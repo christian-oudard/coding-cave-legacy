@@ -849,12 +849,15 @@ def cmd_reset(args):
     print(f"Reset overlay for {slug}. Cave will see current host state on next start.", file=sys.stderr)
 
 
-def push_project(slug):
+def push_project(slug, force=False):
     """Push host commits into the cave's gitdir.
 
     Updates the gitdir refs and objects to match the host. The working tree
     on the overlay is left untouched — uncommitted changes in the cave are
     preserved.
+
+    Warns if the cave has unpulled commits that would be lost. Use
+    force=True to skip the check.
     """
     projects = load_projects()
     if slug not in projects:
@@ -890,6 +893,40 @@ def push_project(slug):
         print(f"No commits to push to {slug}.", file=sys.stderr)
         return
 
+    # Check for unpulled cave commits that would be lost
+    if not force and cave_head.returncode == 0:
+        cave_head_hash = cave_head.stdout.strip()
+        # Fetch host objects into gitdir so merge-base can work
+        subprocess.run(
+            ["git", "--git-dir", str(gitdir), "fetch", str(project_dir), "HEAD"],
+            capture_output=True,
+        )
+        merge_base = subprocess.run(
+            ["git", "--git-dir", str(gitdir), "merge-base",
+             cave_head_hash, host_head],
+            capture_output=True, text=True,
+        )
+        if merge_base.returncode == 0:
+            unpulled = subprocess.run(
+                ["git", "--git-dir", str(gitdir), "rev-list", "--count",
+                 f"{merge_base.stdout.strip()}..{cave_head_hash}"],
+                capture_output=True, text=True,
+            )
+            if unpulled.returncode == 0 and unpulled.stdout.strip() != "0":
+                count = unpulled.stdout.strip()
+                print(f"Cave has {count} unpulled commit(s) that will be lost.", file=sys.stderr)
+                subprocess.run(
+                    ["git", "--git-dir", str(gitdir), "log", "--oneline",
+                     f"{merge_base.stdout.strip()}..{cave_head_hash}"],
+                )
+                try:
+                    answer = input("Overwrite? [y/N] ").strip().lower()
+                except EOFError:
+                    answer = ""
+                if answer not in ("y", "yes"):
+                    print("Aborted.", file=sys.stderr)
+                    return
+
     # Update gitdir refs and objects from host. The gitdir is bind-mounted
     # into the cave, so the update is immediately visible inside. The
     # working tree (on the overlay) is left untouched — uncommitted changes
@@ -911,15 +948,18 @@ def push_project(slug):
 
 def cmd_push(args):
     """Push host commits into project overlays."""
+    force = "--force" in args
+    args = [a for a in args if a != "--force"]
+
     if args:
-        push_project(args[0])
+        push_project(args[0], force=force)
         return
 
     # If CWD is inside a registered project, push only that project
     cwd = Path.cwd().resolve()
     for slug, source in load_projects().items():
         if cwd == Path(source).resolve() or cwd.is_relative_to(Path(source).resolve()):
-            push_project(slug)
+            push_project(slug, force=force)
             return
 
     # Otherwise push all projects
@@ -929,7 +969,7 @@ def cmd_push(args):
         return
     for slug, _ in projects:
         try:
-            push_project(slug)
+            push_project(slug, force=force)
         except SystemExit:
             pass  # continue with other projects
 
@@ -1016,6 +1056,7 @@ Commands:
   pull [project]       pull commits from cave gitdir, re-author
                        --force: adopt cave's commit history on host (destructive)
   push [project]       push host commits into cave gitdir
+                       --force: skip unpulled commit check
   reset [project]      wipe overlay + gitdir to match host (cave must be stopped)
   remove [project]     unregister a project and delete overlay data
   status               show cave and project info
