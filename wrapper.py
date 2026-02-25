@@ -467,7 +467,6 @@ def ensure_cave_remote(project_dir, gitdir):
             git + ["remote", "add", "cave", str(gitdir)],
             capture_output=True,
         )
-    subprocess.run(git + ["fetch", "cave"], capture_output=True)
 
 
 def update_cave_sync(gitdir, project_dir, commit, branch=None):
@@ -483,15 +482,24 @@ def update_cave_sync(gitdir, project_dir, commit, branch=None):
     )
     # Update host remote in gitdir (so cave git log shows host/main)
     if branch:
-        host_head = subprocess.run(
-            ["git", "-C", str(project_dir), "rev-parse", "HEAD"],
-            capture_output=True, text=True,
+        subprocess.run(
+            ["git", "--git-dir", str(gitdir), "update-ref",
+             f"refs/remotes/host/{branch}", commit],
         )
-        if host_head.returncode == 0:
-            subprocess.run(
-                ["git", "--git-dir", str(gitdir), "update-ref",
-                 f"refs/remotes/host/{branch}", host_head.stdout.strip()],
-            )
+
+
+def sync_refs(gitdir, project_dir, host_head, branch):
+    """Fetch objects into gitdir, update branch ref, and mark cave-sync."""
+    subprocess.run(
+        ["git", "--git-dir", str(gitdir), "fetch", str(project_dir), "HEAD"],
+        check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "--git-dir", str(gitdir), "update-ref",
+         f"refs/heads/{branch}", host_head],
+        check=True,
+    )
+    update_cave_sync(gitdir, project_dir, host_head, branch=branch)
 
 
 def mount_project_overlay(slug):
@@ -569,60 +577,79 @@ def find_tree_merge_base(git, host_tree):
     return None
 
 
-def pull_working_tree(slug, project_dir, gitdir):
-    """Pull uncommitted working tree changes from the cave overlay.
-
-    Stages the changes in the host index. Refuses if the host working
-    tree already has uncommitted changes.
-    """
+@contextmanager
+def cave_overlay(slug):
+    """Yield the merged overlay path, mounting temporarily if needed."""
     proj_state = PROJECTS_DIR / slug
     merged = proj_state / "merged"
-
-    # Use existing mount or mount temporarily
     mounted_here = False
     if not (merged.exists() and merged.is_mount()):
         result = mount_project_overlay(slug)
         if result is None:
+            yield None
             return
         mounted_here = True
-
     try:
-        git_cave = ["git", "--git-dir", str(gitdir), "--work-tree", str(merged)]
-
-        # Check for tracked/staged changes vs HEAD
-        diff_check = subprocess.run(
-            git_cave + ["diff", "HEAD", "--quiet"], capture_output=True,
-        )
-        if diff_check.returncode == 0:
-            return
-
-        # Refuse if host working tree is dirty
-        host_status = subprocess.run(
-            ["git", "-C", str(project_dir), "status", "--porcelain"],
-            capture_output=True, text=True,
-        )
-        if host_status.returncode == 0 and host_status.stdout.strip():
-            print(f"Host has uncommitted changes — skipping working tree pull for {slug}.", file=sys.stderr)
-            print("Commit or stash host changes first.", file=sys.stderr)
-            return
-
-        patch = subprocess.run(
-            git_cave + ["diff", "HEAD"], capture_output=True,
-        )
-        if patch.stdout:
-            apply_result = subprocess.run(
-                ["git", "-C", str(project_dir), "apply", "--index"],
-                input=patch.stdout, capture_output=True,
-            )
-            if apply_result.returncode != 0:
-                print(f"Failed to apply working tree changes for {slug}.", file=sys.stderr)
-                return
-
-        print(f"Staged working tree changes from {slug}.", file=sys.stderr)
-
+        yield merged
     finally:
         if mounted_here:
             try_unmount(merged)
+
+
+def transfer_working_tree(slug, src_git, dst_git, dst_workdir, direction):
+    """Transfer uncommitted working tree changes via diff+apply.
+
+    src_git/dst_git are git command prefixes (lists) for the source and
+    destination working trees. dst_workdir is the path to the destination
+    work-tree (needed as CWD for git apply). direction is "pull" or "push"
+    (for messages).
+    """
+    # Check for src tracked/staged changes vs HEAD
+    diff_check = subprocess.run(
+        src_git + ["diff", "HEAD", "--quiet"], capture_output=True,
+    )
+    if diff_check.returncode == 0:
+        return
+
+    # Refuse if dst working tree is dirty
+    dst_diff = subprocess.run(
+        dst_git + ["diff", "HEAD", "--quiet"], capture_output=True,
+    )
+    if dst_diff.returncode != 0:
+        dst_name = "host" if direction == "pull" else "cave"
+        print(f"{dst_name.title()} has uncommitted changes — skipping working tree {direction} for {slug}.", file=sys.stderr)
+        print(f"Commit or stash {dst_name} changes first.", file=sys.stderr)
+        return
+
+    patch = subprocess.run(
+        src_git + ["diff", "HEAD"], capture_output=True,
+    )
+    if patch.stdout:
+        # Run apply from the dst work-tree directory. git apply with
+        # --git-dir/--work-tree can fail or silently skip work-tree
+        # writes when CWD is a different git repo.
+        apply_result = subprocess.run(
+            dst_git + ["apply", "--index"],
+            input=patch.stdout, capture_output=True,
+            cwd=str(dst_workdir),
+        )
+        if apply_result.returncode != 0:
+            action = "from" if direction == "pull" else "to"
+            print(f"Failed to apply working tree changes {action} {slug}.", file=sys.stderr)
+            return
+
+    verb = "Staged" if direction == "pull" else "Pushed"
+    print(f"{verb} working tree changes {'from' if direction == 'pull' else 'to'} {slug}.", file=sys.stderr)
+
+
+def pull_working_tree(slug, project_dir, gitdir):
+    """Pull uncommitted working tree changes from the cave overlay."""
+    with cave_overlay(slug) as merged:
+        if merged is None:
+            return
+        git_cave = ["git", "--git-dir", str(gitdir), "--work-tree", str(merged)]
+        git_host = ["git", "-C", str(project_dir)]
+        transfer_working_tree(slug, git_cave, git_host, project_dir, "pull")
 
 
 def pull_project(slug, force=False):
@@ -692,7 +719,7 @@ def pull_project(slug, force=False):
     ).stdout.strip()
     if host_head == gitdir_head:
         print(f"No new commits to pull from {slug}.", file=sys.stderr)
-        update_cave_sync(gitdir, project_dir, host_head, branch)
+        update_cave_sync(gitdir, project_dir, host_head, branch=branch)
         pull_working_tree(slug, project_dir, gitdir)
         return
 
@@ -719,7 +746,7 @@ def pull_project(slug, force=False):
             )
             print(f"Force-updated {slug} (history rewritten, tree unchanged):", file=sys.stderr)
             print(f"  {host_head[:8]} -> {gitdir_head[:8]}", file=sys.stderr)
-            update_cave_sync(gitdir, project_dir, gitdir_head, branch)
+            update_cave_sync(gitdir, project_dir, gitdir_head, branch=branch)
             pull_working_tree(slug, project_dir, gitdir)
             return
 
@@ -817,16 +844,7 @@ def pull_project(slug, force=False):
             git + ["rev-parse", "HEAD"],
             capture_output=True, text=True, check=True,
         ).stdout.strip()
-        subprocess.run(
-            ["git", "--git-dir", str(gitdir), "fetch", str(project_dir), "HEAD"],
-            check=True, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "--git-dir", str(gitdir), "update-ref",
-             f"refs/heads/{branch}", host_head],
-            check=True,
-        )
-        update_cave_sync(gitdir, project_dir, host_head, branch)
+        sync_refs(gitdir, project_dir, host_head, branch)
         pull_working_tree(slug, project_dir, gitdir)
         return
 
@@ -893,22 +911,11 @@ def pull_project(slug, force=False):
     # Sync gitdir to the rebased history so both repos share the same
     # commit hashes. The gitdir is bind-mounted into the cave, so this
     # update is immediately visible inside.
-    # Fetch objects without updating refs (git refuses to fetch into a
-    # checked-out branch), then update the ref manually.
     host_head = subprocess.run(
         git + ["rev-parse", "HEAD"],
         capture_output=True, text=True, check=True,
     ).stdout.strip()
-    subprocess.run(
-        ["git", "--git-dir", str(gitdir), "fetch", str(project_dir), "HEAD"],
-        check=True, capture_output=True,
-    )
-    subprocess.run(
-        ["git", "--git-dir", str(gitdir), "update-ref",
-         f"refs/heads/{branch}", host_head],
-        check=True,
-    )
-    update_cave_sync(gitdir, project_dir, host_head, branch)
+    sync_refs(gitdir, project_dir, host_head, branch)
 
     pull_working_tree(slug, project_dir, gitdir)
 
@@ -1118,59 +1125,13 @@ def cmd_reset(args):
 
 
 def push_working_tree(slug, project_dir, gitdir):
-    """Push uncommitted host working tree changes into the cave overlay.
-
-    Stages the changes in the cave's index. Refuses if the cave working
-    tree already has uncommitted changes.
-    """
-    proj_state = PROJECTS_DIR / slug
-    merged = proj_state / "merged"
-
-    # Use existing mount or mount temporarily
-    mounted_here = False
-    if not (merged.exists() and merged.is_mount()):
-        result = mount_project_overlay(slug)
-        if result is None:
+    """Push uncommitted host working tree changes into the cave overlay."""
+    with cave_overlay(slug) as merged:
+        if merged is None:
             return
-        mounted_here = True
-
-    try:
         git_host = ["git", "-C", str(project_dir)]
         git_cave = ["git", "--git-dir", str(gitdir), "--work-tree", str(merged)]
-
-        # Check for host tracked/staged changes vs HEAD
-        diff_check = subprocess.run(
-            git_host + ["diff", "HEAD", "--quiet"], capture_output=True,
-        )
-        if diff_check.returncode == 0:
-            return
-
-        # Refuse if cave working tree is dirty
-        cave_diff = subprocess.run(
-            git_cave + ["diff", "HEAD", "--quiet"], capture_output=True,
-        )
-        if cave_diff.returncode != 0:
-            print(f"Cave has uncommitted changes — skipping working tree push for {slug}.", file=sys.stderr)
-            print("Commit or stash cave changes first.", file=sys.stderr)
-            return
-
-        patch = subprocess.run(
-            git_host + ["diff", "HEAD"], capture_output=True,
-        )
-        if patch.stdout:
-            apply_result = subprocess.run(
-                git_cave + ["apply", "--index"],
-                input=patch.stdout, capture_output=True,
-            )
-            if apply_result.returncode != 0:
-                print(f"Failed to apply working tree changes to {slug}.", file=sys.stderr)
-                return
-
-        print(f"Pushed working tree changes to {slug}.", file=sys.stderr)
-
-    finally:
-        if mounted_here:
-            try_unmount(merged)
+        transfer_working_tree(slug, git_host, git_cave, merged, "push")
 
 
 def push_project(slug, force=False):
@@ -1217,7 +1178,7 @@ def push_project(slug, force=False):
     )
     if cave_head.returncode == 0 and cave_head.stdout.strip() == host_head:
         print(f"No commits to push to {slug}.", file=sys.stderr)
-        update_cave_sync(gitdir, project_dir, host_head, branch)
+        update_cave_sync(gitdir, project_dir, host_head, branch=branch)
         push_working_tree(slug, project_dir, gitdir)
         return
 
@@ -1250,22 +1211,7 @@ def push_project(slug, force=False):
                 print(f"Run 'coding-cave pull' first, or use 'coding-cave push --force'.", file=sys.stderr)
                 sys.exit(1)
 
-    # Update gitdir refs and objects from host. The gitdir is bind-mounted
-    # into the cave, so the update is immediately visible inside. The
-    # working tree (on the overlay) is left untouched — uncommitted changes
-    # in the cave are preserved.
-    # Fetch objects without updating refs (git refuses to fetch into a
-    # checked-out branch), then update the ref manually.
-    subprocess.run(
-        ["git", "--git-dir", str(gitdir), "fetch", str(project_dir), "HEAD"],
-        check=True,
-    )
-    subprocess.run(
-        ["git", "--git-dir", str(gitdir), "update-ref",
-         f"refs/heads/{branch}", host_head],
-        check=True,
-    )
-    update_cave_sync(gitdir, project_dir, host_head, branch)
+    sync_refs(gitdir, project_dir, host_head, branch)
 
     print(f"Pushed to {slug} ({host_head[:8]}).", file=sys.stderr)
 

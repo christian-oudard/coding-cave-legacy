@@ -1,0 +1,6 @@
+[project]
+name = "coding-cave"
+version = "0.0.0"
+
+[dependency-groups]
+dev = ["pytest"]
