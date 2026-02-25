@@ -198,6 +198,8 @@
       # Entry: set up /projects, save env for nsenter shells, then exec
       (wrap-entry (entry: ''
         mkdir -p /projects
+        export TMPDIR="$HOME/.cache/tmp"
+        mkdir -p "$TMPDIR"
         export -p > /tmp/cave-env
         chmod 444 /tmp/cave-env
         exec "$@"
