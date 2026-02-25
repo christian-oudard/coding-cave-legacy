@@ -62,6 +62,7 @@
 
       # Task forwarding (used by wrap-entry inside the jail)
       (try-fwd-env "CODING_CAVE_TASK")
+      (try-fwd-env "CODING_CAVE_CLAUDE_MD")
       # CODING_CAVE_WORKSPACE, OVERLAY_UPPER, OVERLAY_WORK are read by
       # add-runtime on the host side only — not forwarded into the jail.
 
@@ -78,6 +79,10 @@
         fi
         RUNTIME_ARGS+=(--bind "$CLAUDE_STATE" ${jailHome}/.claude)
         RUNTIME_ARGS+=(--bind "$CLAUDE_JSON" ${jailHome}/.claude.json)
+
+        if [ -n "''${CODING_CAVE_CLAUDE_MD:-}" ] && [ -f "''${CODING_CAVE_CLAUDE_MD}" ]; then
+          RUNTIME_ARGS+=(--ro-bind "$CODING_CAVE_CLAUDE_MD" ${jailHome}/CLAUDE.md)
+        fi
 
         if [ -n "''${CODING_CAVE_OVERLAY_UPPER:-}" ]; then
           RUNTIME_ARGS+=(--overlay-src "$CODING_CAVE_WORKSPACE" --overlay "$CODING_CAVE_OVERLAY_UPPER" "$CODING_CAVE_OVERLAY_WORK" /workspace)

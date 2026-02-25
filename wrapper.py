@@ -53,6 +53,10 @@ def setup_env(global_config, project_config):
     if home_size_gb:
         os.environ["CODING_CAVE_HOME_SIZE"] = str(int(home_size_gb * 1073741824))
 
+    claude_md = Path.home() / ".config" / "coding-cave" / "CLAUDE.md"
+    if claude_md.exists():
+        os.environ["CODING_CAVE_CLAUDE_MD"] = str(claude_md)
+
     for key, val in project_config.get("environment", {}).items():
         os.environ[key] = str(val)
 
