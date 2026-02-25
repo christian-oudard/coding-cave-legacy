@@ -202,6 +202,11 @@
         mkdir -p /projects
         export TMPDIR="$HOME/.cache/tmp"
         mkdir -p "$TMPDIR"
+        export PATH="$HOME/.local/bin:$PATH"
+        # Auto-install uv tools from mounted projects
+        if [ -f /projects/claude-loop/pyproject.toml ] && ! command -v claude-loop >/dev/null 2>&1; then
+          uv tool install -e /projects/claude-loop >/dev/null 2>&1 || true
+        fi
         export -p > /tmp/cave-env
         chmod 444 /tmp/cave-env
         exec "$@"
