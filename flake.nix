@@ -32,6 +32,9 @@
     baseCombinators = with jail.combinators; [
       no-die-with-parent
       (set-hostname "coding-cave")
+      # pasta wraps bwrap in a user namespace where the host user appears as root.
+      # Force bwrap to map whatever external UID it has to cave-coder (1000) inside.
+      (unsafe-add-raw-args "--uid 1000 --gid 1000")
       (unsafe-add-raw-args "--symlink /bin/sh /bin/bash")
       (unsafe-add-raw-args "--symlink ${pkgs.zsh}/bin/zsh /bin/zsh")
       (set-env "SHELL" "/bin/bash")
@@ -139,6 +142,11 @@
         export PATH="$HOME/.local/bin:$PATH"
         export -p > /tmp/cave-env
         chmod 444 /tmp/cave-env
+        # Wait for pasta to configure networking via DHCP.
+        # /proc/net/route gets a default route (destination 00000000) once ready.
+        until awk 'NR>1 && $2=="00000000"{found=1} END{exit !found}' /proc/net/route 2>/dev/null; do
+          sleep 0.1
+        done
         exec "$@"
       ''))
     ];
@@ -168,7 +176,7 @@
     };
 
     baseScript = pkgs.writeText "coding-cave-script" ''
-      export PATH="${pkgs.lib.makeBinPath [pkgs.fuse-overlayfs pkgs.fuse3 pkgs.util-linux]}:$PATH"
+      export PATH="${pkgs.lib.makeBinPath [pkgs.fuse-overlayfs pkgs.fuse3 pkgs.util-linux pkgs.passt]}:$PATH"
       exec ${pkgs.python3}/bin/python3 ${wrapperScript} "$@"
     '';
 

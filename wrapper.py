@@ -507,8 +507,17 @@ def start_session(project, command, gpu=False):
     }
     bwrap_env = {k: v for k, v in os.environ.items() if k in BWRAP_ENV_ALLOWLIST}
 
+    # pasta provides an isolated network namespace with outbound-only access.
+    # bwrap's `network` combinator (share-ns "net") inherits pasta's namespace.
+    # --quiet: suppress startup messages
+    # -T none -U none: no inbound port forwarding from host
     proc = subprocess.Popen(
-        [binary] + command,
+        # --map-host-loopback: pasta by default maps the gateway address to the
+        # host's loopback, allowing access to host localhost services. Override
+        # to 192.0.2.1 (TEST-NET, reserved/unreachable) to disable this.
+        ["pasta", "--quiet", "--config-net",
+         "--map-host-loopback", "192.0.2.1",
+         "-T", "none", "-U", "none", "--", binary] + command,
         start_new_session=False,
         env=bwrap_env,
     )
