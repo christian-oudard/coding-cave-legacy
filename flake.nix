@@ -36,7 +36,8 @@
       (try-fwd-env "CODING_CAVE_NIX_WORK")
       (add-runtime ''
         if [ -n "''${CODING_CAVE_NIX_UPPER:-}" ]; then
-          RUNTIME_ARGS+=(--overlay-src /nix --overlay "$CODING_CAVE_NIX_UPPER" "$CODING_CAVE_NIX_WORK" /nix)
+          RUNTIME_ARGS+=(--overlay-src /nix/store --overlay "$CODING_CAVE_NIX_UPPER" "$CODING_CAVE_NIX_WORK" /nix/store)
+          RUNTIME_ARGS+=(--tmpfs /nix/var)
         fi
       '')
       (set-env "NIX_CONFIG" "sandbox = false\nexperimental-features = nix-command flakes")

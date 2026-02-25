@@ -211,7 +211,8 @@ def enter_cave(pid, project=None, task=None):
         "nsenter",
         f"--target={pid}",
         "--user", "--mount", "--pid", "--uts", "--ipc",
-        "--", "bash", "-c", bash_cmd,
+        "--preserve-credentials",
+        "--", "/bin/bash", "-c", bash_cmd,
     ])
 
 
