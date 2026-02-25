@@ -3,12 +3,14 @@
 coding-cave wrapper: persistent cave with multi-agent support.
 
 Commands:
-    coding-cave [--gpu] [project-dir] [task...]    - enter cave, run claude
-    coding-cave agent [--gpu] [project-dir] [task...] - same as above
-    coding-cave shell [--gpu] [project-dir]           - enter cave with shell
-    coding-cave status                                - show cave and sessions
-    coding-cave pull [project-name]               - pull commits from overlay
+    coding-cave [--gpu]                 - enter cave, run claude
+    coding-cave agent [--gpu]           - same as above
+    coding-cave shell [--gpu]           - enter cave with shell
+    coding-cave add [dir]               - add a project to the cave
+    coding-cave status                  - show cave and sessions
+    coding-cave pull [project-name]     - pull commits from overlay
 """
+import json
 import os
 import re
 import shutil
@@ -28,7 +30,8 @@ SANDBOX_GPU_BIN = "@SANDBOX_GPU_BIN@"
 
 CAVE_DATA = Path.home() / ".local" / "share" / "coding-cave"
 CAVE_PID_FILE = CAVE_DATA / "cave.pid"
-PROJECTS_MANIFEST = CAVE_DATA / "projects.tsv"
+PROJECTS_FILE = CAVE_DATA / "projects.json"
+LOADED_PROJECTS_FILE = CAVE_DATA / "loaded-projects.json"
 PROJECTS_DIR = CAVE_DATA / "projects"
 NIX_OVERLAY_DIR = CAVE_DATA / "nix-overlay"
 SESSIONS_DIR = CAVE_DATA / "sessions"
@@ -158,9 +161,10 @@ def start_cave(gpu=False):
     os.environ["CODING_CAVE_NIX_UPPER"] = str(NIX_OVERLAY_DIR / "upper")
     os.environ["CODING_CAVE_NIX_WORK"] = str(NIX_OVERLAY_DIR / "work")
 
-    # Project mount script
-    write_projects_manifest()
-    os.environ["CODING_CAVE_PROJECTS_MANIFEST"] = str(PROJECTS_MANIFEST)
+    # Project manifest for bwrap runtime
+    os.environ["CODING_CAVE_PROJECTS_MANIFEST"] = str(PROJECTS_FILE)
+    # Snapshot what's loaded so we know if a restart is needed later
+    shutil.copy2(PROJECTS_FILE, LOADED_PROJECTS_FILE) if PROJECTS_FILE.exists() else None
 
     binary = SANDBOX_GPU_BIN if gpu else SANDBOX_BIN
 
@@ -193,7 +197,6 @@ def stop_cave():
     """Stop the cave."""
     pid = cave_pid()
     if pid is None:
-        print("No coding-cave running.", file=sys.stderr)
         return
 
     bwrap_pid = None
@@ -226,10 +229,9 @@ def stop_cave():
 
     CAVE_PID_FILE.unlink(missing_ok=True)
     (CAVE_DATA / "bwrap.pid").unlink(missing_ok=True)
-    print("Stopped coding-cave.", file=sys.stderr)
 
 
-def enter_cave(pid, project=None, task=None, shell=None):
+def enter_cave(pid, project=None, shell=None):
     """nsenter into the cave and run claude or a shell."""
     parts = ["source /tmp/cave-env 2>/dev/null"]
 
@@ -238,10 +240,7 @@ def enter_cave(pid, project=None, task=None, shell=None):
     else:
         parts.append("cd $HOME")
 
-    if task:
-        escaped = task.replace("'", "'\\''")
-        parts.append(f"exec claude --dangerously-skip-permissions -p '{escaped}'")
-    elif shell:
+    if shell:
         shell_bin = "/bin/zsh" if shell == "zsh" else "/bin/bash"
         parts.append(f"exec {shell_bin} -l")
     else:
@@ -261,56 +260,79 @@ def enter_cave(pid, project=None, task=None, shell=None):
     finally:
         unregister_session()
         if active_session_count() == 0:
-            print("Last session exited. Stopped coding-cave.", file=sys.stderr)
-            stop_cave()
+            if os.fork() == 0:
+                stop_cave()
+                os._exit(0)
     sys.exit(ret)
 
 
 # --- Project management ---
 
+def detect_project_from_cwd():
+    """Check CWD against registered projects, or offer to register it.
+    Returns the project directory path, or None."""
+    cwd = Path.cwd().resolve()
+
+    if cwd == Path.home().resolve():
+        return None
+
+    for _slug, source in list_projects():
+        source_path = Path(source).resolve()
+        if cwd == source_path or cwd.is_relative_to(source_path):
+            return source_path
+
+    try:
+        answer = input(f"Add {cwd}/ to the coding cave? [Y/n] ").strip().lower()
+    except EOFError:
+        return None
+    if answer in ("", "y", "yes"):
+        return cwd
+    return None
+
+
+
+def load_projects():
+    """Load the project registry (slug -> source path)."""
+    if PROJECTS_FILE.exists():
+        with open(PROJECTS_FILE) as f:
+            return json.load(f)
+    return {}
+
+
+def save_projects(projects):
+    """Save the project registry."""
+    CAVE_DATA.mkdir(parents=True, exist_ok=True)
+    with open(PROJECTS_FILE, "w") as f:
+        json.dump(projects, f, indent=2, sort_keys=True)
+
+
 def ensure_project(project_dir):
-    """Register a project with overlay dirs. Returns slug."""
+    """Add a project to the registry and create overlay dirs. Returns slug."""
     project_dir = Path(project_dir).resolve()
     slug = project_dir.name
     proj_state = PROJECTS_DIR / slug
 
-    if not proj_state.exists():
-        (proj_state / "upper").mkdir(parents=True, exist_ok=True)
-        (proj_state / "work").mkdir(parents=True, exist_ok=True)
-        (proj_state / "source").write_text(str(project_dir))
+    (proj_state / "upper").mkdir(parents=True, exist_ok=True)
+    (proj_state / "work").mkdir(parents=True, exist_ok=True)
+
+    projects = load_projects()
+    projects[slug] = str(project_dir)
+    save_projects(projects)
 
     return slug
 
 
 def list_projects():
     """Return list of (slug, source_path) for all registered projects."""
-    if not PROJECTS_DIR.exists():
-        return []
-    projects = []
-    for proj in sorted(PROJECTS_DIR.iterdir()):
-        source_file = proj / "source"
-        if source_file.exists():
-            projects.append((proj.name, source_file.read_text().strip()))
-    return projects
+    return list(load_projects().items())
 
 
 def project_loaded_in_cave(slug):
-    """Check if a project was included in the running cave's mount script."""
-    if not PROJECTS_MANIFEST.exists():
+    """Check if a project was loaded when the cave started."""
+    if not LOADED_PROJECTS_FILE.exists():
         return False
-    return f"\t{slug}\n" in PROJECTS_MANIFEST.read_text()
-
-
-def write_projects_manifest():
-    """Write tab-delimited manifest of project overlays for bwrap."""
-    CAVE_DATA.mkdir(parents=True, exist_ok=True)
-    lines = []
-    for slug, source in list_projects():
-        proj_state = PROJECTS_DIR / slug
-        upper = proj_state / "upper"
-        work = proj_state / "work"
-        lines.append(f"{source}\t{upper}\t{work}\t{slug}")
-    PROJECTS_MANIFEST.write_text("\n".join(lines) + "\n" if lines else "")
+    with open(LOADED_PROJECTS_FILE) as f:
+        return slug in json.load(f)
 
 
 # --- Overlay and pull ---
@@ -326,11 +348,11 @@ def try_unmount(path):
 
 def mount_project_overlay(slug):
     """Mount a project's overlay using fuse-overlayfs. Returns (merged, source)."""
-    proj_state = PROJECTS_DIR / slug
-    source_file = proj_state / "source"
-    if not source_file.exists():
+    projects = load_projects()
+    if slug not in projects:
         return None
-    project_dir = source_file.read_text().strip()
+    proj_state = PROJECTS_DIR / slug
+    project_dir = projects[slug]
 
     merged = proj_state / "merged"
     merged.mkdir(exist_ok=True)
@@ -351,13 +373,13 @@ def mount_project_overlay(slug):
 
 def pull_project(slug):
     """Pull changes from a project overlay into the host repo."""
-    proj_state = PROJECTS_DIR / slug
-    source_file = proj_state / "source"
-    if not source_file.exists():
+    projects = load_projects()
+    if slug not in projects:
         print(f"Project not found: {slug}", file=sys.stderr)
         sys.exit(1)
 
-    project_dir = Path(source_file.read_text().strip())
+    proj_state = PROJECTS_DIR / slug
+    project_dir = Path(projects[slug])
 
     # Mount overlay for git access
     merged = proj_state / "merged"
@@ -446,36 +468,49 @@ def cleanup_project_overlay(slug):
 # --- Commands ---
 
 def cmd_agent(args, gpu=False):
-    """Enter cave and run claude, optionally in a project directory."""
+    """Enter cave and run claude."""
     global_config = load_global_config()
     setup_env(global_config)
 
     project = None
-    task = None
-
-    if args:
-        candidate = Path(args[0])
-        if candidate.exists() and candidate.is_dir():
-            project = ensure_project(candidate)
-            task = " ".join(args[1:]) if len(args) > 1 else None
-            project_config = load_project_config(candidate)
-            for key, val in project_config.get("environment", {}).items():
-                os.environ[key] = str(val)
-        else:
-            task = " ".join(args)
+    project_dir = detect_project_from_cwd()
+    if project_dir is not None:
+        project = ensure_project(project_dir)
+        project_config = load_project_config(project_dir)
+        for key, val in project_config.get("environment", {}).items():
+            os.environ[key] = str(val)
 
     pid = cave_pid()
 
     if pid is None:
         pid = start_cave(gpu=gpu)
     elif project and not project_loaded_in_cave(project):
-        print(f"Loading {project} into cave (restarting)...", file=sys.stderr)
+        sessions = active_session_count()
+        if sessions > 0:
+            print(f"{project} is not loaded and {sessions} session(s) are active.", file=sys.stderr)
+            print("Exit all sessions first, then re-enter.", file=sys.stderr)
+            sys.exit(1)
         stop_cave()
         pid = start_cave(gpu=gpu)
     else:
         print("Entered coding-cave.", file=sys.stderr)
 
-    enter_cave(pid, project=project, task=task)
+    enter_cave(pid, project=project)
+
+
+def cmd_add(args):
+    """Add a project to the cave."""
+    if args:
+        project_dir = Path(args[0]).resolve()
+    else:
+        project_dir = Path.cwd().resolve()
+
+    if not project_dir.is_dir():
+        print(f"Not a directory: {project_dir}", file=sys.stderr)
+        sys.exit(1)
+
+    slug = ensure_project(project_dir)
+    print(f"Added {slug} to the coding cave.", file=sys.stderr)
 
 
 def cmd_pull(args):
@@ -485,7 +520,7 @@ def cmd_pull(args):
     else:
         projects = list_projects()
         if not projects:
-            print("No projects registered.", file=sys.stderr)
+            print("No projects in the cave.", file=sys.stderr)
             return
         for slug, _ in projects:
             try:
@@ -502,17 +537,20 @@ def cmd_shell(args, gpu=False):
     shell_type = Path(os.environ.get("SHELL", "/bin/bash")).name
 
     project = None
-    if args:
-        candidate = Path(args[0])
-        if candidate.exists() and candidate.is_dir():
-            project = ensure_project(candidate)
+    project_dir = detect_project_from_cwd()
+    if project_dir is not None:
+        project = ensure_project(project_dir)
 
     pid = cave_pid()
 
     if pid is None:
         pid = start_cave(gpu=gpu)
     elif project and not project_loaded_in_cave(project):
-        print(f"Loading {project} into cave (restarting)...", file=sys.stderr)
+        sessions = active_session_count()
+        if sessions > 0:
+            print(f"{project} is not loaded and {sessions} session(s) are active.", file=sys.stderr)
+            print("Exit all sessions first, then re-enter.", file=sys.stderr)
+            sys.exit(1)
         stop_cave()
         pid = start_cave(gpu=gpu)
     else:
@@ -523,31 +561,23 @@ def cmd_shell(args, gpu=False):
 
 
 def cmd_status(args):
-    """Show cave status, sessions, and processes."""
+    """Show cave status and projects."""
     pid = cave_pid()
     if pid is None:
         print("Cave: stopped", file=sys.stderr)
-        return
-
-    sessions = active_session_count()
-    print(f"Cave: running (PID {pid}), {sessions} active session(s)", file=sys.stderr)
+    else:
+        sessions = active_session_count()
+        print(f"Cave: running (PID {pid}), {sessions} active session(s)", file=sys.stderr)
 
     projects = list_projects()
     if projects:
         print("Projects:", file=sys.stderr)
         for slug, source in projects:
-            loaded = project_loaded_in_cave(slug)
+            loaded = pid and project_loaded_in_cave(slug)
             tag = " [loaded]" if loaded else ""
             print(f"  {slug}  <- {source}{tag}", file=sys.stderr)
-
-    print("Processes:", file=sys.stderr)
-    subprocess.call([
-        "nsenter",
-        f"--target={pid}",
-        "--user", "--mount", "--pid", "--uts", "--ipc",
-        "--preserve-credentials",
-        "--", "/bin/bash", "-c", "ps aux",
-    ])
+    else:
+        print("No projects in the cave.", file=sys.stderr)
 
 
 
@@ -555,6 +585,7 @@ def main():
     commands = {
         "agent": cmd_agent,
         "shell": cmd_shell,
+        "add": cmd_add,
         "status": cmd_status,
         "pull": cmd_pull,
     }
@@ -574,12 +605,9 @@ def main():
             commands[cmd](args[1:], gpu=gpu)
         else:
             commands[cmd](args[1:])
-    elif Path(cmd).is_dir():
-        # coding-cave ./project [task...] → shorthand for agent
-        cmd_agent(args, gpu=gpu)
     else:
         print(f"Unknown command: {cmd}", file=sys.stderr)
-        print("Commands: agent, shell, status, pull", file=sys.stderr)
+        print("Commands: agent, shell, add, status, pull", file=sys.stderr)
         sys.exit(1)
 
 

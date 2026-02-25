@@ -63,6 +63,7 @@
         pkgs.file
         pkgs.ncurses
         pkgs.zsh
+        pkgs.eza
         pkgs.tini
       ])
       (set-env "TERMINFO_DIRS" "${pkgs.ncurses}/share/terminfo")
@@ -120,11 +121,14 @@
           RUNTIME_ARGS+=(--ro-bind "$CODING_CAVE_BASH_PROFILE" ${jailHome}/.bash_profile)
         fi
 
-        # Mount project overlays from tab-delimited manifest
+        # Mount project overlays from JSON manifest
         if [ -n "''${CODING_CAVE_PROJECTS_MANIFEST:-}" ] && [ -f "''${CODING_CAVE_PROJECTS_MANIFEST}" ]; then
-          while IFS=$'\t' read -r src upper work slug; do
+          while IFS=$'\t' read -r slug src; do
+            upper="$CAVE_DATA/projects/$slug/upper"
+            work="$CAVE_DATA/projects/$slug/work"
+            mkdir -p "$upper" "$work"
             RUNTIME_ARGS+=(--overlay-src "$src" --overlay "$upper" "$work" "/projects/$slug")
-          done < "''${CODING_CAVE_PROJECTS_MANIFEST}"
+          done < <(${pkgs.jq}/bin/jq -r 'to_entries[] | [.key, .value] | @tsv' "''${CODING_CAVE_PROJECTS_MANIFEST}")
         fi
       '')
 
