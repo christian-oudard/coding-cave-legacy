@@ -4,24 +4,6 @@ A portable, reproducible sandbox for running Claude Code agents with full autono
 
 Uses [jail.nix](https://git.sr.ht/~alexdavid/jail.nix) for composable bwrap configuration. Claude Code runs with `--dangerously-skip-permissions` inside the sandbox — all restrictions are at the bwrap boundary.
 
-## Status
-
-Early implementation. Currently working:
-
-- Bash shell inside a bwrap namespace (hostname `coding-cave`)
-- Network access
-- Claude Code available on PATH
-- OAuth token loaded from config file and forwarded into the sandbox
-- Ephemeral home directory (lost on exit)
-
-Not yet implemented:
-
-- Workspace directory mounting
-- Git worktree creation/cleanup
-- Per-project configuration (`.claude-sandbox.toml`)
-- Dev tools (git, ripgrep, fd, etc.)
-- Network filtering (v2)
-
 ## Setup
 
 ### Prerequisites
@@ -41,20 +23,74 @@ Create `~/.config/coding-cave/config.toml`:
 ```toml
 [credentials]
 claude-oauth-token = "<your-token>"
+
+[git]
+name = "Your Name"
+email = "you@example.com"
 ```
 
-### Build and run
+### Build
 
 ```bash
 nix build
-nix run
 ```
 
-Inside the sandbox, Claude Code is available:
+## Usage
+
+### Launch Claude Code in sandbox
 
 ```bash
-claude
+codingcave
 ```
+
+Launches Claude Code with `--dangerously-skip-permissions` inside a bwrap namespace. Ephemeral home directory, full network access, dev tools on PATH.
+
+### Run an agent on a project
+
+```bash
+codingcave run ./my-project "add unit tests for the auth module"
+```
+
+Creates a git worktree on a dedicated branch (e.g., `agent/add-unit-tests-for-the-auth-module-20260218-091500`), launches Claude Code with the task inside the sandbox, and leaves the work on the branch for review.
+
+### Interactive shell in a project
+
+```bash
+codingcave shell ./my-project
+```
+
+Drops into a bash shell inside the sandbox with the project directory mounted read-write. No worktree — edits go to the working directory directly.
+
+### Clean up a worktree
+
+```bash
+codingcave cleanup ./my-project agent/add-unit-tests-20260218-091500
+```
+
+Removes the worktree and deletes the branch.
+
+## Per-project configuration
+
+Add `.claude-sandbox.toml` to a project:
+
+```toml
+[git]
+branch-prefix = "agent"
+
+[environment]
+DATABASE_URL = "postgresql://localhost/dev"
+```
+
+## Persistent state
+
+Claude Code state persists across sandbox runs in `~/.local/share/coding-cave/`:
+
+- `claude-state/` — bind-mounted as `~/.claude` (settings, session history, plugins)
+- `claude.json` — bind-mounted as `~/.claude.json` (onboarding state, preferences)
+
+On first run, these are seeded from templates (`claude-settings.json` and a built-in default). After that, Claude Code manages them and they're left alone.
+
+To reset to defaults, delete `~/.local/share/coding-cave/`.
 
 ## Architecture
 
@@ -63,6 +99,8 @@ Two-layer isolation:
 1. **bwrap namespace** — the security boundary. Clears host environment, hides host home directory, provides ephemeral filesystems.
 2. **Nix** — reproducible environments. All tools delivered via the Nix store.
 
-A Python wrapper (`wrapper.py`) reads credentials from the config file and forwards them as environment variables into the sandbox.
+A Python wrapper (`wrapper.py`) reads config, creates git worktrees, and sets up environment variables. The jail definition (`flake.nix`) uses jail.nix combinators to construct the bwrap invocation with persistent state bind-mounts, runtime-conditional workspace mounting, and an entry wrapper that launches Claude Code.
+
+Credentials are never written to disk — they're read from `config.toml` by the wrapper and forwarded via environment variables through `--clearenv`/`--setenv`.
 
 See `agent-isolation-guide.md` for the full design spec.

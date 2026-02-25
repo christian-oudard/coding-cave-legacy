@@ -1,0 +1,5 @@
+{
+  "model": "opus",
+  "reasoning_effort": "high",
+  "skipDangerousModePermissionPrompt": true
+}
