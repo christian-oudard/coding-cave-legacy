@@ -212,6 +212,11 @@ def mount_project_overlay(slug, session_id=None):
     proj_state = PROJECTS_DIR / slug
     project_dir = projects[slug]
 
+    if not Path(project_dir).is_dir():
+        print(f"Warning: source directory for '{slug}' not found: {project_dir}", file=sys.stderr)
+        print(f"  Run 'coding-cave remove {slug}' to unregister it.", file=sys.stderr)
+        return None
+
     if session_id:
         sess_dir = proj_state / "sessions" / session_id
         merged = sess_dir / "merged"
