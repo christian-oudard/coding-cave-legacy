@@ -126,11 +126,28 @@
           RUNTIME_ARGS+=(--ro-bind "$CODING_CAVE_CLAUDE_MD" ${jailHome}/.claude/CLAUDE.md)
         fi
 
-        # Shell dotfiles (zsh) — overlay so .zhistory/.zcompdump are writable
+        # Shell dotfiles (zsh) — ro-bind config files, writable dir for history/compdump.
+        # Files matching *_private* are excluded (may contain secrets).
         if [ -n "''${CODING_CAVE_ZDOTDIR:-}" ] && [ -d "''${CODING_CAVE_ZDOTDIR}" ]; then
-          mkdir -p "$CAVE_DATA/zdotdir-upper" "$CAVE_DATA/zdotdir-work"
-          RUNTIME_ARGS+=(--overlay-src "$CODING_CAVE_ZDOTDIR" --overlay "$CAVE_DATA/zdotdir-upper" "$CAVE_DATA/zdotdir-work" ${jailHome}/.config/zsh)
-          RUNTIME_ARGS+=(--setenv ZDOTDIR ${jailHome}/.config/zsh)
+          zsh_cave="${jailHome}/.config/zsh"
+          mkdir -p "$CAVE_DATA/zdotdir"
+          RUNTIME_ARGS+=(--bind "$CAVE_DATA/zdotdir" "$zsh_cave")
+          for f in "$CODING_CAVE_ZDOTDIR"/.z*; do
+            [ -f "$f" ] || continue
+            name="$(basename "$f")"
+            case "$name" in *_private*|*secret*) continue ;; esac
+            case "$name" in
+              .zhistory|.zcompdump*)
+                # Writable: copy to persistent dir if not present, then bind
+                [ -f "$CAVE_DATA/zdotdir/$name" ] || cp "$f" "$CAVE_DATA/zdotdir/$name"
+                ;;
+              *)
+                # Read-only config
+                RUNTIME_ARGS+=(--ro-bind "$f" "$zsh_cave/$name")
+                ;;
+            esac
+          done
+          RUNTIME_ARGS+=(--setenv ZDOTDIR "$zsh_cave")
         fi
         # Shell dotfiles (bash) — ro-bind individual files
         if [ -n "''${CODING_CAVE_BASHRC:-}" ] && [ -f "''${CODING_CAVE_BASHRC}" ]; then
