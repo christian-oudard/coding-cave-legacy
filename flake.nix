@@ -26,11 +26,11 @@
       (unsafe-add-raw-args "--dev-bind /dev/pts /dev/pts")
       (set-env "CODING_CAVE_VERSION" version)
       (set-env "HOME" jailHome)
-      (try-fwd-env "CODING_CAVE_HOME_SIZE")
-      # Ephemeral home (tmpfs, backed by RAM + swap). Size from config, default 32G.
+      # Persistent home directory (bind mount, survives across sessions).
       (add-runtime ''
-        HOME_SIZE="''${CODING_CAVE_HOME_SIZE:-34359738368}"
-        RUNTIME_ARGS+=(--size "$HOME_SIZE" --tmpfs ${jailHome})
+        CAVE_HOME="$HOME/.local/share/coding-cave/home"
+        mkdir -p "$CAVE_HOME"
+        RUNTIME_ARGS+=(--bind "$CAVE_HOME" ${jailHome})
       '')
       network
       # no-new-session omitted: cave init needs its own session to survive terminal close
@@ -92,19 +92,27 @@
       (try-fwd-env "CODING_CAVE_BASH_PROFILE")
       (try-fwd-env "CODING_CAVE_PROJECTS_MANIFEST")
 
-      # Persist Claude Code state across sandbox runs.
+      # Initialize Claude Code state in persistent home.
       # Mount project overlays from wrapper-generated script.
       (add-runtime ''
         CAVE_DATA="$HOME/.local/share/coding-cave"
-        CLAUDE_STATE="$CAVE_DATA/claude-state"
-        CLAUDE_JSON="$CAVE_DATA/claude.json"
-        if [ ! -d "$CLAUDE_STATE" ]; then
-          mkdir -p "$CLAUDE_STATE"
-          cp ${defaultClaudeSettings} "$CLAUDE_STATE/settings.json"
-          printf '%s' '{"hasCompletedOnboarding":true,"theme":"dark","effortCalloutDismissed":true}' > "$CLAUDE_JSON"
+        CAVE_HOME="$CAVE_DATA/home"
+        CLAUDE_DIR="$CAVE_HOME/.claude"
+
+        # First-run init
+        if [ ! -d "$CLAUDE_DIR" ]; then
+          mkdir -p "$CLAUDE_DIR"
+          cp ${defaultClaudeSettings} "$CLAUDE_DIR/settings.json"
+          printf '%s' '{"hasCompletedOnboarding":true,"theme":"dark","effortCalloutDismissed":true}' > "$CAVE_HOME/.claude.json"
         fi
-        RUNTIME_ARGS+=(--bind "$CLAUDE_STATE" ${jailHome}/.claude)
-        RUNTIME_ARGS+=(--bind "$CLAUDE_JSON" ${jailHome}/.claude.json)
+
+        # Migrate from old layout (separate claude-state dir + file bind mount)
+        if [ -d "$CAVE_DATA/claude-state" ] && [ ! -f "$CLAUDE_DIR/settings.json" ]; then
+          cp -a "$CAVE_DATA/claude-state/." "$CLAUDE_DIR/"
+        fi
+        if [ -f "$CAVE_DATA/claude.json" ] && [ ! -f "$CAVE_HOME/.claude.json" ]; then
+          mv "$CAVE_DATA/claude.json" "$CAVE_HOME/.claude.json"
+        fi
 
         if [ -n "''${CODING_CAVE_CLAUDE_MD:-}" ] && [ -f "''${CODING_CAVE_CLAUDE_MD}" ]; then
           RUNTIME_ARGS+=(--ro-bind "$CODING_CAVE_CLAUDE_MD" ${jailHome}/.claude/CLAUDE.md)
@@ -116,7 +124,7 @@
           RUNTIME_ARGS+=(--overlay-src "$CODING_CAVE_ZDOTDIR" --overlay "$CAVE_DATA/zdotdir-upper" "$CAVE_DATA/zdotdir-work" ${jailHome}/.config/zsh)
           RUNTIME_ARGS+=(--setenv ZDOTDIR ${jailHome}/.config/zsh)
         fi
-        # Shell dotfiles (bash) — ro-bind individual files; history writes to tmpfs home
+        # Shell dotfiles (bash) — ro-bind individual files
         if [ -n "''${CODING_CAVE_BASHRC:-}" ] && [ -f "''${CODING_CAVE_BASHRC}" ]; then
           RUNTIME_ARGS+=(--ro-bind "$CODING_CAVE_BASHRC" ${jailHome}/.bashrc)
         fi

@@ -23,9 +23,6 @@ Create `~/.config/coding-cave/config.toml`:
 ```toml
 [credentials]
 claude-oauth-token = "<your-token>"
-
-[sandbox]
-home-size-gb = 32  # optional, default 32
 ```
 
 ### Install
@@ -163,7 +160,7 @@ To reset to defaults, delete `~/.local/share/coding-cave/`.
 
 Two-layer isolation:
 
-1. **bwrap namespace** — the security boundary. `--clearenv` clears the host environment, ephemeral tmpfs provides the home directory, overlays isolate project writes.
+1. **bwrap namespace** — the security boundary. `--clearenv` clears the host environment, a persistent bind-mounted home directory stores Claude Code state, overlays isolate project writes.
 2. **Nix** — reproducible environments. All tools delivered via the Nix store closure. A `/nix/store` overlay allows agents to install additional packages inside the cave.
 
 The cave is a **persistent bwrap namespace**. The first `coding-cave` invocation starts bwrap with `tini` as init (`tini -s -- sleep infinity`). Subsequent invocations join the existing namespace via `nsenter`. The cave stops automatically when the last session exits.

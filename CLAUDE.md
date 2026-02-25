@@ -20,7 +20,7 @@ The cave is a **persistent bwrap namespace** that survives across agent sessions
 
 ### Configuration Files (on host, outside this repo)
 
-- **Global config** (`~/.config/coding-cave/config.toml`): OAuth tokens (`credentials.claude-oauth-token`), sandbox settings (`sandbox.home-size-gb`). Credentials are forwarded via env vars only, never written to disk inside the cave.
+- **Global config** (`~/.config/coding-cave/config.toml`): OAuth tokens (`credentials.claude-oauth-token`). Credentials are forwarded via env vars only, never written to disk inside the cave.
 - **User CLAUDE.md** (`~/.config/coding-cave/CLAUDE.md`): Optional instructions file, bind-mounted read-only into cave home at `~/.claude/CLAUDE.md`.
 - **Shell dotfiles**: User's `~/.bashrc`/`~/.bash_profile` (ro-bind) or `~/.config/zsh/` (overlay for writable history) are forwarded into the cave.
 
@@ -28,8 +28,7 @@ The cave is a **persistent bwrap namespace** that survives across agent sessions
 
 - `cave.pid`, `bwrap.pid` — process tracking for the running cave
 - `sessions/` — per-session PID files for tracking active agents
-- `claude-state/` → `~/.claude` inside cave (Claude Code config/history)
-- `claude.json` → `~/.claude.json` inside cave (onboarding/theme prefs)
+- `home/` → `~` inside cave (persistent home directory bind mount; Claude Code state lives here naturally at `.claude/` and `.claude.json`)
 - `projects.json` — project registry (slug → source path)
 - `loaded-projects.json` — snapshot of projects loaded at cave start
 - `projects/<slug>/upper/`, `work/`, `fuse-work/`, `merged/` — overlay dirs per project

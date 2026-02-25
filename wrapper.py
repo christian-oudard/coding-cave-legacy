@@ -45,11 +45,6 @@ def setup_env(global_config):
     if token:
         os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = token
 
-    sandbox_cfg = global_config.get("sandbox", {})
-    home_size_gb = sandbox_cfg.get("home-size-gb")
-    if home_size_gb:
-        os.environ["CODING_CAVE_HOME_SIZE"] = str(int(home_size_gb * 1073741824))
-
     claude_md = Path.home() / ".config" / "coding-cave" / "CLAUDE.md"
     if claude_md.exists():
         os.environ["CODING_CAVE_CLAUDE_MD"] = str(claude_md)
