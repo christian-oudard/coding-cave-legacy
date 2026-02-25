@@ -25,7 +25,7 @@ Create `~/.config/coding-cave/config.toml`:
 claude-oauth-token = "<your-token>"
 
 [sandbox]
-home-size-gb = 32  # default 32
+home-size-gb = 32  # optional, default 32
 ```
 
 ### Install
@@ -51,43 +51,84 @@ nix run
 ### Work on a project
 
 ```bash
-cd ./my-project
-codingcave
+cd ~/code/my-project
+coding-cave
 ```
 
-Mounts the current directory as a read-only overlay inside a bwrap sandbox and launches Claude Code. All writes go to a workspace directory (`~/.local/share/coding-cave/workspaces/`). The original project is never modified.
+The cave starts automatically on first entry. Your project directory is mounted as a read-only overlay — all writes go to `~/.local/share/coding-cave/projects/<name>/upper/`. The original project is never modified.
+
+If you're not in a registered project directory, you'll be prompted to add it.
+
+### Multiple agents
+
+Open another terminal and enter the same cave:
+
+```bash
+cd ~/code/other-project
+coding-cave
+```
+
+Both agents share the same cave namespace. The cave stops automatically when the last session exits.
+
+### Get a shell
+
+```bash
+coding-cave shell
+```
+
+Enters the cave with your shell (bash or zsh) instead of Claude Code. Useful for debugging or manual work inside the sandbox. Nix is available for installing additional tools:
+
+```bash
+nix shell nixpkgs#python3 --command python3 script.py
+```
+
+### Register a project
+
+```bash
+coding-cave add ~/code/my-project
+```
+
+Adds a project to the registry without entering the cave. If the cave is already running, agents must restart to access the new project.
 
 ### Pull changes back
 
 ```bash
-cd ./my-project
-codingcave pull
+cd ~/code/my-project
+coding-cave pull
 ```
 
-Mounts the most recent workspace, rebases the agent's commits onto your branch, re-authoring each with your identity and GPG signature, then cleans up. If there are conflicts, the overlay stays mounted for manual resolution.
+Mounts the project overlay using fuse-overlayfs, fetches the agent's commits, and rebases them onto your branch — re-authoring each with your identity. If there are conflicts, instructions are printed for manual resolution.
 
-### Run an agent with a task
+Running `pull` from outside any project directory pulls all registered projects.
+
+### Push host changes
 
 ```bash
-codingcave run ./my-project "add unit tests for the auth module"
+cd ~/code/my-project
+coding-cave push
 ```
 
-Same overlay workspace as the default command, but targets a specific directory and passes a task prompt to Claude Code in non-interactive mode.
+Resets the project overlay so the cave sees the current host state on next entry. The cave must be stopped first (exit all sessions). If there are unpulled commits or uncommitted changes in the overlay, you'll be shown a summary and prompted before they're discarded.
 
-### Review a workspace manually
+### Remove a project
 
 ```bash
-codingcave review
+cd ~/code/my-project
+coding-cave remove
 ```
 
-Lists available workspaces.
+Unregisters the project and deletes its overlay data. The host project directory is never touched. If the project is loaded in a running cave, you must stop the cave first (exit all sessions).
+
+You can also remove by slug: `coding-cave remove my-project`.
+
+### Check status
 
 ```bash
-codingcave review <workspace>
+coding-cave status
 ```
 
-Mounts the overlay workspace for manual inspection. The mounted directory is a fully functional git repo — the agent's commits are visible on top of your original history.
 
+Shows whether the cave is running, how many sessions are active, and lists registered projects.
 
 ## Per-project configuration
 
@@ -98,14 +139,23 @@ Add `.claude-sandbox.toml` to a project:
 DATABASE_URL = "postgresql://localhost/dev"
 ```
 
+Variables under `[environment]` are set when entering the cave for that project.
+
+## User instructions
+
+Place a `CLAUDE.md` at `~/.config/coding-cave/CLAUDE.md` to have it bind-mounted read-only into the cave home. This is useful for instructions you want applied across all projects.
+
 ## Persistent state
 
-Claude Code state persists across sandbox runs in `~/.local/share/coding-cave/`:
+State persists across cave sessions in `~/.local/share/coding-cave/`:
 
-- `claude-state/` — bind-mounted as `~/.claude` (settings, session history, plugins)
+- `claude-state/` — bind-mounted as `~/.claude` (settings, session history)
 - `claude.json` — bind-mounted as `~/.claude.json` (onboarding state, preferences)
+- `projects.json` — project registry (slug → source path)
+- `projects/<name>/` — per-project overlay upper/work dirs
+- `nix-overlay/` — writable nix store overlay for packages installed inside the cave
 
-On first run, these are seeded from templates (`claude-settings.json` and a built-in default). After that, Claude Code manages them and they're left alone.
+On first run, Claude Code state is seeded from `claude-settings.json`. After that it's managed by Claude Code.
 
 To reset to defaults, delete `~/.local/share/coding-cave/`.
 
@@ -113,13 +163,11 @@ To reset to defaults, delete `~/.local/share/coding-cave/`.
 
 Two-layer isolation:
 
-1. **bwrap namespace** — the security boundary. Clears host environment, hides host home directory, provides ephemeral filesystems.
-2. **Nix** — reproducible environments. All tools delivered via the Nix store.
+1. **bwrap namespace** — the security boundary. `--clearenv` clears the host environment, ephemeral tmpfs provides the home directory, overlays isolate project writes.
+2. **Nix** — reproducible environments. All tools delivered via the Nix store closure. A `/nix/store` overlay allows agents to install additional packages inside the cave.
 
-A Python wrapper (`wrapper.py`) reads config, creates overlay workspaces, and sets up environment variables. The jail definition (`flake.nix`) uses jail.nix combinators to construct the bwrap invocation with persistent state bind-mounts, overlay-based workspace mounting, and an entry wrapper that launches Claude Code.
+The cave is a **persistent bwrap namespace**. The first `coding-cave` invocation starts bwrap with `tini` as init (`tini -s -- sleep infinity`). Subsequent invocations join the existing namespace via `nsenter`. The cave stops automatically when the last session exits.
 
-The project directory is mounted as the read-only lower layer of a bwrap overlay. Writes go to an upper directory on the host (`~/.local/share/coding-cave/workspaces/`). The original project is never modified. After the sandbox exits, `pull` uses fuse-overlayfs to mount the workspace, pulls changes via git, and cleans up. For manual inspection, `review` mounts the workspace without pulling.
+Projects are mounted as bwrap overlays at `/projects/<name>` — the host directory is the read-only lower layer, writes go to an upper directory on the host. The `pull` command uses `fuse-overlayfs` outside the cave to mount the overlay as a git repo, fetches commits back to the host, and rebases them with the user's identity.
 
-Credentials are never written to disk — they're read from `config.toml` by the wrapper and forwarded via environment variables through `--clearenv`/`--setenv`.
-
-See `agent-isolation-guide.md` for the full design spec.
+Credentials are never written to disk inside the cave — they're read from `config.toml` by the wrapper and forwarded via environment variables.

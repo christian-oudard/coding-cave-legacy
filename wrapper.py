@@ -1,15 +1,5 @@
 #!/usr/bin/env python3
-"""
-coding-cave wrapper: persistent cave with multi-agent support.
-
-Commands:
-    coding-cave [--gpu]                 - enter cave, run claude
-    coding-cave agent [--gpu]           - same as above
-    coding-cave shell [--gpu]           - enter cave with shell
-    coding-cave add [dir]               - add a project to the cave
-    coding-cave status                  - show cave and sessions
-    coding-cave pull [project-name]     - pull commits from overlay
-"""
+"""coding-cave wrapper: persistent cave with multi-agent support."""
 import json
 import os
 import re
@@ -46,13 +36,6 @@ def load_global_config():
             return tomllib.load(f)
     return {}
 
-
-def load_project_config(project_dir):
-    config_path = Path(project_dir) / ".claude-sandbox.toml"
-    if config_path.exists():
-        with open(config_path, "rb") as f:
-            return tomllib.load(f)
-    return {}
 
 
 def setup_env(global_config):
@@ -235,10 +218,7 @@ def enter_cave(pid, project=None, shell=None):
     """nsenter into the cave and run claude or a shell."""
     parts = ["source /tmp/cave-env 2>/dev/null"]
 
-    if project:
-        parts.append(f"cd /projects/{project} || exit 1")
-    else:
-        parts.append("cd $HOME")
+    parts.append("cd /projects")
 
     if shell:
         shell_bin = "/bin/zsh" if shell == "zsh" else "/bin/bash"
@@ -381,6 +361,29 @@ def pull_project(slug):
     proj_state = PROJECTS_DIR / slug
     project_dir = Path(projects[slug])
 
+    # Clean up stale rebase/branch state from a previous failed pull
+    git = ["git", "-C", str(project_dir)]
+    git_dir = project_dir / ".git"
+    if (git_dir / "rebase-merge").is_dir() or (git_dir / "rebase-apply").is_dir():
+        print(f"Aborting stale rebase in {slug}.", file=sys.stderr)
+        subprocess.run(git + ["rebase", "--abort"], capture_output=True)
+    # If left on _cave_pull branch, get back to a real branch
+    cur_branch = subprocess.run(
+        git + ["rev-parse", "--abbrev-ref", "HEAD"],
+        capture_output=True, text=True,
+    )
+    if cur_branch.returncode == 0 and cur_branch.stdout.strip() == "_cave_pull":
+        # Find the most likely target branch (not _cave_pull)
+        branches = subprocess.run(
+            git + ["branch", "--format=%(refname:short)"],
+            capture_output=True, text=True,
+        )
+        for b in branches.stdout.strip().splitlines():
+            if b != "_cave_pull":
+                subprocess.run(git + ["checkout", b], capture_output=True)
+                break
+    subprocess.run(git + ["branch", "-D", "_cave_pull"], capture_output=True)
+
     # Mount overlay for git access
     merged = proj_state / "merged"
     if merged.exists() and merged.is_mount():
@@ -391,8 +394,6 @@ def pull_project(slug):
         print(f"Failed to mount overlay for {slug}", file=sys.stderr)
         sys.exit(1)
     merged, _ = result
-
-    git = ["git", "-C", str(project_dir)]
 
     fetch = subprocess.run(git + ["fetch", str(merged), "HEAD"])
     if fetch.returncode != 0:
@@ -414,10 +415,23 @@ def pull_project(slug):
         capture_output=True, text=True, check=True,
     ).stdout.strip()
 
+    # Check for uncommitted changes in the overlay
+    dirty = subprocess.run(
+        ["git", "-C", str(merged), "status", "--porcelain"],
+        capture_output=True, text=True,
+    )
+    has_uncommitted = dirty.returncode == 0 and dirty.stdout.strip()
+
     try_unmount(merged)
 
-    if count == "0":
+    if count == "0" and not has_uncommitted:
         print(f"No commits to pull from {slug}.", file=sys.stderr)
+        return
+
+    if has_uncommitted:
+        print(f"Warning: {slug} has uncommitted changes in the cave.", file=sys.stderr)
+
+    if count == "0":
         return
 
     branch = subprocess.run(
@@ -425,9 +439,15 @@ def pull_project(slug):
         capture_output=True, text=True, check=True,
     ).stdout.strip()
 
+    pre_head = subprocess.run(
+        git + ["rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
     subprocess.run(git + ["branch", "-f", "_cave_pull", "FETCH_HEAD"], check=True)
     result = subprocess.run(git + [
         "rebase", "--onto", branch, merge_base, "_cave_pull",
+        "--no-reapply-cherry-picks",
         "--exec", "git commit --amend --reset-author --allow-empty --no-edit",
     ])
     if result.returncode != 0:
@@ -442,11 +462,35 @@ def pull_project(slug):
     subprocess.run(git + ["merge", "--ff-only", "_cave_pull"], check=True)
     subprocess.run(git + ["branch", "-d", "_cave_pull"], check=True)
 
-    print(f"Pulled {count} commit(s) from {slug}.", file=sys.stderr)
+    actual = subprocess.run(
+        git + ["rev-list", "--count", f"{pre_head}..HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    if actual == "0":
+        print(f"No new commits to pull from {slug}.", file=sys.stderr)
+    else:
+        print(f"Pulled {actual} commit(s) from {slug}.", file=sys.stderr)
+
+    # Update cave's branch to match host so next pull sees shared history.
+    result = mount_project_overlay(slug)
+    if result is not None:
+        merged, _ = result
+        cave_git = ["git", "-C", str(merged)]
+        fetch_ok = subprocess.run(
+            cave_git + ["fetch", str(project_dir), "HEAD"],
+            capture_output=True,
+        )
+        if fetch_ok.returncode == 0:
+            subprocess.run(
+                cave_git + ["update-ref", f"refs/heads/{branch}", "FETCH_HEAD"],
+                capture_output=True,
+            )
+        try_unmount(merged)
 
 
-def cleanup_project_overlay(slug):
-    """Clear overlay upper/work dirs for a project (reset overlay debt)."""
+def reset_project_overlay(slug):
+    """Delete overlay upper/work dirs for a project and recreate them empty."""
     proj_state = PROJECTS_DIR / slug
     merged = proj_state / "merged"
     if merged.exists() and merged.is_mount():
@@ -476,9 +520,6 @@ def cmd_agent(args, gpu=False):
     project_dir = detect_project_from_cwd()
     if project_dir is not None:
         project = ensure_project(project_dir)
-        project_config = load_project_config(project_dir)
-        for key, val in project_config.get("environment", {}).items():
-            os.environ[key] = str(val)
 
     pid = cave_pid()
 
@@ -509,24 +550,254 @@ def cmd_add(args):
         print(f"Not a directory: {project_dir}", file=sys.stderr)
         sys.exit(1)
 
+    slug = project_dir.name
+    projects = load_projects()
+    if slug in projects and Path(projects[slug]).resolve() == project_dir:
+        print(f"{slug} is already in the coding cave.", file=sys.stderr)
+        return
+
     slug = ensure_project(project_dir)
     print(f"Added {slug} to the coding cave.", file=sys.stderr)
+    if cave_pid():
+        print("Note: running agents must be restarted to access this project.", file=sys.stderr)
+
+
+def cmd_remove(args):
+    """Remove a project from the cave."""
+    # Resolve project — explicit arg or CWD match
+    slug = None
+    if args:
+        slug = args[0]
+    else:
+        cwd = Path.cwd().resolve()
+        for s, source in load_projects().items():
+            if cwd == Path(source).resolve() or cwd.is_relative_to(Path(source).resolve()):
+                slug = s
+                break
+
+    if slug is None:
+        print("No project specified and CWD is not a registered project.", file=sys.stderr)
+        sys.exit(1)
+
+    projects = load_projects()
+    if slug not in projects:
+        print(f"Project not found: {slug}", file=sys.stderr)
+        sys.exit(1)
+
+    if cave_pid() and project_loaded_in_cave(slug):
+        print(f"Project {slug} is loaded in the running cave.", file=sys.stderr)
+        print("Stop the cave first (exit all sessions).", file=sys.stderr)
+        sys.exit(1)
+
+    reset_project_overlay(slug)
+    proj_state = PROJECTS_DIR / slug
+    if proj_state.exists():
+        shutil.rmtree(proj_state)
+
+    del projects[slug]
+    save_projects(projects)
+
+    print(f"Removed {slug} from the coding cave.", file=sys.stderr)
+
+
+def cmd_reset(args):
+    """Reset a project overlay to match host state."""
+    if cave_pid() is not None:
+        print("Cave is running. Exit all sessions first.", file=sys.stderr)
+        sys.exit(1)
+
+    # Resolve project — explicit arg, CWD match, or error
+    slug = None
+    if args:
+        slug = args[0]
+    else:
+        cwd = Path.cwd().resolve()
+        for s, source in load_projects().items():
+            if cwd == Path(source).resolve() or cwd.is_relative_to(Path(source).resolve()):
+                slug = s
+                break
+
+    if slug is None:
+        print("No project specified and CWD is not a registered project.", file=sys.stderr)
+        sys.exit(1)
+
+    projects = load_projects()
+    if slug not in projects:
+        print(f"Project not found: {slug}", file=sys.stderr)
+        sys.exit(1)
+
+    # Check for unpulled commits and uncommitted changes
+    result = mount_project_overlay(slug)
+    if result is None:
+        print(f"Failed to mount overlay for {slug}", file=sys.stderr)
+        sys.exit(1)
+    merged, project_dir = result
+
+    git = ["git", "-C", str(merged)]
+    changes = []
+
+    # Find unpulled commits
+    merge_base_result = subprocess.run(
+        ["git", "-C", str(project_dir), "merge-base", "HEAD",
+         subprocess.run(["git", "-C", str(merged), "rev-parse", "HEAD"],
+                        capture_output=True, text=True, check=True).stdout.strip()],
+        capture_output=True, text=True,
+    )
+    if merge_base_result.returncode == 0:
+        merge_base = merge_base_result.stdout.strip()
+        log = subprocess.run(
+            git + ["log", "--oneline", f"{merge_base}..HEAD"],
+            capture_output=True, text=True,
+        )
+        if log.returncode == 0 and log.stdout.strip():
+            changes.append("Unpulled commits:")
+            changes.append(log.stdout.rstrip())
+
+    # Check uncommitted changes
+    status = subprocess.run(
+        git + ["status", "--short"],
+        capture_output=True, text=True,
+    )
+    if status.returncode == 0 and status.stdout.strip():
+        changes.append("Uncommitted changes:")
+        changes.append(status.stdout.rstrip())
+
+    try_unmount(merged)
+
+    if changes:
+        print(f"Project {slug} has overlay changes that will be lost:\n", file=sys.stderr)
+        for line in changes:
+            print(f"  {line}", file=sys.stderr)
+        print(file=sys.stderr)
+        try:
+            answer = input("Overwrite these changes? [y/N] ").strip().lower()
+        except EOFError:
+            answer = ""
+        if answer not in ("y", "yes"):
+            print("Aborted.", file=sys.stderr)
+            return
+
+    reset_project_overlay(slug)
+    print(f"Reset overlay for {slug}. Cave will see current host state on next start.", file=sys.stderr)
+
+
+def push_project(slug):
+    """Push host commits into a project overlay."""
+    projects = load_projects()
+    if slug not in projects:
+        print(f"Project not found: {slug}", file=sys.stderr)
+        sys.exit(1)
+
+    proj_state = PROJECTS_DIR / slug
+    project_dir = Path(projects[slug])
+
+    # Mount overlay for git access
+    merged = proj_state / "merged"
+    if merged.exists() and merged.is_mount():
+        try_unmount(merged)
+
+    result = mount_project_overlay(slug)
+    if result is None:
+        print(f"Failed to mount overlay for {slug}", file=sys.stderr)
+        sys.exit(1)
+    merged, _ = result
+
+    git = ["git", "-C", str(merged)]
+
+    # Fetch host commits into overlay
+    fetch = subprocess.run(git + ["fetch", str(project_dir), "HEAD"])
+    if fetch.returncode != 0:
+        try_unmount(merged)
+        print(f"Fetch failed for {slug}.", file=sys.stderr)
+        sys.exit(1)
+
+    # Check if there's anything to push
+    merge_base_result = subprocess.run(
+        git + ["merge-base", "HEAD", "FETCH_HEAD"],
+        capture_output=True, text=True,
+    )
+    if merge_base_result.returncode != 0:
+        try_unmount(merged)
+        print(f"No common ancestor for {slug} — cannot push.", file=sys.stderr)
+        sys.exit(1)
+
+    # Count incoming commits
+    count = subprocess.run(
+        git + ["rev-list", "--count", "HEAD..FETCH_HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    if count == "0":
+        try_unmount(merged)
+        print(f"No commits to push to {slug}.", file=sys.stderr)
+        return
+
+    # Check for uncommitted changes in overlay
+    dirty = subprocess.run(
+        git + ["status", "--porcelain"],
+        capture_output=True, text=True,
+    )
+    if dirty.returncode == 0 and dirty.stdout.strip():
+        print(f"Warning: {slug} has uncommitted changes in the cave.", file=sys.stderr)
+
+    # Try fast-forward merge first
+    result = subprocess.run(git + ["merge", "--ff-only", "FETCH_HEAD"],
+                            capture_output=True)
+
+    if result.returncode != 0:
+        # Cave has diverged (e.g. host amended a pulled commit) — reset to host
+        cave_only = subprocess.run(
+            git + ["rev-list", "--count", "FETCH_HEAD..HEAD"],
+            capture_output=True, text=True,
+        )
+        cave_count = cave_only.stdout.strip() if cave_only.returncode == 0 else "?"
+        print(f"Resetting {slug} — overwriting {cave_count} cave-only commit(s).", file=sys.stderr)
+        subprocess.run(git + ["reset", "--hard", "FETCH_HEAD"], check=True)
+
+    try_unmount(merged)
+    print(f"Pushed {count} commit(s) to {slug}.", file=sys.stderr)
+
+
+def cmd_push(args):
+    """Push host commits into project overlays."""
+    if args:
+        push_project(args[0])
+        return
+
+    # If CWD is inside a registered project, push only that project
+    cwd = Path.cwd().resolve()
+    for slug, source in load_projects().items():
+        if cwd == Path(source).resolve() or cwd.is_relative_to(Path(source).resolve()):
+            push_project(slug)
+            return
+
+    # Otherwise push all projects
+    projects = list_projects()
+    if not projects:
+        print("No projects in the cave.", file=sys.stderr)
+        return
+    for slug, _ in projects:
+        try:
+            push_project(slug)
+        except SystemExit:
+            pass  # continue with other projects
 
 
 def cmd_pull(args):
     """Pull changes from project overlays."""
     if args:
         pull_project(args[0])
-    else:
-        projects = list_projects()
-        if not projects:
-            print("No projects in the cave.", file=sys.stderr)
+        return
+
+    # If CWD is inside a registered project, pull only that project
+    cwd = Path.cwd().resolve()
+    for slug, source in load_projects().items():
+        if cwd == Path(source).resolve() or cwd.is_relative_to(Path(source).resolve()):
+            pull_project(slug)
             return
-        for slug, _ in projects:
-            try:
-                pull_project(slug)
-            except SystemExit:
-                pass  # continue with other projects
+
+    # Not in a project folder — do nothing
+    print("Not in a project folder. Specify a project or cd into one.", file=sys.stderr)
 
 
 def cmd_shell(args, gpu=False):
@@ -581,6 +852,40 @@ def cmd_status(args):
 
 
 
+HELP = """\
+Usage: coding-cave [command] [options]
+
+Commands:
+  (default)            enter cave and run claude agent
+  shell                enter cave with your shell
+  add [dir]            register a project (default: current dir)
+  pull [project]       pull commits from overlay (default: current project)
+  push [project]       push host commits into cave (live)
+  reset [project]      wipe overlay to match host (requires cave stopped)
+  remove [project]     unregister a project and delete overlay data
+  status               show cave and project info
+  help                 show this help
+
+Options:
+  --gpu                enable GPU access (for agent/shell)
+
+Examples:
+  coding-cave                          run claude in current project
+  coding-cave ./my-project             run claude in my-project
+  coding-cave shell                    get a shell in the cave
+  coding-cave add ~/code/my-project    register a project
+  coding-cave pull                     pull changes from current project
+  coding-cave push                     push host commits into cave
+  coding-cave reset                    wipe overlay to match host
+  coding-cave remove                   unregister current project
+  coding-cave status                   show what's running\
+"""
+
+
+def print_help():
+    print(HELP, file=sys.stderr)
+
+
 def main():
     commands = {
         "agent": cmd_agent,
@@ -588,6 +893,9 @@ def main():
         "add": cmd_add,
         "status": cmd_status,
         "pull": cmd_pull,
+        "push": cmd_push,
+        "reset": cmd_reset,
+        "remove": cmd_remove,
     }
 
     args = sys.argv[1:]
@@ -600,6 +908,10 @@ def main():
         return
 
     cmd = args[0]
+    if cmd in ("help", "--help", "-h"):
+        print_help()
+        return
+
     if cmd in commands:
         if cmd in ("agent", "shell"):
             commands[cmd](args[1:], gpu=gpu)
@@ -607,7 +919,7 @@ def main():
             commands[cmd](args[1:])
     else:
         print(f"Unknown command: {cmd}", file=sys.stderr)
-        print("Commands: agent, shell, add, status, pull", file=sys.stderr)
+        print("Run 'coding-cave help' for usage.", file=sys.stderr)
         sys.exit(1)
 
 
