@@ -513,6 +513,19 @@ def enter_session(session_info, shell_type):
 
 # --- Pull / Push (commits only) ---
 
+def _find_overlay_git(slug):
+    """Find a .git dir in a session overlay for a project without a gitdir."""
+    proj_state = PROJECTS_DIR / slug
+    sessions_dir = proj_state / "sessions"
+    if not sessions_dir.exists():
+        return None
+    for sess_dir in sessions_dir.iterdir():
+        git_dir = sess_dir / "merged" / ".git"
+        if git_dir.is_dir():
+            return git_dir
+    return None
+
+
 def pull_project(slug, force=False):
     """Pull committed changes from cave gitdir into the host repo."""
     projects = load_projects()
@@ -525,13 +538,52 @@ def pull_project(slug, force=False):
     gitdir = proj_state / "gitdir"
 
     if not gitdir.exists():
-        print(f"No gitdir for {slug} — run 'coding-cave reset' first.", file=sys.stderr)
-        sys.exit(1)
+        # Project may have been git-init'd inside the cave (on the overlay).
+        overlay_git = _find_overlay_git(slug)
+        if overlay_git:
+            print(f"Creating gitdir from cave overlay for {slug}...", file=sys.stderr)
+            shutil.copytree(overlay_git, gitdir)
+            subprocess.run(
+                ["git", "--git-dir", str(gitdir), "config", "core.hooksPath", "/dev/null"],
+                capture_output=True,
+            )
+            hooks_dir = gitdir / "hooks"
+            if hooks_dir.exists():
+                shutil.rmtree(hooks_dir)
+        else:
+            print(f"No gitdir for {slug} — run 'coding-cave reset' first.", file=sys.stderr)
+            sys.exit(1)
+
+    git_dir = project_dir / ".git"
+
+    # If the host has no git repo, initialize one from the cave's gitdir
+    if not git_dir.is_dir():
+        print(f"Initializing host repo for {slug} from cave...", file=sys.stderr)
+        subprocess.run(
+            ["git", "clone", "--local", str(gitdir), str(project_dir)],
+            check=True,
+        )
+        # Remove the 'origin' remote (it points to the gitdir, we'll add 'cave' instead)
+        subprocess.run(
+            ["git", "-C", str(project_dir), "remote", "remove", "origin"],
+            capture_output=True,
+        )
+        ensure_cave_remote(project_dir, gitdir)
+        host_head = subprocess.run(
+            ["git", "-C", str(project_dir), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        branch = subprocess.run(
+            ["git", "-C", str(project_dir), "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        update_cave_sync(gitdir, project_dir, host_head, branch=branch)
+        print(f"Pulled {slug} (new repo from cave).", file=sys.stderr)
+        return
 
     ensure_cave_remote(project_dir, gitdir)
 
     git = ["git", "-C", str(project_dir), "-c", "core.hooksPath=/dev/null"]
-    git_dir = project_dir / ".git"
 
     # Clean up stale rebase state
     if (git_dir / "rebase-merge").is_dir() or (git_dir / "rebase-apply").is_dir():
