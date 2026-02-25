@@ -65,8 +65,10 @@
         pkgs.ncurses
         pkgs.zsh
         pkgs.eza
+        pkgs.nano
         pkgs.tini
       ])
+      (set-env "EDITOR" "${pkgs.nano}/bin/nano")
       (set-env "TERMINFO_DIRS" "${pkgs.ncurses}/share/terminfo")
       (set-env "LOCALE_ARCHIVE" "${pkgs.glibcLocales}/lib/locale/locale-archive")
       (set-env "LANG" "en_US.UTF-8")
