@@ -536,7 +536,8 @@ def pull_project(slug, force=False):
     git = ["git", "-C", str(project_dir), "-c", "core.hooksPath=/dev/null"]
 
     # Clean up stale rebase state
-    if (git_dir / "rebase-merge").is_dir() or (git_dir / "rebase-apply").is_dir():
+    host_git_dir = project_dir / ".git"
+    if (host_git_dir / "rebase-merge").is_dir() or (host_git_dir / "rebase-apply").is_dir():
         print(f"Aborting stale rebase in {slug}.", file=sys.stderr)
         subprocess.run(git + ["rebase", "--abort"], capture_output=True)
     cur_branch = subprocess.run(
