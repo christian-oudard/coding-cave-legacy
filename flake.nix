@@ -28,11 +28,23 @@
         RUNTIME_ARGS+=(--size "$HOME_SIZE" --tmpfs ${jailHome})
       '')
       network
-      no-new-session
+      # no-new-session omitted: cave init needs its own session to survive terminal close
+
+      # Nix CLI for autonomous package management inside the cave
+      # Nix store overlay: writable /nix backed by host store as lower layer
+      (try-fwd-env "CODING_CAVE_NIX_UPPER")
+      (try-fwd-env "CODING_CAVE_NIX_WORK")
+      (add-runtime ''
+        if [ -n "''${CODING_CAVE_NIX_UPPER:-}" ]; then
+          RUNTIME_ARGS+=(--overlay-src /nix --overlay "$CODING_CAVE_NIX_UPPER" "$CODING_CAVE_NIX_WORK" /nix)
+        fi
+      '')
+      (set-env "NIX_CONFIG" "sandbox = false\nexperimental-features = nix-command flakes")
 
       # Dev tools
       (add-pkg-deps [
         claude-code.packages.x86_64-linux.default
+        pkgs.nix
         pkgs.git
         pkgs.ripgrep
         pkgs.fd
@@ -45,6 +57,7 @@
         pkgs.less
         pkgs.file
         pkgs.ncurses
+        pkgs.tini
       ])
       (set-env "TERMINFO_DIRS" "${pkgs.ncurses}/share/terminfo")
       (try-fwd-env "COLORTERM")
@@ -60,14 +73,12 @@
       (try-fwd-env "ANTHROPIC_API_KEY")
       (try-fwd-env "GITHUB_TOKEN")
 
-      # Task forwarding (used by wrap-entry inside the jail)
-      (try-fwd-env "CODING_CAVE_TASK")
+      # Cave configuration forwarding
       (try-fwd-env "CODING_CAVE_CLAUDE_MD")
-      # CODING_CAVE_WORKSPACE, OVERLAY_UPPER, OVERLAY_WORK are read by
-      # add-runtime on the host side only — not forwarded into the jail.
+      (try-fwd-env "CODING_CAVE_MOUNT_SCRIPT")
 
       # Persist Claude Code state across sandbox runs.
-      # Mount workspace as overlay (project is read-only lower layer).
+      # Mount project overlays from wrapper-generated script.
       (add-runtime ''
         CAVE_DATA="$HOME/.local/share/coding-cave"
         CLAUDE_STATE="$CAVE_DATA/claude-state"
@@ -84,23 +95,17 @@
           RUNTIME_ARGS+=(--ro-bind "$CODING_CAVE_CLAUDE_MD" ${jailHome}/CLAUDE.md)
         fi
 
-        if [ -n "''${CODING_CAVE_OVERLAY_UPPER:-}" ]; then
-          RUNTIME_ARGS+=(--overlay-src "$CODING_CAVE_WORKSPACE" --overlay "$CODING_CAVE_OVERLAY_UPPER" "$CODING_CAVE_OVERLAY_WORK" /workspace)
-        elif [ -n "''${CODING_CAVE_WORKSPACE:-}" ] && [ -d "''${CODING_CAVE_WORKSPACE:-}" ]; then
-          RUNTIME_ARGS+=(--bind "$CODING_CAVE_WORKSPACE" /workspace)
+        # Mount project overlays from wrapper-generated script
+        if [ -n "''${CODING_CAVE_MOUNT_SCRIPT:-}" ] && [ -f "''${CODING_CAVE_MOUNT_SCRIPT}" ]; then
+          source "''${CODING_CAVE_MOUNT_SCRIPT}"
         fi
       '')
 
-      # Inside the jail: cd to workspace, launch claude
+      # Cave init: dump environment for nsenter, reap zombies via tini
       (wrap-entry (entry: ''
-        if [ -d /workspace ]; then
-          cd /workspace
-        fi
-        if [ -n "''${CODING_CAVE_TASK:-}" ]; then
-          exec claude --dangerously-skip-permissions -p "$CODING_CAVE_TASK"
-        else
-          exec claude --dangerously-skip-permissions
-        fi
+        mkdir -p /projects
+        export -p > /tmp/cave-env
+        exec tini -s -- sleep infinity
       ''))
     ];
 
@@ -128,7 +133,7 @@
     };
 
     wrapper = pkgs.writeShellScriptBin "coding-cave" ''
-      export PATH="${pkgs.lib.makeBinPath [pkgs.fuse-overlayfs pkgs.fuse3]}:$PATH"
+      export PATH="${pkgs.lib.makeBinPath [pkgs.fuse-overlayfs pkgs.fuse3 pkgs.util-linux]}:$PATH"
       exec ${pkgs.python3}/bin/python3 ${wrapperScript} "$@"
     '';
 

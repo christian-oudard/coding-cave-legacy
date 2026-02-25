@@ -10,32 +10,40 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Two-layer isolation: bwrap namespace provides the security boundary, Nix provides reproducible environments. Claude Code runs with `--dangerously-skip-permissions` inside the box.
 
-- **Flake** (`flake.nix`): Packages the sandbox using jail.nix combinators. Inputs: nixpkgs (unstable), jail.nix from `sourcehut:~alexdavid/jail.nix`, claude-code-nix from `github:sadjow/claude-code-nix`.
-- **Wrapper** (`wrapper.py`): Python script that handles subcommands (run/pull/review/cleanup), reads config, creates overlay workspaces, sets up env vars, and execs the sandbox binary. Nix substitutes `@SANDBOX_BIN@` at build time via `replaceVars`.
-- **jail.nix** (cloned in `prior-art/` for reference): Pure Nix combinator library for bwrap. Key combinators used: `network`, `no-new-session`, `add-pkg-deps`, `try-fwd-env`, `add-runtime`, `wrap-entry`, `set-hostname`.
+The cave is a **persistent bwrap namespace** that survives across agent sessions. Multiple Claude Code agents can run simultaneously inside the same cave via `nsenter`. Projects are mounted as overlays at `/projects/<name>`.
+
+- **Flake** (`flake.nix`): Packages the sandbox using jail.nix combinators. Inputs: nixpkgs (unstable), jail.nix from `sourcehut:~alexdavid/jail.nix`, claude-code-nix from `github:sadjow/claude-code-nix`. Builds two sandbox variants: `sandbox` (no GPU) and `sandboxGpu` (with GPU).
+- **Wrapper** (`wrapper.py`): Python script that manages cave lifecycle (start/stop/resync), project overlays, and agent launching via `nsenter`. Nix substitutes `@SANDBOX_BIN@` and `@SANDBOX_GPU_BIN@` at build time via `replaceVars`.
+- **jail.nix** (cloned in `prior-art/` for reference): Pure Nix combinator library for bwrap. Key combinators used: `network`, `add-pkg-deps`, `try-fwd-env`, `add-runtime`, `wrap-entry`, `set-hostname`, `gpu`.
 - **Claude settings** (`claude-settings.json`): Default `~/.claude/settings.json` seeded on first run. Configures model, effort level, etc.
 - **Per-project config** (`.claude-sandbox.toml`): TOML files in client repos declaring git settings and environment variables.
 - **Global config** (`~/.config/coding-cave/config.toml`): User credentials (OAuth tokens), git identity. Keeps secrets out of shell environment and repo.
-- **Persistent state** (`~/.local/share/coding-cave/`): Claude Code state (`claude-state/` → `~/.claude`) and preferences (`claude.json` → `~/.claude.json`) persist across sandbox runs. Seeded from templates on first run, then left alone.
+- **User CLAUDE.md** (`~/.config/coding-cave/CLAUDE.md`): Optional instructions file, bind-mounted read-only into cave home.
+- **Persistent state** (`~/.local/share/coding-cave/`): Claude Code state (`claude-state/` → `~/.claude`), preferences (`claude.json` → `~/.claude.json`), per-project overlay dirs (`projects/`), nix overlay (`nix-overlay/`), cave PID files.
 
 Key design decisions:
 - jail.nix over raw bwrap: composable combinators, nix store closure binding, fake-passwd
 - All restrictions at the bwrap layer, full autonomy inside the box
 - `--clearenv` with explicit credential forwarding only (auditable)
 - Credentials never written to disk — forwarded via env vars only
-- bwrap overlay for workspace isolation — project is read-only lower layer, writes go to upper dir on host
+- Persistent cave with `nsenter` for multi-agent: first invocation starts bwrap with `tini` init, subsequent invocations join via `nsenter`
+- bwrap overlay for project isolation — project is read-only lower layer, writes go to upper dir on host
+- `/nix` overlay — host nix store as lower layer, cave-local upper for autonomous package management
 - `fuse-overlayfs` for post-exit review — mounts the overlay as a fully functional git repo
 - `add-runtime` for runtime-conditional overlay/bind mounting and persistent state setup
-- `wrap-entry` for cd to workspace and claude launch inside the jail
-- Entry is always `claude --dangerously-skip-permissions` (use `!` inside claude for shell access)
+- `wrap-entry` runs cave init (`tini -s -- sleep infinity`), agents enter via `nsenter`
+- GPU access opt-in via `--gpu` flag (two sandbox derivations)
+- Overlay debt model: periodic `resync` pulls changes and resets overlays
 - Full network access in v1; proxy-based filtering planned for v2
 
 ## Tech Stack
 
-- **Nix**: Environment definitions, flake packaging
+- **Nix**: Environment definitions, flake packaging, autonomous package management inside cave
 - **jail.nix**: Composable bwrap configuration
 - **bubblewrap (bwrap)**: Linux namespace isolation
-- **Python**: Wrapper script (config parsing, workspace management)
+- **nsenter**: Multi-agent support — join existing cave namespaces
+- **tini**: Minimal init process for zombie reaping inside cave
+- **Python**: Wrapper script (cave lifecycle, project management)
 - **fuse-overlayfs**: FUSE overlay filesystem for post-exit workspace review
 - **TOML**: Configuration format (per-project and global)
 
@@ -43,13 +51,27 @@ Key design decisions:
 
 ```bash
 nix build                                          # build the sandbox
-nix run                                            # overlay cwd, launch claude
-nix run . -- run ./project "task description"      # overlay project, launch claude with task
-nix run . -- pull                                  # mount overlay, git pull, clean up
-nix run . -- pull                                  # rebase + re-author agent commits, clean up
-nix run . -- review                                # list workspaces
-nix run . -- review <workspace>                    # mount workspace for manual inspection
-rm -rf ~/.local/share/coding-cave/workspaces/<ws>  # manual cleanup
+
+# Cave lifecycle
+coding-cave                                        # enter cave (start if needed), run claude
+coding-cave ./project                              # load project, enter cave, run claude
+coding-cave ./project "task description"            # load project with task
+coding-cave --gpu ./project                         # enter cave with GPU access
+coding-cave down                                    # stop the cave
+coding-cave resync                                  # pull all, reset overlays, stop cave
+
+# In another tmux window (shares same cave):
+coding-cave ./other-project                         # second agent in same cave
+
+# Project management
+coding-cave pull                                    # pull all project overlays
+coding-cave pull <project-name>                     # pull specific project
+coding-cave review                                  # list projects and cave status
+coding-cave review <project-name>                   # mount overlay for inspection
+
+# Inside the cave (nix available for package management):
+nix shell nixpkgs#python3 --command python3 script.py
+nix shell nixpkgs#ffmpeg nixpkgs#deno --command bash
 ```
 
 The sandbox hostname is `coding-cave`.

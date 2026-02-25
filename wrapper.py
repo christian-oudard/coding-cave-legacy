@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 """
-coding-cave wrapper: reads config, sets up workspaces, launches sandbox.
+coding-cave wrapper: persistent cave with multi-agent support.
 
-Subcommands:
-    coding-cave                               - overlay cwd, launch claude
-    coding-cave run <project-dir> [task...]   - overlay project, launch claude with task
-    coding-cave pull [workspace]              - rebase + re-author commits, clean up
-    coding-cave review [workspace]            - list workspaces or mount one for inspection
+Commands:
+    coding-cave [--gpu] [project-dir] [task...]  - enter cave, run claude
+    coding-cave run [--gpu] <project-dir> [task...] - load project, enter cave
+    coding-cave pull [project-name]               - rebase commits from overlay
+    coding-cave down                              - stop the cave
+    coding-cave resync                            - pull all, recreate cave
+    coding-cave review [project-name]             - list projects or inspect one
 """
-import fcntl
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
-from datetime import datetime
+import time
 from pathlib import Path
 
 try:
@@ -25,6 +27,14 @@ except ImportError:
 SANDBOX_BIN = "@SANDBOX_BIN@"
 SANDBOX_GPU_BIN = "@SANDBOX_GPU_BIN@"
 
+CAVE_DATA = Path.home() / ".local" / "share" / "coding-cave"
+CAVE_PID_FILE = CAVE_DATA / "cave.pid"
+CAVE_MOUNT_SCRIPT = CAVE_DATA / "mount-projects.sh"
+PROJECTS_DIR = CAVE_DATA / "projects"
+NIX_OVERLAY_DIR = CAVE_DATA / "nix-overlay"
+
+
+# --- Config ---
 
 def load_global_config():
     config_path = Path.home() / ".config" / "coding-cave" / "config.toml"
@@ -42,8 +52,8 @@ def load_project_config(project_dir):
     return {}
 
 
-def setup_env(global_config, project_config):
-    """Set environment variables from config files."""
+def setup_env(global_config):
+    """Set environment variables from global config."""
     token = global_config.get("credentials", {}).get("claude-oauth-token")
     if token:
         os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = token
@@ -57,235 +67,208 @@ def setup_env(global_config, project_config):
     if claude_md.exists():
         os.environ["CODING_CAVE_CLAUDE_MD"] = str(claude_md)
 
-    for key, val in project_config.get("environment", {}).items():
-        os.environ[key] = str(val)
-
 
 def slugify(text, max_len=40):
     slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
     return slug[:max_len]
 
 
-def workspaces_dir():
-    return Path.home() / ".local" / "share" / "coding-cave" / "workspaces"
+# --- Cave lifecycle ---
 
-
-def is_workspace_locked(workspace):
-    """Check if a workspace is in use by another instance."""
-    lock_file = workspace / "lock"
-    if not lock_file.exists():
-        return False
-    try:
-        fd = os.open(str(lock_file), os.O_RDONLY)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            fcntl.flock(fd, fcntl.LOCK_UN)
-            return False
-        except OSError:
-            return True
-        finally:
-            os.close(fd)
-    except OSError:
-        return False
-
-
-def lock_workspace(workspace):
-    """Acquire an exclusive lock that survives execv into the sandbox."""
-    lock_file = workspace / "lock"
-    fd = os.open(str(lock_file), os.O_WRONLY | os.O_CREAT, 0o644)
-    os.set_inheritable(fd, True)
-    fcntl.flock(fd, fcntl.LOCK_EX)
-    return fd
-
-
-def workspace_has_commits(workspace):
-    """Check if a workspace has unpulled git commits (mounts overlay temporarily)."""
-    source = workspace / "source"
-    if not source.exists():
-        return False
-    project_dir = Path(source.read_text().strip())
-    merged = workspace / "merged"
-    if merged.is_mount():
-        try_unmount(merged)
-    try:
-        mount_overlay(workspace, project_dir)
-    except (subprocess.CalledProcessError, OSError):
-        return True  # can't verify — assume changes to be safe
-    try:
-        overlay_head = subprocess.run(
-            ["git", "-C", str(merged), "rev-parse", "HEAD"],
-            capture_output=True, text=True,
-        )
-        source_head = subprocess.run(
-            ["git", "-C", str(project_dir), "rev-parse", "HEAD"],
-            capture_output=True, text=True,
-        )
-        if overlay_head.returncode != 0 or source_head.returncode != 0:
-            return True
-        if overlay_head.stdout.strip() == source_head.stdout.strip():
-            return False
-        # HEADs differ — check if overlay has commits not in source.
-        result = subprocess.run(
-            ["git", "-C", str(project_dir), "merge-base", "--is-ancestor",
-             overlay_head.stdout.strip(), source_head.stdout.strip()],
-        )
-        # If overlay HEAD is ancestor of source HEAD, no new commits.
-        return result.returncode != 0
-    finally:
-        try_unmount(merged)
-
-
-def create_workspace(project_dir, task=None):
-    """Create overlay workspace directories. Returns (workspace_path, name).
-
-    Removes any existing workspaces for the same project first,
-    but refuses if they contain unpulled changes.
-    """
-    project_dir = Path(project_dir).resolve()
-    project_str = str(project_dir)
-
-    # Clean up old workspaces for this project
-    base = workspaces_dir()
-    if base.exists():
-        for ws in base.iterdir():
-            source_file = ws / "source"
-            if source_file.exists() and source_file.read_text().strip() == project_str:
-                if is_workspace_locked(ws):
-                    print(f"Already running: {ws.name}", file=sys.stderr)
-                    sys.exit(1)
-                if workspace_has_commits(ws):
-                    print(f"Unpulled changes in: {ws.name}", file=sys.stderr)
-                    print(f"Run 'coding-cave pull' first, or remove manually:", file=sys.stderr)
-                    print(f"  rm -rf {ws}", file=sys.stderr)
-                    sys.exit(1)
-                cleanup_workspace(ws)
-
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    if task:
-        name = f"{project_dir.name}-{slugify(task)}-{timestamp}"
-    else:
-        name = f"{project_dir.name}-{timestamp}"
-
-    workspace = workspaces_dir() / name
-    (workspace / "upper").mkdir(parents=True, exist_ok=True)
-    (workspace / "work").mkdir(parents=True, exist_ok=True)
-    (workspace / "merged").mkdir(parents=True, exist_ok=True)
-
-    # Store source project path for review/cleanup
-    (workspace / "source").write_text(str(project_dir))
-
-    return workspace, name
-
-
-def launch_sandbox(gpu=False):
-    binary = SANDBOX_GPU_BIN if gpu else SANDBOX_BIN
-    os.execv(binary, ["coding-cave"])
-
-
-def cmd_run(args, gpu=False):
-    if not args:
-        print("Usage: coding-cave run <project-dir> [task...]", file=sys.stderr)
-        sys.exit(1)
-
-    project_dir = Path(args[0]).resolve()
-    task = " ".join(args[1:]) if len(args) > 1 else None
-
-    global_config = load_global_config()
-    project_config = load_project_config(project_dir)
-    setup_env(global_config, project_config)
-
-    workspace, name = create_workspace(project_dir, task)
-    lock_workspace(workspace)
-    print(f"Workspace: {name}", file=sys.stderr)
-
-    os.environ["CODING_CAVE_WORKSPACE"] = str(project_dir)
-    os.environ["CODING_CAVE_OVERLAY_UPPER"] = str(workspace / "upper")
-    os.environ["CODING_CAVE_OVERLAY_WORK"] = str(workspace / "work")
-    if task:
-        os.environ["CODING_CAVE_TASK"] = task
-
-    launch_sandbox(gpu=gpu)
-
-
-
-def cmd_review(args):
-    base = workspaces_dir()
-
-    if not args:
-        if not base.exists():
-            print("No workspaces.", file=sys.stderr)
-            return
-        found = False
-        for ws in sorted(base.iterdir()):
-            source_file = ws / "source"
-            if source_file.exists():
-                source = source_file.read_text().strip()
-                mounted = (ws / "merged").is_mount()
-                status = " (mounted)" if mounted else ""
-                print(f"  {ws.name}  <- {source}{status}", file=sys.stderr)
-                found = True
-        if not found:
-            print("No workspaces.", file=sys.stderr)
-        return
-
-    name = args[0]
-    workspace = base / name
-
-    if not workspace.exists():
-        print(f"Workspace not found: {name}", file=sys.stderr)
-        sys.exit(1)
-
-    source = (workspace / "source").read_text().strip()
-    upper = workspace / "upper"
-    work = workspace / "work"
-    merged = workspace / "merged"
-
-    if merged.is_mount():
-        print(f"Already mounted: {merged}", file=sys.stderr)
-    else:
-        subprocess.run([
-            "fuse-overlayfs",
-            "-o", f"lowerdir={source},upperdir={upper},workdir={work}",
-            str(merged),
-        ], check=True)
-        print(f"Mounted: {merged}", file=sys.stderr)
-    print(f"Source:  {source}", file=sys.stderr)
-    print(file=sys.stderr)
-    print(f"To pull changes into your project:", file=sys.stderr)
-    print(f"  cd {source}", file=sys.stderr)
-    print(f"  git fetch {merged} <branch>", file=sys.stderr)
-    print(file=sys.stderr)
-    print(f"When done:  fusermount3 -u {merged}", file=sys.stderr)
-
-
-def find_latest_workspace(project_dir):
-    """Find the most recent workspace for a project directory."""
-    base = workspaces_dir()
-    if not base.exists():
+def cave_pid():
+    """Return cave init PID if running, else None."""
+    if not CAVE_PID_FILE.exists():
         return None
-    project_str = str(Path(project_dir).resolve())
-    for ws in sorted(base.iterdir(), reverse=True):
-        source_file = ws / "source"
-        if source_file.exists() and source_file.read_text().strip() == project_str:
-            return ws
+    try:
+        pid = int(CAVE_PID_FILE.read_text().strip())
+        os.kill(pid, 0)
+        return pid
+    except (ValueError, ProcessLookupError, PermissionError):
+        CAVE_PID_FILE.unlink(missing_ok=True)
+        return None
+
+
+def find_child_pid(parent_pid, timeout=10):
+    """Find the child of the bwrap process (the init inside the namespace)."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        for entry in os.scandir("/proc"):
+            if not entry.name.isdigit():
+                continue
+            try:
+                stat = Path(entry.path, "stat").read_text()
+                # Format: pid (comm) state ppid ... — comm can contain parens
+                close_paren = stat.rfind(")")
+                fields = stat[close_paren + 2:].split()
+                ppid = int(fields[1])  # fields[0]=state, fields[1]=ppid
+                if ppid == parent_pid:
+                    return int(entry.name)
+            except (FileNotFoundError, ValueError, PermissionError, IndexError):
+                continue
+        time.sleep(0.2)
     return None
 
 
-def mount_overlay(workspace, project_dir):
-    """Mount workspace overlay using fuse-overlayfs."""
-    # Separate workdir from bwrap's kernel overlayfs workdir —
-    # kernel overlayfs leaves internal state that fuse-overlayfs can't reuse.
-    fuse_work = workspace / "fuse-work"
-    fuse_work.mkdir(exist_ok=True)
-    subprocess.run([
-        "fuse-overlayfs",
-        "-o", f"lowerdir={project_dir},upperdir={workspace / 'upper'},workdir={fuse_work}",
-        str(workspace / "merged"),
-    ], check=True)
+def start_cave(gpu=False):
+    """Start the cave. Returns the init process PID (for nsenter)."""
+    CAVE_DATA.mkdir(parents=True, exist_ok=True)
 
+    # Nix overlay dirs
+    (NIX_OVERLAY_DIR / "upper").mkdir(parents=True, exist_ok=True)
+    (NIX_OVERLAY_DIR / "work").mkdir(parents=True, exist_ok=True)
+    os.environ["CODING_CAVE_NIX_UPPER"] = str(NIX_OVERLAY_DIR / "upper")
+    os.environ["CODING_CAVE_NIX_WORK"] = str(NIX_OVERLAY_DIR / "work")
+
+    # Project mount script
+    write_mount_script()
+    os.environ["CODING_CAVE_MOUNT_SCRIPT"] = str(CAVE_MOUNT_SCRIPT)
+
+    binary = SANDBOX_GPU_BIN if gpu else SANDBOX_BIN
+
+    proc = subprocess.Popen(
+        [binary],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+    # bwrap forks a child into the new namespaces. Find it.
+    child_pid = find_child_pid(proc.pid)
+    if child_pid is None:
+        proc.kill()
+        print("Failed to start cave: init process not found", file=sys.stderr)
+        sys.exit(1)
+
+    CAVE_PID_FILE.write_text(str(child_pid))
+    (CAVE_DATA / "bwrap.pid").write_text(str(proc.pid))
+
+    # Wait for init to write /tmp/cave-env
+    time.sleep(0.5)
+
+    print(f"Cave started (PID {child_pid})", file=sys.stderr)
+    return child_pid
+
+
+def stop_cave():
+    """Stop the cave."""
+    pid = cave_pid()
+    if pid is None:
+        print("No cave running.", file=sys.stderr)
+        return
+
+    bwrap_pid = None
+    bwrap_pid_file = CAVE_DATA / "bwrap.pid"
+    if bwrap_pid_file.exists():
+        try:
+            bwrap_pid = int(bwrap_pid_file.read_text().strip())
+        except (ValueError, FileNotFoundError):
+            pass
+
+    # Kill init process (tini forwards SIGTERM to sleep, then exits)
+    try:
+        os.kill(pid, signal.SIGTERM)
+        for _ in range(50):
+            try:
+                os.kill(pid, 0)
+                time.sleep(0.1)
+            except ProcessLookupError:
+                break
+        else:
+            os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+    if bwrap_pid:
+        try:
+            os.kill(bwrap_pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
+    CAVE_PID_FILE.unlink(missing_ok=True)
+    (CAVE_DATA / "bwrap.pid").unlink(missing_ok=True)
+    print("Cave stopped.", file=sys.stderr)
+
+
+def enter_cave(pid, project=None, task=None):
+    """nsenter into the cave and run claude. Does not return."""
+    parts = ["source /tmp/cave-env 2>/dev/null"]
+
+    if project:
+        parts.append(f"cd /projects/{project} || exit 1")
+    else:
+        parts.append("cd $HOME")
+
+    if task:
+        escaped = task.replace("'", "'\\''")
+        parts.append(f"exec claude --dangerously-skip-permissions -p '{escaped}'")
+    else:
+        parts.append("exec claude --dangerously-skip-permissions")
+
+    bash_cmd = " && ".join(parts)
+
+    os.execvp("nsenter", [
+        "nsenter",
+        f"--target={pid}",
+        "--user", "--mount", "--pid", "--uts", "--ipc",
+        "--", "bash", "-c", bash_cmd,
+    ])
+
+
+# --- Project management ---
+
+def ensure_project(project_dir):
+    """Register a project with overlay dirs. Returns slug."""
+    project_dir = Path(project_dir).resolve()
+    slug = project_dir.name
+    proj_state = PROJECTS_DIR / slug
+
+    if not proj_state.exists():
+        (proj_state / "upper").mkdir(parents=True, exist_ok=True)
+        (proj_state / "work").mkdir(parents=True, exist_ok=True)
+        (proj_state / "source").write_text(str(project_dir))
+
+    return slug
+
+
+def list_projects():
+    """Return list of (slug, source_path) for all registered projects."""
+    if not PROJECTS_DIR.exists():
+        return []
+    projects = []
+    for proj in sorted(PROJECTS_DIR.iterdir()):
+        source_file = proj / "source"
+        if source_file.exists():
+            projects.append((proj.name, source_file.read_text().strip()))
+    return projects
+
+
+def project_loaded_in_cave(slug):
+    """Check if a project was included in the running cave's mount script."""
+    if not CAVE_MOUNT_SCRIPT.exists():
+        return False
+    return f'"/projects/{slug}"' in CAVE_MOUNT_SCRIPT.read_text()
+
+
+def write_mount_script():
+    """Generate bwrap overlay args for all registered projects."""
+    CAVE_DATA.mkdir(parents=True, exist_ok=True)
+    lines = []
+    for slug, source in list_projects():
+        proj_state = PROJECTS_DIR / slug
+        upper = proj_state / "upper"
+        work = proj_state / "work"
+        lines.append(
+            f'RUNTIME_ARGS+=(--overlay-src "{source}" '
+            f'--overlay "{upper}" "{work}" "/projects/{slug}")'
+        )
+    CAVE_MOUNT_SCRIPT.write_text("\n".join(lines) + "\n" if lines else "")
+
+
+# --- Overlay and pull ---
 
 def try_unmount(path):
-    """Try to unmount a FUSE mount. Returns True if successful."""
+    """Try to unmount a FUSE mount."""
     for cmd in ["fusermount3 -u", "fusermount -u", "/run/wrappers/bin/fusermount -u"]:
         subprocess.run(cmd.split() + [str(path)], capture_output=True)
         if not path.is_mount():
@@ -293,64 +276,78 @@ def try_unmount(path):
     return False
 
 
-def cleanup_workspace(workspace):
-    """Unmount and remove a workspace. Best-effort."""
-    merged = workspace / "merged"
-    if merged.is_mount() and not try_unmount(merged):
-        print(f"Could not unmount {merged}. Run: fusermount -u {merged}", file=sys.stderr)
-        return
-    # Kernel overlayfs creates work/work with mode 000; fix before removing.
-    for dirpath, dirnames, _filenames in os.walk(workspace):
-        for d in dirnames:
-            p = Path(dirpath) / d
-            try:
-                p.chmod(0o700)
-            except OSError:
-                pass
-    shutil.rmtree(workspace)
+def mount_project_overlay(slug):
+    """Mount a project's overlay using fuse-overlayfs. Returns (merged, source)."""
+    proj_state = PROJECTS_DIR / slug
+    source_file = proj_state / "source"
+    if not source_file.exists():
+        return None
+    project_dir = source_file.read_text().strip()
 
-
-def cmd_pull(args):
-    if args:
-        workspace = workspaces_dir() / args[0]
-        if not workspace.exists():
-            print(f"Workspace not found: {args[0]}", file=sys.stderr)
-            sys.exit(1)
-        project_dir = Path((workspace / "source").read_text().strip())
-    else:
-        project_dir = Path.cwd()
-        workspace = find_latest_workspace(project_dir)
-        if not workspace:
-            print(f"No workspace found for {project_dir}", file=sys.stderr)
-            sys.exit(1)
-
-    merged = workspace / "merged"
+    merged = proj_state / "merged"
+    merged.mkdir(exist_ok=True)
     if merged.is_mount():
         try_unmount(merged)
-    mount_overlay(workspace, project_dir)
 
-    # Runs outside sandbox — user's git identity and GPG config apply.
+    fuse_work = proj_state / "fuse-work"
+    fuse_work.mkdir(exist_ok=True)
+
+    subprocess.run([
+        "fuse-overlayfs",
+        "-o", f"lowerdir={project_dir},upperdir={proj_state / 'upper'},workdir={fuse_work}",
+        str(merged),
+    ], check=True)
+
+    return merged, project_dir
+
+
+def pull_project(slug):
+    """Pull changes from a project overlay into the host repo."""
+    proj_state = PROJECTS_DIR / slug
+    source_file = proj_state / "source"
+    if not source_file.exists():
+        print(f"Project not found: {slug}", file=sys.stderr)
+        sys.exit(1)
+
+    project_dir = Path(source_file.read_text().strip())
+
+    # Mount overlay for git access
+    merged = proj_state / "merged"
+    if merged.exists() and merged.is_mount():
+        try_unmount(merged)
+
+    result = mount_project_overlay(slug)
+    if result is None:
+        print(f"Failed to mount overlay for {slug}", file=sys.stderr)
+        sys.exit(1)
+    merged, _ = result
+
     git = ["git", "-C", str(project_dir)]
 
     fetch = subprocess.run(git + ["fetch", str(merged), "HEAD"])
     if fetch.returncode != 0:
-        print(f"Fetch failed. Overlay mounted at: {merged}", file=sys.stderr)
-        print(f"coding-cave cleanup {workspace.name}", file=sys.stderr)
+        print(f"Fetch failed for {slug}. Overlay mounted at: {merged}", file=sys.stderr)
         sys.exit(1)
 
-    merge_base = subprocess.run(
+    merge_base_result = subprocess.run(
         git + ["merge-base", "HEAD", "FETCH_HEAD"],
-        capture_output=True, text=True, check=True,
-    ).stdout.strip()
+        capture_output=True, text=True,
+    )
+    if merge_base_result.returncode != 0:
+        try_unmount(merged)
+        print(f"No common ancestor for {slug} — skipping.", file=sys.stderr)
+        return
+    merge_base = merge_base_result.stdout.strip()
 
     count = subprocess.run(
         git + ["rev-list", "--count", f"{merge_base}..FETCH_HEAD"],
         capture_output=True, text=True, check=True,
     ).stdout.strip()
 
+    try_unmount(merged)
+
     if count == "0":
-        print("No commits to pull.", file=sys.stderr)
-        cleanup_workspace(workspace)
+        print(f"No commits to pull from {slug}.", file=sys.stderr)
         return
 
     branch = subprocess.run(
@@ -358,31 +355,169 @@ def cmd_pull(args):
         capture_output=True, text=True, check=True,
     ).stdout.strip()
 
-    # Rebase agent commits onto our branch, re-authoring and re-signing each.
     subprocess.run(git + ["branch", "-f", "_cave_pull", "FETCH_HEAD"], check=True)
-
     result = subprocess.run(git + [
         "rebase", "--onto", branch, merge_base, "_cave_pull",
         "--exec", "git commit --amend --reset-author --no-edit",
     ])
     if result.returncode != 0:
-        print(f"Rebase conflicts. Resolve, then:", file=sys.stderr)
-        print(f"  git rebase --continue", file=sys.stderr)
-        print(f"  git checkout {branch} && git merge --ff-only _cave_pull && git branch -d _cave_pull", file=sys.stderr)
-        print(f"  coding-cave cleanup {workspace.name}", file=sys.stderr)
+        print(f"Rebase conflicts for {slug}. Resolve, then:", file=sys.stderr)
+        print(f"  git -C {project_dir} rebase --continue", file=sys.stderr)
+        print(f"  git -C {project_dir} checkout {branch}", file=sys.stderr)
+        print(f"  git -C {project_dir} merge --ff-only _cave_pull", file=sys.stderr)
+        print(f"  git -C {project_dir} branch -d _cave_pull", file=sys.stderr)
         sys.exit(1)
 
     subprocess.run(git + ["checkout", branch], check=True)
     subprocess.run(git + ["merge", "--ff-only", "_cave_pull"], check=True)
     subprocess.run(git + ["branch", "-d", "_cave_pull"], check=True)
 
-    cleanup_workspace(workspace)
-    print(f"Rebased {count} commit(s) and cleaned up: {workspace.name}", file=sys.stderr)
+    print(f"Pulled {count} commit(s) from {slug}.", file=sys.stderr)
 
+
+def cleanup_project_overlay(slug):
+    """Clear overlay upper/work dirs for a project (reset overlay debt)."""
+    proj_state = PROJECTS_DIR / slug
+    merged = proj_state / "merged"
+    if merged.exists() and merged.is_mount():
+        try_unmount(merged)
+
+    for subdir in ["upper", "work", "fuse-work"]:
+        p = proj_state / subdir
+        if p.exists():
+            for dirpath, dirnames, _filenames in os.walk(p):
+                for d in dirnames:
+                    try:
+                        (Path(dirpath) / d).chmod(0o700)
+                    except OSError:
+                        pass
+            shutil.rmtree(p)
+            p.mkdir()
+
+
+# --- Commands ---
+
+def cmd_run(args, gpu=False):
+    """Enter cave and run claude, optionally in a project directory."""
+    global_config = load_global_config()
+    setup_env(global_config)
+
+    project = None
+    task = None
+
+    if args:
+        candidate = Path(args[0])
+        if candidate.exists() and candidate.is_dir():
+            project = ensure_project(candidate)
+            task = " ".join(args[1:]) if len(args) > 1 else None
+            project_config = load_project_config(candidate)
+            for key, val in project_config.get("environment", {}).items():
+                os.environ[key] = str(val)
+        else:
+            task = " ".join(args)
+
+    pid = cave_pid()
+
+    if pid is None:
+        pid = start_cave(gpu=gpu)
+    elif project and not project_loaded_in_cave(project):
+        print(f"Loading {project} into cave (restarting)...", file=sys.stderr)
+        stop_cave()
+        pid = start_cave(gpu=gpu)
+
+    enter_cave(pid, project=project, task=task)
+
+
+def cmd_pull(args):
+    """Pull changes from project overlays."""
+    if args:
+        pull_project(args[0])
+    else:
+        projects = list_projects()
+        if not projects:
+            print("No projects registered.", file=sys.stderr)
+            return
+        for slug, _ in projects:
+            try:
+                pull_project(slug)
+            except SystemExit:
+                pass  # continue with other projects
+
+
+def cmd_down(args):
+    """Stop the cave."""
+    stop_cave()
+
+
+def cmd_resync(args):
+    """Pull all projects, recreate cave with fresh overlays."""
+    projects = list_projects()
+
+    # Pull all projects
+    for slug, _ in projects:
+        try:
+            pull_project(slug)
+        except (subprocess.CalledProcessError, SystemExit):
+            print(f"Warning: pull failed for {slug}, continuing", file=sys.stderr)
+
+    # Stop cave
+    stop_cave()
+
+    # Reset project overlays
+    for slug, _ in projects:
+        cleanup_project_overlay(slug)
+
+    # Reset nix overlay
+    for subdir in ["upper", "work"]:
+        p = NIX_OVERLAY_DIR / subdir
+        if p.exists():
+            shutil.rmtree(p)
+            p.mkdir()
+
+    print("Resync complete. Run 'coding-cave' to start fresh.", file=sys.stderr)
+
+
+def cmd_review(args):
+    """List projects or inspect one."""
+    projects = list_projects()
+
+    if not args:
+        pid = cave_pid()
+        status = f"running (PID {pid})" if pid else "stopped"
+        print(f"Cave: {status}", file=sys.stderr)
+        if not projects:
+            print("No projects registered.", file=sys.stderr)
+            return
+        for slug, source in projects:
+            loaded = project_loaded_in_cave(slug)
+            tag = " [loaded]" if loaded else ""
+            print(f"  {slug}  <- {source}{tag}", file=sys.stderr)
+        return
+
+    slug = args[0]
+    proj_state = PROJECTS_DIR / slug
+    if not proj_state.exists():
+        print(f"Project not found: {slug}", file=sys.stderr)
+        sys.exit(1)
+
+    result = mount_project_overlay(slug)
+    if result is None:
+        print(f"Failed to mount overlay for {slug}", file=sys.stderr)
+        sys.exit(1)
+    merged, source = result
+    print(f"Mounted: {merged}", file=sys.stderr)
+    print(f"Source:  {source}", file=sys.stderr)
+    print(f"When done: fusermount3 -u {merged}", file=sys.stderr)
 
 
 def main():
-    commands = {"run": cmd_run, "pull": cmd_pull, "review": cmd_review}
+    commands = {
+        "run": cmd_run,
+        "pull": cmd_pull,
+        "down": cmd_down,
+        "resync": cmd_resync,
+        "review": cmd_review,
+    }
 
     args = sys.argv[1:]
     gpu = "--gpu" in args
@@ -390,7 +525,7 @@ def main():
         args = [a for a in args if a != "--gpu"]
 
     if not args:
-        cmd_run(["."], gpu=gpu)
+        cmd_run([], gpu=gpu)
         return
 
     cmd = args[0]
@@ -399,9 +534,12 @@ def main():
             commands[cmd](args[1:], gpu=gpu)
         else:
             commands[cmd](args[1:])
+    elif Path(cmd).is_dir():
+        # coding-cave ./project [task...] → shorthand for run
+        cmd_run(args, gpu=gpu)
     else:
         print(f"Unknown command: {cmd}", file=sys.stderr)
-        print("Commands: run, pull, review", file=sys.stderr)
+        print("Commands: run, pull, down, resync, review", file=sys.stderr)
         sys.exit(1)
 
 
