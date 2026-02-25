@@ -55,6 +55,7 @@
         ripgrep
         fd
         jq
+        python3
         curl
         gawk
         gnused
