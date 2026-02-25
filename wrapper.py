@@ -246,19 +246,44 @@ def enter_cave(pid, project=None, shell=None):
         shell_bin = "/bin/zsh" if shell == "zsh" else "/bin/bash"
         parts.append(f"exec {shell_bin} -l")
     else:
-        parts.append("claude --dangerously-skip-permissions || exec /bin/bash -l")
+        # exec replaces bash so claude becomes the direct child — required
+        # for WUNTRACED job control propagation below.
+        parts.append("exec claude --dangerously-skip-permissions")
 
     bash_cmd = " && ".join(parts)
 
     register_session()
     try:
-        ret = subprocess.call([
+        proc = subprocess.Popen([
             "nsenter",
             f"--target={pid}",
             "--user", "--mount", "--pid", "--uts", "--ipc",
             "--preserve-credentials",
             "--", "/bin/bash", "-c", bash_cmd,
         ])
+        # Wait with WUNTRACED so we detect when the child stops (Ctrl+Z).
+        # Without this, a stopped child hangs forever because bash -c has
+        # no job control and subprocess.call ignores stopped children.
+        while True:
+            try:
+                _, status = os.waitpid(proc.pid, os.WUNTRACED)
+            except ChildProcessError:
+                ret = 1
+                break
+            if os.WIFSTOPPED(status):
+                # Child stopped (e.g. Claude Code's Ctrl+Z handler).
+                # Stop ourselves so the outer shell sees the job as
+                # suspended and the user can fg back.
+                signal.signal(signal.SIGTSTP, signal.SIG_DFL)
+                os.kill(os.getpid(), signal.SIGTSTP)
+                # Resumed by outer shell — continue the child.
+                os.kill(proc.pid, signal.SIGCONT)
+            elif os.WIFEXITED(status):
+                ret = os.WEXITSTATUS(status)
+                break
+            elif os.WIFSIGNALED(status):
+                ret = 128 + os.WTERMSIG(status)
+                break
     except KeyboardInterrupt:
         ret = 130
     finally:
