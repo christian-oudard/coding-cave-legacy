@@ -6,11 +6,23 @@
       url = "github:sadjow/claude-code-nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    claude-loop-src = {
+      url = "github:christian-oudard/claude-loop";
+      flake = false;
+    };
   };
 
-  outputs = { self, nixpkgs, jail-nix, claude-code, ... }: let
+  outputs = { self, nixpkgs, jail-nix, claude-code, claude-loop-src, ... }: let
     pkgs = import nixpkgs { system = "x86_64-linux"; };
     jail = jail-nix.lib.init pkgs;
+
+    claude-loop = pkgs.python3Packages.buildPythonApplication {
+      pname = "claude-loop";
+      version = "0.1.0";
+      src = claude-loop-src;
+      pyproject = true;
+      build-system = [ pkgs.python3Packages.hatchling ];
+    };
 
     defaultClaudeSettings = ./claude-settings.json;
     version = self.shortRev or self.dirtyShortRev or "dev";
@@ -76,6 +88,8 @@
         zsh
         eza
         nano
+        uv
+        claude-loop
       ]))
       (set-env "EDITOR" "${pkgs.nano}/bin/nano")
       (set-env "TERMINFO_DIRS" "${pkgs.ncurses}/share/terminfo")
@@ -202,10 +216,6 @@
         export TMPDIR="$HOME/.cache/tmp"
         mkdir -p "$TMPDIR"
         export PATH="$HOME/.local/bin:$PATH"
-        # Auto-install claude-loop
-        if ! command -v claude-loop >/dev/null 2>&1; then
-          uv tool install "claude-loop @ git+https://github.com/christian-oudard/claude-loop.git" >/dev/null 2>&1 || true
-        fi
         export -p > /tmp/cave-env
         chmod 444 /tmp/cave-env
         exec "$@"
