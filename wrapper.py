@@ -1268,12 +1268,23 @@ def project_sync_status(slug, source):
 def cmd_status(args):
     print(f"coding-cave {VERSION}", file=sys.stderr)
 
-    projects = list_projects()
-    if not projects:
+    all_projects = list_projects()
+    if not all_projects:
         print("No projects in the cave.", file=sys.stderr)
         return
 
-    print("Projects:", file=sys.stderr)
+    # Scope to current project if running from a project dir
+    cwd = Path.cwd().resolve()
+    scoped = None
+    for slug, source in all_projects:
+        source_path = Path(source).resolve()
+        if cwd == source_path or cwd.is_relative_to(source_path):
+            scoped = [(slug, source)]
+            break
+    projects = scoped or all_projects
+
+    if not scoped:
+        print("Projects:", file=sys.stderr)
     for slug, source in projects:
         status = project_sync_status(slug, source)
         tag = f" [{status}]" if status else ""
