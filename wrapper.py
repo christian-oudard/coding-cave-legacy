@@ -358,7 +358,7 @@ def pull_project(slug):
     subprocess.run(git + ["branch", "-f", "_cave_pull", "FETCH_HEAD"], check=True)
     result = subprocess.run(git + [
         "rebase", "--onto", branch, merge_base, "_cave_pull",
-        "--exec", "git commit --amend --reset-author --no-edit",
+        "--exec", "git commit --amend --reset-author --allow-empty --no-edit",
     ])
     if result.returncode != 0:
         print(f"Rebase conflicts for {slug}. Resolve, then:", file=sys.stderr)
