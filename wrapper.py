@@ -467,12 +467,98 @@ def find_tree_merge_base(git, host_tree):
     return None
 
 
+def pull_working_tree(slug, project_dir, gitdir):
+    """Pull uncommitted working tree changes from the cave overlay.
+
+    Stages the changes in the host index. Refuses if the host working
+    tree already has uncommitted changes.
+    """
+    proj_state = PROJECTS_DIR / slug
+    merged = proj_state / "merged"
+
+    # Use existing mount or mount temporarily
+    mounted_here = False
+    if not (merged.exists() and merged.is_mount()):
+        result = mount_project_overlay(slug)
+        if result is None:
+            return
+        mounted_here = True
+
+    try:
+        git_cave = ["git", "--git-dir", str(gitdir), "--work-tree", str(merged)]
+
+        # Check for tracked changes (staged + unstaged vs HEAD)
+        diff_check = subprocess.run(
+            git_cave + ["diff", "HEAD", "--quiet"], capture_output=True,
+        )
+        has_diff = diff_check.returncode != 0
+
+        # Check for untracked files
+        untracked_result = subprocess.run(
+            git_cave + ["ls-files", "--others", "--exclude-standard"],
+            capture_output=True, text=True,
+        )
+        untracked_files = [
+            f for f in untracked_result.stdout.strip().splitlines() if f
+        ] if untracked_result.returncode == 0 else []
+
+        if not has_diff and not untracked_files:
+            return
+
+        # Refuse if host working tree is dirty
+        host_status = subprocess.run(
+            ["git", "-C", str(project_dir), "status", "--porcelain"],
+            capture_output=True, text=True,
+        )
+        if host_status.returncode == 0 and host_status.stdout.strip():
+            print(f"Host has uncommitted changes — skipping working tree pull for {slug}.", file=sys.stderr)
+            print("Commit or stash host changes first.", file=sys.stderr)
+            return
+
+        # Apply tracked changes
+        if has_diff:
+            patch = subprocess.run(
+                git_cave + ["diff", "HEAD"], capture_output=True,
+            )
+            if patch.stdout:
+                apply_result = subprocess.run(
+                    ["git", "-C", str(project_dir), "apply", "--index"],
+                    input=patch.stdout, capture_output=True,
+                )
+                if apply_result.returncode != 0:
+                    print(f"Failed to apply working tree changes for {slug}.", file=sys.stderr)
+                    return
+
+        # Copy and stage untracked files
+        if untracked_files:
+            for rel_path in untracked_files:
+                src = merged / rel_path
+                dst = project_dir / rel_path
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(src), str(dst))
+            subprocess.run(
+                ["git", "-C", str(project_dir), "add", "--"] + untracked_files,
+                check=True,
+            )
+
+        parts = []
+        if has_diff:
+            parts.append("tracked changes")
+        if untracked_files:
+            parts.append(f"{len(untracked_files)} untracked file(s)")
+        print(f"Staged working tree changes ({', '.join(parts)}) from {slug}.", file=sys.stderr)
+
+    finally:
+        if mounted_here:
+            try_unmount(merged)
+
+
 def pull_project(slug, force=False):
     """Pull changes from a project's cave gitdir into the host repo.
 
-    Post-condition: the host git repo becomes identical to the cave repo,
-    except that unsigned cave-coder commits are re-authored as the user.
-    The cave's gitdir is then synced to match the host's rebased history.
+    Pulls both committed and uncommitted changes. Commits are re-authored
+    as the host user. Uncommitted working tree changes are staged in the
+    host index (refused if the host working tree is already dirty).
 
     Handles rewritten history (amend, rebase, filter-branch) automatically
     via tree matching when normal ancestry-based merge-base fails.
@@ -532,6 +618,7 @@ def pull_project(slug, force=False):
     ).stdout.strip()
     if host_head == gitdir_head:
         print(f"No new commits to pull from {slug}.", file=sys.stderr)
+        pull_working_tree(slug, project_dir, gitdir)
         return
 
     # Force with matching trees: adopt cave's history on the host
@@ -556,6 +643,7 @@ def pull_project(slug, force=False):
                 check=True,
             )
             print(f"Force-updated {slug}.", file=sys.stderr)
+            pull_working_tree(slug, project_dir, gitdir)
             return
 
     # Fetch cave commits from gitdir (a regular dir on the host filesystem)
@@ -643,6 +731,8 @@ def pull_project(slug, force=False):
          f"refs/heads/{branch}", host_head],
         check=True,
     )
+
+    pull_working_tree(slug, project_dir, gitdir)
 
 
 def reset_project_overlay(slug):
@@ -1048,7 +1138,7 @@ Commands:
   (default)            enter cave and run claude agent
   shell                enter cave with your shell
   add [dir]            register a project (default: current dir)
-  pull [project]       pull commits from cave gitdir, re-author
+  pull [project]       pull commits + working tree changes from cave
                        --force: adopt cave's commit history on host (destructive)
   push [project]       push host commits into cave gitdir
                        --force: skip unpulled commit check
