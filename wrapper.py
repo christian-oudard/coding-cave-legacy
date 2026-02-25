@@ -3,10 +3,10 @@
 coding-cave wrapper: reads config, sets up workspaces, launches sandbox.
 
 Subcommands:
-    codingcave                               - overlay cwd, launch claude
-    codingcave run <project-dir> [task...]   - overlay project, launch claude with task
-    codingcave pull [workspace]              - rebase + re-author commits, clean up
-    codingcave review [workspace]            - list workspaces or mount one for inspection
+    coding-cave                               - overlay cwd, launch claude
+    coding-cave run <project-dir> [task...]   - overlay project, launch claude with task
+    coding-cave pull [workspace]              - rebase + re-author commits, clean up
+    coding-cave review [workspace]            - list workspaces or mount one for inspection
 """
 import fcntl
 import os
@@ -93,14 +93,41 @@ def lock_workspace(workspace):
     return fd
 
 
-def workspace_has_changes(workspace):
-    """Check if a workspace's upper dir contains real file changes."""
-    upper = workspace / "upper"
-    if not upper.exists():
+def workspace_has_commits(workspace):
+    """Check if a workspace has unpulled git commits (mounts overlay temporarily)."""
+    source = workspace / "source"
+    if not source.exists():
         return False
-    for entry in upper.iterdir():
-        return True
-    return False
+    project_dir = Path(source.read_text().strip())
+    merged = workspace / "merged"
+    if merged.is_mount():
+        try_unmount(merged)
+    try:
+        mount_overlay(workspace, project_dir)
+    except (subprocess.CalledProcessError, OSError):
+        return True  # can't verify — assume changes to be safe
+    try:
+        overlay_head = subprocess.run(
+            ["git", "-C", str(merged), "rev-parse", "HEAD"],
+            capture_output=True, text=True,
+        )
+        source_head = subprocess.run(
+            ["git", "-C", str(project_dir), "rev-parse", "HEAD"],
+            capture_output=True, text=True,
+        )
+        if overlay_head.returncode != 0 or source_head.returncode != 0:
+            return True
+        if overlay_head.stdout.strip() == source_head.stdout.strip():
+            return False
+        # HEADs differ — check if overlay has commits not in source.
+        result = subprocess.run(
+            ["git", "-C", str(project_dir), "merge-base", "--is-ancestor",
+             overlay_head.stdout.strip(), source_head.stdout.strip()],
+        )
+        # If overlay HEAD is ancestor of source HEAD, no new commits.
+        return result.returncode != 0
+    finally:
+        try_unmount(merged)
 
 
 def create_workspace(project_dir, task=None):
@@ -121,9 +148,9 @@ def create_workspace(project_dir, task=None):
                 if is_workspace_locked(ws):
                     print(f"Already running: {ws.name}", file=sys.stderr)
                     sys.exit(1)
-                if workspace_has_changes(ws):
+                if workspace_has_commits(ws):
                     print(f"Unpulled changes in: {ws.name}", file=sys.stderr)
-                    print(f"Run 'codingcave pull' first, or remove manually:", file=sys.stderr)
+                    print(f"Run 'coding-cave pull' first, or remove manually:", file=sys.stderr)
                     print(f"  rm -rf {ws}", file=sys.stderr)
                     sys.exit(1)
                 cleanup_workspace(ws)
@@ -146,12 +173,12 @@ def create_workspace(project_dir, task=None):
 
 
 def launch_sandbox():
-    os.execv(SANDBOX_BIN, ["codingcave"])
+    os.execv(SANDBOX_BIN, ["coding-cave"])
 
 
 def cmd_run(args):
     if not args:
-        print("Usage: codingcave run <project-dir> [task...]", file=sys.stderr)
+        print("Usage: coding-cave run <project-dir> [task...]", file=sys.stderr)
         sys.exit(1)
 
     project_dir = Path(args[0]).resolve()
@@ -302,7 +329,7 @@ def cmd_pull(args):
     fetch = subprocess.run(git + ["fetch", str(merged), "HEAD"])
     if fetch.returncode != 0:
         print(f"Fetch failed. Overlay mounted at: {merged}", file=sys.stderr)
-        print(f"codingcave cleanup {workspace.name}", file=sys.stderr)
+        print(f"coding-cave cleanup {workspace.name}", file=sys.stderr)
         sys.exit(1)
 
     merge_base = subprocess.run(
@@ -336,7 +363,7 @@ def cmd_pull(args):
         print(f"Rebase conflicts. Resolve, then:", file=sys.stderr)
         print(f"  git rebase --continue", file=sys.stderr)
         print(f"  git checkout {branch} && git merge --ff-only _cave_pull && git branch -d _cave_pull", file=sys.stderr)
-        print(f"  codingcave cleanup {workspace.name}", file=sys.stderr)
+        print(f"  coding-cave cleanup {workspace.name}", file=sys.stderr)
         sys.exit(1)
 
     subprocess.run(git + ["checkout", branch], check=True)

@@ -16,7 +16,7 @@
 
     jailHome = "/home/coding-cave";
 
-    sandbox = jail "codingcave" pkgs.bashInteractive (with jail.combinators; [
+    sandbox = jail "coding-cave" pkgs.bashInteractive (with jail.combinators; [
       (set-hostname "coding-cave")
       (unsafe-add-raw-args "--symlink /bin/sh /bin/bash")
       (set-env "SHELL" "/bin/bash")
@@ -45,7 +45,10 @@
         pkgs.tree
         pkgs.less
         pkgs.file
+        pkgs.ncurses
       ])
+      (set-env "TERMINFO_DIRS" "${pkgs.ncurses}/share/terminfo")
+      (try-fwd-env "COLORTERM")
 
       # Git identity (throwaway — pull re-authors commits outside the sandbox)
       (set-env "GIT_AUTHOR_NAME" "coding-cave")
@@ -98,10 +101,10 @@
     ]);
 
     wrapperScript = pkgs.replaceVars ./wrapper.py {
-      SANDBOX_BIN = "${sandbox}/bin/codingcave";
+      SANDBOX_BIN = "${sandbox}/bin/coding-cave";
     };
 
-    wrapper = pkgs.writeShellScriptBin "codingcave" ''
+    wrapper = pkgs.writeShellScriptBin "coding-cave" ''
       export PATH="${pkgs.lib.makeBinPath [pkgs.fuse-overlayfs pkgs.fuse3]}:$PATH"
       exec ${pkgs.python3}/bin/python3 ${wrapperScript} "$@"
     '';
