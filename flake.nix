@@ -191,9 +191,11 @@
         RUNTIME_ARGS+=(--ro-bind "$CAVE_GROUP" /etc/group)
       '')
 
-      # Entry: set up /projects, then exec the provided command
+      # Entry: set up /projects, save env for nsenter shells, then exec
       (wrap-entry (entry: ''
         mkdir -p /projects
+        export -p > /tmp/cave-env
+        chmod 444 /tmp/cave-env
         exec "$@"
       ''))
     ];

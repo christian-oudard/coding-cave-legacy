@@ -3,7 +3,6 @@
 import json
 import os
 import re
-import shlex
 import shutil
 import signal
 import subprocess
@@ -477,36 +476,16 @@ def enter_session(session_info, shell_type):
 
     shell_bin = "/bin/zsh" if shell_type == "zsh" else "/bin/bash"
 
-    # Read cave environment from the bwrap child process (has --setenv vars applied).
-    # PID 1 is bwrap itself (started with --clearenv), so its environ lacks cave vars.
-    try:
-        environ_data = Path(f"/proc/{child_pid}/environ").read_bytes()
-        cave_env = {}
-        for entry in environ_data.split(b'\0'):
-            if b'=' in entry:
-                k, v = entry.split(b'=', 1)
-                cave_env[k.decode()] = v.decode()
-    except (FileNotFoundError, PermissionError):
-        cave_env = {}
-
-    # Merge: cave env as base, override TERM/COLORTERM from host
-    filtered_env = dict(cave_env)
-    for k in ("TERM", "COLORTERM"):
-        if k in os.environ:
-            filtered_env[k] = os.environ[k]
-
-    # Export all env vars in the bash wrapper so exec'd shell inherits them
-    export_cmds = "; ".join(
-        f'export {k}={shlex.quote(v)}'
-        for k, v in filtered_env.items()
-    )
+    # Source cave-env (written at bwrap entry) for the full cave environment,
+    # then launch the user's shell. /tmp/cave-env is per-session (tmpfs inside
+    # bwrap), so it's safe from cross-session tampering.
     proc = subprocess.Popen([
         "nsenter",
         f"--target={child_pid}",
         "--user", "--mount", "--pid", "--uts", "--ipc",
         "--preserve-credentials",
         "--", "/bin/bash", "-c",
-        f'{export_cmds}; cd /projects 2>/dev/null; exec {shell_bin} -l',
+        f'source /tmp/cave-env 2>/dev/null; cd /projects 2>/dev/null; exec {shell_bin} -l',
     ])
 
     try:
