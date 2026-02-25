@@ -46,7 +46,8 @@
         mkdir -p "$CAVE_HOME"
         RUNTIME_ARGS+=(--bind "$CAVE_HOME" ${jailHome})
       '')
-      network
+      # Network namespace provided by pasta (wrapper.py wraps bwrap with pasta).
+      # Bwrap inherits pasta's isolated net namespace via default behavior.
       # no-new-session omitted: cave init needs its own session to survive terminal close
 
       # Nix CLI for autonomous package management inside the cave
@@ -142,11 +143,6 @@
         export PATH="$HOME/.local/bin:$PATH"
         export -p > /tmp/cave-env
         chmod 444 /tmp/cave-env
-        # Wait for pasta to configure networking via DHCP.
-        # /proc/net/route gets a default route (destination 00000000) once ready.
-        until awk 'NR>1 && $2=="00000000"{found=1} END{exit !found}' /proc/net/route 2>/dev/null; do
-          sleep 0.1
-        done
         exec "$@"
       ''))
     ];

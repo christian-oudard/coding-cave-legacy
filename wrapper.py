@@ -508,13 +508,13 @@ def start_session(project, command, gpu=False):
     bwrap_env = {k: v for k, v in os.environ.items() if k in BWRAP_ENV_ALLOWLIST}
 
     # pasta provides an isolated network namespace with outbound-only access.
-    # bwrap's `network` combinator (share-ns "net") inherits pasta's namespace.
     # --quiet: suppress startup messages
-    # -T none -U none: no inbound port forwarding from host
+    # --config-net: pasta directly configures the network interface (no DHCP wait)
+    # --map-host-loopback 192.0.2.1: disable gateway→host-loopback mapping
+    #   (pasta by default maps the gateway to host loopback, which would allow
+    #    access to host localhost services like 1Password, SSH agent)
+    # -T none -U none: disable all TCP/UDP port forwarding
     proc = subprocess.Popen(
-        # --map-host-loopback: pasta by default maps the gateway address to the
-        # host's loopback, allowing access to host localhost services. Override
-        # to 192.0.2.1 (TEST-NET, reserved/unreachable) to disable this.
         ["pasta", "--quiet", "--config-net",
          "--map-host-loopback", "192.0.2.1",
          "-T", "none", "-U", "none", "--", binary] + command,
