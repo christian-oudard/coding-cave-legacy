@@ -555,15 +555,37 @@ def pull_project(slug, force=False):
                 break
     subprocess.run(git + ["branch", "-D", "_cave_pull"], capture_output=True)
 
-    branch = subprocess.run(
+    branch_result = subprocess.run(
         git + ["rev-parse", "--abbrev-ref", "HEAD"],
-        capture_output=True, text=True, check=True,
-    ).stdout.strip()
-
-    gitdir_head = subprocess.run(
+        capture_output=True, text=True,
+    )
+    gitdir_head_result = subprocess.run(
         ["git", "--git-dir", str(gitdir), "rev-parse", "HEAD"],
-        capture_output=True, text=True, check=True,
-    ).stdout.strip()
+        capture_output=True, text=True,
+    )
+
+    if gitdir_head_result.returncode != 0:
+        print(f"No commits in cave gitdir for {slug} — nothing to pull.", file=sys.stderr)
+        return
+
+    gitdir_head = gitdir_head_result.stdout.strip()
+
+    # Host repo has no commits yet — fetch and create branch from cave
+    if branch_result.returncode != 0:
+        branch = subprocess.run(
+            ["git", "--git-dir", str(gitdir), "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True,
+        ).stdout.strip() or "main"
+        subprocess.run(git + ["fetch", str(gitdir), "HEAD"], check=True, capture_output=True)
+        subprocess.run(git + ["update-ref", f"refs/heads/{branch}", gitdir_head], check=True)
+        subprocess.run(git + ["symbolic-ref", "HEAD", f"refs/heads/{branch}"], check=True)
+        subprocess.run(git + ["checkout", branch], capture_output=True)
+        print(f"Pulled {slug} (initialized from cave):", file=sys.stderr)
+        subprocess.run(git + ["log", "--oneline"], check=False)
+        update_cave_sync(gitdir, project_dir, gitdir_head, branch=branch)
+        return
+
+    branch = branch_result.stdout.strip()
     host_head = subprocess.run(
         git + ["rev-parse", "HEAD"],
         capture_output=True, text=True, check=True,
