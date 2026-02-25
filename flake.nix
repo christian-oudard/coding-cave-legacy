@@ -202,9 +202,16 @@
       VERSION = version;
     };
 
-    wrapper = pkgs.writeShellScriptBin "coding-cave" ''
+    baseScript = pkgs.writeText "coding-cave-script" ''
       export PATH="${pkgs.lib.makeBinPath [pkgs.fuse-overlayfs pkgs.fuse3 pkgs.util-linux]}:$PATH"
       exec ${pkgs.python3}/bin/python3 ${wrapperScript} "$@"
+    '';
+
+    wrapper = pkgs.runCommand "coding-cave-with-alias" {} ''
+      mkdir -p $out/bin
+      cat ${baseScript} > $out/bin/coding-cave
+      chmod +x $out/bin/coding-cave
+      ln -s coding-cave $out/bin/cav
     '';
 
   in {
