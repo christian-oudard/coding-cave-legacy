@@ -1225,7 +1225,7 @@ def project_sync_status(slug, source):
     if merged.exists() and merged.is_mount():
         git_cave = ["git", "--git-dir", str(gitdir), "--work-tree", str(merged)]
         wt = subprocess.run(
-            git_cave + ["status", "--porcelain"], capture_output=True, text=True,
+            git_cave + ["status", "--porcelain", "-uno"], capture_output=True, text=True,
         )
         if wt.returncode == 0 and wt.stdout.strip():
             n = len(wt.stdout.strip().splitlines())
