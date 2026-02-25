@@ -76,6 +76,7 @@
         zsh
         eza
         nano
+        uv
       ]))
       (set-env "EDITOR" "${pkgs.nano}/bin/nano")
       (set-env "TERMINFO_DIRS" "${pkgs.ncurses}/share/terminfo")
