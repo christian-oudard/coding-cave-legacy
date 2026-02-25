@@ -487,22 +487,11 @@ def pull_working_tree(slug, project_dir, gitdir):
     try:
         git_cave = ["git", "--git-dir", str(gitdir), "--work-tree", str(merged)]
 
-        # Check for tracked changes (staged + unstaged vs HEAD)
+        # Check for tracked/staged changes vs HEAD
         diff_check = subprocess.run(
             git_cave + ["diff", "HEAD", "--quiet"], capture_output=True,
         )
-        has_diff = diff_check.returncode != 0
-
-        # Check for untracked files
-        untracked_result = subprocess.run(
-            git_cave + ["ls-files", "--others", "--exclude-standard"],
-            capture_output=True, text=True,
-        )
-        untracked_files = [
-            f for f in untracked_result.stdout.strip().splitlines() if f
-        ] if untracked_result.returncode == 0 else []
-
-        if not has_diff and not untracked_files:
+        if diff_check.returncode == 0:
             return
 
         # Refuse if host working tree is dirty
@@ -515,38 +504,19 @@ def pull_working_tree(slug, project_dir, gitdir):
             print("Commit or stash host changes first.", file=sys.stderr)
             return
 
-        # Apply tracked changes
-        if has_diff:
-            patch = subprocess.run(
-                git_cave + ["diff", "HEAD"], capture_output=True,
+        patch = subprocess.run(
+            git_cave + ["diff", "HEAD"], capture_output=True,
+        )
+        if patch.stdout:
+            apply_result = subprocess.run(
+                ["git", "-C", str(project_dir), "apply", "--index"],
+                input=patch.stdout, capture_output=True,
             )
-            if patch.stdout:
-                apply_result = subprocess.run(
-                    ["git", "-C", str(project_dir), "apply", "--index"],
-                    input=patch.stdout, capture_output=True,
-                )
-                if apply_result.returncode != 0:
-                    print(f"Failed to apply working tree changes for {slug}.", file=sys.stderr)
-                    return
+            if apply_result.returncode != 0:
+                print(f"Failed to apply working tree changes for {slug}.", file=sys.stderr)
+                return
 
-        # Copy and stage untracked files
-        if untracked_files:
-            for rel_path in untracked_files:
-                src = merged / rel_path
-                dst = project_dir / rel_path
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(str(src), str(dst))
-            subprocess.run(
-                ["git", "-C", str(project_dir), "add", "--"] + untracked_files,
-                check=True,
-            )
-
-        parts = []
-        if has_diff:
-            parts.append("tracked changes")
-        if untracked_files:
-            parts.append(f"{len(untracked_files)} untracked file(s)")
-        print(f"Staged working tree changes ({', '.join(parts)}) from {slug}.", file=sys.stderr)
+        print(f"Staged working tree changes from {slug}.", file=sys.stderr)
 
     finally:
         if mounted_here:
@@ -980,72 +950,35 @@ def push_working_tree(slug, project_dir, gitdir):
         git_host = ["git", "-C", str(project_dir)]
         git_cave = ["git", "--git-dir", str(gitdir), "--work-tree", str(merged)]
 
-        # Check for host tracked changes
+        # Check for host tracked/staged changes vs HEAD
         diff_check = subprocess.run(
             git_host + ["diff", "HEAD", "--quiet"], capture_output=True,
         )
-        has_diff = diff_check.returncode != 0
-
-        # Check for host untracked files
-        untracked_result = subprocess.run(
-            git_host + ["ls-files", "--others", "--exclude-standard"],
-            capture_output=True, text=True,
-        )
-        untracked_files = [
-            f for f in untracked_result.stdout.strip().splitlines() if f
-        ] if untracked_result.returncode == 0 else []
-
-        if not has_diff and not untracked_files:
+        if diff_check.returncode == 0:
             return
 
         # Refuse if cave working tree is dirty
         cave_diff = subprocess.run(
             git_cave + ["diff", "HEAD", "--quiet"], capture_output=True,
         )
-        cave_untracked = subprocess.run(
-            git_cave + ["ls-files", "--others", "--exclude-standard"],
-            capture_output=True, text=True,
-        )
-        cave_dirty = (cave_diff.returncode != 0 or
-                      (cave_untracked.returncode == 0 and
-                       cave_untracked.stdout.strip()))
-        if cave_dirty:
+        if cave_diff.returncode != 0:
             print(f"Cave has uncommitted changes — skipping working tree push for {slug}.", file=sys.stderr)
             print("Commit or stash cave changes first.", file=sys.stderr)
             return
 
-        # Apply tracked changes to cave
-        if has_diff:
-            patch = subprocess.run(
-                git_host + ["diff", "HEAD"], capture_output=True,
+        patch = subprocess.run(
+            git_host + ["diff", "HEAD"], capture_output=True,
+        )
+        if patch.stdout:
+            apply_result = subprocess.run(
+                git_cave + ["apply", "--index"],
+                input=patch.stdout, capture_output=True,
             )
-            if patch.stdout:
-                apply_result = subprocess.run(
-                    git_cave + ["apply", "--index"],
-                    input=patch.stdout, capture_output=True,
-                )
-                if apply_result.returncode != 0:
-                    print(f"Failed to apply working tree changes to {slug}.", file=sys.stderr)
-                    return
+            if apply_result.returncode != 0:
+                print(f"Failed to apply working tree changes to {slug}.", file=sys.stderr)
+                return
 
-        # Copy and stage untracked files
-        if untracked_files:
-            for rel_path in untracked_files:
-                src = project_dir / rel_path
-                dst = merged / rel_path
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(str(src), str(dst))
-            subprocess.run(
-                git_cave + ["add", "--"] + untracked_files,
-                check=True,
-            )
-
-        parts = []
-        if has_diff:
-            parts.append("tracked changes")
-        if untracked_files:
-            parts.append(f"{len(untracked_files)} untracked file(s)")
-        print(f"Pushed working tree changes ({', '.join(parts)}) to {slug}.", file=sys.stderr)
+        print(f"Pushed working tree changes to {slug}.", file=sys.stderr)
 
     finally:
         if mounted_here:
