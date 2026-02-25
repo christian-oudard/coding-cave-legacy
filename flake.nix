@@ -52,6 +52,7 @@
         claude-code.packages.x86_64-linux.default
         pkgs.nix
         pkgs.git
+        pkgs.github-cli
         pkgs.ripgrep
         pkgs.fd
         pkgs.jq
