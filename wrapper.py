@@ -164,6 +164,10 @@ def start_cave(gpu=False):
 
     binary = SANDBOX_GPU_BIN if gpu else SANDBOX_BIN
 
+    # Defer SIGINT from Popen through PID file writes — if interrupted
+    # in this window the bwrap process would be orphaned without tracking
+    old_handler = signal.signal(signal.SIGINT, signal.SIG_IGN)
+
     proc = subprocess.Popen(
         [binary],
         stdin=subprocess.DEVNULL,
@@ -176,11 +180,14 @@ def start_cave(gpu=False):
     child_pid = find_child_pid(proc.pid)
     if child_pid is None:
         proc.kill()
+        signal.signal(signal.SIGINT, old_handler)
         print("Failed to start cave: init process not found", file=sys.stderr)
         sys.exit(1)
 
     CAVE_PID_FILE.write_text(str(child_pid))
     (CAVE_DATA / "bwrap.pid").write_text(str(proc.pid))
+
+    signal.signal(signal.SIGINT, old_handler)
 
     # Wait for init to write /tmp/cave-env
     time.sleep(0.5)
@@ -191,8 +198,12 @@ def start_cave(gpu=False):
 
 def stop_cave():
     """Stop the cave."""
+    # Ignore SIGINT during teardown — partial cleanup is worse than
+    # a slightly delayed exit
+    old_handler = signal.signal(signal.SIGINT, signal.SIG_IGN)
     pid = cave_pid()
     if pid is None:
+        signal.signal(signal.SIGINT, old_handler)
         return
 
     bwrap_pid = None
@@ -227,6 +238,7 @@ def stop_cave():
     (CAVE_DATA / "bwrap.pid").unlink(missing_ok=True)
 
     unmount_project_overlays()
+    signal.signal(signal.SIGINT, old_handler)
 
 
 def enter_cave(pid, project=None, shell=None):
@@ -252,7 +264,12 @@ def enter_cave(pid, project=None, shell=None):
             "--preserve-credentials",
             "--", "/bin/bash", "-c", bash_cmd,
         ])
+    except KeyboardInterrupt:
+        ret = 130
     finally:
+        # Ignore SIGINT during cleanup so rapid Ctrl-C can't interrupt
+        # session unregistration or cave teardown
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
         unregister_session()
         if active_session_count() == 0:
             if os.fork() == 0:
