@@ -30,6 +30,17 @@
       network
       no-new-session
       gpu
+      (add-runtime ''
+        for dev in /dev/nvidia{0,1,ctl,-uvm,-uvm-tools,-modeset}; do
+          [ -e "$dev" ] && RUNTIME_ARGS+=(--dev-bind "$dev" "$dev")
+        done
+        NVIDIA_SMI="$(command -v nvidia-smi 2>/dev/null || true)"
+        if [ -n "$NVIDIA_SMI" ]; then
+          NVIDIA_BIN="$(dirname "$(realpath "$NVIDIA_SMI")")"
+          RUNTIME_ARGS+=(--ro-bind "$NVIDIA_BIN" "$NVIDIA_BIN")
+          RUNTIME_ARGS+=(--symlink "$NVIDIA_BIN/nvidia-smi" /bin/nvidia-smi)
+        fi
+      '')
 
       # Dev tools
       (add-pkg-deps [
