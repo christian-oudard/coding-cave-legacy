@@ -738,6 +738,10 @@ def pull_project(slug, force=False):
             sys.exit(1)
         else:
             print(f"Rebase failed for {slug}.", file=sys.stderr)
+            if result.stderr:
+                print(result.stderr.decode() if isinstance(result.stderr, bytes) else result.stderr, file=sys.stderr, end="")
+            if result.stdout:
+                print(result.stdout.decode() if isinstance(result.stdout, bytes) else result.stdout, file=sys.stderr, end="")
             subprocess.run(git + ["rebase", "--abort"], capture_output=True)
             subprocess.run(git + ["branch", "-D", "_cave_pull"], capture_output=True)
             if stashed:
