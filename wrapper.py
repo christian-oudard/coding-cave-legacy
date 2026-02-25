@@ -393,9 +393,15 @@ def mount_project_overlay(slug):
     upper.mkdir(parents=True, exist_ok=True)
     fuse_work.mkdir(exist_ok=True)
 
+    # squash_to_uid/gid prevents fuse-overlayfs from trying to chown
+    # during copy-up. Without this, files whose GID doesn't match the
+    # current user cause EPERM on modification.
+    uid = os.getuid()
+    gid = os.getgid()
     subprocess.run([
         "fuse-overlayfs",
-        "-o", f"lowerdir={project_dir},upperdir={upper},workdir={fuse_work}",
+        "-o", f"lowerdir={project_dir},upperdir={upper},workdir={fuse_work}"
+               f",squash_to_uid={uid},squash_to_gid={gid}",
         str(merged),
     ], check=True)
 
