@@ -472,21 +472,18 @@ def pull_project(slug):
     else:
         print(f"Pulled {actual} commit(s) from {slug}.", file=sys.stderr)
 
-    # Update cave's branch to match host so next pull sees shared history.
-    result = mount_project_overlay(slug)
-    if result is not None:
-        merged, _ = result
-        cave_git = ["git", "-C", str(merged)]
-        fetch_ok = subprocess.run(
-            cave_git + ["fetch", str(project_dir), "HEAD"],
-            capture_output=True,
-        )
-        if fetch_ok.returncode == 0:
-            subprocess.run(
-                cave_git + ["update-ref", f"refs/heads/{branch}", "FETCH_HEAD"],
-                capture_output=True,
-            )
-        try_unmount(merged)
+    # Point the cave's branch at the rebased commits so both repos share
+    # the same history. Without this, the cave retains the pre-rebase
+    # hashes and the next pull re-applies already-pulled commits.
+    # Write directly to the upper dir — fuse-overlayfs update-ref can't
+    # reliably sync with the kernel overlayfs inside the cave.
+    host_head = subprocess.run(
+        git + ["rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    ref_file = proj_state / "upper" / ".git" / "refs" / "heads" / branch
+    if ref_file.exists():
+        ref_file.write_text(host_head + "\n")
 
 
 def reset_project_overlay(slug):
@@ -727,35 +724,53 @@ def push_project(slug):
         capture_output=True, text=True, check=True,
     ).stdout.strip()
 
-    if count == "0":
-        try_unmount(merged)
-        print(f"No commits to push to {slug}.", file=sys.stderr)
-        return
-
-    # Check for uncommitted changes in overlay
-    dirty = subprocess.run(
-        git + ["status", "--porcelain"],
-        capture_output=True, text=True,
-    )
-    if dirty.returncode == 0 and dirty.stdout.strip():
-        print(f"Warning: {slug} has uncommitted changes in the cave.", file=sys.stderr)
-
-    # Try fast-forward merge first
-    result = subprocess.run(git + ["merge", "--ff-only", "FETCH_HEAD"],
-                            capture_output=True)
-
-    if result.returncode != 0:
-        # Cave has diverged (e.g. host amended a pulled commit) — reset to host
-        cave_only = subprocess.run(
-            git + ["rev-list", "--count", "FETCH_HEAD..HEAD"],
+    if count != "0":
+        # Check for uncommitted changes in overlay
+        dirty = subprocess.run(
+            git + ["status", "--porcelain"],
             capture_output=True, text=True,
         )
-        cave_count = cave_only.stdout.strip() if cave_only.returncode == 0 else "?"
-        print(f"Resetting {slug} — overwriting {cave_count} cave-only commit(s).", file=sys.stderr)
-        subprocess.run(git + ["reset", "--hard", "FETCH_HEAD"], check=True)
+        if dirty.returncode == 0 and dirty.stdout.strip():
+            print(f"Warning: {slug} has uncommitted changes in the cave.", file=sys.stderr)
+
+        # Try fast-forward merge first
+        result = subprocess.run(git + ["merge", "--ff-only", "FETCH_HEAD"],
+                                capture_output=True)
+
+        if result.returncode != 0:
+            # Cave has diverged — reset to host
+            cave_only = subprocess.run(
+                git + ["rev-list", "--count", "FETCH_HEAD..HEAD"],
+                capture_output=True, text=True,
+            )
+            cave_count = cave_only.stdout.strip() if cave_only.returncode == 0 else "?"
+            print(f"Resetting {slug} — overwriting {cave_count} cave-only commit(s).", file=sys.stderr)
+            subprocess.run(git + ["reset", "--hard", "FETCH_HEAD"], check=True)
 
     try_unmount(merged)
-    print(f"Pushed {count} commit(s) to {slug}.", file=sys.stderr)
+
+    # Write host HEAD directly to the upper dir ref file. The kernel
+    # overlayfs inside the cave may have page-cached ref writes that
+    # haven't flushed to disk, making the fuse-overlayfs view stale.
+    # Writing here ensures the on-disk state matches the host.
+    host_head = subprocess.run(
+        ["git", "-C", str(project_dir), "rev-parse", "HEAD"],
+        capture_output=True, text=True,
+    )
+    branch_result = subprocess.run(
+        ["git", "-C", str(project_dir), "rev-parse", "--abbrev-ref", "HEAD"],
+        capture_output=True, text=True,
+    )
+    if host_head.returncode == 0 and branch_result.returncode == 0:
+        branch = branch_result.stdout.strip()
+        ref_file = proj_state / "upper" / ".git" / "refs" / "heads" / branch
+        if ref_file.exists():
+            ref_file.write_text(host_head.stdout.strip() + "\n")
+
+    if count == "0":
+        print(f"No commits to push to {slug}.", file=sys.stderr)
+    else:
+        print(f"Pushed {count} commit(s) to {slug}.", file=sys.stderr)
 
 
 def cmd_push(args):
