@@ -696,15 +696,43 @@ def pull_project(slug, force=False):
 
     # Detect history rewrite: if cave-sync exists, host hasn't moved since
     # last sync, but merge-base is older, the cave rewrote history.
-    # Reset host branch to merge-base so rebase replaces old commits.
-    branch_reset = False
+    # Adopt the cave's history directly (no rebase/re-author) to preserve
+    # commit hashes that may already be on a remote.
     if (cave_sync_hash and cave_sync_hash == host_head
             and merge_base != host_head):
+        stash_result = subprocess.run(
+            git + ["stash", "--include-untracked"],
+            capture_output=True, text=True,
+        )
+        stashed = stash_result.returncode == 0 and "No local changes" not in stash_result.stdout
+
+        subprocess.run(git + ["reset", "--hard", "FETCH_HEAD"], check=True)
+
+        if stashed:
+            subprocess.run(git + ["stash", "pop"], capture_output=True)
+
+        print(f"Pulled {count} commit(s) from {slug}.", file=sys.stderr)
+
+        # Sync gitdir to match host
+        host_head = subprocess.run(
+            git + ["rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
         subprocess.run(
-            git + ["update-ref", f"refs/heads/{branch}", merge_base],
+            ["git", "--git-dir", str(gitdir), "fetch", str(project_dir), "HEAD"],
             check=True,
         )
-        branch_reset = True
+        subprocess.run(
+            ["git", "--git-dir", str(gitdir), "update-ref",
+             f"refs/heads/{branch}", host_head],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "--git-dir", str(gitdir), "update-ref",
+             "refs/cave-sync", host_head],
+        )
+        pull_working_tree(slug, project_dir, gitdir)
+        return
 
     pre_head = subprocess.run(
         git + ["rev-parse", "HEAD"],
@@ -738,11 +766,6 @@ def pull_project(slug, force=False):
             print(f"  coding-cave push {slug}", file=sys.stderr)
         else:
             print(f"Rebase failed for {slug}.", file=sys.stderr)
-            if branch_reset:
-                subprocess.run(
-                    git + ["update-ref", f"refs/heads/{branch}", host_head],
-                    capture_output=True,
-                )
             subprocess.run(git + ["branch", "-D", "_cave_pull"], capture_output=True)
             if stashed:
                 subprocess.run(git + ["stash", "pop"], capture_output=True)
