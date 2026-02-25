@@ -1206,6 +1206,81 @@ def cmd_shell(args, gpu=False):
 
 
 
+def project_sync_status(slug, source):
+    """Return a short sync status string for a project."""
+    project_dir = Path(source)
+    proj_state = PROJECTS_DIR / slug
+    gitdir = proj_state / "gitdir"
+
+    if not gitdir.exists():
+        return "no gitdir"
+
+    host_head = subprocess.run(
+        ["git", "-C", str(project_dir), "rev-parse", "HEAD"],
+        capture_output=True, text=True,
+    )
+    cave_head = subprocess.run(
+        ["git", "--git-dir", str(gitdir), "rev-parse", "HEAD"],
+        capture_output=True, text=True,
+    )
+    if host_head.returncode != 0 or cave_head.returncode != 0:
+        return "?"
+
+    host_h = host_head.stdout.strip()
+    cave_h = cave_head.stdout.strip()
+
+    tags = []
+
+    # Commit sync
+    if host_h == cave_h:
+        pass  # commits in sync
+    else:
+        # Fetch host objects into gitdir for merge-base
+        subprocess.run(
+            ["git", "--git-dir", str(gitdir), "fetch", str(project_dir), "HEAD"],
+            capture_output=True,
+        )
+        mb = subprocess.run(
+            ["git", "--git-dir", str(gitdir), "merge-base", cave_h, host_h],
+            capture_output=True, text=True,
+        )
+        if mb.returncode != 0:
+            tags.append("diverged")
+        else:
+            base = mb.stdout.strip()
+            to_pull = subprocess.run(
+                ["git", "--git-dir", str(gitdir), "rev-list", "--count",
+                 f"{base}..{cave_h}"],
+                capture_output=True, text=True,
+            )
+            to_push = subprocess.run(
+                ["git", "--git-dir", str(gitdir), "rev-list", "--count",
+                 f"{base}..{host_h}"],
+                capture_output=True, text=True,
+            )
+            n_pull = to_pull.stdout.strip() if to_pull.returncode == 0 else "0"
+            n_push = to_push.stdout.strip() if to_push.returncode == 0 else "0"
+            if n_pull != "0" and n_push != "0":
+                tags.append(f"{n_pull} to pull, {n_push} to push")
+            elif n_pull != "0":
+                tags.append(f"{n_pull} to pull")
+            elif n_push != "0":
+                tags.append(f"{n_push} to push")
+
+    # Working tree changes (only if overlay is already mounted)
+    merged = proj_state / "merged"
+    if merged.exists() and merged.is_mount():
+        git_cave = ["git", "--git-dir", str(gitdir), "--work-tree", str(merged)]
+        wt = subprocess.run(
+            git_cave + ["status", "--porcelain"], capture_output=True, text=True,
+        )
+        if wt.returncode == 0 and wt.stdout.strip():
+            n = len(wt.stdout.strip().splitlines())
+            tags.append(f"{n} changed")
+
+    return ", ".join(tags) if tags else ""
+
+
 def cmd_status(args):
     """Show cave status and projects."""
     pid = cave_pid()
@@ -1219,8 +1294,8 @@ def cmd_status(args):
     if projects:
         print("Projects:", file=sys.stderr)
         for slug, source in projects:
-            loaded = pid and project_loaded_in_cave(slug)
-            tag = " [loaded]" if loaded else ""
+            status = project_sync_status(slug, source)
+            tag = f" [{status}]" if status else ""
             print(f"  {slug}  <- {source}{tag}", file=sys.stderr)
     else:
         print("No projects in the cave.", file=sys.stderr)
