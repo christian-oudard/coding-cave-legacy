@@ -12,6 +12,10 @@ The host repo is canonical. The cave works on an overlay copy. `pull` brings cav
 
 `reset` is the escape hatch: wipe everything in the cave and start fresh from the host. It always works, regardless of how broken the cave state is.
 
+## Projects are folders, not names
+
+On the host, the user thinks in terms of project directories, not slugs. The project name (slug) is always derived from the directory name. If a project folder is moved or renamed, `cav move` updates the registry to point to the new location and renames internal state to match. Commands that accept a project argument also detect the current project from CWD.
+
 ## Session isolation
 
 Each agent session runs in its own bwrap namespace with its own overlay. Multiple agents working on the same project get independent working trees — they cannot see or interfere with each other's uncommitted work. Agents interact only through git commits to a shared gitdir.
