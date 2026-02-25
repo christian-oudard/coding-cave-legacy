@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """coding-cave wrapper: persistent cave with multi-agent support."""
+import fcntl
 import json
 import os
 import re
@@ -27,6 +28,20 @@ LOADED_PROJECTS_FILE = CAVE_DATA / "loaded-projects.json"
 PROJECTS_DIR = CAVE_DATA / "projects"
 NIX_OVERLAY_DIR = CAVE_DATA / "nix-overlay"
 SESSIONS_DIR = CAVE_DATA / "sessions"
+SESSION_LOCK = CAVE_DATA / "session.lock"
+
+
+@contextmanager
+def session_lock():
+    """Exclusive lock that serializes session registration and cave teardown."""
+    SESSION_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(SESSION_LOCK), os.O_CREAT | os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 # --- Config ---
@@ -73,8 +88,9 @@ def slugify(text, max_len=40):
 # --- Session tracking ---
 
 def register_session():
-    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
-    (SESSIONS_DIR / str(os.getpid())).touch()
+    with session_lock():
+        SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+        (SESSIONS_DIR / str(os.getpid())).touch()
 
 
 def unregister_session():
@@ -192,13 +208,16 @@ def start_cave(gpu=False):
     return child_pid
 
 
-def stop_cave():
-    """Stop the cave."""
+def stop_cave(init_pid=None):
+    """Stop the cave. If init_pid is given, kill that process directly.
+    Otherwise read the PID file (used by explicit stop commands)."""
     # Ignore SIGINT during teardown — partial cleanup is worse than
     # a slightly delayed exit
     old_handler = signal.signal(signal.SIGINT, signal.SIG_IGN)
-    pid = cave_pid()
-    if pid is None:
+
+    if init_pid is None:
+        init_pid = cave_pid()
+    if init_pid is None:
         signal.signal(signal.SIGINT, old_handler)
         return
 
@@ -212,15 +231,15 @@ def stop_cave():
 
     # Kill init process (tini forwards SIGTERM to sleep, then exits)
     try:
-        os.kill(pid, signal.SIGTERM)
+        os.kill(init_pid, signal.SIGTERM)
         for _ in range(50):
             try:
-                os.kill(pid, 0)
+                os.kill(init_pid, 0)
                 time.sleep(0.1)
             except ProcessLookupError:
                 break
         else:
-            os.kill(pid, signal.SIGKILL)
+            os.kill(init_pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
 
@@ -305,11 +324,18 @@ def enter_cave(pid, project=None, shell=None, workdir=None):
         # Ignore SIGINT during cleanup so rapid Ctrl-C can't interrupt
         # session unregistration or cave teardown
         signal.signal(signal.SIGINT, signal.SIG_IGN)
-        unregister_session()
-        if active_session_count() == 0:
-            if os.fork() == 0:
-                stop_cave()
-                os._exit(0)
+        with session_lock():
+            unregister_session()
+            if active_session_count() == 0:
+                # Delete PID file while holding the lock so new callers
+                # see no running cave and start a fresh one instead of
+                # entering a cave that's being torn down.
+                cave_init_pid = cave_pid()
+                CAVE_PID_FILE.unlink(missing_ok=True)
+                (CAVE_DATA / "bwrap.pid").unlink(missing_ok=True)
+                if cave_init_pid and os.fork() == 0:
+                    stop_cave(cave_init_pid)
+                    os._exit(0)
     sys.exit(ret)
 
 
@@ -962,20 +988,21 @@ def cmd_agent(args, gpu=False):
     if project_dir is not None:
         project = ensure_project(project_dir)
 
-    pid = cave_pid()
+    with session_lock():
+        pid = cave_pid()
 
-    if pid is None:
-        pid = start_cave(gpu=gpu)
-    elif project and not project_loaded_in_cave(project):
-        sessions = active_session_count()
-        if sessions > 0:
-            print(f"{project} is not loaded and {sessions} session(s) are active.", file=sys.stderr)
-            print("Exit all sessions first, then re-enter.", file=sys.stderr)
-            sys.exit(1)
-        stop_cave()
-        pid = start_cave(gpu=gpu)
-    else:
-        print("Entered coding-cave.", file=sys.stderr)
+        if pid is None:
+            pid = start_cave(gpu=gpu)
+        elif project and not project_loaded_in_cave(project):
+            sessions = active_session_count()
+            if sessions > 0:
+                print(f"{project} is not loaded and {sessions} session(s) are active.", file=sys.stderr)
+                print("Exit all sessions first, then re-enter.", file=sys.stderr)
+                sys.exit(1)
+            stop_cave()
+            pid = start_cave(gpu=gpu)
+        else:
+            print("Entered coding-cave.", file=sys.stderr)
 
     enter_cave(pid, project=project, workdir=cave_workdir(project))
 
@@ -1278,20 +1305,21 @@ def cmd_shell(args, gpu=False):
     if project_dir is not None:
         project = ensure_project(project_dir)
 
-    pid = cave_pid()
+    with session_lock():
+        pid = cave_pid()
 
-    if pid is None:
-        pid = start_cave(gpu=gpu)
-    elif project and not project_loaded_in_cave(project):
-        sessions = active_session_count()
-        if sessions > 0:
-            print(f"{project} is not loaded and {sessions} session(s) are active.", file=sys.stderr)
-            print("Exit all sessions first, then re-enter.", file=sys.stderr)
-            sys.exit(1)
-        stop_cave()
-        pid = start_cave(gpu=gpu)
-    else:
-        print("Entered coding-cave.", file=sys.stderr)
+        if pid is None:
+            pid = start_cave(gpu=gpu)
+        elif project and not project_loaded_in_cave(project):
+            sessions = active_session_count()
+            if sessions > 0:
+                print(f"{project} is not loaded and {sessions} session(s) are active.", file=sys.stderr)
+                print("Exit all sessions first, then re-enter.", file=sys.stderr)
+                sys.exit(1)
+            stop_cave()
+            pid = start_cave(gpu=gpu)
+        else:
+            print("Entered coding-cave.", file=sys.stderr)
 
     enter_cave(pid, project=project, shell=shell_type, workdir=cave_workdir(project))
 
