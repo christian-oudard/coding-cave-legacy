@@ -305,6 +305,7 @@ def initialize_gitdir(slug, project_dir):
                  f"refs/remotes/host/{branch.stdout.strip()}", head.stdout.strip()],
             )
     ensure_cave_remote(project_dir, gitdir)
+    mirror_origin_refs(gitdir, project_dir)
 
 
 def ensure_cave_remote(project_dir, gitdir):
@@ -320,6 +321,25 @@ def ensure_cave_remote(project_dir, gitdir):
         subprocess.run(git + ["remote", "add", "cave", str(gitdir)], capture_output=True)
 
 
+def mirror_origin_refs(gitdir, project_dir):
+    """Copy refs/remotes/origin/* from host project into the cave gitdir."""
+    result = subprocess.run(
+        ["git", "-C", str(project_dir), "for-each-ref",
+         "--format=%(refname) %(objectname)", "refs/remotes/origin/"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return
+    for line in result.stdout.strip().splitlines():
+        if not line:
+            continue
+        ref, sha = line.split()
+        subprocess.run(
+            ["git", "--git-dir", str(gitdir), "update-ref", ref, sha],
+            capture_output=True,
+        )
+
+
 def update_cave_sync(gitdir, project_dir, commit, branch=None):
     subprocess.run(
         ["git", "--git-dir", str(gitdir), "update-ref", "refs/cave-sync", commit],
@@ -330,6 +350,7 @@ def update_cave_sync(gitdir, project_dir, commit, branch=None):
             ["git", "--git-dir", str(gitdir), "update-ref",
              f"refs/remotes/host/{branch}", commit],
         )
+    mirror_origin_refs(gitdir, project_dir)
 
 
 def sync_refs(gitdir, project_dir, host_head, branch):
