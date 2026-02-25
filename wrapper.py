@@ -8,6 +8,7 @@ import signal
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 try:
@@ -716,13 +717,14 @@ def pull_project(slug, force=False):
                 git + ["update-ref", f"refs/heads/{branch}", gitdir_head],
                 check=True,
             )
-            print(f"Force-updated {slug}.", file=sys.stderr)
+            print(f"Force-updated {slug} (history rewritten, tree unchanged):", file=sys.stderr)
+            print(f"  {host_head[:8]} -> {gitdir_head[:8]}", file=sys.stderr)
             update_cave_sync(gitdir, project_dir, gitdir_head, branch)
             pull_working_tree(slug, project_dir, gitdir)
             return
 
     # Fetch cave commits from gitdir (a regular dir on the host filesystem)
-    fetch = subprocess.run(git + ["fetch", str(gitdir), "HEAD"])
+    fetch = subprocess.run(git + ["fetch", str(gitdir), "HEAD"], capture_output=True)
     if fetch.returncode != 0:
         print(f"Fetch from gitdir failed for {slug}.", file=sys.stderr)
         sys.exit(1)
@@ -766,13 +768,14 @@ def pull_project(slug, force=False):
     # Require --force to adopt rewritten history.
     if (cave_sync_hash and cave_sync_hash == host_head
             and merge_base != host_head):
+        host_count = subprocess.run(
+            git + ["rev-list", "--count", f"{merge_base}..HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
         if not force:
-            host_count = subprocess.run(
-                git + ["rev-list", "--count", f"{merge_base}..HEAD"],
-                capture_output=True, text=True, check=True,
-            ).stdout.strip()
             print(f"Cave rewrote history for {slug} "
-                  f"({host_count} host commit(s) → {count} cave commit(s)).",
+                  f"({host_count} host commit(s) -> {count} cave commit(s)).",
                   file=sys.stderr)
             print(f"Run 'coding-cave pull --force' to adopt the cave's history.",
                   file=sys.stderr)
@@ -784,12 +787,30 @@ def pull_project(slug, force=False):
         )
         stashed = stash_result.returncode == 0 and "No local changes" not in stash_result.stdout
 
-        subprocess.run(git + ["reset", "--hard", "FETCH_HEAD"], check=True)
+        # Capture old log before reset
+        old_log = subprocess.run(
+            git + ["log", "--oneline", f"{merge_base}..HEAD"],
+            capture_output=True, text=True,
+        )
+
+        subprocess.run(git + ["reset", "--hard", "FETCH_HEAD"], check=True, capture_output=True)
 
         if stashed:
             subprocess.run(git + ["stash", "pop"], capture_output=True)
 
-        print(f"Pulled {count} commit(s) from {slug}.", file=sys.stderr)
+        print(f"Force-pulled {slug} ({host_count} commit(s) replaced with {count}):", file=sys.stderr)
+        if old_log.returncode == 0 and old_log.stdout.strip():
+            print(f"  Replaced:", file=sys.stderr)
+            for line in old_log.stdout.rstrip().splitlines():
+                print(f"    {line}", file=sys.stderr)
+        new_log = subprocess.run(
+            git + ["log", "--oneline", f"{merge_base}..HEAD"],
+            capture_output=True, text=True,
+        )
+        if new_log.returncode == 0 and new_log.stdout.strip():
+            print(f"  With:", file=sys.stderr)
+            for line in new_log.stdout.rstrip().splitlines():
+                print(f"    {line}", file=sys.stderr)
 
         # Sync gitdir to match host
         host_head = subprocess.run(
@@ -798,7 +819,7 @@ def pull_project(slug, force=False):
         ).stdout.strip()
         subprocess.run(
             ["git", "--git-dir", str(gitdir), "fetch", str(project_dir), "HEAD"],
-            check=True,
+            check=True, capture_output=True,
         )
         subprocess.run(
             ["git", "--git-dir", str(gitdir), "update-ref",
@@ -821,12 +842,12 @@ def pull_project(slug, force=False):
     )
     stashed = stash_result.returncode == 0 and "No local changes" not in stash_result.stdout
 
-    subprocess.run(git + ["branch", "-f", "_cave_pull", "FETCH_HEAD"], check=True)
+    subprocess.run(git + ["branch", "-f", "_cave_pull", "FETCH_HEAD"], check=True, capture_output=True)
     result = subprocess.run(git + [
         "rebase", "--onto", branch, merge_base, "_cave_pull",
         "--no-reapply-cherry-picks",
-        "--exec", "git commit --amend --reset-author --allow-empty --no-edit",
-    ])
+        "--exec", "git commit --amend --reset-author --allow-empty --no-edit --quiet",
+    ], capture_output=True)
     if result.returncode != 0:
         rebase_in_progress = ((git_dir / "rebase-merge").is_dir() or
                               (git_dir / "rebase-apply").is_dir())
@@ -846,9 +867,9 @@ def pull_project(slug, force=False):
                 subprocess.run(git + ["stash", "pop"], capture_output=True)
         sys.exit(1)
 
-    subprocess.run(git + ["checkout", branch], check=True)
-    subprocess.run(git + ["merge", "--ff-only", "_cave_pull"], check=True)
-    subprocess.run(git + ["branch", "-d", "_cave_pull"], check=True)
+    subprocess.run(git + ["checkout", branch], check=True, capture_output=True)
+    subprocess.run(git + ["merge", "--ff-only", "_cave_pull"], check=True, capture_output=True)
+    subprocess.run(git + ["branch", "-d", "_cave_pull"], check=True, capture_output=True)
 
     if stashed:
         subprocess.run(git + ["stash", "pop"], capture_output=True)
@@ -861,7 +882,13 @@ def pull_project(slug, force=False):
     if actual == "0":
         print(f"No new commits to pull from {slug}.", file=sys.stderr)
     else:
-        print(f"Pulled {actual} commit(s) from {slug}.", file=sys.stderr)
+        print(f"Pulled {actual} commit(s) from {slug}:", file=sys.stderr)
+        log = subprocess.run(
+            git + ["log", "--oneline", f"{pre_head}..HEAD"],
+            capture_output=True, text=True,
+        )
+        if log.returncode == 0 and log.stdout.strip():
+            print(log.stdout.rstrip(), file=sys.stderr)
 
     # Sync gitdir to the rebased history so both repos share the same
     # commit hashes. The gitdir is bind-mounted into the cave, so this
@@ -874,7 +901,7 @@ def pull_project(slug, force=False):
     ).stdout.strip()
     subprocess.run(
         ["git", "--git-dir", str(gitdir), "fetch", str(project_dir), "HEAD"],
-        check=True,
+        check=True, capture_output=True,
     )
     subprocess.run(
         ["git", "--git-dir", str(gitdir), "update-ref",
