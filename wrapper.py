@@ -447,12 +447,35 @@ def unmount_project_overlays():
             try_unmount(merged)
 
 
-def pull_project(slug):
+def find_tree_merge_base(git, host_tree):
+    """Find the cave commit whose tree matches the host HEAD tree.
+
+    Used when histories have diverged (e.g. filter-branch, amend) to
+    find the effective merge-base by content rather than ancestry.
+    Expects FETCH_HEAD to be set from a prior fetch.
+    """
+    cave_log = subprocess.run(
+        git + ["log", "--format=%H %T", "FETCH_HEAD"],
+        capture_output=True, text=True,
+    )
+    if cave_log.returncode != 0:
+        return None
+    for line in cave_log.stdout.strip().splitlines():
+        commit_hash, tree_hash = line.split()
+        if tree_hash == host_tree:
+            return commit_hash
+    return None
+
+
+def pull_project(slug, force=False):
     """Pull changes from a project's cave gitdir into the host repo.
 
     Post-condition: the host git repo becomes identical to the cave repo,
     except that unsigned cave-coder commits are re-authored as the user.
     The cave's gitdir is then synced to match the host's rebased history.
+
+    With force=True, handles rewritten history (amend, rebase, filter-branch)
+    by finding the effective merge-base via tree matching.
     """
     projects = load_projects()
     if slug not in projects:
@@ -533,6 +556,8 @@ def pull_project(slug):
             capture_output=True,
         ).returncode == 0
         if has_ancestor:
+            # Previous pull succeeded but gitdir sync failed — sync
+            # gitdir to match host's re-authored history
             subprocess.run(
                 ["git", "--git-dir", str(gitdir), "fetch",
                  str(project_dir), "HEAD"],
@@ -545,6 +570,15 @@ def pull_project(slug):
             )
             print(f"Synced gitdir for {slug}.", file=sys.stderr)
             print(f"No new commits to pull from {slug}.", file=sys.stderr)
+            return
+        if force:
+            # Diverged histories with same content — adopt cave's
+            # history on the host (e.g. after filter-branch in cave)
+            subprocess.run(
+                git + ["update-ref", f"refs/heads/{branch}", gitdir_head],
+                check=True,
+            )
+            print(f"Force-updated {slug}.", file=sys.stderr)
             return
         # No common ancestor — fall through to normal flow
 
@@ -559,9 +593,20 @@ def pull_project(slug):
         capture_output=True, text=True,
     )
     if merge_base_result.returncode != 0:
-        print(f"No common ancestor for {slug} — skipping.", file=sys.stderr)
-        return
-    merge_base = merge_base_result.stdout.strip()
+        if not force:
+            print(f"No common ancestor for {slug} — skipping.", file=sys.stderr)
+            return
+        # Force: find effective merge-base by tree matching
+        host_tree = subprocess.run(
+            git + ["rev-parse", "HEAD^{tree}"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        merge_base = find_tree_merge_base(git, host_tree)
+        if merge_base is None:
+            print(f"No matching trees for {slug} — cannot force-pull.", file=sys.stderr)
+            return
+    else:
+        merge_base = merge_base_result.stdout.strip()
 
     count = subprocess.run(
         git + ["rev-list", "--count", f"{merge_base}..FETCH_HEAD"],
@@ -917,15 +962,18 @@ def cmd_push(args):
 
 def cmd_pull(args):
     """Pull changes from project overlays."""
+    force = "--force" in args
+    args = [a for a in args if a != "--force"]
+
     if args:
-        pull_project(args[0])
+        pull_project(args[0], force=force)
         return
 
     # If CWD is inside a registered project, pull only that project
     cwd = Path.cwd().resolve()
     for slug, source in load_projects().items():
         if cwd == Path(source).resolve() or cwd.is_relative_to(Path(source).resolve()):
-            pull_project(slug)
+            pull_project(slug, force=force)
             return
 
     # Not in a project folder — do nothing
@@ -992,6 +1040,7 @@ Commands:
   shell                enter cave with your shell
   add [dir]            register a project (default: current dir)
   pull [project]       pull commits from cave gitdir, re-author
+                       --force: handle rewritten history (amend/rebase/filter-branch)
   push [project]       push host commits into cave gitdir
   reset [project]      wipe overlay + gitdir to match host (cave must be stopped)
   remove [project]     unregister a project and delete overlay data
