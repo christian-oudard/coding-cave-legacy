@@ -410,6 +410,16 @@ def initialize_gitdir(slug, project_dir):
         ["git", "--git-dir", str(gitdir), "read-tree", "HEAD"],
         check=True,
     )
+    # Record sync point so pull can detect history rewrites
+    head = subprocess.run(
+        ["git", "--git-dir", str(gitdir), "rev-parse", "HEAD"],
+        capture_output=True, text=True,
+    )
+    if head.returncode == 0:
+        subprocess.run(
+            ["git", "--git-dir", str(gitdir), "update-ref",
+             "refs/cave-sync", head.stdout.strip()],
+        )
 
 
 def mount_project_overlay(slug):
@@ -608,6 +618,10 @@ def pull_project(slug, force=False):
     ).stdout.strip()
     if host_head == gitdir_head:
         print(f"No new commits to pull from {slug}.", file=sys.stderr)
+        subprocess.run(
+            ["git", "--git-dir", str(gitdir), "update-ref",
+             "refs/cave-sync", host_head],
+        )
         pull_working_tree(slug, project_dir, gitdir)
         return
 
@@ -633,6 +647,10 @@ def pull_project(slug, force=False):
                 check=True,
             )
             print(f"Force-updated {slug}.", file=sys.stderr)
+            subprocess.run(
+                ["git", "--git-dir", str(gitdir), "update-ref",
+                 "refs/cave-sync", gitdir_head],
+            )
             pull_working_tree(slug, project_dir, gitdir)
             return
 
@@ -641,6 +659,13 @@ def pull_project(slug, force=False):
     if fetch.returncode != 0:
         print(f"Fetch from gitdir failed for {slug}.", file=sys.stderr)
         sys.exit(1)
+
+    # Read cave-sync marker (last agreed-upon commit)
+    cave_sync = subprocess.run(
+        ["git", "--git-dir", str(gitdir), "rev-parse", "refs/cave-sync"],
+        capture_output=True, text=True,
+    )
+    cave_sync_hash = cave_sync.stdout.strip() if cave_sync.returncode == 0 else None
 
     merge_base_result = subprocess.run(
         git + ["merge-base", "HEAD", "FETCH_HEAD"],
@@ -668,6 +693,18 @@ def pull_project(slug, force=False):
     if count == "0":
         print(f"No commits to pull from {slug}.", file=sys.stderr)
         return
+
+    # Detect history rewrite: if cave-sync exists, host hasn't moved since
+    # last sync, but merge-base is older, the cave rewrote history.
+    # Reset host branch to merge-base so rebase replaces old commits.
+    branch_reset = False
+    if (cave_sync_hash and cave_sync_hash == host_head
+            and merge_base != host_head):
+        subprocess.run(
+            git + ["update-ref", f"refs/heads/{branch}", merge_base],
+            check=True,
+        )
+        branch_reset = True
 
     pre_head = subprocess.run(
         git + ["rev-parse", "HEAD"],
@@ -701,6 +738,11 @@ def pull_project(slug, force=False):
             print(f"  coding-cave push {slug}", file=sys.stderr)
         else:
             print(f"Rebase failed for {slug}.", file=sys.stderr)
+            if branch_reset:
+                subprocess.run(
+                    git + ["update-ref", f"refs/heads/{branch}", host_head],
+                    capture_output=True,
+                )
             subprocess.run(git + ["branch", "-D", "_cave_pull"], capture_output=True)
             if stashed:
                 subprocess.run(git + ["stash", "pop"], capture_output=True)
@@ -740,6 +782,10 @@ def pull_project(slug, force=False):
         ["git", "--git-dir", str(gitdir), "update-ref",
          f"refs/heads/{branch}", host_head],
         check=True,
+    )
+    subprocess.run(
+        ["git", "--git-dir", str(gitdir), "update-ref",
+         "refs/cave-sync", host_head],
     )
 
     pull_working_tree(slug, project_dir, gitdir)
@@ -1047,6 +1093,10 @@ def push_project(slug, force=False):
     )
     if cave_head.returncode == 0 and cave_head.stdout.strip() == host_head:
         print(f"No commits to push to {slug}.", file=sys.stderr)
+        subprocess.run(
+            ["git", "--git-dir", str(gitdir), "update-ref",
+             "refs/cave-sync", host_head],
+        )
         push_working_tree(slug, project_dir, gitdir)
         return
 
@@ -1093,6 +1143,10 @@ def push_project(slug, force=False):
         ["git", "--git-dir", str(gitdir), "update-ref",
          f"refs/heads/{branch}", host_head],
         check=True,
+    )
+    subprocess.run(
+        ["git", "--git-dir", str(gitdir), "update-ref",
+         "refs/cave-sync", host_head],
     )
 
     print(f"Pushed to {slug} ({host_head[:8]}).", file=sys.stderr)
