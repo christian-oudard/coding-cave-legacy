@@ -130,14 +130,6 @@
           printf '%s' '{"hasCompletedOnboarding":true,"theme":"dark","effortCalloutDismissed":true}' > "$CAVE_HOME/.claude.json"
         fi
 
-        # Migrate from old layout (separate claude-state dir + file bind mount)
-        if [ -d "$CAVE_DATA/claude-state" ] && [ ! -f "$CLAUDE_DIR/settings.json" ]; then
-          cp -a "$CAVE_DATA/claude-state/." "$CLAUDE_DIR/"
-        fi
-        if [ -f "$CAVE_DATA/claude.json" ] && [ ! -f "$CAVE_HOME/.claude.json" ]; then
-          mv "$CAVE_DATA/claude.json" "$CAVE_HOME/.claude.json"
-        fi
-
         if [ -n "''${CODING_CAVE_CLAUDE_MD:-}" ] && [ -f "''${CODING_CAVE_CLAUDE_MD}" ]; then
           RUNTIME_ARGS+=(--ro-bind "$CODING_CAVE_CLAUDE_MD" ${jailHome}/.claude/CLAUDE.md)
         fi
