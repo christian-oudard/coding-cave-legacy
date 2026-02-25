@@ -48,28 +48,36 @@
       (set-env "NIX_CONFIG" "sandbox = false\nexperimental-features = nix-command flakes")
 
       # Dev tools
-      (add-pkg-deps [
+      (add-pkg-deps (with pkgs; [
         claude-code.packages.x86_64-linux.default
-        pkgs.nix
-        pkgs.git
-        pkgs.github-cli
-        pkgs.ripgrep
-        pkgs.fd
-        pkgs.jq
-        pkgs.curl
-        pkgs.gnused
-        pkgs.gnugrep
-        pkgs.findutils
-        pkgs.tree
-        pkgs.less
-        pkgs.file
-        pkgs.ncurses
-        pkgs.which
-        pkgs.zsh
-        pkgs.eza
-        pkgs.nano
-        pkgs.tini
-      ])
+        nix
+        git
+        github-cli
+        ripgrep
+        fd
+        jq
+        curl
+        gawk
+        gnused
+        gnugrep
+        findutils
+        diffutils
+        patch
+        gnutar
+        gzip
+        unzip
+        wget
+        perl
+        tree
+        less
+        file
+        ncurses
+        which
+        zsh
+        eza
+        nano
+        tini
+      ]))
       (set-env "EDITOR" "${pkgs.nano}/bin/nano")
       (set-env "TERMINFO_DIRS" "${pkgs.ncurses}/share/terminfo")
       (set-env "LOCALE_ARCHIVE" "${pkgs.glibcLocales}/lib/locale/locale-archive")
