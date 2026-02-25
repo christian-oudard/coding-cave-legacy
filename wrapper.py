@@ -597,7 +597,7 @@ def enter_session(session_info, shell_type, workdir=None):
     proc = subprocess.Popen([
         "nsenter",
         f"--target={child_pid}",
-        "--user", "--mount", "--pid", "--uts", "--ipc",
+        "--user", "--mount", "--net", "--pid", "--uts", "--ipc",
         "--preserve-credentials",
         "--", "/bin/bash", "-c",
         f'source /tmp/cave-env 2>/dev/null; cd {workdir or "/projects"} 2>/dev/null; exec {shell_bin} -l',
