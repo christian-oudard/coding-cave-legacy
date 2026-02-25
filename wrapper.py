@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """coding-cave wrapper: per-session bwrap sandboxes with shared gitdirs."""
+import argparse
 import json
 import os
 import re
@@ -1266,6 +1267,8 @@ def project_sync_status(slug, source):
 
 
 def cmd_status(args):
+    show_all = "--all" in args or "-a" in args
+
     print(f"coding-cave {VERSION}", file=sys.stderr)
 
     all_projects = list_projects()
@@ -1273,14 +1276,15 @@ def cmd_status(args):
         print("No projects in the cave.", file=sys.stderr)
         return
 
-    # Scope to current project if running from a project dir
-    cwd = Path.cwd().resolve()
+    # Scope to current project unless --all
     scoped = None
-    for slug, source in all_projects:
-        source_path = Path(source).resolve()
-        if cwd == source_path or cwd.is_relative_to(source_path):
-            scoped = [(slug, source)]
-            break
+    if not show_all:
+        cwd = Path.cwd().resolve()
+        for slug, source in all_projects:
+            source_path = Path(source).resolve()
+            if cwd == source_path or cwd.is_relative_to(source_path):
+                scoped = [(slug, source)]
+                break
     projects = scoped or all_projects
 
     if not scoped:
@@ -1296,75 +1300,72 @@ def cmd_status(args):
             print(f"    [{started}] PID {s['bwrap_pid']}  running", file=sys.stderr)
 
 
-HELP = """\
-Usage: coding-cave [command] [options]
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="coding-cave",
+        description="Sandboxed Claude Code agent sessions with Nix environments.",
+    )
+    parser.add_argument("--gpu", action="store_true", help="enable GPU access")
+    sub = parser.add_subparsers(dest="command")
 
-Commands:
-  (default)            start a new agent session
-  shell                start a shell or join a running session
-  add [dir]            register a project (default: current dir)
-  pull [project]       pull commits from cave
-                       --force: adopt cave's commit history on host (destructive)
-  push [project]       push host commits into cave
-                       --force: skip unpulled commit check
-  reset [project]      wipe overlay + gitdir to match host (no running sessions)
-  remove [project]     unregister a project and delete overlay data
-  status               show projects and running sessions
-  help                 show this help
+    sub.add_parser("agent", help="start a new agent session")
+    sub.add_parser("shell", help="start a shell or join a running session")
 
-Options:
-  --gpu                enable GPU access (for agent/shell)
+    p_add = sub.add_parser("add", help="register a project")
+    p_add.add_argument("dir", nargs="?", help="directory to add (default: CWD)")
 
-Examples:
-  coding-cave                          run claude in current project
-  coding-cave shell                    get a shell (joins running session if any)
-  coding-cave add ~/code/my-project    register a project
-  coding-cave pull                     pull commits from current project
-  coding-cave push                     push host commits into cave
-  coding-cave reset                    wipe overlay to match host
-  coding-cave status                   show what's running\
-"""
+    p_status = sub.add_parser("status", help="show projects and running sessions")
+    p_status.add_argument("-a", "--all", action="store_true", help="show all projects")
 
+    p_pull = sub.add_parser("pull", help="pull commits from cave")
+    p_pull.add_argument("project", nargs="?", help="project slug (default: CWD project)")
+    p_pull.add_argument("--force", action="store_true", help="adopt cave's history")
 
-def print_help():
-    print(HELP, file=sys.stderr)
+    p_push = sub.add_parser("push", help="push host commits into cave")
+    p_push.add_argument("project", nargs="?", help="project slug (default: CWD project)")
+    p_push.add_argument("--force", action="store_true", help="skip unpulled commit check")
+
+    p_reset = sub.add_parser("reset", help="wipe overlay + gitdir to match host")
+    p_reset.add_argument("project", nargs="?", help="project slug (default: CWD project)")
+
+    p_remove = sub.add_parser("remove", help="unregister a project and delete data")
+    p_remove.add_argument("project", nargs="?", help="project slug (default: CWD project)")
+
+    return parser
 
 
 def main():
-    commands = {
-        "agent": cmd_agent,
-        "shell": cmd_shell,
-        "add": cmd_add,
-        "status": cmd_status,
-        "pull": cmd_pull,
-        "push": cmd_push,
-        "reset": cmd_reset,
-        "remove": cmd_remove,
-    }
+    parser = build_parser()
+    parsed = parser.parse_args()
 
-    args = sys.argv[1:]
-    gpu = "--gpu" in args
-    if gpu:
-        args = [a for a in args if a != "--gpu"]
-
-    if not args:
-        cmd_agent([], gpu=gpu)
-        return
-
-    cmd = args[0]
-    if cmd in ("help", "--help", "-h"):
-        print_help()
-        return
-
-    if cmd in commands:
-        if cmd in ("agent", "shell"):
-            commands[cmd](args[1:], gpu=gpu)
-        else:
-            commands[cmd](args[1:])
-    else:
-        print(f"Unknown command: {cmd}", file=sys.stderr)
-        print("Run 'coding-cave help' for usage.", file=sys.stderr)
-        sys.exit(1)
+    if parsed.command is None:
+        cmd_agent([], gpu=parsed.gpu)
+    elif parsed.command == "agent":
+        cmd_agent([], gpu=parsed.gpu)
+    elif parsed.command == "shell":
+        cmd_shell([], gpu=parsed.gpu)
+    elif parsed.command == "add":
+        cmd_add([parsed.dir] if parsed.dir else [])
+    elif parsed.command == "status":
+        cmd_status(["--all"] if parsed.all else [])
+    elif parsed.command == "pull":
+        args = []
+        if parsed.project:
+            args.append(parsed.project)
+        if parsed.force:
+            args.append("--force")
+        cmd_pull(args)
+    elif parsed.command == "push":
+        args = []
+        if parsed.project:
+            args.append(parsed.project)
+        if parsed.force:
+            args.append("--force")
+        cmd_push(args)
+    elif parsed.command == "reset":
+        cmd_reset([parsed.project] if parsed.project else [])
+    elif parsed.command == "remove":
+        cmd_remove([parsed.project] if parsed.project else [])
 
 
 if __name__ == "__main__":
