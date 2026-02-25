@@ -269,7 +269,7 @@ def initialize_gitdir(slug, project_dir):
     subprocess.run(
         ["git", "clone", "--no-checkout", "--local", "--quiet",
          str(project_dir), str(tmpclone)],
-        check=True,
+        check=True, capture_output=True,
     )
     (tmpclone / ".git").rename(gitdir)
     tmpclone.rmdir()
@@ -1249,6 +1249,9 @@ def project_sync_status(slug, source):
     proj_state = PROJECTS_DIR / slug
     gitdir = proj_state / "gitdir"
 
+    if not project_dir.is_dir():
+        return "missing"
+
     if not gitdir.exists():
         return "no gitdir"
 
@@ -1260,6 +1263,8 @@ def project_sync_status(slug, source):
         ["git", "--git-dir", str(gitdir), "rev-parse", "HEAD"],
         capture_output=True, text=True,
     )
+    if host_head.returncode != 0 and cave_head.returncode != 0:
+        return None  # both empty, nothing to compare
     if host_head.returncode != 0 or cave_head.returncode != 0:
         return "?"
 
