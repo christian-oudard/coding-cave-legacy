@@ -326,6 +326,31 @@ def try_unmount(path):
     return False
 
 
+def sync_cave_ref(slug, branch, commit_hash):
+    """Update a branch ref inside the cave to point at commit_hash.
+
+    If the cave is running, nsenter to write from inside so the kernel
+    overlayfs page cache is updated. Otherwise write to the upper dir
+    directly (takes effect on next cave start).
+    """
+    proj_state = PROJECTS_DIR / slug
+    ref_path = f"/projects/{slug}/.git/refs/heads/{branch}"
+
+    pid = cave_pid()
+    if pid is not None:
+        subprocess.run([
+            "nsenter", f"--target={pid}",
+            "--user", "--mount", "--pid",
+            "--preserve-credentials",
+            "--", "/bin/bash", "-c",
+            f"echo '{commit_hash}' > {ref_path}",
+        ], capture_output=True)
+    else:
+        ref_file = proj_state / "upper" / ".git" / "refs" / "heads" / branch
+        if ref_file.exists():
+            ref_file.write_text(commit_hash + "\n")
+
+
 def mount_project_overlay(slug):
     """Mount a project's overlay using fuse-overlayfs. Returns (merged, source)."""
     projects = load_projects()
@@ -475,15 +500,11 @@ def pull_project(slug):
     # Point the cave's branch at the rebased commits so both repos share
     # the same history. Without this, the cave retains the pre-rebase
     # hashes and the next pull re-applies already-pulled commits.
-    # Write directly to the upper dir — fuse-overlayfs update-ref can't
-    # reliably sync with the kernel overlayfs inside the cave.
     host_head = subprocess.run(
         git + ["rev-parse", "HEAD"],
         capture_output=True, text=True, check=True,
     ).stdout.strip()
-    ref_file = proj_state / "upper" / ".git" / "refs" / "heads" / branch
-    if ref_file.exists():
-        ref_file.write_text(host_head + "\n")
+    sync_cave_ref(slug, branch, host_head)
 
 
 def reset_project_overlay(slug):
@@ -749,23 +770,21 @@ def push_project(slug):
 
     try_unmount(merged)
 
-    # Write host HEAD directly to the upper dir ref file. The kernel
-    # overlayfs inside the cave may have page-cached ref writes that
-    # haven't flushed to disk, making the fuse-overlayfs view stale.
-    # Writing here ensures the on-disk state matches the host.
+    # Sync the cave's live ref. Writes to the upper dir from outside
+    # don't invalidate the kernel overlayfs page cache inside the cave,
+    # so nsenter and write from inside if the cave is running.
     host_head = subprocess.run(
         ["git", "-C", str(project_dir), "rev-parse", "HEAD"],
         capture_output=True, text=True,
     )
-    branch_result = subprocess.run(
-        ["git", "-C", str(project_dir), "rev-parse", "--abbrev-ref", "HEAD"],
-        capture_output=True, text=True,
-    )
-    if host_head.returncode == 0 and branch_result.returncode == 0:
-        branch = branch_result.stdout.strip()
-        ref_file = proj_state / "upper" / ".git" / "refs" / "heads" / branch
-        if ref_file.exists():
-            ref_file.write_text(host_head.stdout.strip() + "\n")
+    if host_head.returncode == 0:
+        head = host_head.stdout.strip()
+        branch_result = subprocess.run(
+            ["git", "-C", str(project_dir), "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True,
+        )
+        branch = branch_result.stdout.strip() if branch_result.returncode == 0 else "main"
+        sync_cave_ref(slug, branch, head)
 
     if count == "0":
         print(f"No commits to push to {slug}.", file=sys.stderr)
