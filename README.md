@@ -56,6 +56,20 @@ The cave starts automatically on first entry. Your project directory is mounted 
 
 If you're not in a registered project directory, you'll be prompted to add it.
 
+Use `-c` to continue the most recent conversation, or `-r` to pick one to resume:
+
+```bash
+coding-cave -c
+coding-cave -r
+```
+
+Any arguments after `--` are passed directly to the `claude` CLI:
+
+```bash
+coding-cave -- --model sonnet --effort low
+coding-cave -c -- --verbose
+```
+
 ### Multiple agents
 
 Open another terminal and enter the same cave:

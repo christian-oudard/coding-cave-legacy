@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -960,7 +961,7 @@ def reset_project_overlay(slug):
 
 # --- Commands ---
 
-def cmd_agent(args, gpu=False):
+def cmd_agent(args, gpu=False, continue_session=False, resume=False, claude_args=None):
     """Start a new agent session."""
     global_config = load_global_config()
     setup_env(global_config)
@@ -971,9 +972,17 @@ def cmd_agent(args, gpu=False):
         project = ensure_project(project_dir)
 
     workdir = cave_workdir(project)
+    claude_parts = ["claude", "--dangerously-skip-permissions"]
+    if continue_session:
+        claude_parts.append("--continue")
+    elif resume:
+        claude_parts.append("--resume")
+    if claude_args:
+        claude_parts.extend(claude_args)
+    claude_cmd = shlex.join(claude_parts)
     command = [
         "--", "/bin/bash", "-c",
-        f"cd {workdir} && exec claude --dangerously-skip-permissions",
+        f"cd {workdir} && exec {claude_cmd}",
     ]
 
     start_session(project, command, gpu=gpu)
@@ -1345,12 +1354,16 @@ def cmd_status(args):
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="coding-cave",
-        description="Sandboxed Claude Code agent sessions with Nix environments.",
+        description="Sandboxed Claude Code agent sessions with Nix environments. Use -- to pass extra arguments to claude.",
     )
     parser.add_argument("--gpu", action="store_true", help="enable GPU access")
+    parser.add_argument("-c", "--continue", action="store_true", dest="continue_session", help="continue most recent conversation")
+    parser.add_argument("-r", "--resume", action="store_true", help="resume a conversation (interactive picker)")
     sub = parser.add_subparsers(dest="command")
 
-    sub.add_parser("agent", help="start a new agent session")
+    p_agent = sub.add_parser("agent", help="start a new agent session")
+    p_agent.add_argument("-c", "--continue", action="store_true", dest="continue_session", help="continue most recent conversation")
+    p_agent.add_argument("-r", "--resume", action="store_true", help="resume a conversation (interactive picker)")
     sub.add_parser("shell", help="start a shell or join a running session")
 
     p_add = sub.add_parser("add", help="register a project")
@@ -1381,13 +1394,21 @@ def build_parser():
 
 
 def main():
+    # Split on -- to extract claude passthrough args
+    argv = sys.argv[1:]
+    claude_args = []
+    if "--" in argv:
+        idx = argv.index("--")
+        claude_args = argv[idx + 1:]
+        argv = argv[:idx]
+
     parser = build_parser()
-    parsed = parser.parse_args()
+    parsed = parser.parse_args(argv)
 
     if parsed.command is None:
-        cmd_agent([], gpu=parsed.gpu)
+        cmd_agent([], gpu=parsed.gpu, continue_session=parsed.continue_session, resume=parsed.resume, claude_args=claude_args)
     elif parsed.command == "agent":
-        cmd_agent([], gpu=parsed.gpu)
+        cmd_agent([], gpu=parsed.gpu, continue_session=parsed.continue_session, resume=parsed.resume, claude_args=claude_args)
     elif parsed.command == "shell":
         cmd_shell([], gpu=parsed.gpu)
     elif parsed.command == "add":
