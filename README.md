@@ -24,59 +24,76 @@ Create `~/.config/coding-cave/config.toml`:
 [credentials]
 claude-oauth-token = "<your-token>"
 
-[git]
-name = "Your Name"
-email = "you@example.com"
+[sandbox]
+home-size-gb = 32  # default 32
 ```
 
-### Build
+### Install
 
 ```bash
-nix build
+nix profile install .
+```
+
+### Update after changes
+
+```bash
+nix profile upgrade coding-cave
+```
+
+Or run directly without installing:
+
+```bash
+nix run
 ```
 
 ## Usage
 
-### Launch Claude Code in sandbox
+### Work on a project
 
 ```bash
+cd ./my-project
 codingcave
 ```
 
-Launches Claude Code with `--dangerously-skip-permissions` inside a bwrap namespace. Ephemeral home directory, full network access, dev tools on PATH.
+Mounts the current directory as a read-only overlay inside a bwrap sandbox and launches Claude Code. All writes go to a workspace directory (`~/.local/share/coding-cave/workspaces/`). The original project is never modified.
 
-### Run an agent on a project
+### Pull changes back
+
+```bash
+cd ./my-project
+codingcave pull
+```
+
+Mounts the most recent workspace, rebases the agent's commits onto your branch, re-authoring each with your identity and GPG signature, then cleans up. If there are conflicts, the overlay stays mounted for manual resolution.
+
+### Run an agent with a task
 
 ```bash
 codingcave run ./my-project "add unit tests for the auth module"
 ```
 
-Creates a git worktree on a dedicated branch (e.g., `agent/add-unit-tests-for-the-auth-module-20260218-091500`), launches Claude Code with the task inside the sandbox, and leaves the work on the branch for review.
+Same overlay workspace as the default command, but targets a specific directory and passes a task prompt to Claude Code in non-interactive mode.
 
-### Interactive shell in a project
-
-```bash
-codingcave shell ./my-project
-```
-
-Drops into a bash shell inside the sandbox with the project directory mounted read-write. No worktree — edits go to the working directory directly.
-
-### Clean up a worktree
+### Review a workspace manually
 
 ```bash
-codingcave cleanup ./my-project agent/add-unit-tests-20260218-091500
+codingcave review
 ```
 
-Removes the worktree and deletes the branch.
+Lists available workspaces.
+
+```bash
+codingcave review <workspace>
+```
+
+Mounts the overlay workspace for manual inspection. The mounted directory is a fully functional git repo — the agent's commits are visible on top of your original history.
+
 
 ## Per-project configuration
 
 Add `.claude-sandbox.toml` to a project:
 
 ```toml
-[git]
-branch-prefix = "agent"
-
 [environment]
 DATABASE_URL = "postgresql://localhost/dev"
 ```
@@ -99,7 +116,9 @@ Two-layer isolation:
 1. **bwrap namespace** — the security boundary. Clears host environment, hides host home directory, provides ephemeral filesystems.
 2. **Nix** — reproducible environments. All tools delivered via the Nix store.
 
-A Python wrapper (`wrapper.py`) reads config, creates git worktrees, and sets up environment variables. The jail definition (`flake.nix`) uses jail.nix combinators to construct the bwrap invocation with persistent state bind-mounts, runtime-conditional workspace mounting, and an entry wrapper that launches Claude Code.
+A Python wrapper (`wrapper.py`) reads config, creates overlay workspaces, and sets up environment variables. The jail definition (`flake.nix`) uses jail.nix combinators to construct the bwrap invocation with persistent state bind-mounts, overlay-based workspace mounting, and an entry wrapper that launches Claude Code.
+
+The project directory is mounted as the read-only lower layer of a bwrap overlay. Writes go to an upper directory on the host (`~/.local/share/coding-cave/workspaces/`). The original project is never modified. After the sandbox exits, `pull` uses fuse-overlayfs to mount the workspace, pulls changes via git, and cleans up. For manual inspection, `review` mounts the workspace without pulling.
 
 Credentials are never written to disk — they're read from `config.toml` by the wrapper and forwarded via environment variables through `--clearenv`/`--setenv`.
 

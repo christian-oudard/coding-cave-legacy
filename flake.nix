@@ -14,8 +14,19 @@
 
     defaultClaudeSettings = ./claude-settings.json;
 
+    jailHome = "/home/coding-cave";
+
     sandbox = jail "codingcave" pkgs.bashInteractive (with jail.combinators; [
       (set-hostname "coding-cave")
+      (unsafe-add-raw-args "--symlink /bin/sh /bin/bash")
+      (set-env "SHELL" "/bin/bash")
+      (set-env "HOME" jailHome)
+      (try-fwd-env "CODING_CAVE_HOME_SIZE")
+      # Ephemeral home (tmpfs, backed by RAM + swap). Size from config, default 32G.
+      (add-runtime ''
+        HOME_SIZE="''${CODING_CAVE_HOME_SIZE:-34359738368}"
+        RUNTIME_ARGS+=(--size "$HOME_SIZE" --tmpfs ${jailHome})
+      '')
       network
       no-new-session
 
@@ -35,21 +46,24 @@
         pkgs.file
       ])
 
+      # Git identity (throwaway — pull re-authors commits outside the sandbox)
+      (set-env "GIT_AUTHOR_NAME" "coding-cave")
+      (set-env "GIT_AUTHOR_EMAIL" "coding-cave@noreply")
+      (set-env "GIT_COMMITTER_NAME" "coding-cave")
+      (set-env "GIT_COMMITTER_EMAIL" "coding-cave@noreply")
+
       # Credential forwarding
       (try-fwd-env "CLAUDE_CODE_OAUTH_TOKEN")
       (try-fwd-env "ANTHROPIC_API_KEY")
       (try-fwd-env "GITHUB_TOKEN")
-      (try-fwd-env "GIT_AUTHOR_NAME")
-      (try-fwd-env "GIT_AUTHOR_EMAIL")
-      (try-fwd-env "GIT_COMMITTER_NAME")
-      (try-fwd-env "GIT_COMMITTER_EMAIL")
 
-      # Workspace and task forwarding
-      (try-fwd-env "CODING_CAVE_WORKSPACE")
+      # Task forwarding (used by wrap-entry inside the jail)
       (try-fwd-env "CODING_CAVE_TASK")
+      # CODING_CAVE_WORKSPACE, OVERLAY_UPPER, OVERLAY_WORK are read by
+      # add-runtime on the host side only — not forwarded into the jail.
 
       # Persist Claude Code state across sandbox runs.
-      # Bind workspace directory if set.
+      # Mount workspace as overlay (project is read-only lower layer).
       (add-runtime ''
         CAVE_DATA="$HOME/.local/share/coding-cave"
         CLAUDE_STATE="$CAVE_DATA/claude-state"
@@ -59,25 +73,22 @@
           cp ${defaultClaudeSettings} "$CLAUDE_STATE/settings.json"
           printf '%s' '{"hasCompletedOnboarding":true,"theme":"dark","effortCalloutDismissed":true}' > "$CLAUDE_JSON"
         fi
-        RUNTIME_ARGS+=(--bind "$CLAUDE_STATE" "$HOME/.claude")
-        RUNTIME_ARGS+=(--bind "$CLAUDE_JSON" "$HOME/.claude.json")
+        RUNTIME_ARGS+=(--bind "$CLAUDE_STATE" ${jailHome}/.claude)
+        RUNTIME_ARGS+=(--bind "$CLAUDE_JSON" ${jailHome}/.claude.json)
 
-        if [ -n "''${CODING_CAVE_WORKSPACE:-}" ] && [ -d "''${CODING_CAVE_WORKSPACE:-}" ]; then
-          RUNTIME_ARGS+=(--bind "$CODING_CAVE_WORKSPACE" "$CODING_CAVE_WORKSPACE")
+        if [ -n "''${CODING_CAVE_OVERLAY_UPPER:-}" ]; then
+          RUNTIME_ARGS+=(--overlay-src "$CODING_CAVE_WORKSPACE" --overlay "$CODING_CAVE_OVERLAY_UPPER" "$CODING_CAVE_OVERLAY_WORK" /workspace)
+        elif [ -n "''${CODING_CAVE_WORKSPACE:-}" ] && [ -d "''${CODING_CAVE_WORKSPACE:-}" ]; then
+          RUNTIME_ARGS+=(--bind "$CODING_CAVE_WORKSPACE" /workspace)
         fi
       '')
 
-      # Forward CODING_CAVE_SHELL to control entry mode
-      (try-fwd-env "CODING_CAVE_SHELL")
-
-      # Inside the jail: skip onboarding, cd to workspace, launch claude or shell
+      # Inside the jail: cd to workspace, launch claude
       (wrap-entry (entry: ''
-        if [ -n "''${CODING_CAVE_WORKSPACE:-}" ]; then
-          cd "$CODING_CAVE_WORKSPACE"
+        if [ -d /workspace ]; then
+          cd /workspace
         fi
-        if [ -n "''${CODING_CAVE_SHELL:-}" ]; then
-          ${entry}
-        elif [ -n "''${CODING_CAVE_TASK:-}" ]; then
+        if [ -n "''${CODING_CAVE_TASK:-}" ]; then
           exec claude --dangerously-skip-permissions -p "$CODING_CAVE_TASK"
         else
           exec claude --dangerously-skip-permissions
@@ -90,6 +101,7 @@
     };
 
     wrapper = pkgs.writeShellScriptBin "codingcave" ''
+      export PATH="${pkgs.lib.makeBinPath [pkgs.fuse-overlayfs pkgs.fuse3]}:$PATH"
       exec ${pkgs.python3}/bin/python3 ${wrapperScript} "$@"
     '';
 
