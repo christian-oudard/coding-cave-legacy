@@ -24,17 +24,55 @@ The cave's `.git` is not on the overlay. It's a separate clone (gitdir) bind-mou
 
 The gitdir is the shared channel between host and cave for committed work. `pull` fetches from it; `push` updates it.
 
-## Pull preserves remote-pushed history
+## Pull
 
-`coding-cave pull` must not create commits that diverge from an already-pushed remote branch:
+Pull brings cave work to the host. It handles two kinds of changes: commits and uncommitted working tree modifications.
+
+### Committed changes
+
+Pull fetches from the cave's gitdir, rebases cave commits onto the host branch, and re-authors them to replace the throwaway cave identity (`coding-cave <coding-cave@noreply>`) with the host user's git identity. After rebasing, it syncs the gitdir back so both repos share the same commit hashes.
+
+The rebase uses `--no-reapply-cherry-picks` to skip commits already present on the host. Conflicts pause the rebase and print instructions for manual resolution.
+
+### Working tree changes
+
+After pulling commits, pull checks for uncommitted changes in the cave (tracked/staged diffs against HEAD). If found, it generates a patch and applies it to the host working tree, staging the result. This is refused if the host already has uncommitted changes, to avoid conflicts.
+
+### History rewrites require --force
+
+Pull must not silently rewrite the host's history. When the cave rewrites history (squash, amend, rebase), pull detects this via `refs/cave-sync` — a marker of the last commit both repos agreed on. If the host hasn't moved since the last sync but the merge-base is older, the cave rewrote history.
+
+Without `--force`, pull warns and exits:
+
+    Cave rewrote history for project (5 host commit(s) → 1 cave commit(s)).
+    Run 'coding-cave pull --force' to adopt the cave's history.
+
+With `--force`, pull adopts the cave's history directly (`reset --hard`) rather than rebasing. This preserves commit hashes that may already exist on a remote, keeping the host fast-forwardable from its tracking branch.
+
+### Preserving remote-pushed history
+
+Pull must not create commits that diverge from an already-pushed remote branch:
 
 - Commits previously pulled and pushed to a remote keep their exact hashes in subsequent pulls.
-- When the cave rewrites history (squash, amend, rebase), pull replaces the rewritten range while keeping ancestor commits intact.
 - The result is always fast-forwardable from the remote tracking branch (assuming no independent host-side changes).
 
-Pull detects history rewrites via `refs/cave-sync`, a marker of the last commit both repos agreed on. When the host hasn't moved since the last sync but the merge-base is older, the cave rewrote history. In that case, pull adopts the cave's history directly (`reset --hard`) rather than rebasing, which would re-author commits into new hashes.
+This is why the force path uses `reset --hard` (adopting exact commit objects) rather than rebase+re-author (which creates new hashes).
 
-For normal appends (no rewrite), pull rebases cave commits onto the host branch with `--reset-author` to replace the throwaway cave identity with the host user's.
+## Push
+
+Push brings host state to the cave. It updates the gitdir's refs and objects to match the host, then optionally transfers uncommitted working tree changes.
+
+### Safety: unpulled cave commits
+
+Push refuses if the cave has commits that haven't been pulled yet, since updating the gitdir would lose them. It shows the unpulled commits and suggests `coding-cave pull` first, or `--force` to override.
+
+### Working tree changes
+
+After updating commits, push checks for uncommitted host changes (tracked/staged diffs against HEAD). If found, it generates a patch and applies it to the cave overlay, staging the result. This is refused if the cave already has uncommitted changes, to avoid conflicts.
+
+### Immediate visibility
+
+The gitdir is bind-mounted into the cave, so push updates are immediately visible to running agents. No cave restart needed.
 
 ## Credential isolation
 

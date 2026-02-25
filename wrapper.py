@@ -696,10 +696,21 @@ def pull_project(slug, force=False):
 
     # Detect history rewrite: if cave-sync exists, host hasn't moved since
     # last sync, but merge-base is older, the cave rewrote history.
-    # Adopt the cave's history directly (no rebase/re-author) to preserve
-    # commit hashes that may already be on a remote.
+    # Require --force to adopt rewritten history.
     if (cave_sync_hash and cave_sync_hash == host_head
             and merge_base != host_head):
+        if not force:
+            host_count = subprocess.run(
+                git + ["rev-list", "--count", f"{merge_base}..HEAD"],
+                capture_output=True, text=True, check=True,
+            ).stdout.strip()
+            print(f"Cave rewrote history for {slug} "
+                  f"({host_count} host commit(s) → {count} cave commit(s)).",
+                  file=sys.stderr)
+            print(f"Run 'coding-cave pull --force' to adopt the cave's history.",
+                  file=sys.stderr)
+            return
+
         stash_result = subprocess.run(
             git + ["stash", "--include-untracked"],
             capture_output=True, text=True,
