@@ -450,22 +450,31 @@ def enter_session(session_info, shell_type):
 
     shell_bin = "/bin/zsh" if shell_type == "zsh" else "/bin/bash"
 
-    # Read the cave environment from PID 1's environ (kernel-backed, immutable)
-    bash_cmd = (
-        "while IFS= read -r -d '' line; do export \"$line\"; done < /proc/1/environ; "
-        f"cd /projects && exec {shell_bin} -l"
-    )
+    # Read cave environment from the bwrap child process (has --setenv vars applied).
+    # PID 1 is bwrap itself (started with --clearenv), so its environ lacks cave vars.
+    try:
+        environ_data = Path(f"/proc/{child_pid}/environ").read_bytes()
+        cave_env = {}
+        for entry in environ_data.split(b'\0'):
+            if b'=' in entry:
+                k, v = entry.split(b'=', 1)
+                cave_env[k.decode()] = v.decode()
+    except (FileNotFoundError, PermissionError):
+        cave_env = {}
 
-    # Minimal env for nsenter — bash needs these to start
-    NSENTER_ENV_ALLOWLIST = {"TERM", "COLORTERM", "HOME", "PATH", "SHELL"}
-    filtered_env = {k: v for k, v in os.environ.items() if k in NSENTER_ENV_ALLOWLIST}
+    # Merge: cave env as base, override TERM/COLORTERM from host
+    filtered_env = dict(cave_env)
+    for k in ("TERM", "COLORTERM"):
+        if k in os.environ:
+            filtered_env[k] = os.environ[k]
 
     proc = subprocess.Popen([
         "nsenter",
         f"--target={child_pid}",
         "--user", "--mount", "--pid", "--uts", "--ipc",
         "--preserve-credentials",
-        "--", "/bin/bash", "-c", bash_cmd,
+        f"--wd=/projects",
+        "--", shell_bin, "-l",
     ], env=filtered_env)
 
     try:
