@@ -8,11 +8,12 @@
     };
   };
 
-  outputs = { nixpkgs, jail-nix, claude-code, ... }: let
+  outputs = { self, nixpkgs, jail-nix, claude-code, ... }: let
     pkgs = import nixpkgs { system = "x86_64-linux"; };
     jail = jail-nix.lib.init pkgs;
 
     defaultClaudeSettings = ./claude-settings.json;
+    version = self.shortRev or self.dirtyShortRev or "dev";
 
     jailHome = "/home/cave-coder";
 
@@ -23,7 +24,7 @@
       (unsafe-add-raw-args "--symlink ${pkgs.zsh}/bin/zsh /bin/zsh")
       (set-env "SHELL" "/bin/bash")
       (unsafe-add-raw-args "--dev-bind /dev/pts /dev/pts")
-      (set-env "CODING_CAVE" "1")
+      (set-env "CODING_CAVE_VERSION" version)
       (set-env "HOME" jailHome)
       (try-fwd-env "CODING_CAVE_HOME_SIZE")
       # Ephemeral home (tmpfs, backed by RAM + swap). Size from config, default 32G.
@@ -121,16 +122,22 @@
           RUNTIME_ARGS+=(--ro-bind "$CODING_CAVE_BASH_PROFILE" ${jailHome}/.bash_profile)
         fi
 
-        # Mount project overlays from JSON manifest
+        # Mount projects from JSON manifest. The wrapper pre-mounts
+        # fuse-overlayfs at merged/ (handles unmapped GIDs that kernel
+        # overlayfs can't copy-up in user namespaces). Fall back to
+        # kernel overlayfs if fuse-overlayfs isn't mounted.
         if [ -n "''${CODING_CAVE_PROJECTS_MANIFEST:-}" ] && [ -f "''${CODING_CAVE_PROJECTS_MANIFEST}" ]; then
           while IFS=$'\t' read -r slug src; do
-            upper="$CAVE_DATA/projects/$slug/upper"
-            work="$CAVE_DATA/projects/$slug/work"
+            merged="$CAVE_DATA/projects/$slug/merged"
             gitdir="$CAVE_DATA/projects/$slug/gitdir"
-            mkdir -p "$upper" "$work"
-            RUNTIME_ARGS+=(--overlay-src "$src" --overlay "$upper" "$work" "/projects/$slug")
-            # Bind .git from a regular directory — overlayfs breaks git's
-            # atomic renames for index and ref updates in user namespaces.
+            if mountpoint -q "$merged" 2>/dev/null; then
+              RUNTIME_ARGS+=(--bind "$merged" "/projects/$slug")
+            else
+              upper="$CAVE_DATA/projects/$slug/upper"
+              work="$CAVE_DATA/projects/$slug/work"
+              mkdir -p "$upper" "$work"
+              RUNTIME_ARGS+=(--overlay-src "$src" --overlay "$upper" "$work" "/projects/$slug")
+            fi
             if [ -d "$gitdir" ]; then
               RUNTIME_ARGS+=(--bind "$gitdir" "/projects/$slug/.git")
             fi
@@ -180,6 +187,7 @@
     wrapperScript = pkgs.replaceVars ./wrapper.py {
       SANDBOX_BIN = "${sandbox}/bin/coding-cave";
       SANDBOX_GPU_BIN = "${sandboxGpu}/bin/coding-cave";
+      VERSION = version;
     };
 
     wrapper = pkgs.writeShellScriptBin "coding-cave" ''

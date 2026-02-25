@@ -41,7 +41,7 @@ The cave is a **persistent bwrap namespace** that survives across agent sessions
 - jail.nix over raw bwrap: composable combinators, nix store closure binding, fake-passwd
 - `--clearenv` with explicit credential forwarding only (auditable)
 - Persistent cave with `nsenter` for multi-agent: first invocation starts bwrap, subsequent invocations join via `nsenter`
-- bwrap overlay for project isolation — host project dir is read-only lower layer, writes go to upper dir
+- fuse-overlayfs for project isolation — kernel overlayfs in user namespaces can't copy-up files with unmapped GIDs (EOVERFLOW). The wrapper pre-mounts fuse-overlayfs on the host, and bwrap bind-mounts the merged dir. Falls back to kernel overlayfs if fuse-overlayfs isn't available.
 - `.git` on bind mount, not overlay — kernel overlayfs in user namespaces breaks atomic rename (git index, refs). A dedicated `gitdir/` is bind-mounted at `/projects/<slug>/.git` so git operations work normally inside the cave.
 - `/nix/store` overlay — host nix store as lower layer, cave-local upper for autonomous `nix shell` package management
 - `pull` fetches from gitdir (host filesystem), rebases to re-author (strips cave-coder identity), then syncs gitdir back

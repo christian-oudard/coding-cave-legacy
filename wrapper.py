@@ -17,6 +17,7 @@ except ImportError:
 
 SANDBOX_BIN = "@SANDBOX_BIN@"
 SANDBOX_GPU_BIN = "@SANDBOX_GPU_BIN@"
+VERSION = "@VERSION@"
 
 CAVE_DATA = Path.home() / ".local" / "share" / "coding-cave"
 CAVE_PID_FILE = CAVE_DATA / "cave.pid"
@@ -151,6 +152,11 @@ def start_cave(gpu=False):
             print(f"Syncing {slug}...", file=sys.stderr)
         initialize_gitdir(slug, Path(source))
 
+    # Mount fuse-overlayfs for all projects. Kernel overlayfs in user
+    # namespaces can't copy-up files with unmapped GIDs (EOVERFLOW).
+    # fuse-overlayfs runs in userspace and handles this correctly.
+    mount_project_overlays()
+
     # Project manifest for bwrap runtime
     os.environ["CODING_CAVE_PROJECTS_MANIFEST"] = str(PROJECTS_FILE)
     # Snapshot what's loaded so we know if a restart is needed later
@@ -219,6 +225,8 @@ def stop_cave():
 
     CAVE_PID_FILE.unlink(missing_ok=True)
     (CAVE_DATA / "bwrap.pid").unlink(missing_ok=True)
+
+    unmount_project_overlays()
 
 
 def enter_cave(pid, project=None, shell=None):
@@ -380,16 +388,40 @@ def mount_project_overlay(slug):
     if merged.is_mount():
         try_unmount(merged)
 
+    upper = proj_state / "upper"
     fuse_work = proj_state / "fuse-work"
+    upper.mkdir(parents=True, exist_ok=True)
     fuse_work.mkdir(exist_ok=True)
 
     subprocess.run([
         "fuse-overlayfs",
-        "-o", f"lowerdir={project_dir},upperdir={proj_state / 'upper'},workdir={fuse_work}",
+        "-o", f"lowerdir={project_dir},upperdir={upper},workdir={fuse_work}",
         str(merged),
     ], check=True)
 
     return merged, project_dir
+
+
+def mount_project_overlays():
+    """Mount fuse-overlayfs for all registered projects.
+
+    Called before starting bwrap so the runtime script can bind-mount
+    the merged dirs. fuse-overlayfs handles unmapped GIDs that kernel
+    overlayfs cannot copy-up in user namespaces (EOVERFLOW).
+    """
+    for slug in load_projects():
+        merged = PROJECTS_DIR / slug / "merged"
+        if merged.exists() and merged.is_mount():
+            continue
+        mount_project_overlay(slug)
+
+
+def unmount_project_overlays():
+    """Unmount all project fuse-overlayfs mounts."""
+    for slug in load_projects():
+        merged = PROJECTS_DIR / slug / "merged"
+        if merged.exists() and merged.is_mount():
+            try_unmount(merged)
 
 
 def pull_project(slug):
@@ -859,10 +891,10 @@ def cmd_status(args):
     """Show cave status and projects."""
     pid = cave_pid()
     if pid is None:
-        print("Cave: stopped", file=sys.stderr)
+        print(f"Cave: stopped (version {VERSION})", file=sys.stderr)
     else:
         sessions = active_session_count()
-        print(f"Cave: running (PID {pid}), {sessions} active session(s)", file=sys.stderr)
+        print(f"Cave: running (PID {pid}, version {VERSION}), {sessions} active session(s)", file=sys.stderr)
 
     projects = list_projects()
     if projects:
