@@ -263,6 +263,14 @@ def initialize_gitdir(slug, project_dir):
         ["git", "-C", str(gitdir), "remote", "remove", "origin"],
         capture_output=True,
     )
+    # Disable hooks to prevent cross-session code execution
+    subprocess.run(
+        ["git", "--git-dir", str(gitdir), "config", "core.hooksPath", "/dev/null"],
+        capture_output=True,
+    )
+    hooks_dir = gitdir / "hooks"
+    if hooks_dir.exists():
+        shutil.rmtree(hooks_dir)
     subprocess.run(
         ["git", "--git-dir", str(gitdir), "read-tree", "HEAD"],
         check=True,
