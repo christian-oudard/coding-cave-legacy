@@ -33,6 +33,7 @@ The cave is a **persistent bwrap namespace** that survives across agent sessions
 - `projects.json` — project registry (slug → source path)
 - `loaded-projects.json` — snapshot of projects loaded at cave start
 - `projects/<slug>/upper/`, `work/`, `fuse-work/`, `merged/` — overlay dirs per project
+- `projects/<slug>/gitdir/` — bind-mounted at `/projects/<slug>/.git` inside cave (regular filesystem, not on overlayfs)
 - `nix-overlay/upper/`, `work/` — writable nix store overlay
 
 ### Key Design Decisions
@@ -41,9 +42,10 @@ The cave is a **persistent bwrap namespace** that survives across agent sessions
 - `--clearenv` with explicit credential forwarding only (auditable)
 - Persistent cave with `nsenter` for multi-agent: first invocation starts bwrap, subsequent invocations join via `nsenter`
 - bwrap overlay for project isolation — host project dir is read-only lower layer, writes go to upper dir
+- `.git` on bind mount, not overlay — kernel overlayfs in user namespaces breaks atomic rename (git index, refs). A dedicated `gitdir/` is bind-mounted at `/projects/<slug>/.git` so git operations work normally inside the cave.
 - `/nix/store` overlay — host nix store as lower layer, cave-local upper for autonomous `nix shell` package management
-- `fuse-overlayfs` for pulling — mounts overlay outside the cave as a git repo, fetches commits back to host
-- `pull` re-authors commits (strips cave-coder identity) via `rebase --exec`
+- `pull` fetches from gitdir (host filesystem), rebases to re-author (strips cave-coder identity), then syncs gitdir back
+- `push` updates gitdir from host, then nsenter to reset working tree (or wipes overlay if stopped)
 - Auto-stop: cave shuts down when the last session exits (via `fork` + `stop_cave` in `enter_cave`)
 - GPU access opt-in via `--gpu` flag (two separate sandbox derivations)
 - CWD-based project detection: running `coding-cave` from inside a registered project dir auto-selects it; from an unregistered dir, prompts to add it
@@ -54,9 +56,9 @@ The cave is a **persistent bwrap namespace** that survives across agent sessions
 coding-cave [--gpu]                   enter cave, run claude (auto-detects project from CWD)
 coding-cave shell [--gpu]             enter cave with user's shell
 coding-cave add [dir]                 register a project (default: CWD)
-coding-cave pull [project]            pull commits from overlay (default: CWD project, or all)
-coding-cave push [project]            push host commits into cave (live)
-coding-cave reset [project]           wipe overlay to match host (cave must be stopped)
+coding-cave pull [project]            pull commits from cave gitdir, re-author
+coding-cave push [project]            make cave identical to host (clobbers cave)
+coding-cave reset [project]           wipe overlay + gitdir to match host (cave must be stopped)
 coding-cave remove [project]          unregister a project and delete overlay data
 coding-cave status                    show cave status and registered projects
 coding-cave help                      show usage help

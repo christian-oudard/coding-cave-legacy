@@ -126,8 +126,14 @@
           while IFS=$'\t' read -r slug src; do
             upper="$CAVE_DATA/projects/$slug/upper"
             work="$CAVE_DATA/projects/$slug/work"
+            gitdir="$CAVE_DATA/projects/$slug/gitdir"
             mkdir -p "$upper" "$work"
             RUNTIME_ARGS+=(--overlay-src "$src" --overlay "$upper" "$work" "/projects/$slug")
+            # Bind .git from a regular directory — overlayfs breaks git's
+            # atomic renames for index and ref updates in user namespaces.
+            if [ -d "$gitdir" ]; then
+              RUNTIME_ARGS+=(--bind "$gitdir" "/projects/$slug/.git")
+            fi
           done < <(${pkgs.jq}/bin/jq -r 'to_entries[] | [.key, .value] | @tsv' "''${CODING_CAVE_PROJECTS_MANIFEST}")
         fi
       '')
