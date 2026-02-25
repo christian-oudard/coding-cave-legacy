@@ -23,6 +23,7 @@ except ImportError:
     import tomli as tomllib
 
 SANDBOX_BIN = "@SANDBOX_BIN@"
+SANDBOX_GPU_BIN = "@SANDBOX_GPU_BIN@"
 
 
 def load_global_config():
@@ -172,11 +173,12 @@ def create_workspace(project_dir, task=None):
     return workspace, name
 
 
-def launch_sandbox():
-    os.execv(SANDBOX_BIN, ["coding-cave"])
+def launch_sandbox(gpu=False):
+    binary = SANDBOX_GPU_BIN if gpu else SANDBOX_BIN
+    os.execv(binary, ["coding-cave"])
 
 
-def cmd_run(args):
+def cmd_run(args, gpu=False):
     if not args:
         print("Usage: coding-cave run <project-dir> [task...]", file=sys.stderr)
         sys.exit(1)
@@ -198,7 +200,7 @@ def cmd_run(args):
     if task:
         os.environ["CODING_CAVE_TASK"] = task
 
-    launch_sandbox()
+    launch_sandbox(gpu=gpu)
 
 
 
@@ -378,13 +380,21 @@ def cmd_pull(args):
 def main():
     commands = {"run": cmd_run, "pull": cmd_pull, "review": cmd_review}
 
-    if len(sys.argv) < 2:
-        cmd_run(["."])
+    args = sys.argv[1:]
+    gpu = "--gpu" in args
+    if gpu:
+        args = [a for a in args if a != "--gpu"]
+
+    if not args:
+        cmd_run(["."], gpu=gpu)
         return
 
-    cmd = sys.argv[1]
+    cmd = args[0]
     if cmd in commands:
-        commands[cmd](sys.argv[2:])
+        if cmd == "run":
+            commands[cmd](args[1:], gpu=gpu)
+        else:
+            commands[cmd](args[1:])
     else:
         print(f"Unknown command: {cmd}", file=sys.stderr)
         print("Commands: run, pull, review", file=sys.stderr)

@@ -16,7 +16,7 @@
 
     jailHome = "/home/coding-cave";
 
-    sandbox = jail "coding-cave" pkgs.bashInteractive (with jail.combinators; [
+    baseCombinators = with jail.combinators; [
       (set-hostname "coding-cave")
       (unsafe-add-raw-args "--symlink /bin/sh /bin/bash")
       (set-env "SHELL" "/bin/bash")
@@ -29,18 +29,6 @@
       '')
       network
       no-new-session
-      gpu
-      (add-runtime ''
-        for dev in /dev/nvidia{0,1,ctl,-uvm,-uvm-tools,-modeset}; do
-          [ -e "$dev" ] && RUNTIME_ARGS+=(--dev-bind "$dev" "$dev")
-        done
-        NVIDIA_SMI="$(command -v nvidia-smi 2>/dev/null || true)"
-        if [ -n "$NVIDIA_SMI" ]; then
-          NVIDIA_BIN="$(dirname "$(realpath "$NVIDIA_SMI")")"
-          RUNTIME_ARGS+=(--ro-bind "$NVIDIA_BIN" "$NVIDIA_BIN")
-          RUNTIME_ARGS+=(--symlink "$NVIDIA_BIN/nvidia-smi" /bin/nvidia-smi)
-        fi
-      '')
 
       # Dev tools
       (add-pkg-deps [
@@ -109,10 +97,29 @@
           exec claude --dangerously-skip-permissions
         fi
       ''))
-    ]);
+    ];
+
+    gpuCombinators = with jail.combinators; [
+      gpu
+      (add-runtime ''
+        for dev in /dev/nvidia{0,1,ctl,-uvm,-uvm-tools,-modeset}; do
+          [ -e "$dev" ] && RUNTIME_ARGS+=(--dev-bind "$dev" "$dev")
+        done
+        NVIDIA_SMI="$(command -v nvidia-smi 2>/dev/null || true)"
+        if [ -n "$NVIDIA_SMI" ]; then
+          NVIDIA_BIN="$(dirname "$(realpath "$NVIDIA_SMI")")"
+          RUNTIME_ARGS+=(--ro-bind "$NVIDIA_BIN" "$NVIDIA_BIN")
+          RUNTIME_ARGS+=(--symlink "$NVIDIA_BIN/nvidia-smi" /bin/nvidia-smi)
+        fi
+      '')
+    ];
+
+    sandbox = jail "coding-cave" pkgs.bashInteractive baseCombinators;
+    sandboxGpu = jail "coding-cave" pkgs.bashInteractive (baseCombinators ++ gpuCombinators);
 
     wrapperScript = pkgs.replaceVars ./wrapper.py {
       SANDBOX_BIN = "${sandbox}/bin/coding-cave";
+      SANDBOX_GPU_BIN = "${sandboxGpu}/bin/coding-cave";
     };
 
     wrapper = pkgs.writeShellScriptBin "coding-cave" ''
