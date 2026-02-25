@@ -58,7 +58,8 @@ coding-cave pull [project]            pull commits from cave gitdir, re-author
 coding-cave push [project]            push host commits into cave gitdir
 coding-cave reset [project]           wipe overlay + gitdir to match host (no running sessions)
 coding-cave remove [project]          unregister a project and delete overlay data
-coding-cave status                    show projects and running sessions
+coding-cave move <slug> <new-path>    update a project's source path (and slug if dir name changed)
+coding-cave status [-a/--all]         show projects and running sessions
 coding-cave help                      show usage help
 ```
 

@@ -1088,6 +1088,43 @@ def cmd_remove(args):
     print(f"Removed {slug} from the coding cave.", file=sys.stderr)
 
 
+def cmd_move(old_slug, new_path):
+    projects = load_projects()
+    if old_slug not in projects:
+        print(f"Project not found: {old_slug}", file=sys.stderr)
+        sys.exit(1)
+
+    new_path = Path(new_path).resolve()
+    if not new_path.is_dir():
+        print(f"Not a directory: {new_path}", file=sys.stderr)
+        sys.exit(1)
+
+    sessions = list_sessions(project=old_slug)
+    if sessions:
+        print(f"Project {old_slug} has {len(sessions)} running session(s).", file=sys.stderr)
+        print("Exit all sessions first.", file=sys.stderr)
+        sys.exit(1)
+
+    new_slug = new_path.name
+    if new_slug in projects and new_slug != old_slug:
+        print(f"A project named {new_slug} already exists.", file=sys.stderr)
+        sys.exit(1)
+
+    # Update registry
+    del projects[old_slug]
+    projects[new_slug] = str(new_path)
+    save_projects(projects)
+
+    # Rename state dirs if slug changed
+    if new_slug != old_slug:
+        old_state = PROJECTS_DIR / old_slug
+        new_state = PROJECTS_DIR / new_slug
+        if old_state.exists():
+            old_state.rename(new_state)
+
+    print(f"Moved {old_slug} -> {new_slug} ({new_path})", file=sys.stderr)
+
+
 def cmd_reset(args):
     slug = None
     if args:
@@ -1331,6 +1368,10 @@ def build_parser():
     p_remove = sub.add_parser("remove", help="unregister a project and delete data")
     p_remove.add_argument("project", nargs="?", help="project slug (default: CWD project)")
 
+    p_move = sub.add_parser("move", help="update a project's source path")
+    p_move.add_argument("old_slug", help="current project name")
+    p_move.add_argument("new_path", help="new directory path")
+
     return parser
 
 
@@ -1366,6 +1407,8 @@ def main():
         cmd_reset([parsed.project] if parsed.project else [])
     elif parsed.command == "remove":
         cmd_remove([parsed.project] if parsed.project else [])
+    elif parsed.command == "move":
+        cmd_move(parsed.old_slug, parsed.new_path)
 
 
 if __name__ == "__main__":
