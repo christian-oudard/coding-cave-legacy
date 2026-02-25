@@ -698,14 +698,22 @@ def pull_project(slug, force=False):
         "--exec", "git commit --amend --reset-author --allow-empty --no-edit",
     ])
     if result.returncode != 0:
-        print(f"Rebase conflicts for {slug}. Resolve, then:", file=sys.stderr)
-        print(f"  git -C {project_dir} rebase --continue", file=sys.stderr)
-        print(f"  git -C {project_dir} checkout {branch}", file=sys.stderr)
-        print(f"  git -C {project_dir} merge --ff-only _cave_pull", file=sys.stderr)
-        print(f"  git -C {project_dir} branch -d _cave_pull", file=sys.stderr)
-        if stashed:
-            print(f"  git -C {project_dir} stash pop", file=sys.stderr)
-        print(f"  coding-cave push {slug}", file=sys.stderr)
+        rebase_in_progress = ((git_dir / "rebase-merge").is_dir() or
+                              (git_dir / "rebase-apply").is_dir())
+        if rebase_in_progress:
+            print(f"Rebase conflicts for {slug}. Resolve, then:", file=sys.stderr)
+            print(f"  git -C {project_dir} rebase --continue", file=sys.stderr)
+            print(f"  git -C {project_dir} checkout {branch}", file=sys.stderr)
+            print(f"  git -C {project_dir} merge --ff-only _cave_pull", file=sys.stderr)
+            print(f"  git -C {project_dir} branch -d _cave_pull", file=sys.stderr)
+            if stashed:
+                print(f"  git -C {project_dir} stash pop", file=sys.stderr)
+            print(f"  coding-cave push {slug}", file=sys.stderr)
+        else:
+            print(f"Rebase failed for {slug}.", file=sys.stderr)
+            subprocess.run(git + ["branch", "-D", "_cave_pull"], capture_output=True)
+            if stashed:
+                subprocess.run(git + ["stash", "pop"], capture_output=True)
         sys.exit(1)
 
     subprocess.run(git + ["checkout", branch], check=True)
