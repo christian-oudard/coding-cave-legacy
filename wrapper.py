@@ -93,10 +93,21 @@ def lock_workspace(workspace):
     return fd
 
 
+def workspace_has_changes(workspace):
+    """Check if a workspace's upper dir contains real file changes."""
+    upper = workspace / "upper"
+    if not upper.exists():
+        return False
+    for entry in upper.iterdir():
+        return True
+    return False
+
+
 def create_workspace(project_dir, task=None):
     """Create overlay workspace directories. Returns (workspace_path, name).
 
-    Removes any existing workspaces for the same project first.
+    Removes any existing workspaces for the same project first,
+    but refuses if they contain unpulled changes.
     """
     project_dir = Path(project_dir).resolve()
     project_str = str(project_dir)
@@ -109,6 +120,11 @@ def create_workspace(project_dir, task=None):
             if source_file.exists() and source_file.read_text().strip() == project_str:
                 if is_workspace_locked(ws):
                     print(f"Already running: {ws.name}", file=sys.stderr)
+                    sys.exit(1)
+                if workspace_has_changes(ws):
+                    print(f"Unpulled changes in: {ws.name}", file=sys.stderr)
+                    print(f"Run 'codingcave pull' first, or remove manually:", file=sys.stderr)
+                    print(f"  rm -rf {ws}", file=sys.stderr)
                     sys.exit(1)
                 cleanup_workspace(ws)
 
@@ -191,13 +207,15 @@ def cmd_review(args):
     work = workspace / "work"
     merged = workspace / "merged"
 
-    subprocess.run([
-        "fuse-overlayfs",
-        "-o", f"lowerdir={source},upperdir={upper},workdir={work}",
-        str(merged),
-    ], check=True)
-
-    print(f"Mounted: {merged}", file=sys.stderr)
+    if merged.is_mount():
+        print(f"Already mounted: {merged}", file=sys.stderr)
+    else:
+        subprocess.run([
+            "fuse-overlayfs",
+            "-o", f"lowerdir={source},upperdir={upper},workdir={work}",
+            str(merged),
+        ], check=True)
+        print(f"Mounted: {merged}", file=sys.stderr)
     print(f"Source:  {source}", file=sys.stderr)
     print(file=sys.stderr)
     print(f"To pull changes into your project:", file=sys.stderr)
@@ -248,6 +266,14 @@ def cleanup_workspace(workspace):
     if merged.is_mount() and not try_unmount(merged):
         print(f"Could not unmount {merged}. Run: fusermount -u {merged}", file=sys.stderr)
         return
+    # Kernel overlayfs creates work/work with mode 000; fix before removing.
+    for dirpath, dirnames, _filenames in os.walk(workspace):
+        for d in dirnames:
+            p = Path(dirpath) / d
+            try:
+                p.chmod(0o700)
+            except OSError:
+                pass
     shutil.rmtree(workspace)
 
 
@@ -266,6 +292,8 @@ def cmd_pull(args):
             sys.exit(1)
 
     merged = workspace / "merged"
+    if merged.is_mount():
+        try_unmount(merged)
     mount_overlay(workspace, project_dir)
 
     # Runs outside sandbox — user's git identity and GPG config apply.
