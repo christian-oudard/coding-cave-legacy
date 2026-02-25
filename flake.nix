@@ -182,6 +182,7 @@
       (wrap-entry (entry: ''
         mkdir -p /projects
         export -p > /tmp/cave-env
+        chmod 444 /tmp/cave-env
         exec tini -s -- sleep infinity
       ''))
     ];

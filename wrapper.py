@@ -683,7 +683,7 @@ def pull_working_tree(slug, project_dir, gitdir):
         if merged is None:
             return
         git_cave = ["git", "--git-dir", str(gitdir), "--work-tree", str(merged)]
-        git_host = ["git", "-C", str(project_dir)]
+        git_host = ["git", "-C", str(project_dir), "-c", "core.hooksPath=/dev/null"]
         transfer_working_tree(slug, git_cave, git_host, project_dir, "pull")
 
 
@@ -1167,7 +1167,7 @@ def push_working_tree(slug, project_dir, gitdir):
     with cave_overlay(slug) as merged:
         if merged is None:
             return
-        git_host = ["git", "-C", str(project_dir)]
+        git_host = ["git", "-C", str(project_dir), "-c", "core.hooksPath=/dev/null"]
         git_cave = ["git", "--git-dir", str(gitdir), "--work-tree", str(merged)]
         transfer_working_tree(slug, git_host, git_cave, merged, "push")
 
