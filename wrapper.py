@@ -474,8 +474,12 @@ def pull_project(slug, force=False):
     except that unsigned cave-coder commits are re-authored as the user.
     The cave's gitdir is then synced to match the host's rebased history.
 
-    With force=True, handles rewritten history (amend, rebase, filter-branch)
-    by finding the effective merge-base via tree matching.
+    Handles rewritten history (amend, rebase, filter-branch) automatically
+    via tree matching when normal ancestry-based merge-base fails.
+
+    With force=True, also allows replacing host history when trees match
+    at HEAD (e.g. message-only rewrites). This is destructive: host-only
+    commits not in the cave will be lost.
     """
     projects = load_projects()
     if slug not in projects:
@@ -565,17 +569,15 @@ def pull_project(slug, force=False):
         capture_output=True, text=True,
     )
     if merge_base_result.returncode != 0:
-        if not force:
-            print(f"No common ancestor for {slug} — skipping.", file=sys.stderr)
-            return
-        # Force: find effective merge-base by tree matching
+        # No common ancestor — find effective merge-base by tree
+        # matching (handles rewritten history from amend/rebase/filter-branch)
         host_tree = subprocess.run(
             git + ["rev-parse", "HEAD^{tree}"],
             capture_output=True, text=True, check=True,
         ).stdout.strip()
         merge_base = find_tree_merge_base(git, host_tree)
         if merge_base is None:
-            print(f"No matching trees for {slug} — cannot force-pull.", file=sys.stderr)
+            print(f"No common ancestor for {slug} — skipping.", file=sys.stderr)
             return
     else:
         merge_base = merge_base_result.stdout.strip()
@@ -1012,7 +1014,7 @@ Commands:
   shell                enter cave with your shell
   add [dir]            register a project (default: current dir)
   pull [project]       pull commits from cave gitdir, re-author
-                       --force: handle rewritten history (amend/rebase/filter-branch)
+                       --force: adopt cave's commit history on host (destructive)
   push [project]       push host commits into cave gitdir
   reset [project]      wipe overlay + gitdir to match host (cave must be stopped)
   remove [project]     unregister a project and delete overlay data
