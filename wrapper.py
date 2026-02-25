@@ -751,7 +751,16 @@ def pull_project(slug, force=False):
             capture_output=True, text=True,
         )
 
-        subprocess.run(git + ["reset", "--hard", "FETCH_HEAD"], check=True, capture_output=True)
+        subprocess.run(git + ["reset", "--hard", merge_base], check=True, capture_output=True)
+        subprocess.run(git + ["branch", "-f", "_cave_pull", "FETCH_HEAD"], check=True, capture_output=True)
+        subprocess.run(git + [
+            "rebase", "--onto", branch, merge_base, "_cave_pull",
+            "--no-reapply-cherry-picks",
+            "--exec", "git -c core.hooksPath=/dev/null commit --amend --reset-author --allow-empty --no-edit --quiet",
+        ], check=True, capture_output=True)
+        subprocess.run(git + ["checkout", branch], check=True, capture_output=True)
+        subprocess.run(git + ["merge", "--ff-only", "_cave_pull"], check=True, capture_output=True)
+        subprocess.run(git + ["branch", "-D", "_cave_pull"], capture_output=True)
 
         if stashed:
             subprocess.run(git + ["stash", "pop"], capture_output=True)
