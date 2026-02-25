@@ -146,6 +146,9 @@ def start_cave(gpu=False):
 
     # Ensure gitdirs exist for all registered projects (migration)
     for slug, source in load_projects().items():
+        gitdir = PROJECTS_DIR / slug / "gitdir"
+        if not gitdir.exists() and (Path(source) / ".git").is_dir():
+            print(f"Syncing {slug}...", file=sys.stderr)
         initialize_gitdir(slug, Path(source))
 
     # Project manifest for bwrap runtime
@@ -345,7 +348,7 @@ def initialize_gitdir(slug, project_dir):
         return
     tmpclone = proj_state / "_tmpclone"
     subprocess.run(
-        ["git", "clone", "--no-checkout", "--local",
+        ["git", "clone", "--no-checkout", "--local", "--quiet",
          str(project_dir), str(tmpclone)],
         check=True,
     )
@@ -355,6 +358,12 @@ def initialize_gitdir(slug, project_dir):
     subprocess.run(
         ["git", "-C", str(gitdir), "remote", "remove", "origin"],
         capture_output=True,
+    )
+    # Populate the index from HEAD — clone --no-checkout leaves it empty,
+    # which makes git think all tracked files are deleted.
+    subprocess.run(
+        ["git", "--git-dir", str(gitdir), "read-tree", "HEAD"],
+        check=True,
     )
 
 
@@ -490,9 +499,19 @@ def pull_project(slug):
     # Sync gitdir to the rebased history so both repos share the same
     # commit hashes. The gitdir is bind-mounted into the cave, so this
     # update is immediately visible inside.
+    # Fetch objects without updating refs (git refuses to fetch into a
+    # checked-out branch), then update the ref manually.
+    host_head = subprocess.run(
+        git + ["rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
     subprocess.run(
-        ["git", "--git-dir", str(gitdir),
-         "fetch", str(project_dir), f"+refs/heads/{branch}:refs/heads/{branch}"],
+        ["git", "--git-dir", str(gitdir), "fetch", str(project_dir), "HEAD"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "--git-dir", str(gitdir), "update-ref",
+         f"refs/heads/{branch}", host_head],
         check=True,
     )
 
@@ -744,30 +763,21 @@ def push_project(slug):
         print(f"No commits to push to {slug}.", file=sys.stderr)
         return
 
-    # Update gitdir refs and objects from host
+    # Update gitdir refs and objects from host. The gitdir is bind-mounted
+    # into the cave, so the update is immediately visible inside. The
+    # working tree (on the overlay) is left untouched — uncommitted changes
+    # in the cave are preserved.
+    # Fetch objects without updating refs (git refuses to fetch into a
+    # checked-out branch), then update the ref manually.
     subprocess.run(
-        ["git", "--git-dir", str(gitdir),
-         "fetch", str(project_dir), f"+refs/heads/{branch}:refs/heads/{branch}"],
+        ["git", "--git-dir", str(gitdir), "fetch", str(project_dir), "HEAD"],
         check=True,
     )
-
-    pid = cave_pid()
-    if pid is not None:
-        # Cave is running — nsenter to reset the working tree on the overlay
-        subprocess.run([
-            "nsenter", f"--target={pid}",
-            "--user", "--mount", "--pid",
-            "--preserve-credentials",
-            "--", "git", "-C", f"/projects/{slug}",
-            "reset", "--hard", "HEAD",
-        ], check=True)
-    else:
-        # Cave is stopped — wipe overlay so next start assembles fresh
-        for subdir in ["upper", "work"]:
-            p = proj_state / subdir
-            if p.exists():
-                shutil.rmtree(p)
-                p.mkdir()
+    subprocess.run(
+        ["git", "--git-dir", str(gitdir), "update-ref",
+         f"refs/heads/{branch}", host_head],
+        check=True,
+    )
 
     print(f"Pushed to {slug} ({host_head[:8]}).", file=sys.stderr)
 
