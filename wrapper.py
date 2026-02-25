@@ -5,11 +5,9 @@ coding-cave wrapper: persistent cave with multi-agent support.
 Commands:
     coding-cave [--gpu] [project-dir] [task...]    - enter cave, run claude
     coding-cave agent [--gpu] [project-dir] [task...] - same as above
-    coding-cave shell [--gpu] [project-dir]           - enter cave with bash
-    coding-cave pull [project-name]               - rebase commits from overlay
-    coding-cave down                              - stop the cave
-    coding-cave resync                            - pull all, recreate cave
-    coding-cave review [project-name]             - list projects or inspect one
+    coding-cave shell [--gpu] [project-dir]           - enter cave with shell
+    coding-cave status                                - show cave and sessions
+    coding-cave pull [project-name]               - pull commits from overlay
 """
 import os
 import re
@@ -33,6 +31,7 @@ CAVE_PID_FILE = CAVE_DATA / "cave.pid"
 PROJECTS_MANIFEST = CAVE_DATA / "projects.tsv"
 PROJECTS_DIR = CAVE_DATA / "projects"
 NIX_OVERLAY_DIR = CAVE_DATA / "nix-overlay"
+SESSIONS_DIR = CAVE_DATA / "sessions"
 
 
 # --- Config ---
@@ -68,10 +67,49 @@ def setup_env(global_config):
     if claude_md.exists():
         os.environ["CODING_CAVE_CLAUDE_MD"] = str(claude_md)
 
+    user_shell = Path(os.environ.get("SHELL", "/bin/bash")).name
+
+    if user_shell == "zsh":
+        zdotdir = Path.home() / ".config" / "zsh"
+        if zdotdir.is_dir():
+            os.environ["CODING_CAVE_ZDOTDIR"] = str(zdotdir)
+    else:
+        bashrc = Path.home() / ".bashrc"
+        if bashrc.is_file():
+            os.environ["CODING_CAVE_BASHRC"] = str(bashrc)
+        bash_profile = Path.home() / ".bash_profile"
+        if bash_profile.is_file():
+            os.environ["CODING_CAVE_BASH_PROFILE"] = str(bash_profile)
+
 
 def slugify(text, max_len=40):
     slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
     return slug[:max_len]
+
+
+# --- Session tracking ---
+
+def register_session():
+    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    (SESSIONS_DIR / str(os.getpid())).touch()
+
+
+def unregister_session():
+    (SESSIONS_DIR / str(os.getpid())).unlink(missing_ok=True)
+
+
+def active_session_count():
+    """Count live session processes, cleaning up stale entries."""
+    if not SESSIONS_DIR.exists():
+        return 0
+    count = 0
+    for f in SESSIONS_DIR.iterdir():
+        try:
+            os.kill(int(f.name), 0)
+            count += 1
+        except (ValueError, ProcessLookupError):
+            f.unlink(missing_ok=True)
+    return count
 
 
 # --- Cave lifecycle ---
@@ -147,7 +185,7 @@ def start_cave(gpu=False):
     # Wait for init to write /tmp/cave-env
     time.sleep(0.5)
 
-    print(f"Cave started (PID {child_pid})", file=sys.stderr)
+    print("Started coding-cave.", file=sys.stderr)
     return child_pid
 
 
@@ -155,7 +193,7 @@ def stop_cave():
     """Stop the cave."""
     pid = cave_pid()
     if pid is None:
-        print("No cave running.", file=sys.stderr)
+        print("No coding-cave running.", file=sys.stderr)
         return
 
     bwrap_pid = None
@@ -188,11 +226,11 @@ def stop_cave():
 
     CAVE_PID_FILE.unlink(missing_ok=True)
     (CAVE_DATA / "bwrap.pid").unlink(missing_ok=True)
-    print("Cave stopped.", file=sys.stderr)
+    print("Stopped coding-cave.", file=sys.stderr)
 
 
-def enter_cave(pid, project=None, task=None, shell=False):
-    """nsenter into the cave and run claude (or bash with shell=True). Does not return."""
+def enter_cave(pid, project=None, task=None, shell=None):
+    """nsenter into the cave and run claude or a shell."""
     parts = ["source /tmp/cave-env 2>/dev/null"]
 
     if project:
@@ -204,19 +242,28 @@ def enter_cave(pid, project=None, task=None, shell=False):
         escaped = task.replace("'", "'\\''")
         parts.append(f"exec claude --dangerously-skip-permissions -p '{escaped}'")
     elif shell:
-        parts.append("exec bash -l")
+        shell_bin = "/bin/zsh" if shell == "zsh" else "/bin/bash"
+        parts.append(f"exec {shell_bin} -l")
     else:
         parts.append("exec claude --dangerously-skip-permissions")
 
     bash_cmd = " && ".join(parts)
 
-    os.execvp("nsenter", [
-        "nsenter",
-        f"--target={pid}",
-        "--user", "--mount", "--pid", "--uts", "--ipc",
-        "--preserve-credentials",
-        "--", "/bin/bash", "-c", bash_cmd,
-    ])
+    register_session()
+    try:
+        ret = subprocess.call([
+            "nsenter",
+            f"--target={pid}",
+            "--user", "--mount", "--pid", "--uts", "--ipc",
+            "--preserve-credentials",
+            "--", "/bin/bash", "-c", bash_cmd,
+        ])
+    finally:
+        unregister_session()
+        if active_session_count() == 0:
+            print("Last session exited. Stopped coding-cave.", file=sys.stderr)
+            stop_cave()
+    sys.exit(ret)
 
 
 # --- Project management ---
@@ -425,6 +472,8 @@ def cmd_agent(args, gpu=False):
         print(f"Loading {project} into cave (restarting)...", file=sys.stderr)
         stop_cave()
         pid = start_cave(gpu=gpu)
+    else:
+        print("Entered coding-cave.", file=sys.stderr)
 
     enter_cave(pid, project=project, task=task)
 
@@ -446,9 +495,11 @@ def cmd_pull(args):
 
 
 def cmd_shell(args, gpu=False):
-    """Enter the cave with a bash shell."""
+    """Enter the cave with the user's shell."""
     global_config = load_global_config()
     setup_env(global_config)
+
+    shell_type = Path(os.environ.get("SHELL", "/bin/bash")).name
 
     project = None
     if args:
@@ -464,84 +515,48 @@ def cmd_shell(args, gpu=False):
         print(f"Loading {project} into cave (restarting)...", file=sys.stderr)
         stop_cave()
         pid = start_cave(gpu=gpu)
+    else:
+        print("Entered coding-cave.", file=sys.stderr)
 
-    enter_cave(pid, project=project, shell=True)
-
-
-def cmd_down(args):
-    """Stop the cave."""
-    stop_cave()
+    enter_cave(pid, project=project, shell=shell_type)
 
 
-def cmd_resync(args):
-    """Pull all projects, recreate cave with fresh overlays."""
+
+def cmd_status(args):
+    """Show cave status, sessions, and processes."""
+    pid = cave_pid()
+    if pid is None:
+        print("Cave: stopped", file=sys.stderr)
+        return
+
+    sessions = active_session_count()
+    print(f"Cave: running (PID {pid}), {sessions} active session(s)", file=sys.stderr)
+
     projects = list_projects()
-
-    # Pull all projects
-    for slug, _ in projects:
-        try:
-            pull_project(slug)
-        except (subprocess.CalledProcessError, SystemExit):
-            print(f"Warning: pull failed for {slug}, continuing", file=sys.stderr)
-
-    # Stop cave
-    stop_cave()
-
-    # Reset project overlays
-    for slug, _ in projects:
-        cleanup_project_overlay(slug)
-
-    # Reset nix overlay
-    for subdir in ["upper", "work"]:
-        p = NIX_OVERLAY_DIR / subdir
-        if p.exists():
-            shutil.rmtree(p)
-            p.mkdir()
-
-    print("Resync complete. Run 'coding-cave' to start fresh.", file=sys.stderr)
-
-
-def cmd_review(args):
-    """List projects or inspect one."""
-    projects = list_projects()
-
-    if not args:
-        pid = cave_pid()
-        status = f"running (PID {pid})" if pid else "stopped"
-        print(f"Cave: {status}", file=sys.stderr)
-        if not projects:
-            print("No projects registered.", file=sys.stderr)
-            return
+    if projects:
+        print("Projects:", file=sys.stderr)
         for slug, source in projects:
             loaded = project_loaded_in_cave(slug)
             tag = " [loaded]" if loaded else ""
             print(f"  {slug}  <- {source}{tag}", file=sys.stderr)
-        return
 
-    slug = args[0]
-    proj_state = PROJECTS_DIR / slug
-    if not proj_state.exists():
-        print(f"Project not found: {slug}", file=sys.stderr)
-        sys.exit(1)
+    print("Processes:", file=sys.stderr)
+    subprocess.call([
+        "nsenter",
+        f"--target={pid}",
+        "--user", "--mount", "--pid", "--uts", "--ipc",
+        "--preserve-credentials",
+        "--", "/bin/bash", "-c", "ps aux",
+    ])
 
-    result = mount_project_overlay(slug)
-    if result is None:
-        print(f"Failed to mount overlay for {slug}", file=sys.stderr)
-        sys.exit(1)
-    merged, source = result
-    print(f"Mounted: {merged}", file=sys.stderr)
-    print(f"Source:  {source}", file=sys.stderr)
-    print(f"When done: fusermount3 -u {merged}", file=sys.stderr)
 
 
 def main():
     commands = {
         "agent": cmd_agent,
         "shell": cmd_shell,
+        "status": cmd_status,
         "pull": cmd_pull,
-        "down": cmd_down,
-        "resync": cmd_resync,
-        "review": cmd_review,
     }
 
     args = sys.argv[1:]
@@ -564,7 +579,7 @@ def main():
         cmd_agent(args, gpu=gpu)
     else:
         print(f"Unknown command: {cmd}", file=sys.stderr)
-        print("Commands: agent, shell, pull, down, resync, review", file=sys.stderr)
+        print("Commands: agent, shell, status, pull", file=sys.stderr)
         sys.exit(1)
 
 

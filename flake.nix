@@ -17,9 +17,13 @@
     jailHome = "/home/cave-coder";
 
     baseCombinators = with jail.combinators; [
+      no-die-with-parent
       (set-hostname "coding-cave")
       (unsafe-add-raw-args "--symlink /bin/sh /bin/bash")
+      (unsafe-add-raw-args "--symlink ${pkgs.zsh}/bin/zsh /bin/zsh")
       (set-env "SHELL" "/bin/bash")
+      (unsafe-add-raw-args "--dev-bind /dev/pts /dev/pts")
+      (set-env "CODING_CAVE" "1")
       (set-env "HOME" jailHome)
       (try-fwd-env "CODING_CAVE_HOME_SIZE")
       # Ephemeral home (tmpfs, backed by RAM + swap). Size from config, default 32G.
@@ -58,9 +62,12 @@
         pkgs.less
         pkgs.file
         pkgs.ncurses
+        pkgs.zsh
         pkgs.tini
       ])
       (set-env "TERMINFO_DIRS" "${pkgs.ncurses}/share/terminfo")
+      (set-env "LOCALE_ARCHIVE" "${pkgs.glibcLocales}/lib/locale/locale-archive")
+      (set-env "LANG" "en_US.UTF-8")
       (try-fwd-env "COLORTERM")
 
       # Git identity (throwaway — pull re-authors commits outside the sandbox)
@@ -76,6 +83,9 @@
 
       # Cave configuration forwarding
       (try-fwd-env "CODING_CAVE_CLAUDE_MD")
+      (try-fwd-env "CODING_CAVE_ZDOTDIR")
+      (try-fwd-env "CODING_CAVE_BASHRC")
+      (try-fwd-env "CODING_CAVE_BASH_PROFILE")
       (try-fwd-env "CODING_CAVE_PROJECTS_MANIFEST")
 
       # Persist Claude Code state across sandbox runs.
@@ -94,6 +104,20 @@
 
         if [ -n "''${CODING_CAVE_CLAUDE_MD:-}" ] && [ -f "''${CODING_CAVE_CLAUDE_MD}" ]; then
           RUNTIME_ARGS+=(--ro-bind "$CODING_CAVE_CLAUDE_MD" ${jailHome}/CLAUDE.md)
+        fi
+
+        # Shell dotfiles (zsh) — overlay so .zhistory/.zcompdump are writable
+        if [ -n "''${CODING_CAVE_ZDOTDIR:-}" ] && [ -d "''${CODING_CAVE_ZDOTDIR}" ]; then
+          mkdir -p "$CAVE_DATA/zdotdir-upper" "$CAVE_DATA/zdotdir-work"
+          RUNTIME_ARGS+=(--overlay-src "$CODING_CAVE_ZDOTDIR" --overlay "$CAVE_DATA/zdotdir-upper" "$CAVE_DATA/zdotdir-work" ${jailHome}/.config/zsh)
+          RUNTIME_ARGS+=(--setenv ZDOTDIR ${jailHome}/.config/zsh)
+        fi
+        # Shell dotfiles (bash) — ro-bind individual files; history writes to tmpfs home
+        if [ -n "''${CODING_CAVE_BASHRC:-}" ] && [ -f "''${CODING_CAVE_BASHRC}" ]; then
+          RUNTIME_ARGS+=(--ro-bind "$CODING_CAVE_BASHRC" ${jailHome}/.bashrc)
+        fi
+        if [ -n "''${CODING_CAVE_BASH_PROFILE:-}" ] && [ -f "''${CODING_CAVE_BASH_PROFILE}" ]; then
+          RUNTIME_ARGS+=(--ro-bind "$CODING_CAVE_BASH_PROFILE" ${jailHome}/.bash_profile)
         fi
 
         # Mount project overlays from tab-delimited manifest
