@@ -583,6 +583,11 @@ def enter_session(session_info, shell_type, workdir=None):
     if child_pid is None:
         print("Cannot find namespace process for session.", file=sys.stderr)
         sys.exit(1)
+    # pasta wraps bwrap, so bwrap_pid is pasta and child_pid is bwrap.
+    # bwrap's namespaces (mount, user, etc.) belong to bwrap's child, not bwrap itself.
+    inner_pid = find_bwrap_child(child_pid)
+    if inner_pid is not None:
+        child_pid = inner_pid
 
     shell_bin = "/bin/zsh" if shell_type == "zsh" else "/bin/bash"
 
