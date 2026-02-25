@@ -381,9 +381,27 @@ def start_session(project, command, gpu=False):
 
     binary = SANDBOX_GPU_BIN if gpu else SANDBOX_BIN
 
+    # Sanitize environment: only pass vars the bwrap runtime actually needs.
+    # Everything else (host secrets, user identity, etc.) is dropped.
+    # This prevents /proc/1/environ inside the cave from leaking host env.
+    BWRAP_ENV_ALLOWLIST = {
+        # Runtime script needs these to function
+        "HOME", "PATH", "TERM",
+        # Forwarded into cave via try-fwd-env
+        "COLORTERM",
+        "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "GITHUB_TOKEN",
+        # coding-cave internal
+        "CODING_CAVE_NIX_UPPER", "CODING_CAVE_NIX_WORK",
+        "CODING_CAVE_PROJECTS_MANIFEST", "CODING_CAVE_CLAUDE_MD",
+        "CODING_CAVE_ZDOTDIR", "CODING_CAVE_BASHRC", "CODING_CAVE_BASH_PROFILE",
+        "CODING_CAVE_SESSION_ID",
+    }
+    bwrap_env = {k: v for k, v in os.environ.items() if k in BWRAP_ENV_ALLOWLIST}
+
     proc = subprocess.Popen(
         [binary] + command,
         start_new_session=False,
+        env=bwrap_env,
     )
 
     register_session(sid, project, proc.pid)
