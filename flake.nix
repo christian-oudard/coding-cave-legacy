@@ -64,6 +64,7 @@
         pkgs.less
         pkgs.file
         pkgs.ncurses
+        pkgs.which
         pkgs.zsh
         pkgs.eza
         pkgs.nano
