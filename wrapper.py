@@ -499,8 +499,8 @@ def enter_session(session_info, shell_type):
         f"--target={child_pid}",
         "--user", "--mount", "--pid", "--uts", "--ipc",
         "--preserve-credentials",
-        f"--wd=/projects",
-        "--", shell_bin, "-l",
+        "--", "/bin/bash", "-c",
+        f'cd /projects 2>/dev/null; exec {shell_bin} -l',
     ], env=filtered_env)
 
     try:
