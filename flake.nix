@@ -108,98 +108,27 @@
       (try-fwd-env "ANTHROPIC_API_KEY")
       (try-fwd-env "GITHUB_TOKEN")
 
-      # Cave configuration forwarding
-      (try-fwd-env "CODING_CAVE_CLAUDE_MD")
-      (try-fwd-env "CODING_CAVE_ZDOTDIR")
-      (try-fwd-env "CODING_CAVE_BASHRC")
-      (try-fwd-env "CODING_CAVE_BASH_PROFILE")
-      (try-fwd-env "CODING_CAVE_PROJECTS_MANIFEST")
+      # Extra bwrap args file from wrapper.py
+      (try-fwd-env "CODING_CAVE_BWRAP_ARGS")
 
-      # Initialize Claude Code state in persistent home.
-      # Mount project overlays from wrapper-generated script.
+      # First-run init for Claude Code state
       (add-runtime ''
-        CAVE_DATA="$HOME/.local/share/coding-cave"
-        CAVE_HOME="$CAVE_DATA/home"
+        CAVE_HOME="$HOME/.local/share/coding-cave/home"
         CLAUDE_DIR="$CAVE_HOME/.claude"
-
-        # First-run init
         if [ ! -d "$CLAUDE_DIR" ]; then
           mkdir -p "$CLAUDE_DIR"
           cp ${defaultClaudeSettings} "$CLAUDE_DIR/settings.json"
           chmod 644 "$CLAUDE_DIR/settings.json"
           printf '%s' '{"hasCompletedOnboarding":true,"theme":"dark","effortCalloutDismissed":true}' > "$CAVE_HOME/.claude.json"
         fi
-
-        if [ -n "''${CODING_CAVE_CLAUDE_MD:-}" ] && [ -f "''${CODING_CAVE_CLAUDE_MD}" ]; then
-          RUNTIME_ARGS+=(--ro-bind "$CODING_CAVE_CLAUDE_MD" ${jailHome}/.claude/CLAUDE.md)
-        fi
-
-        # Shell dotfiles (zsh) — ro-bind config files, writable dir for history/compdump.
-        # Files matching *_private* are excluded (may contain secrets).
-        if [ -n "''${CODING_CAVE_ZDOTDIR:-}" ] && [ -d "''${CODING_CAVE_ZDOTDIR}" ]; then
-          zsh_cave="${jailHome}/.config/zsh"
-          mkdir -p "$CAVE_DATA/zdotdir"
-          RUNTIME_ARGS+=(--bind "$CAVE_DATA/zdotdir" "$zsh_cave")
-          for f in "$CODING_CAVE_ZDOTDIR"/.z*; do
-            [ -f "$f" ] || continue
-            name="$(basename "$f")"
-            case "$name" in *_private*|*secret*) continue ;; esac
-            case "$name" in
-              .zhistory|.zcompdump*)
-                # Writable: copy to persistent dir if not present, then bind
-                [ -f "$CAVE_DATA/zdotdir/$name" ] || cp "$f" "$CAVE_DATA/zdotdir/$name"
-                ;;
-              *)
-                # Read-only config
-                RUNTIME_ARGS+=(--ro-bind "$f" "$zsh_cave/$name")
-                ;;
-            esac
-          done
-          RUNTIME_ARGS+=(--setenv ZDOTDIR "$zsh_cave")
-        fi
-        # Shell dotfiles (bash) — ro-bind individual files
-        if [ -n "''${CODING_CAVE_BASHRC:-}" ] && [ -f "''${CODING_CAVE_BASHRC}" ]; then
-          RUNTIME_ARGS+=(--ro-bind "$CODING_CAVE_BASHRC" ${jailHome}/.bashrc)
-        fi
-        if [ -n "''${CODING_CAVE_BASH_PROFILE:-}" ] && [ -f "''${CODING_CAVE_BASH_PROFILE}" ]; then
-          RUNTIME_ARGS+=(--ro-bind "$CODING_CAVE_BASH_PROFILE" ${jailHome}/.bash_profile)
-        fi
-
-        # Mount projects from JSON manifest. The wrapper pre-mounts
-        # fuse-overlayfs at per-session merged dirs. Manifest format:
-        # {slug: {source: path, merged: path}}
-        if [ -n "''${CODING_CAVE_PROJECTS_MANIFEST:-}" ] && [ -f "''${CODING_CAVE_PROJECTS_MANIFEST}" ]; then
-          while IFS=$'\t' read -r slug src merged; do
-            gitdir="$CAVE_DATA/projects/$slug/gitdir"
-            if mountpoint -q "$merged" 2>/dev/null; then
-              RUNTIME_ARGS+=(--bind "$merged" "/projects/$slug")
-            else
-              upper="$CAVE_DATA/projects/$slug/upper"
-              work="$CAVE_DATA/projects/$slug/work"
-              mkdir -p "$upper" "$work"
-              RUNTIME_ARGS+=(--overlay-src "$src" --overlay "$upper" "$work" "/projects/$slug")
-            fi
-            if [ -d "$gitdir" ]; then
-              RUNTIME_ARGS+=(--bind "$gitdir" "/projects/$slug/.git")
-            else
-              echo "FATAL: no gitdir for project '$slug' at $gitdir" >&2
-              exit 1
-            fi
-          done < <(${pkgs.jq}/bin/jq -r 'to_entries[] | [.key, .value.source, .value.merged] | @tsv' "''${CODING_CAVE_PROJECTS_MANIFEST}")
-        fi
       '')
 
-      # Override jail.nix fake-passwd to use cave identity
+      # Extra bwrap args from wrapper.py (project mounts, dotfiles, passwd)
       (add-runtime ''
-        CAVE_PASSWD="$CAVE_DATA/passwd"
-        CAVE_GROUP="$CAVE_DATA/group"
-        NOLOGIN=${pkgs.shadow}/bin/nologin
-        echo "root:x:0:0:System administrator:/root:$NOLOGIN" > "$CAVE_PASSWD"
-        echo "cave-coder:x:$(id -u):$(id -g)::${jailHome}:$NOLOGIN" >> "$CAVE_PASSWD"
-        echo "root:x:0:" > "$CAVE_GROUP"
-        echo "cave-coder:x:$(id -g):" >> "$CAVE_GROUP"
-        RUNTIME_ARGS+=(--ro-bind "$CAVE_PASSWD" /etc/passwd)
-        RUNTIME_ARGS+=(--ro-bind "$CAVE_GROUP" /etc/group)
+        if [ -n "''${CODING_CAVE_BWRAP_ARGS:-}" ] && [ -f "''${CODING_CAVE_BWRAP_ARGS}" ]; then
+          exec {EXTRA_ARGS_FD}<"''${CODING_CAVE_BWRAP_ARGS}"
+          RUNTIME_ARGS+=(--args "$EXTRA_ARGS_FD")
+        fi
       '')
 
       # Entry: set up /projects, save env for nsenter shells, then exec

@@ -19,6 +19,7 @@ SANDBOX_BIN = "@SANDBOX_BIN@"
 SANDBOX_GPU_BIN = "@SANDBOX_GPU_BIN@"
 VERSION = "@VERSION@"
 
+JAIL_HOME = "/home/cave-coder"
 CAVE_DATA = Path.home() / ".local" / "share" / "coding-cave"
 PROJECTS_FILE = CAVE_DATA / "projects.json"
 PROJECTS_DIR = CAVE_DATA / "projects"
@@ -382,18 +383,83 @@ def start_session(project, command, gpu=False):
     for slug in projects:
         mount_project_overlay(slug, session_id=sid)
 
-    # Build manifest: slug -> {source, merged} for bwrap runtime
-    manifest = {}
+    # Build extra bwrap args (project mounts, dotfiles, passwd)
+    bwrap_args = []
+
+    # CLAUDE.md
+    claude_md = os.environ.get("CODING_CAVE_CLAUDE_MD", "")
+    if claude_md and Path(claude_md).is_file():
+        bwrap_args += ["--ro-bind", claude_md, f"{JAIL_HOME}/.claude/CLAUDE.md"]
+
+    # Zsh dotfiles
+    zdotdir = os.environ.get("CODING_CAVE_ZDOTDIR", "")
+    if zdotdir and Path(zdotdir).is_dir():
+        zsh_cave = f"{JAIL_HOME}/.config/zsh"
+        persistent_zdotdir = CAVE_DATA / "zdotdir"
+        persistent_zdotdir.mkdir(parents=True, exist_ok=True)
+        bwrap_args += ["--bind", str(persistent_zdotdir), zsh_cave]
+        for f in sorted(Path(zdotdir).glob(".z*")):
+            if not f.is_file():
+                continue
+            if "private" in f.name or "secret" in f.name:
+                continue
+            if f.name.startswith(".zhistory") or f.name.startswith(".zcompdump"):
+                dest = persistent_zdotdir / f.name
+                if not dest.exists():
+                    shutil.copy2(f, dest)
+            else:
+                bwrap_args += ["--ro-bind", str(f), f"{zsh_cave}/{f.name}"]
+        bwrap_args += ["--setenv", "ZDOTDIR", zsh_cave]
+
+    # Bash dotfiles
+    bashrc = os.environ.get("CODING_CAVE_BASHRC", "")
+    if bashrc and Path(bashrc).is_file():
+        bwrap_args += ["--ro-bind", bashrc, f"{JAIL_HOME}/.bashrc"]
+    bash_profile = os.environ.get("CODING_CAVE_BASH_PROFILE", "")
+    if bash_profile and Path(bash_profile).is_file():
+        bwrap_args += ["--ro-bind", bash_profile, f"{JAIL_HOME}/.bash_profile"]
+
+    # Project mounts
     for slug, source in projects.items():
         sess_merged = PROJECTS_DIR / slug / "sessions" / sid / "merged"
+        gitdir = PROJECTS_DIR / slug / "gitdir"
         if sess_merged.exists() and sess_merged.is_mount():
-            manifest[slug] = {"source": source, "merged": str(sess_merged)}
+            bwrap_args += ["--bind", str(sess_merged), f"/projects/{slug}"]
+        elif Path(source).is_dir():
+            upper = PROJECTS_DIR / slug / "upper"
+            work = PROJECTS_DIR / slug / "work"
+            upper.mkdir(parents=True, exist_ok=True)
+            work.mkdir(parents=True, exist_ok=True)
+            bwrap_args += ["--overlay-src", source, "--overlay", str(upper), str(work), f"/projects/{slug}"]
+        else:
+            continue
+        if gitdir.is_dir():
+            bwrap_args += ["--bind", str(gitdir), f"/projects/{slug}/.git"]
 
-    sess_manifest = SESSIONS_DIR / f"{sid}.manifest.json"
+    # Passwd/group files
+    uid = os.getuid()
+    gid = os.getgid()
+    passwd_file = CAVE_DATA / "passwd"
+    group_file = CAVE_DATA / "group"
+    nologin = "/bin/false"
+    passwd_file.write_text(
+        f"root:x:0:0:System administrator:/root:{nologin}\n"
+        f"cave-coder:x:{uid}:{gid}::{JAIL_HOME}:{nologin}\n"
+    )
+    group_file.write_text(
+        f"root:x:0:\n"
+        f"cave-coder:x:{gid}:\n"
+    )
+    bwrap_args += ["--ro-bind", str(passwd_file), "/etc/passwd"]
+    bwrap_args += ["--ro-bind", str(group_file), "/etc/group"]
+
+    # Write bwrap args file (null-separated, for bwrap --args)
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
-    with open(sess_manifest, "w") as f:
-        json.dump(manifest, f)
-    os.environ["CODING_CAVE_PROJECTS_MANIFEST"] = str(sess_manifest)
+    args_file = SESSIONS_DIR / f"{sid}.bwrap-args"
+    with open(args_file, "wb") as f:
+        for arg in bwrap_args:
+            f.write(arg.encode() + b"\0")
+    os.environ["CODING_CAVE_BWRAP_ARGS"] = str(args_file)
 
     binary = SANDBOX_GPU_BIN if gpu else SANDBOX_BIN
 
@@ -408,8 +474,7 @@ def start_session(project, command, gpu=False):
         "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "GITHUB_TOKEN",
         # coding-cave internal
         "CODING_CAVE_NIX_UPPER", "CODING_CAVE_NIX_WORK",
-        "CODING_CAVE_PROJECTS_MANIFEST", "CODING_CAVE_CLAUDE_MD",
-        "CODING_CAVE_ZDOTDIR", "CODING_CAVE_BASHRC", "CODING_CAVE_BASH_PROFILE",
+        "CODING_CAVE_BWRAP_ARGS",
         "CODING_CAVE_SESSION_ID",
     }
     bwrap_env = {k: v for k, v in os.environ.items() if k in BWRAP_ENV_ALLOWLIST}
