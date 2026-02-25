@@ -684,6 +684,13 @@ def pull_project(slug, force=False):
         capture_output=True, text=True, check=True,
     ).stdout.strip()
 
+    # Stash any working tree / index changes so rebase can proceed
+    stash_result = subprocess.run(
+        git + ["stash", "--include-untracked"],
+        capture_output=True, text=True,
+    )
+    stashed = stash_result.returncode == 0 and "No local changes" not in stash_result.stdout
+
     subprocess.run(git + ["branch", "-f", "_cave_pull", "FETCH_HEAD"], check=True)
     result = subprocess.run(git + [
         "rebase", "--onto", branch, merge_base, "_cave_pull",
@@ -696,12 +703,17 @@ def pull_project(slug, force=False):
         print(f"  git -C {project_dir} checkout {branch}", file=sys.stderr)
         print(f"  git -C {project_dir} merge --ff-only _cave_pull", file=sys.stderr)
         print(f"  git -C {project_dir} branch -d _cave_pull", file=sys.stderr)
+        if stashed:
+            print(f"  git -C {project_dir} stash pop", file=sys.stderr)
         print(f"  coding-cave push {slug}", file=sys.stderr)
         sys.exit(1)
 
     subprocess.run(git + ["checkout", branch], check=True)
     subprocess.run(git + ["merge", "--ff-only", "_cave_pull"], check=True)
     subprocess.run(git + ["branch", "-d", "_cave_pull"], check=True)
+
+    if stashed:
+        subprocess.run(git + ["stash", "pop"], capture_output=True)
 
     actual = subprocess.run(
         git + ["rev-list", "--count", f"{pre_head}..HEAD"],
