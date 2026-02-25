@@ -236,11 +236,25 @@ def stop_cave():
     signal.signal(signal.SIGINT, old_handler)
 
 
-def enter_cave(pid, project=None, shell=None):
+def cave_workdir(project):
+    """Compute the working directory inside the cave based on host CWD."""
+    if not project:
+        return "/projects"
+    cwd = Path.cwd().resolve()
+    projects = load_projects()
+    source = Path(projects.get(project, "")).resolve()
+    try:
+        rel = cwd.relative_to(source)
+    except ValueError:
+        return f"/projects/{project}"
+    return f"/projects/{project}/{rel}" if str(rel) != "." else f"/projects/{project}"
+
+
+def enter_cave(pid, project=None, shell=None, workdir=None):
     """nsenter into the cave and run claude or a shell."""
     parts = ["source /tmp/cave-env 2>/dev/null"]
 
-    parts.append("cd /projects")
+    parts.append(f"cd {workdir or '/projects'}")
 
     if shell:
         shell_bin = "/bin/zsh" if shell == "zsh" else "/bin/bash"
@@ -929,7 +943,7 @@ def cmd_agent(args, gpu=False):
     else:
         print("Entered coding-cave.", file=sys.stderr)
 
-    enter_cave(pid, project=project)
+    enter_cave(pid, project=project, workdir=cave_workdir(project))
 
 
 def cmd_add(args):
@@ -1306,7 +1320,7 @@ def cmd_shell(args, gpu=False):
     else:
         print("Entered coding-cave.", file=sys.stderr)
 
-    enter_cave(pid, project=project, shell=shell_type)
+    enter_cave(pid, project=project, shell=shell_type, workdir=cave_workdir(project))
 
 
 
