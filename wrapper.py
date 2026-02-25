@@ -517,7 +517,22 @@ def pull_project(slug):
             ["git", "--git-dir", str(gitdir), "rev-parse", "HEAD"],
             capture_output=True, text=True, check=True,
         ).stdout.strip()
-        if host_head != gitdir_head:
+        if host_head == gitdir_head:
+            print(f"No new commits to pull from {slug}.", file=sys.stderr)
+            return
+        # Fetch gitdir objects into host to check for shared ancestry.
+        # Only sync if the histories share a common ancestor — diverged
+        # histories (e.g. from filter-branch) must not be silently
+        # clobbered.
+        subprocess.run(
+            git + ["fetch", str(gitdir), "HEAD"],
+            capture_output=True,
+        )
+        has_ancestor = subprocess.run(
+            git + ["merge-base", "HEAD", "FETCH_HEAD"],
+            capture_output=True,
+        ).returncode == 0
+        if has_ancestor:
             subprocess.run(
                 ["git", "--git-dir", str(gitdir), "fetch",
                  str(project_dir), "HEAD"],
@@ -529,8 +544,9 @@ def pull_project(slug):
                 capture_output=True,
             )
             print(f"Synced gitdir for {slug}.", file=sys.stderr)
-        print(f"No new commits to pull from {slug}.", file=sys.stderr)
-        return
+            print(f"No new commits to pull from {slug}.", file=sys.stderr)
+            return
+        # No common ancestor — fall through to normal flow
 
     # Fetch cave commits from gitdir (a regular dir on the host filesystem)
     fetch = subprocess.run(git + ["fetch", str(gitdir), "HEAD"])
