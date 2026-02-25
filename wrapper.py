@@ -286,6 +286,15 @@ def enter_cave(pid, project=None, shell=None, workdir=None):
 
     bash_cmd = " && ".join(parts)
 
+    # Only forward variables needed for the cave session. nsenter inherits
+    # the caller's full environment, which can leak host credentials
+    # (API keys, tokens) that weren't explicitly forwarded by bwrap.
+    NSENTER_ENV_ALLOWLIST = {
+        "TERM", "COLORTERM", "LANG", "HOME", "PATH", "SHELL",
+        "TERMINFO_DIRS", "LOCALE_ARCHIVE",
+    }
+    filtered_env = {k: v for k, v in os.environ.items() if k in NSENTER_ENV_ALLOWLIST}
+
     register_session()
     try:
         proc = subprocess.Popen([
@@ -294,7 +303,7 @@ def enter_cave(pid, project=None, shell=None, workdir=None):
             "--user", "--mount", "--pid", "--uts", "--ipc",
             "--preserve-credentials",
             "--", "/bin/bash", "-c", bash_cmd,
-        ])
+        ], env=filtered_env)
         # Wait with WUNTRACED so we detect when the child stops (Ctrl+Z).
         # Without this, a stopped child hangs forever because bash -c has
         # no job control and subprocess.call ignores stopped children.
@@ -708,7 +717,9 @@ def pull_project(slug, force=False):
     ensure_cave_remote(project_dir, gitdir)
 
     # Clean up stale rebase/branch state from a previous failed pull
-    git = ["git", "-C", str(project_dir)]
+    # Disable hooks: the gitdir is writable from inside the cave, so a
+    # malicious agent could inject hooks that execute on the host during pull.
+    git = ["git", "-C", str(project_dir), "-c", "core.hooksPath=/dev/null"]
     git_dir = project_dir / ".git"
     if (git_dir / "rebase-merge").is_dir() or (git_dir / "rebase-apply").is_dir():
         print(f"Aborting stale rebase in {slug}.", file=sys.stderr)
@@ -890,7 +901,7 @@ def pull_project(slug, force=False):
     result = subprocess.run(git + [
         "rebase", "--onto", branch, merge_base, "_cave_pull",
         "--no-reapply-cherry-picks",
-        "--exec", "git commit --amend --reset-author --allow-empty --no-edit --quiet",
+        "--exec", "git -c core.hooksPath=/dev/null commit --amend --reset-author --allow-empty --no-edit --quiet",
     ], capture_output=True)
     if result.returncode != 0:
         rebase_in_progress = ((git_dir / "rebase-merge").is_dir() or
