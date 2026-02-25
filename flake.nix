@@ -46,8 +46,9 @@
         mkdir -p "$CAVE_HOME"
         RUNTIME_ARGS+=(--bind "$CAVE_HOME" ${jailHome})
       '')
-      # Network namespace provided by pasta (wrapper.py wraps bwrap with pasta).
-      # Bwrap inherits pasta's isolated net namespace via default behavior.
+      # `network` prevents bwrap from doing --unshare-net, so it inherits
+      # pasta's isolated namespace instead of creating a new empty one.
+      network
       # no-new-session omitted: cave init needs its own session to survive terminal close
 
       # Nix CLI for autonomous package management inside the cave
