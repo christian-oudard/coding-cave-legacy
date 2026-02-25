@@ -726,8 +726,8 @@ def pull_project(slug, force=False):
         "--exec", "git -c core.hooksPath=/dev/null commit --amend --reset-author --allow-empty --no-edit --quiet",
     ], capture_output=True)
     if result.returncode != 0:
-        rebase_in_progress = ((git_dir / "rebase-merge").is_dir() or
-                              (git_dir / "rebase-apply").is_dir())
+        rebase_in_progress = ((host_git_dir / "rebase-merge").is_dir() or
+                              (host_git_dir / "rebase-apply").is_dir())
         if rebase_in_progress:
             print(f"Rebase conflicts for {slug}. Resolve, then:", file=sys.stderr)
             print(f"  git -C {project_dir} rebase --continue", file=sys.stderr)
