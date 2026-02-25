@@ -939,12 +939,105 @@ def cmd_reset(args):
     print(f"Reset overlay for {slug}. Cave will see current host state on next start.", file=sys.stderr)
 
 
-def push_project(slug, force=False):
-    """Push host commits into the cave's gitdir.
+def push_working_tree(slug, project_dir, gitdir):
+    """Push uncommitted host working tree changes into the cave overlay.
 
-    Updates the gitdir refs and objects to match the host. The working tree
-    on the overlay is left untouched — uncommitted changes in the cave are
-    preserved.
+    Stages the changes in the cave's index. Refuses if the cave working
+    tree already has uncommitted changes.
+    """
+    proj_state = PROJECTS_DIR / slug
+    merged = proj_state / "merged"
+
+    # Use existing mount or mount temporarily
+    mounted_here = False
+    if not (merged.exists() and merged.is_mount()):
+        result = mount_project_overlay(slug)
+        if result is None:
+            return
+        mounted_here = True
+
+    try:
+        git_host = ["git", "-C", str(project_dir)]
+        git_cave = ["git", "--git-dir", str(gitdir), "--work-tree", str(merged)]
+
+        # Check for host tracked changes
+        diff_check = subprocess.run(
+            git_host + ["diff", "HEAD", "--quiet"], capture_output=True,
+        )
+        has_diff = diff_check.returncode != 0
+
+        # Check for host untracked files
+        untracked_result = subprocess.run(
+            git_host + ["ls-files", "--others", "--exclude-standard"],
+            capture_output=True, text=True,
+        )
+        untracked_files = [
+            f for f in untracked_result.stdout.strip().splitlines() if f
+        ] if untracked_result.returncode == 0 else []
+
+        if not has_diff and not untracked_files:
+            return
+
+        # Refuse if cave working tree is dirty
+        cave_diff = subprocess.run(
+            git_cave + ["diff", "HEAD", "--quiet"], capture_output=True,
+        )
+        cave_untracked = subprocess.run(
+            git_cave + ["ls-files", "--others", "--exclude-standard"],
+            capture_output=True, text=True,
+        )
+        cave_dirty = (cave_diff.returncode != 0 or
+                      (cave_untracked.returncode == 0 and
+                       cave_untracked.stdout.strip()))
+        if cave_dirty:
+            print(f"Cave has uncommitted changes — skipping working tree push for {slug}.", file=sys.stderr)
+            print("Commit or stash cave changes first.", file=sys.stderr)
+            return
+
+        # Apply tracked changes to cave
+        if has_diff:
+            patch = subprocess.run(
+                git_host + ["diff", "HEAD"], capture_output=True,
+            )
+            if patch.stdout:
+                apply_result = subprocess.run(
+                    git_cave + ["apply", "--index"],
+                    input=patch.stdout, capture_output=True,
+                )
+                if apply_result.returncode != 0:
+                    print(f"Failed to apply working tree changes to {slug}.", file=sys.stderr)
+                    return
+
+        # Copy and stage untracked files
+        if untracked_files:
+            for rel_path in untracked_files:
+                src = project_dir / rel_path
+                dst = merged / rel_path
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(src), str(dst))
+            subprocess.run(
+                git_cave + ["add", "--"] + untracked_files,
+                check=True,
+            )
+
+        parts = []
+        if has_diff:
+            parts.append("tracked changes")
+        if untracked_files:
+            parts.append(f"{len(untracked_files)} untracked file(s)")
+        print(f"Pushed working tree changes ({', '.join(parts)}) to {slug}.", file=sys.stderr)
+
+    finally:
+        if mounted_here:
+            try_unmount(merged)
+
+
+def push_project(slug, force=False):
+    """Push host commits and working tree changes into the cave.
+
+    Updates the gitdir refs and objects to match the host, then applies
+    any uncommitted host working tree changes to the cave overlay (refused
+    if the cave working tree is already dirty).
 
     Warns if the cave has unpulled commits that would be lost. Use
     force=True to skip the check.
@@ -981,6 +1074,7 @@ def push_project(slug, force=False):
     )
     if cave_head.returncode == 0 and cave_head.stdout.strip() == host_head:
         print(f"No commits to push to {slug}.", file=sys.stderr)
+        push_working_tree(slug, project_dir, gitdir)
         return
 
     # Check for unpulled cave commits that would be lost
@@ -1029,6 +1123,8 @@ def push_project(slug, force=False):
     )
 
     print(f"Pushed to {slug} ({host_head[:8]}).", file=sys.stderr)
+
+    push_working_tree(slug, project_dir, gitdir)
 
 
 def cmd_push(args):
@@ -1140,7 +1236,7 @@ Commands:
   add [dir]            register a project (default: current dir)
   pull [project]       pull commits + working tree changes from cave
                        --force: adopt cave's commit history on host (destructive)
-  push [project]       push host commits into cave gitdir
+  push [project]       push host commits + working tree changes to cave
                        --force: skip unpulled commit check
   reset [project]      wipe overlay + gitdir to match host (cave must be stopped)
   remove [project]     unregister a project and delete overlay data
