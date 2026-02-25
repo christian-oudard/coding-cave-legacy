@@ -29,7 +29,7 @@ SANDBOX_GPU_BIN = "@SANDBOX_GPU_BIN@"
 
 CAVE_DATA = Path.home() / ".local" / "share" / "coding-cave"
 CAVE_PID_FILE = CAVE_DATA / "cave.pid"
-CAVE_MOUNT_SCRIPT = CAVE_DATA / "mount-projects.sh"
+PROJECTS_MANIFEST = CAVE_DATA / "projects.tsv"
 PROJECTS_DIR = CAVE_DATA / "projects"
 NIX_OVERLAY_DIR = CAVE_DATA / "nix-overlay"
 
@@ -120,8 +120,8 @@ def start_cave(gpu=False):
     os.environ["CODING_CAVE_NIX_WORK"] = str(NIX_OVERLAY_DIR / "work")
 
     # Project mount script
-    write_mount_script()
-    os.environ["CODING_CAVE_MOUNT_SCRIPT"] = str(CAVE_MOUNT_SCRIPT)
+    write_projects_manifest()
+    os.environ["CODING_CAVE_PROJECTS_MANIFEST"] = str(PROJECTS_MANIFEST)
 
     binary = SANDBOX_GPU_BIN if gpu else SANDBOX_BIN
 
@@ -245,24 +245,21 @@ def list_projects():
 
 def project_loaded_in_cave(slug):
     """Check if a project was included in the running cave's mount script."""
-    if not CAVE_MOUNT_SCRIPT.exists():
+    if not PROJECTS_MANIFEST.exists():
         return False
-    return f'"/projects/{slug}"' in CAVE_MOUNT_SCRIPT.read_text()
+    return f"\t{slug}\n" in PROJECTS_MANIFEST.read_text()
 
 
-def write_mount_script():
-    """Generate bwrap overlay args for all registered projects."""
+def write_projects_manifest():
+    """Write tab-delimited manifest of project overlays for bwrap."""
     CAVE_DATA.mkdir(parents=True, exist_ok=True)
     lines = []
     for slug, source in list_projects():
         proj_state = PROJECTS_DIR / slug
         upper = proj_state / "upper"
         work = proj_state / "work"
-        lines.append(
-            f'RUNTIME_ARGS+=(--overlay-src "{source}" '
-            f'--overlay "{upper}" "{work}" "/projects/{slug}")'
-        )
-    CAVE_MOUNT_SCRIPT.write_text("\n".join(lines) + "\n" if lines else "")
+        lines.append(f"{source}\t{upper}\t{work}\t{slug}")
+    PROJECTS_MANIFEST.write_text("\n".join(lines) + "\n" if lines else "")
 
 
 # --- Overlay and pull ---

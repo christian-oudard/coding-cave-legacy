@@ -75,7 +75,7 @@
 
       # Cave configuration forwarding
       (try-fwd-env "CODING_CAVE_CLAUDE_MD")
-      (try-fwd-env "CODING_CAVE_MOUNT_SCRIPT")
+      (try-fwd-env "CODING_CAVE_PROJECTS_MANIFEST")
 
       # Persist Claude Code state across sandbox runs.
       # Mount project overlays from wrapper-generated script.
@@ -95,9 +95,11 @@
           RUNTIME_ARGS+=(--ro-bind "$CODING_CAVE_CLAUDE_MD" ${jailHome}/CLAUDE.md)
         fi
 
-        # Mount project overlays from wrapper-generated script
-        if [ -n "''${CODING_CAVE_MOUNT_SCRIPT:-}" ] && [ -f "''${CODING_CAVE_MOUNT_SCRIPT}" ]; then
-          source "''${CODING_CAVE_MOUNT_SCRIPT}"
+        # Mount project overlays from tab-delimited manifest
+        if [ -n "''${CODING_CAVE_PROJECTS_MANIFEST:-}" ] && [ -f "''${CODING_CAVE_PROJECTS_MANIFEST}" ]; then
+          while IFS=$'\t' read -r src upper work slug; do
+            RUNTIME_ARGS+=(--overlay-src "$src" --overlay "$upper" "$work" "/projects/$slug")
+          done < "''${CODING_CAVE_PROJECTS_MANIFEST}"
         fi
       '')
 
