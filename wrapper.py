@@ -512,75 +512,47 @@ def pull_project(slug, force=False):
                 break
     subprocess.run(git + ["branch", "-D", "_cave_pull"], capture_output=True)
 
-    # Quick check: if the gitdir tree matches the host tree, all cave
-    # changes are already on the host (just with different commit hashes
-    # from re-authoring). This happens when a previous pull succeeded but
-    # the post-rebase gitdir sync failed — the gitdir still has the old
-    # cave commit hashes while the host has rebased versions. Sync the
-    # gitdir ref and skip the rebase entirely.
     branch = subprocess.run(
         git + ["rev-parse", "--abbrev-ref", "HEAD"],
         capture_output=True, text=True, check=True,
     ).stdout.strip()
-    gitdir_tree = subprocess.run(
-        ["git", "--git-dir", str(gitdir), "rev-parse", "HEAD^{tree}"],
-        capture_output=True, text=True,
-    )
-    host_tree = subprocess.run(
-        git + ["rev-parse", "HEAD^{tree}"],
-        capture_output=True, text=True,
-    )
-    if (gitdir_tree.returncode == 0 and host_tree.returncode == 0 and
-            gitdir_tree.stdout.strip() == host_tree.stdout.strip()):
-        host_head = subprocess.run(
-            git + ["rev-parse", "HEAD"],
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
-        gitdir_head = subprocess.run(
-            ["git", "--git-dir", str(gitdir), "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
-        if host_head == gitdir_head:
-            print(f"No new commits to pull from {slug}.", file=sys.stderr)
-            return
-        # Fetch gitdir objects into host to check for shared ancestry.
-        # Only sync if the histories share a common ancestor — diverged
-        # histories (e.g. from filter-branch) must not be silently
-        # clobbered.
-        subprocess.run(
-            git + ["fetch", str(gitdir), "HEAD"],
-            capture_output=True,
+
+    # Quick check: identical HEADs means nothing to pull
+    gitdir_head = subprocess.run(
+        ["git", "--git-dir", str(gitdir), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    host_head = subprocess.run(
+        git + ["rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    if host_head == gitdir_head:
+        print(f"No new commits to pull from {slug}.", file=sys.stderr)
+        return
+
+    # Force with matching trees: adopt cave's history on the host
+    # (e.g. after filter-branch / amend in cave, same content)
+    if force:
+        gitdir_tree = subprocess.run(
+            ["git", "--git-dir", str(gitdir), "rev-parse", "HEAD^{tree}"],
+            capture_output=True, text=True,
         )
-        has_ancestor = subprocess.run(
-            git + ["merge-base", "HEAD", "FETCH_HEAD"],
-            capture_output=True,
-        ).returncode == 0
-        if has_ancestor:
-            # Previous pull succeeded but gitdir sync failed — sync
-            # gitdir to match host's re-authored history
+        host_tree = subprocess.run(
+            git + ["rev-parse", "HEAD^{tree}"],
+            capture_output=True, text=True,
+        )
+        if (gitdir_tree.returncode == 0 and host_tree.returncode == 0 and
+                gitdir_tree.stdout.strip() == host_tree.stdout.strip()):
             subprocess.run(
-                ["git", "--git-dir", str(gitdir), "fetch",
-                 str(project_dir), "HEAD"],
+                git + ["fetch", str(gitdir), "HEAD"],
                 capture_output=True,
             )
-            subprocess.run(
-                ["git", "--git-dir", str(gitdir), "update-ref",
-                 f"refs/heads/{branch}", host_head],
-                capture_output=True,
-            )
-            print(f"Synced gitdir for {slug}.", file=sys.stderr)
-            print(f"No new commits to pull from {slug}.", file=sys.stderr)
-            return
-        if force:
-            # Diverged histories with same content — adopt cave's
-            # history on the host (e.g. after filter-branch in cave)
             subprocess.run(
                 git + ["update-ref", f"refs/heads/{branch}", gitdir_head],
                 check=True,
             )
             print(f"Force-updated {slug}.", file=sys.stderr)
             return
-        # No common ancestor — fall through to normal flow
 
     # Fetch cave commits from gitdir (a regular dir on the host filesystem)
     fetch = subprocess.run(git + ["fetch", str(gitdir), "HEAD"])
