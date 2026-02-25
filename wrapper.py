@@ -924,7 +924,7 @@ def pull_project(slug, force=False):
 
     subprocess.run(git + ["checkout", branch], check=True, capture_output=True)
     subprocess.run(git + ["merge", "--ff-only", "_cave_pull"], check=True, capture_output=True)
-    subprocess.run(git + ["branch", "-d", "_cave_pull"], check=True, capture_output=True)
+    subprocess.run(git + ["branch", "-D", "_cave_pull"], capture_output=True)
 
     if stashed:
         subprocess.run(git + ["stash", "pop"], capture_output=True)
