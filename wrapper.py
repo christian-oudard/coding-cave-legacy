@@ -278,10 +278,6 @@ def initialize_gitdir(slug, project_dir):
     hooks_dir = gitdir / "hooks"
     if hooks_dir.exists():
         shutil.rmtree(hooks_dir)
-    subprocess.run(
-        ["git", "--git-dir", str(gitdir), "read-tree", "HEAD"],
-        check=True,
-    )
     head = subprocess.run(
         ["git", "--git-dir", str(gitdir), "rev-parse", "HEAD"],
         capture_output=True, text=True,
