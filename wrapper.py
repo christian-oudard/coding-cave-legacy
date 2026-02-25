@@ -3,8 +3,9 @@
 coding-cave wrapper: persistent cave with multi-agent support.
 
 Commands:
-    coding-cave [--gpu] [project-dir] [task...]  - enter cave, run claude
-    coding-cave run [--gpu] <project-dir> [task...] - load project, enter cave
+    coding-cave [--gpu] [project-dir] [task...]    - enter cave, run claude
+    coding-cave agent [--gpu] [project-dir] [task...] - same as above
+    coding-cave shell [--gpu] [project-dir]           - enter cave with bash
     coding-cave pull [project-name]               - rebase commits from overlay
     coding-cave down                              - stop the cave
     coding-cave resync                            - pull all, recreate cave
@@ -190,8 +191,8 @@ def stop_cave():
     print("Cave stopped.", file=sys.stderr)
 
 
-def enter_cave(pid, project=None, task=None):
-    """nsenter into the cave and run claude. Does not return."""
+def enter_cave(pid, project=None, task=None, shell=False):
+    """nsenter into the cave and run claude (or bash with shell=True). Does not return."""
     parts = ["source /tmp/cave-env 2>/dev/null"]
 
     if project:
@@ -202,6 +203,8 @@ def enter_cave(pid, project=None, task=None):
     if task:
         escaped = task.replace("'", "'\\''")
         parts.append(f"exec claude --dangerously-skip-permissions -p '{escaped}'")
+    elif shell:
+        parts.append("exec bash -l")
     else:
         parts.append("exec claude --dangerously-skip-permissions")
 
@@ -395,7 +398,7 @@ def cleanup_project_overlay(slug):
 
 # --- Commands ---
 
-def cmd_run(args, gpu=False):
+def cmd_agent(args, gpu=False):
     """Enter cave and run claude, optionally in a project directory."""
     global_config = load_global_config()
     setup_env(global_config)
@@ -440,6 +443,29 @@ def cmd_pull(args):
                 pull_project(slug)
             except SystemExit:
                 pass  # continue with other projects
+
+
+def cmd_shell(args, gpu=False):
+    """Enter the cave with a bash shell."""
+    global_config = load_global_config()
+    setup_env(global_config)
+
+    project = None
+    if args:
+        candidate = Path(args[0])
+        if candidate.exists() and candidate.is_dir():
+            project = ensure_project(candidate)
+
+    pid = cave_pid()
+
+    if pid is None:
+        pid = start_cave(gpu=gpu)
+    elif project and not project_loaded_in_cave(project):
+        print(f"Loading {project} into cave (restarting)...", file=sys.stderr)
+        stop_cave()
+        pid = start_cave(gpu=gpu)
+
+    enter_cave(pid, project=project, shell=True)
 
 
 def cmd_down(args):
@@ -510,7 +536,8 @@ def cmd_review(args):
 
 def main():
     commands = {
-        "run": cmd_run,
+        "agent": cmd_agent,
+        "shell": cmd_shell,
         "pull": cmd_pull,
         "down": cmd_down,
         "resync": cmd_resync,
@@ -523,21 +550,21 @@ def main():
         args = [a for a in args if a != "--gpu"]
 
     if not args:
-        cmd_run([], gpu=gpu)
+        cmd_agent([], gpu=gpu)
         return
 
     cmd = args[0]
     if cmd in commands:
-        if cmd == "run":
+        if cmd in ("agent", "shell"):
             commands[cmd](args[1:], gpu=gpu)
         else:
             commands[cmd](args[1:])
     elif Path(cmd).is_dir():
-        # coding-cave ./project [task...] → shorthand for run
-        cmd_run(args, gpu=gpu)
+        # coding-cave ./project [task...] → shorthand for agent
+        cmd_agent(args, gpu=gpu)
     else:
         print(f"Unknown command: {cmd}", file=sys.stderr)
-        print("Commands: run, pull, down, resync, review", file=sys.stderr)
+        print("Commands: agent, shell, pull, down, resync, review", file=sys.stderr)
         sys.exit(1)
 
 

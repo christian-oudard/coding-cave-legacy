@@ -14,7 +14,7 @@
 
     defaultClaudeSettings = ./claude-settings.json;
 
-    jailHome = "/home/coding-cave";
+    jailHome = "/home/cave-coder";
 
     baseCombinators = with jail.combinators; [
       (set-hostname "coding-cave")
@@ -102,6 +102,19 @@
             RUNTIME_ARGS+=(--overlay-src "$src" --overlay "$upper" "$work" "/projects/$slug")
           done < "''${CODING_CAVE_PROJECTS_MANIFEST}"
         fi
+      '')
+
+      # Override jail.nix fake-passwd to use cave identity
+      (add-runtime ''
+        CAVE_PASSWD="$CAVE_DATA/passwd"
+        CAVE_GROUP="$CAVE_DATA/group"
+        NOLOGIN=${pkgs.shadow}/bin/nologin
+        echo "root:x:0:0:System administrator:/root:$NOLOGIN" > "$CAVE_PASSWD"
+        echo "cave-coder:x:$(id -u):$(id -g)::${jailHome}:$NOLOGIN" >> "$CAVE_PASSWD"
+        echo "root:x:0:" > "$CAVE_GROUP"
+        echo "cave-coder:x:$(id -g):" >> "$CAVE_GROUP"
+        RUNTIME_ARGS+=(--ro-bind "$CAVE_PASSWD" /etc/passwd)
+        RUNTIME_ARGS+=(--ro-bind "$CAVE_GROUP" /etc/group)
       '')
 
       # Cave init: dump environment for nsenter, reap zombies via tini
