@@ -251,7 +251,7 @@ def enter_cave(pid, project=None, shell=None):
         shell_bin = "/bin/zsh" if shell == "zsh" else "/bin/bash"
         parts.append(f"exec {shell_bin} -l")
     else:
-        parts.append("exec claude --dangerously-skip-permissions")
+        parts.append("claude --dangerously-skip-permissions || exec /bin/bash -l")
 
     bash_cmd = " && ".join(parts)
 
