@@ -29,6 +29,7 @@
       '')
       network
       no-new-session
+      gpu
 
       # Dev tools
       (add-pkg-deps [
