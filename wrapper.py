@@ -461,7 +461,7 @@ def find_bwrap_child(bwrap_pid):
     return None
 
 
-def enter_session(session_info, shell_type):
+def enter_session(session_info, shell_type, workdir=None):
     """nsenter into a running session."""
     bwrap_pid = session_info["bwrap_pid"]
 
@@ -488,7 +488,7 @@ def enter_session(session_info, shell_type):
         "--user", "--mount", "--pid", "--uts", "--ipc",
         "--preserve-credentials",
         "--", "/bin/bash", "-c",
-        f'source /tmp/cave-env 2>/dev/null; cd /projects 2>/dev/null; exec {shell_bin} -l',
+        f'source /tmp/cave-env 2>/dev/null; cd {workdir or "/projects"} 2>/dev/null; exec {shell_bin} -l',
     ])
 
     try:
@@ -911,12 +911,14 @@ def cmd_shell(args, gpu=False):
     if project_dir is not None:
         project = ensure_project(project_dir)
 
+    workdir = cave_workdir(project)
+
     # Check for running sessions to join
     sessions = list_sessions(project=project)
     if sessions:
         if len(sessions) == 1:
             print(f"Joining session (PID {sessions[0]['bwrap_pid']}).", file=sys.stderr)
-            enter_session(sessions[0], shell_type)
+            enter_session(sessions[0], shell_type, workdir=workdir)
         else:
             print("Running sessions:", file=sys.stderr)
             for i, s in enumerate(sessions):
@@ -932,7 +934,7 @@ def cmd_shell(args, gpu=False):
             else:
                 try:
                     idx = int(choice)
-                    enter_session(sessions[idx], shell_type)
+                    enter_session(sessions[idx], shell_type, workdir=workdir)
                 except (ValueError, IndexError):
                     print("Invalid choice.", file=sys.stderr)
                     sys.exit(1)
