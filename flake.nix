@@ -23,7 +23,6 @@
       (unsafe-add-raw-args "--symlink /bin/sh /bin/bash")
       (unsafe-add-raw-args "--symlink ${pkgs.zsh}/bin/zsh /bin/zsh")
       (set-env "SHELL" "/bin/bash")
-      (unsafe-add-raw-args "--dev-bind /dev/pts /dev/pts")
       (set-env "CODING_CAVE_VERSION" version)
       (set-env "HOME" jailHome)
       # Persistent home directory (bind mount, survives across sessions).
