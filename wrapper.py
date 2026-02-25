@@ -431,9 +431,10 @@ def start_session(project, command, gpu=False):
             if "private" in f.name or "secret" in f.name:
                 continue
             if f.name.startswith(".zhistory") or f.name.startswith(".zcompdump"):
+                # Don't copy host history — keep cave history separate
                 dest = persistent_zdotdir / f.name
                 if not dest.exists():
-                    shutil.copy2(f, dest)
+                    dest.touch()
             else:
                 bwrap_args += ["--ro-bind", str(f), f"{zsh_cave}/{f.name}"]
         bwrap_args += ["--setenv", "ZDOTDIR", zsh_cave]
