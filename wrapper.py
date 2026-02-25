@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -494,14 +495,19 @@ def enter_session(session_info, shell_type):
         if k in os.environ:
             filtered_env[k] = os.environ[k]
 
+    # Export all env vars in the bash wrapper so exec'd shell inherits them
+    export_cmds = "; ".join(
+        f'export {k}={shlex.quote(v)}'
+        for k, v in filtered_env.items()
+    )
     proc = subprocess.Popen([
         "nsenter",
         f"--target={child_pid}",
         "--user", "--mount", "--pid", "--uts", "--ipc",
         "--preserve-credentials",
         "--", "/bin/bash", "-c",
-        f'cd /projects 2>/dev/null; exec {shell_bin} -l',
-    ], env=filtered_env)
+        f'{export_cmds}; cd /projects 2>/dev/null; exec {shell_bin} -l',
+    ])
 
     try:
         while True:
