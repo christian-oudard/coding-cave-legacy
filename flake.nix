@@ -173,6 +173,9 @@
             fi
             if [ -d "$gitdir" ]; then
               RUNTIME_ARGS+=(--bind "$gitdir" "/projects/$slug/.git")
+            else
+              echo "FATAL: no gitdir for project '$slug' at $gitdir" >&2
+              exit 1
             fi
           done < <(${pkgs.jq}/bin/jq -r 'to_entries[] | [.key, .value.source, .value.merged] | @tsv' "''${CODING_CAVE_PROJECTS_MANIFEST}")
         fi
