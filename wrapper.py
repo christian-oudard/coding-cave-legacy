@@ -914,18 +914,13 @@ def push_project(slug, force=False):
             )
             if unpulled.returncode == 0 and unpulled.stdout.strip() != "0":
                 count = unpulled.stdout.strip()
-                print(f"Cave has {count} unpulled commit(s) that will be lost.", file=sys.stderr)
+                print(f"Cave has {count} unpulled commit(s) that would be lost:", file=sys.stderr)
                 subprocess.run(
                     ["git", "--git-dir", str(gitdir), "log", "--oneline",
                      f"{merge_base.stdout.strip()}..{cave_head_hash}"],
                 )
-                try:
-                    answer = input("Overwrite? [y/N] ").strip().lower()
-                except EOFError:
-                    answer = ""
-                if answer not in ("y", "yes"):
-                    print("Aborted.", file=sys.stderr)
-                    return
+                print(f"Run 'coding-cave pull' first, or use 'coding-cave push --force'.", file=sys.stderr)
+                sys.exit(1)
 
     # Update gitdir refs and objects from host. The gitdir is bind-mounted
     # into the cave, so the update is immediately visible inside. The
