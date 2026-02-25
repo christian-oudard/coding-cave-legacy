@@ -1,4 +1,4 @@
-"""Tests for sync helpers: transfer_working_tree, sync_refs, update_cave_sync."""
+"""Tests for sync helpers: sync_refs, history rewrite detection."""
 import subprocess
 from pathlib import Path
 
@@ -58,66 +58,6 @@ def git_head(path, gitdir=False):
         cmd = ["git", "-C", str(path), "rev-parse", "HEAD"]
     return subprocess.run(cmd, capture_output=True, text=True, check=True).stdout.strip()
 
-
-class TestTransferWorkingTree:
-    def test_transfer_cave_to_host(self, two_repos):
-        """Normal pull: cave has uncommitted changes, host is clean."""
-        host, gitdir, cave = two_repos
-
-        # Make uncommitted change in cave
-        (cave / "file.txt").write_text("modified in cave\n")
-
-        git_cave = ["git", "--git-dir", str(gitdir), "--work-tree", str(cave)]
-        git_host = ["git", "-C", str(host)]
-
-        wrapper.transfer_working_tree("test", git_cave, git_host, host, "pull")
-
-        assert (host / "file.txt").read_text() == "modified in cave\n"
-
-    def test_transfer_host_to_cave(self, two_repos):
-        """Normal push: host has uncommitted changes, cave is clean."""
-        host, gitdir, cave = two_repos
-
-        (host / "file.txt").write_text("modified on host\n")
-
-        git_host = ["git", "-C", str(host)]
-        git_cave = ["git", "--git-dir", str(gitdir), "--work-tree", str(cave)]
-
-        wrapper.transfer_working_tree("test", git_host, git_cave, cave, "push")
-
-        assert (cave / "file.txt").read_text() == "modified on host\n"
-
-    def test_refuses_dirty_dst(self, two_repos, capsys):
-        """Refuses transfer when destination has uncommitted changes."""
-        host, gitdir, cave = two_repos
-
-        # Dirty both sides
-        (cave / "file.txt").write_text("cave change\n")
-        (host / "file.txt").write_text("host change\n")
-
-        git_cave = ["git", "--git-dir", str(gitdir), "--work-tree", str(cave)]
-        git_host = ["git", "-C", str(host)]
-
-        wrapper.transfer_working_tree("test", git_cave, git_host, host, "pull")
-
-        # Host file should be unchanged (transfer refused)
-        assert (host / "file.txt").read_text() == "host change\n"
-        captured = capsys.readouterr()
-        assert "uncommitted changes" in captured.err
-
-    def test_noop_when_src_clean(self, two_repos, capsys):
-        """No transfer when source has no changes."""
-        host, gitdir, cave = two_repos
-
-        git_cave = ["git", "--git-dir", str(gitdir), "--work-tree", str(cave)]
-        git_host = ["git", "-C", str(host)]
-
-        wrapper.transfer_working_tree("test", git_cave, git_host, host, "pull")
-
-        # No output, no changes
-        assert (host / "file.txt").read_text() == "initial\n"
-        captured = capsys.readouterr()
-        assert captured.err == ""
 
 
 class TestSyncRefs:

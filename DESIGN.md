@@ -12,31 +12,47 @@ The host repo is canonical. The cave works on an overlay copy. `pull` brings cav
 
 `reset` is the escape hatch: wipe everything in the cave and start fresh from the host. It always works, regardless of how broken the cave state is.
 
-## Persistence across sessions
+## Session isolation
 
-The cave is a long-lived namespace, not a container that starts and stops per invocation. Multiple agents can work simultaneously inside the same cave via `nsenter`. The cave starts on first entry and stops when the last session exits.
+Each agent session runs in its own bwrap namespace with its own overlay. Multiple agents working on the same project get independent working trees — they cannot see or interfere with each other's uncommitted work. Agents interact only through git commits to a shared gitdir.
 
-State that persists: home directory (Claude Code config, history), nix store overlay (installed packages), project overlays (file changes), and gitdirs (commits). A fresh `coding-cave` invocation picks up exactly where the last one left off.
+`cav shell` joins a running agent's namespace via `nsenter`, giving the user direct access to that agent's in-progress files for inspection, testing, and debugging.
+
+### Session identity
+
+Sessions are identified by their first task message and start time, displayed in `cav status`:
+
+    my-project
+      [10:23] "Fix the pull crash when..."    running
+      [10:45] "Add network isolation..."      running
+
+When multiple sessions exist for a project, `cav shell` prompts the user to choose which session to join. If only one session is running, it joins directly.
+
+### Session lifecycle
+
+Each `cav` invocation starts a new bwrap process. The namespace lives as long as the agent does — no persistent idle process, no PID 1 init, no zombie reaper needed. When the agent exits, its bwrap exits.
+
+### What persists across sessions
+
+- Home directory (Claude Code config, conversation history)
+- Nix store overlay (packages installed via `nix shell`)
+- Gitdirs (commits)
+
+What does not persist: each session's working tree overlay. Uncommitted changes live only in the session's overlay. To preserve work, commit it.
 
 ## Git isolation via separate gitdir
 
 The cave's `.git` is not on the overlay. It's a separate clone (gitdir) bind-mounted into place. This avoids overlayfs bugs with atomic rename (which git uses for index and ref updates) and keeps git operations fast and reliable inside the cave.
 
-The gitdir is the shared channel between host and cave for committed work. `pull` fetches from it; `push` updates it.
+The gitdir is the shared channel between host and cave for committed work. `pull` fetches from it; `push` updates it. Multiple agents share the same gitdir, so one agent's commits are immediately visible to another via `git fetch` or `git log`.
 
 ## Pull
 
-Pull brings cave work to the host. It handles two kinds of changes: commits and uncommitted working tree modifications.
-
-### Committed changes
+Pull brings committed cave work to the host. Uncommitted changes are not transferred — with multiple sessions per project, there is no single working tree to pull from. Agents must commit their work for it to be pullable.
 
 Pull fetches from the cave's gitdir, rebases cave commits onto the host branch, and re-authors them to replace the throwaway cave identity (`coding-cave <coding-cave@noreply>`) with the host user's git identity. After rebasing, it syncs the gitdir back so both repos share the same commit hashes.
 
 The rebase uses `--no-reapply-cherry-picks` to skip commits already present on the host. Conflicts pause the rebase and print instructions for manual resolution.
-
-### Working tree changes
-
-After pulling commits, pull checks for uncommitted changes in the cave (tracked/staged diffs against HEAD). If found, it generates a patch and applies it to the host working tree, staging the result. This is refused if the host already has uncommitted changes, to avoid conflicts.
 
 ### History rewrites require --force
 
@@ -60,17 +76,9 @@ This is why the force path uses `reset --hard` (adopting exact commit objects) r
 
 ## Push
 
-Push brings host state to the cave. It updates the gitdir's refs and objects to match the host, then optionally transfers uncommitted working tree changes.
-
-### Safety: unpulled cave commits
+Push brings host commits to the cave. It updates the gitdir's refs and objects to match the host. Uncommitted host changes are not transferred.
 
 Push refuses if the cave has commits that haven't been pulled yet, since updating the gitdir would lose them. It shows the unpulled commits and suggests `coding-cave pull` first, or `--force` to override.
-
-### Working tree changes
-
-After updating commits, push checks for uncommitted host changes (tracked/staged diffs against HEAD). If found, it generates a patch and applies it to the cave overlay, staging the result. This is refused if the cave already has uncommitted changes, to avoid conflicts.
-
-### Immediate visibility
 
 The gitdir is bind-mounted into the cave, so push updates are immediately visible to running agents. No cave restart needed.
 

@@ -75,7 +75,6 @@
         zsh
         eza
         nano
-        tini
       ]))
       (set-env "EDITOR" "${pkgs.nano}/bin/nano")
       (set-env "TERMINFO_DIRS" "${pkgs.ncurses}/share/terminfo")
@@ -142,12 +141,10 @@
         fi
 
         # Mount projects from JSON manifest. The wrapper pre-mounts
-        # fuse-overlayfs at merged/ (handles unmapped GIDs that kernel
-        # overlayfs can't copy-up in user namespaces). Fall back to
-        # kernel overlayfs if fuse-overlayfs isn't mounted.
+        # fuse-overlayfs at per-session merged dirs. Manifest format:
+        # {slug: {source: path, merged: path}}
         if [ -n "''${CODING_CAVE_PROJECTS_MANIFEST:-}" ] && [ -f "''${CODING_CAVE_PROJECTS_MANIFEST}" ]; then
-          while IFS=$'\t' read -r slug src; do
-            merged="$CAVE_DATA/projects/$slug/merged"
+          while IFS=$'\t' read -r slug src merged; do
             gitdir="$CAVE_DATA/projects/$slug/gitdir"
             if mountpoint -q "$merged" 2>/dev/null; then
               RUNTIME_ARGS+=(--bind "$merged" "/projects/$slug")
@@ -160,7 +157,7 @@
             if [ -d "$gitdir" ]; then
               RUNTIME_ARGS+=(--bind "$gitdir" "/projects/$slug/.git")
             fi
-          done < <(${pkgs.jq}/bin/jq -r 'to_entries[] | [.key, .value] | @tsv' "''${CODING_CAVE_PROJECTS_MANIFEST}")
+          done < <(${pkgs.jq}/bin/jq -r 'to_entries[] | [.key, .value.source, .value.merged] | @tsv' "''${CODING_CAVE_PROJECTS_MANIFEST}")
         fi
       '')
 
@@ -177,12 +174,10 @@
         RUNTIME_ARGS+=(--ro-bind "$CAVE_GROUP" /etc/group)
       '')
 
-      # Cave init: dump environment for nsenter, reap zombies via tini
+      # Entry: set up /projects, then exec the provided command
       (wrap-entry (entry: ''
         mkdir -p /projects
-        export -p > /tmp/cave-env
-        chmod 444 /tmp/cave-env
-        exec tini -s -- sleep infinity
+        exec "$@"
       ''))
     ];
 
