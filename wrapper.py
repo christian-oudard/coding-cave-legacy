@@ -420,6 +420,63 @@ def initialize_gitdir(slug, project_dir):
             ["git", "--git-dir", str(gitdir), "update-ref",
              "refs/cave-sync", head.stdout.strip()],
         )
+        # Set initial host remote ref in gitdir so cave git log shows host/main
+        branch = subprocess.run(
+            ["git", "-C", str(project_dir), "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True,
+        )
+        if branch.returncode == 0:
+            subprocess.run(
+                ["git", "--git-dir", str(gitdir), "update-ref",
+                 f"refs/remotes/host/{branch.stdout.strip()}", head.stdout.strip()],
+            )
+    # Add gitdir as 'cave' remote in host repo so cave/main shows in git log
+    ensure_cave_remote(project_dir, gitdir)
+
+
+def ensure_cave_remote(project_dir, gitdir):
+    """Ensure the host repo has a 'cave' remote pointing to the gitdir."""
+    git = ["git", "-C", str(project_dir)]
+    existing = subprocess.run(
+        git + ["remote", "get-url", "cave"],
+        capture_output=True, text=True,
+    )
+    if existing.returncode == 0:
+        if existing.stdout.strip() != str(gitdir):
+            subprocess.run(
+                git + ["remote", "set-url", "cave", str(gitdir)],
+                capture_output=True,
+            )
+    else:
+        subprocess.run(
+            git + ["remote", "add", "cave", str(gitdir)],
+            capture_output=True,
+        )
+    subprocess.run(git + ["fetch", "cave"], capture_output=True)
+
+
+def update_cave_sync(gitdir, project_dir, commit, branch=None):
+    """Write cave-sync ref and update remote tracking refs in both repos."""
+    subprocess.run(
+        ["git", "--git-dir", str(gitdir), "update-ref",
+         "refs/cave-sync", commit],
+    )
+    # Update cave remote in host repo (so host git log shows cave/main)
+    subprocess.run(
+        ["git", "-C", str(project_dir), "fetch", "cave"],
+        capture_output=True,
+    )
+    # Update host remote in gitdir (so cave git log shows host/main)
+    if branch:
+        host_head = subprocess.run(
+            ["git", "-C", str(project_dir), "rev-parse", "HEAD"],
+            capture_output=True, text=True,
+        )
+        if host_head.returncode == 0:
+            subprocess.run(
+                ["git", "--git-dir", str(gitdir), "update-ref",
+                 f"refs/remotes/host/{branch}", host_head.stdout.strip()],
+            )
 
 
 def mount_project_overlay(slug):
@@ -580,6 +637,8 @@ def pull_project(slug, force=False):
         print(f"No gitdir for {slug} — run 'coding-cave reset' first.", file=sys.stderr)
         sys.exit(1)
 
+    ensure_cave_remote(project_dir, gitdir)
+
     # Clean up stale rebase/branch state from a previous failed pull
     git = ["git", "-C", str(project_dir)]
     git_dir = project_dir / ".git"
@@ -618,10 +677,7 @@ def pull_project(slug, force=False):
     ).stdout.strip()
     if host_head == gitdir_head:
         print(f"No new commits to pull from {slug}.", file=sys.stderr)
-        subprocess.run(
-            ["git", "--git-dir", str(gitdir), "update-ref",
-             "refs/cave-sync", host_head],
-        )
+        update_cave_sync(gitdir, project_dir, host_head, branch)
         pull_working_tree(slug, project_dir, gitdir)
         return
 
@@ -647,10 +703,7 @@ def pull_project(slug, force=False):
                 check=True,
             )
             print(f"Force-updated {slug}.", file=sys.stderr)
-            subprocess.run(
-                ["git", "--git-dir", str(gitdir), "update-ref",
-                 "refs/cave-sync", gitdir_head],
-            )
+            update_cave_sync(gitdir, project_dir, gitdir_head, branch)
             pull_working_tree(slug, project_dir, gitdir)
             return
 
@@ -738,10 +791,7 @@ def pull_project(slug, force=False):
              f"refs/heads/{branch}", host_head],
             check=True,
         )
-        subprocess.run(
-            ["git", "--git-dir", str(gitdir), "update-ref",
-             "refs/cave-sync", host_head],
-        )
+        update_cave_sync(gitdir, project_dir, host_head, branch)
         pull_working_tree(slug, project_dir, gitdir)
         return
 
@@ -817,10 +867,7 @@ def pull_project(slug, force=False):
          f"refs/heads/{branch}", host_head],
         check=True,
     )
-    subprocess.run(
-        ["git", "--git-dir", str(gitdir), "update-ref",
-         "refs/cave-sync", host_head],
-    )
+    update_cave_sync(gitdir, project_dir, host_head, branch)
 
     pull_working_tree(slug, project_dir, gitdir)
 
@@ -1108,6 +1155,8 @@ def push_project(slug, force=False):
         print(f"No gitdir for {slug} — run 'coding-cave reset' first.", file=sys.stderr)
         sys.exit(1)
 
+    ensure_cave_remote(project_dir, gitdir)
+
     # Determine host branch and HEAD
     branch_result = subprocess.run(
         ["git", "-C", str(project_dir), "rev-parse", "--abbrev-ref", "HEAD"],
@@ -1127,10 +1176,7 @@ def push_project(slug, force=False):
     )
     if cave_head.returncode == 0 and cave_head.stdout.strip() == host_head:
         print(f"No commits to push to {slug}.", file=sys.stderr)
-        subprocess.run(
-            ["git", "--git-dir", str(gitdir), "update-ref",
-             "refs/cave-sync", host_head],
-        )
+        update_cave_sync(gitdir, project_dir, host_head, branch)
         push_working_tree(slug, project_dir, gitdir)
         return
 
@@ -1178,10 +1224,7 @@ def push_project(slug, force=False):
          f"refs/heads/{branch}", host_head],
         check=True,
     )
-    subprocess.run(
-        ["git", "--git-dir", str(gitdir), "update-ref",
-         "refs/cave-sync", host_head],
-    )
+    update_cave_sync(gitdir, project_dir, host_head, branch)
 
     print(f"Pushed to {slug} ({host_head[:8]}).", file=sys.stderr)
 
