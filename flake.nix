@@ -112,6 +112,7 @@
         if [ ! -d "$CLAUDE_DIR" ]; then
           mkdir -p "$CLAUDE_DIR"
           cp ${defaultClaudeSettings} "$CLAUDE_DIR/settings.json"
+          chmod 644 "$CLAUDE_DIR/settings.json"
           printf '%s' '{"hasCompletedOnboarding":true,"theme":"dark","effortCalloutDismissed":true}' > "$CAVE_HOME/.claude.json"
         fi
 
