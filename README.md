@@ -99,7 +99,7 @@ coding-cave pull
 
 Mounts the project overlay using fuse-overlayfs, fetches the agent's commits, and rebases them onto your branch — re-authoring each with your identity. If there are conflicts, instructions are printed for manual resolution.
 
-Running `pull` from outside any project directory pulls all registered projects.
+Running `pull` from outside any project directory prints an error — specify a project or cd into one.
 
 ### Push host changes
 
@@ -108,7 +108,7 @@ cd ~/code/my-project
 coding-cave push
 ```
 
-Resets the project overlay so the cave sees the current host state on next entry. The cave must be stopped first (exit all sessions). If there are unpulled commits or uncommitted changes in the overlay, you'll be shown a summary and prompted before they're discarded.
+Updates the cave's gitdir to match the host branch. The cave can be running — only the git refs and objects are updated, the working tree on the overlay is left untouched, so uncommitted changes in the cave are preserved. Running `push` from outside any project directory pushes all registered projects.
 
 ### Remove a project
 
@@ -143,7 +143,7 @@ Variables under `[environment]` are set when entering the cave for that project.
 
 ## User instructions
 
-Place a `CLAUDE.md` at `~/.config/coding-cave/CLAUDE.md` to have it bind-mounted read-only into the cave home. This is useful for instructions you want applied across all projects.
+Place a `CLAUDE.md` at `~/.config/coding-cave/CLAUDE.md` to have it bind-mounted read-only into `~/.claude/CLAUDE.md` inside the cave. This is useful for instructions you want applied across all projects.
 
 ## Persistent state
 

@@ -798,13 +798,11 @@ def cmd_reset(args):
 
 
 def push_project(slug):
-    """Push host commits into the cave, making the cave identical to the host.
+    """Push host commits into the cave's gitdir.
 
-    Pre-condition: the user has approved clobbering changes in the cave.
-    Post-condition: the cave git repo becomes identical to the host repo.
-
-    If the cave is running, nsenter to reset the working tree on the overlay.
-    If stopped, wipe the overlay so the next start assembles fresh from host.
+    Updates the gitdir refs and objects to match the host. The working tree
+    on the overlay is left untouched — uncommitted changes in the cave are
+    preserved.
     """
     projects = load_projects()
     if slug not in projects:
@@ -961,7 +959,7 @@ Commands:
   shell                enter cave with your shell
   add [dir]            register a project (default: current dir)
   pull [project]       pull commits from cave gitdir, re-author
-  push [project]       make cave identical to host (clobbers cave)
+  push [project]       push host commits into cave gitdir
   reset [project]      wipe overlay + gitdir to match host (cave must be stopped)
   remove [project]     unregister a project and delete overlay data
   status               show cave and project info

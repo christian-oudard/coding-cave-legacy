@@ -21,7 +21,7 @@ The cave is a **persistent bwrap namespace** that survives across agent sessions
 ### Configuration Files (on host, outside this repo)
 
 - **Global config** (`~/.config/coding-cave/config.toml`): OAuth tokens (`credentials.claude-oauth-token`), sandbox settings (`sandbox.home-size-gb`). Credentials are forwarded via env vars only, never written to disk inside the cave.
-- **User CLAUDE.md** (`~/.config/coding-cave/CLAUDE.md`): Optional instructions file, bind-mounted read-only into cave home at `~/CLAUDE.md`.
+- **User CLAUDE.md** (`~/.config/coding-cave/CLAUDE.md`): Optional instructions file, bind-mounted read-only into cave home at `~/.claude/CLAUDE.md`.
 - **Shell dotfiles**: User's `~/.bashrc`/`~/.bash_profile` (ro-bind) or `~/.config/zsh/` (overlay for writable history) are forwarded into the cave.
 
 ### Persistent State (`~/.local/share/coding-cave/`)
@@ -45,7 +45,7 @@ The cave is a **persistent bwrap namespace** that survives across agent sessions
 - `.git` on bind mount, not overlay — kernel overlayfs in user namespaces breaks atomic rename (git index, refs). A dedicated `gitdir/` is bind-mounted at `/projects/<slug>/.git` so git operations work normally inside the cave.
 - `/nix/store` overlay — host nix store as lower layer, cave-local upper for autonomous `nix shell` package management
 - `pull` fetches from gitdir (host filesystem), rebases to re-author (strips cave-coder identity), then syncs gitdir back
-- `push` updates gitdir from host, then nsenter to reset working tree (or wipes overlay if stopped)
+- `push` updates gitdir refs/objects from host; working tree on the overlay is left untouched (uncommitted cave changes preserved)
 - Auto-stop: cave shuts down when the last session exits (via `fork` + `stop_cave` in `enter_cave`)
 - GPU access opt-in via `--gpu` flag (two separate sandbox derivations)
 - CWD-based project detection: running `coding-cave` from inside a registered project dir auto-selects it; from an unregistered dir, prompts to add it
@@ -57,7 +57,7 @@ coding-cave [--gpu]                   enter cave, run claude (auto-detects proje
 coding-cave shell [--gpu]             enter cave with user's shell
 coding-cave add [dir]                 register a project (default: CWD)
 coding-cave pull [project]            pull commits from cave gitdir, re-author
-coding-cave push [project]            make cave identical to host (clobbers cave)
+coding-cave push [project]            push host commits into cave gitdir (preserves uncommitted changes)
 coding-cave reset [project]           wipe overlay + gitdir to match host (cave must be stopped)
 coding-cave remove [project]          unregister a project and delete overlay data
 coding-cave status                    show cave status and registered projects

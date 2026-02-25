@@ -105,7 +105,7 @@
         RUNTIME_ARGS+=(--bind "$CLAUDE_JSON" ${jailHome}/.claude.json)
 
         if [ -n "''${CODING_CAVE_CLAUDE_MD:-}" ] && [ -f "''${CODING_CAVE_CLAUDE_MD}" ]; then
-          RUNTIME_ARGS+=(--ro-bind "$CODING_CAVE_CLAUDE_MD" ${jailHome}/CLAUDE.md)
+          RUNTIME_ARGS+=(--ro-bind "$CODING_CAVE_CLAUDE_MD" ${jailHome}/.claude/CLAUDE.md)
         fi
 
         # Shell dotfiles (zsh) — overlay so .zhistory/.zcompdump are writable
