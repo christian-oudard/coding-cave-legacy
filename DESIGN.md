@@ -86,6 +86,14 @@ Push refuses if the cave has commits that haven't been pulled yet, since updatin
 
 The gitdir is bind-mounted into the cave, so push updates are immediately visible to running agents. No cave restart needed.
 
+## Cave-originated projects
+
+Projects can be created inside the cave without a host source directory. The agent runs `cav-init <name>`, which creates a git repo at `~/unsynced-projects/<name>/` (persistent home). The agent works there directly.
+
+On the host, `cav pull <name>` discovers the unsynced project, clones it to the host CWD, and registers it as a normal project. The next cave session mounts it at `/projects/<name>/` with overlay + gitdir like any other project.
+
+Two locations make the state obvious: `/projects/` = synced with host, `~/unsynced-projects/` = cave-only.
+
 ## Credential isolation
 
 Credentials enter the cave only as environment variables (`--clearenv` + explicit forwarding). Nothing is written to disk inside the cave. OAuth tokens, API keys, and GitHub tokens are forwarded from the host config at entry time.

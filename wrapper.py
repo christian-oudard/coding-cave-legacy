@@ -27,6 +27,7 @@ PROJECTS_FILE = CAVE_DATA / "projects.json"
 PROJECTS_DIR = CAVE_DATA / "projects"
 NIX_OVERLAY_DIR = CAVE_DATA / "nix-overlay"
 SESSIONS_DIR = CAVE_DATA / "sessions"
+CAVE_HOME = CAVE_DATA / "home"
 
 
 # --- Config ---
@@ -1232,12 +1233,61 @@ def cmd_reset(args):
     print(f"Reset overlay for {slug}. Next session will see current host state.", file=sys.stderr)
 
 
+def find_unsynced_project(slug):
+    """Check if a cave-originated project exists in cave home."""
+    cave_repo = CAVE_HOME / "unsynced-projects" / slug
+    if cave_repo.is_dir() and (cave_repo / ".git").is_dir():
+        return cave_repo
+    return None
+
+
+def pull_cave_project(slug):
+    """Pull a cave-originated project to the host for the first time."""
+    cave_repo = find_unsynced_project(slug)
+    if cave_repo is None:
+        print(f"No cave-originated project named {slug}.", file=sys.stderr)
+        sys.exit(1)
+
+    host_dir = Path.cwd().resolve() / slug
+    if host_dir.exists():
+        print(f"Directory already exists: {host_dir}", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        answer = input(f"Clone cave project to {host_dir}? [y/N] ").strip().lower()
+    except EOFError:
+        answer = ""
+    if answer != "y":
+        print("Aborted.", file=sys.stderr)
+        sys.exit(0)
+
+    subprocess.run(
+        ["git", "clone", str(cave_repo), str(host_dir)],
+        check=True,
+    )
+    # Remove the clone's origin (points to cave home, not useful)
+    subprocess.run(
+        ["git", "-C", str(host_dir), "remote", "remove", "origin"],
+        capture_output=True,
+    )
+
+    # Register as a normal project with gitdir + overlay
+    ensure_project(host_dir)
+    print(f"Pulled cave project {slug} to {host_dir}", file=sys.stderr)
+    print(f"Next cave session will mount it at /projects/{slug}.", file=sys.stderr)
+
+
 def cmd_pull(args):
     force = "--force" in args
     args = [a for a in args if a != "--force"]
 
     if args:
-        pull_project(args[0], force=force)
+        slug = args[0]
+        projects = load_projects()
+        if slug not in projects and find_unsynced_project(slug):
+            pull_cave_project(slug)
+            return
+        pull_project(slug, force=force)
         return
 
     cwd = Path.cwd().resolve()
