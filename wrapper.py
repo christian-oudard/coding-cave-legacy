@@ -722,7 +722,9 @@ def pull_project(slug, force=False):
     # Host repo has no commits yet — fetch and create branch from cave
     if branch_result.returncode != 0:
         branch = git(gitdir, "rev-parse", "--abbrev-ref", "HEAD",
-            capture_output=True, text=True).stdout.strip() or "main"
+            capture_output=True, text=True).stdout.strip()
+        if not branch or branch == "HEAD":
+            branch = "main"
         subprocess.run(host_git + ["fetch", str(gitdir), "HEAD"], check=True, capture_output=True)
         subprocess.run(host_git + ["update-ref", f"refs/heads/{branch}", gitdir_head], check=True)
         subprocess.run(host_git + ["symbolic-ref", "HEAD", f"refs/heads/{branch}"], check=True)
