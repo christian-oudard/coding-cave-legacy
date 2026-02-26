@@ -645,7 +645,7 @@ class TestSessionGitdir:
         assert branch.returncode == 0
 
     def test_two_sessions_both_commit_on_main(self, shared_project, tmp_path):
-        """Two sessions both commit on main: first merges, second diverges."""
+        """Two sessions both commit on main: last writer wins, old ref backed up."""
         host, slug, projects_dir = shared_project
         shared_gd = projects_dir / slug / "gitdir"
 
@@ -656,6 +656,7 @@ class TestSessionGitdir:
         (work_a / "a.txt").write_text("from A\n")
         cave_git(work_a, "add", "a.txt")
         cave_git(work_a, "commit", "-m", "commit A")
+        sha_a = cave_git(work_a, "rev-parse", "HEAD").stdout.strip()
 
         (work_b / "b.txt").write_text("from B\n")
         cave_git(work_b, "add", "b.txt")
@@ -666,23 +667,57 @@ class TestSessionGitdir:
         log = git_run("git", "--git-dir", str(shared_gd), "log", "--oneline")
         assert "commit A" in log.stdout
 
-        # Session B ends — its main can't fast-forward (diverged)
-        # B's commits should still be preserved (not lost)
+        # Session B ends — diverged, force-updates main (last writer wins)
         wrapper.merge_session_gitdirs("sid-b", overlay_b)
 
-        # A's commit should still be on main
+        # B's commit is now on main
         log = git_run("git", "--git-dir", str(shared_gd),
                       "log", "--oneline", "refs/heads/main")
-        assert "commit A" in log.stdout
+        assert "commit B" in log.stdout
 
-        # B's commit should be reachable (saved under a session ref)
-        all_refs = git_run("git", "--git-dir", str(shared_gd),
-                           "for-each-ref", "--format=%(refname)")
-        b_commit_sha = cave_git(work_b, "rev-parse", "HEAD").stdout.strip()
-        # Verify B's commit object exists in shared
-        cat = git_run("git", "--git-dir", str(shared_gd),
-                      "cat-file", "-t", b_commit_sha)
-        assert cat.returncode == 0, "B's commit should exist in shared object store"
+        # A's old ref is backed up under refs/sessions/sid-b/main
+        backup = git_run("git", "--git-dir", str(shared_gd),
+                         "rev-parse", "refs/sessions/sid-b/main")
+        assert backup.returncode == 0
+        assert backup.stdout.strip() == sha_a
+
+    def test_amended_commit_updates_shared(self, shared_project, tmp_path):
+        """Amending a commit after mid-session sync must still update shared.
+
+        Reproduces: session makes commit B, mid-session sync (pull) advances
+        shared main to B, session amends B to B', session exits.
+        merge_session_gitdirs must update shared main to B' (not leave it at B).
+
+        Root cause of the pull failure: merge_session_gitdirs treated the amend
+        as divergence (merge-base of B and B' is A, not B) and saved B' under
+        refs/sessions/ instead of updating refs/heads/main.  Next pull saw
+        host_head == gitdir_head (both B) and reported "No new commits."
+        """
+        host, slug, projects_dir = shared_project
+        shared_gd = projects_dir / slug / "gitdir"
+
+        _, work_a, overlay_a = self._make_session(tmp_path, slug, projects_dir, "a")
+
+        # Session creates commit B
+        (work_a / "new.txt").write_text("v1\n")
+        cave_git(work_a, "add", "new.txt")
+        cave_git(work_a, "commit", "-m", "commit B")
+        sha_b = cave_git(work_a, "rev-parse", "HEAD").stdout.strip()
+
+        # Mid-session sync (simulates pull -> sync_live_sessions) advances shared
+        wrapper.merge_session_gitdirs("sid-a", overlay_a)
+        assert git_head(shared_gd, gitdir=True) == sha_b
+
+        # Session amends B to B'
+        (work_a / "new.txt").write_text("v2\n")
+        cave_git(work_a, "add", "new.txt")
+        cave_git(work_a, "commit", "--amend", "-m", "commit B amended")
+        sha_b_prime = cave_git(work_a, "rev-parse", "HEAD").stdout.strip()
+        assert sha_b_prime != sha_b
+
+        # Session exits — merge should update shared to B'
+        wrapper.merge_session_gitdirs("sid-a", overlay_a)
+        assert git_head(shared_gd, gitdir=True) == sha_b_prime
 
     def test_no_gitdir_returns_none(self, tmp_path, monkeypatch):
         """create_session_gitdir returns None when no shared gitdir exists."""

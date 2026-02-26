@@ -387,8 +387,8 @@ def merge_session_gitdirs(sid, overlay_base):
     """Merge per-session gitdir refs and objects back into shared gitdirs.
 
     Fast-forwards branch and tag refs.  When a ref can't be fast-forwarded
-    (another session already advanced it), the commit is saved under
-    refs/sessions/<sid>/<branch> so it's not lost.
+    (e.g. amend or concurrent sessions), force-updates the shared ref and
+    backs up the old shared ref under refs/sessions/<sid>/<branch>.
 
     Scans overlay_base for gitdir-<slug> directories rather than relying on
     the project registry, so cleanup works even if the registry changes.
@@ -445,9 +445,12 @@ def merge_session_gitdirs(sid, overlay_base):
                 git(shared_gitdir, "update-ref", ref, sha,
                     capture_output=True)
             else:
-                # Diverged — save under session ref
+                # Diverged (e.g. amend) — force-update shared ref.
+                # Back up the old ref so concurrent sessions' work isn't lost.
                 git(shared_gitdir, "update-ref",
-                    f"refs/sessions/{sid}/{branch}", sha,
+                    f"refs/sessions/{sid}/{branch}", existing_sha,
+                    capture_output=True)
+                git(shared_gitdir, "update-ref", ref, sha,
                     capture_output=True)
 
         # Also fetch tags
@@ -1114,11 +1117,30 @@ def push_project(slug, force=False):
     print(f"Pushed to {slug} ({host_head[:8]}).", file=sys.stderr)
 
 
+def unmount_all_under(path):
+    """Unmount any fuse mounts inside path (deepest first)."""
+    path = Path(path).resolve()
+    mounts = []
+    try:
+        with open("/proc/mounts") as f:
+            for line in f:
+                mp = line.split()[1]
+                mp_path = Path(mp)
+                if mp_path == path or (mp_path.is_relative_to(path)):
+                    mounts.append(mp)
+    except OSError:
+        return
+    # Unmount deepest first to avoid "busy" on parent mounts
+    for mp in sorted(mounts, key=len, reverse=True):
+        subprocess.run(["fusermount3", "-u", mp], capture_output=True)
+
+
 def force_rmtree(path):
     """Remove a directory tree, forcing permissions on read-only entries (e.g. nix store paths)."""
     path = Path(path)
     if not path.exists():
         return
+    unmount_all_under(path)
     for dirpath, dirnames, filenames in os.walk(path):
         for name in dirnames + filenames:
             try:
