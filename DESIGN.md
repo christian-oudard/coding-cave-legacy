@@ -18,7 +18,7 @@ On the host, the user thinks in terms of project directories, not slugs. The pro
 
 ## Session isolation
 
-Each agent session runs in its own bwrap namespace with its own overlay. Multiple agents working on the same project get independent working trees — they cannot see or interfere with each other's uncommitted work. Agents interact only through git commits to a shared gitdir.
+Each agent session runs in its own bwrap namespace with its own overlay and its own gitdir. Multiple agents working on the same project get independent working trees and independent git state — they cannot see or interfere with each other's uncommitted work or HEAD position. Agents interact only through the shared gitdir, which receives commits on session cleanup.
 
 `cav shell` joins a running agent's namespace via `nsenter`, giving the user direct access to that agent's in-progress files for inspection, testing, and debugging.
 
@@ -40,15 +40,19 @@ Each `cav` invocation starts a new bwrap process. The namespace lives as long as
 
 - Home directory (Claude Code config, conversation history)
 - Nix store overlay (packages installed via `nix shell`)
-- Gitdirs (commits)
+- Shared gitdirs (commits merged from session gitdirs on cleanup)
 
-What does not persist: each session's working tree overlay. Uncommitted changes live only in the session's overlay. To preserve work, commit it.
+What does not persist: each session's working tree overlay and session gitdir. Uncommitted changes and unpushed refs live only in the session. To preserve work, commit it.
 
 ## Git isolation via separate gitdir
 
-The cave's `.git` is not on the overlay. It's a separate clone (gitdir) bind-mounted into place. This avoids overlayfs bugs with atomic rename (which git uses for index and ref updates) and keeps git operations fast and reliable inside the cave.
+The cave's `.git` is not on the overlay. It's a separate gitdir bind-mounted into place. This avoids overlayfs bugs with atomic rename (which git uses for index and ref updates) and keeps git operations fast and reliable inside the cave.
 
-The gitdir is the shared channel between host and cave for committed work. `pull` fetches from it; `push` updates it. Multiple agents share the same gitdir, so one agent's commits are immediately visible to another via `git fetch` or `git log`.
+A shared gitdir holds the canonical objects and refs for each project. Each session gets its own lightweight gitdir that shares the object store via `objects/info/alternates`. This gives each session an independent HEAD, index, and refs — one agent's commits don't move another agent's HEAD or make its working tree appear dirty.
+
+Per-session gitdirs are small (index file + refs + config). The bulk of git data (packfiles, loose objects) lives in the shared gitdir and is never duplicated. New objects created during a session live in the session gitdir until cleanup, when they're pushed to the shared gitdir.
+
+On session end, refs and new objects from the session gitdir are merged into the shared gitdir, then the session gitdir is removed. `pull` and `push` operate on the shared gitdir as before.
 
 ## Pull
 
