@@ -190,9 +190,7 @@ def list_sessions(project=None):
 def cleanup_session(sid):
     """Remove session files."""
     for slug in load_projects():
-        sess_dir = PROJECTS_DIR / slug / "sessions" / sid
-        if sess_dir.exists():
-            shutil.rmtree(sess_dir, ignore_errors=True)
+        force_rmtree(PROJECTS_DIR / slug / "sessions" / sid)
     (SESSIONS_DIR / f"{sid}.json").unlink(missing_ok=True)
     (SESSIONS_DIR / f"{sid}.manifest.json").unlink(missing_ok=True)
 
@@ -660,7 +658,11 @@ def start_session(project, command, gpu=False):
     finally:
         merge_session_gitdirs(sid, overlay_base)
         cleanup_session(sid)
-        shutil.rmtree(str(overlay_base), ignore_errors=True)
+        force_rmtree(overlay_base)
+        # Clean shared nix overlay when last session exits
+        if not list_sessions():
+            for subdir in ["upper", "work", "db"]:
+                force_rmtree(NIX_OVERLAY_DIR / subdir)
 
     sys.exit(ret)
 
@@ -1059,6 +1061,20 @@ def push_project(slug, force=False):
     print(f"Pushed to {slug} ({host_head[:8]}).", file=sys.stderr)
 
 
+def force_rmtree(path):
+    """Remove a directory tree, forcing permissions on read-only entries (e.g. nix store paths)."""
+    path = Path(path)
+    if not path.exists():
+        return
+    for dirpath, dirnames, filenames in os.walk(path):
+        for name in dirnames + filenames:
+            try:
+                (Path(dirpath) / name).chmod(0o700)
+            except OSError:
+                pass
+    shutil.rmtree(path)
+
+
 def reset_project_overlay(slug):
     """Reset a project: wipe overlays and recreate gitdir."""
     projects = load_projects()
@@ -1067,13 +1083,7 @@ def reset_project_overlay(slug):
     for subdir in ["upper", "work", "gitdir", "sessions"]:
         p = proj_state / subdir
         if p.exists():
-            for dirpath, dirnames, _filenames in os.walk(p):
-                for d in dirnames:
-                    try:
-                        (Path(dirpath) / d).chmod(0o700)
-                    except OSError:
-                        pass
-            shutil.rmtree(p)
+            force_rmtree(p)
             if subdir not in ("gitdir", "sessions"):
                 p.mkdir()
 
@@ -1184,8 +1194,12 @@ def cmd_add(args):
     slug = project_dir.name
     projects = load_projects()
     if slug in projects and Path(projects[slug]).resolve() == project_dir:
-        print(f"{slug} is already in the coding cave.", file=sys.stderr)
-        return
+        gitdir = PROJECTS_DIR / slug / "gitdir"
+        if gitdir.exists():
+            print(f"{slug} is already in the coding cave.", file=sys.stderr)
+            return
+        # Re-initialize missing gitdir
+        initialize_gitdir(slug, project_dir)
 
     slug = ensure_project(project_dir)
     print(f"Added {slug} to the coding cave.", file=sys.stderr)
@@ -1219,9 +1233,7 @@ def cmd_remove(args):
         sys.exit(1)
 
     reset_project_overlay(slug)
-    proj_state = PROJECTS_DIR / slug
-    if proj_state.exists():
-        shutil.rmtree(proj_state)
+    force_rmtree(PROJECTS_DIR / slug)
 
     del projects[slug]
     save_projects(projects)
@@ -1264,6 +1276,17 @@ def cmd_move(old_slug, new_path):
             old_state.rename(new_state)
 
     print(f"Moved {old_slug} -> {new_slug} ({new_path})", file=sys.stderr)
+
+
+def clean_stale_session_overlays():
+    """Remove session overlay dirs that have no running session."""
+    overlay_root = CAVE_DATA / "session-overlays"
+    if not overlay_root.exists():
+        return
+    running = {s["sid"] for s in list_sessions()}
+    for entry in overlay_root.iterdir():
+        if entry.is_dir() and entry.name not in running:
+            force_rmtree(entry)
 
 
 def cmd_reset(args):
@@ -1334,6 +1357,7 @@ def cmd_reset(args):
             return
 
     reset_project_overlay(slug)
+    clean_stale_session_overlays()
     print(f"Reset overlay for {slug}. Next session will see current host state.", file=sys.stderr)
 
 
