@@ -1,4 +1,4 @@
-"""Tests for pull_project: normal pull, auto-force on amend/squash."""
+"""Tests for pull_project: normal pull, auto-force, and edge cases."""
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -217,3 +217,140 @@ class TestPullNormal:
         wrapper.pull_project(env.slug)
         assert _log_count(env.host) == 3
         assert (env.host / "file.txt").read_text() == "two\n"
+
+
+class TestPullEdgeCases:
+    """Edge cases: empty repos, stale state, detached HEAD."""
+
+    def test_pull_into_empty_host(self, tmp_path, monkeypatch):
+        """Pull into a host repo with no commits initializes from cave.
+
+        Regression: 0a7e904 — pull crashed on empty host repos because
+        rev-parse HEAD failed with check=True.
+        """
+        slug = "test-project"
+
+        # Empty host repo (no commits)
+        host = tmp_path / "host"
+        host.mkdir()
+        _run("git", "-C", str(host), "init", "-b", "main")
+        _run("git", "-C", str(host), "config", "user.email", "host@test.com")
+        _run("git", "-C", str(host), "config", "user.name", "Host User")
+
+        # Gitdir with commits (simulate cave that already has work)
+        source = tmp_path / "source"
+        source.mkdir()
+        _run("git", "-C", str(source), "init", "-b", "main")
+        _run("git", "-C", str(source), "config", "user.email", "cave@test.com")
+        _run("git", "-C", str(source), "config", "user.name", "cave-coder")
+        (source / "file.txt").write_text("cave work\n")
+        _run("git", "-C", str(source), "add", ".")
+        _run("git", "-C", str(source), "commit", "-m", "cave commit")
+
+        # Create gitdir from source
+        projects_dir = tmp_path / "projects"
+        proj_state = projects_dir / slug
+        proj_state.mkdir(parents=True)
+        tmpclone = tmp_path / "_tmpclone"
+        _run("git", "clone", "--no-checkout", "--local", str(source), str(tmpclone))
+        gitdir = proj_state / "gitdir"
+        (tmpclone / ".git").rename(gitdir)
+        tmpclone.rmdir()
+        _run("git", "--git-dir", str(gitdir), "remote", "remove", "origin", check=False)
+
+        monkeypatch.setattr(wrapper, "PROJECTS_DIR", projects_dir)
+        monkeypatch.setattr(wrapper, "load_projects", lambda: {slug: str(host)})
+        for var in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
+                    "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"):
+            monkeypatch.delenv(var, raising=False)
+
+        wrapper.pull_project(slug)
+
+        # Host should now have the commit and a branch
+        assert _log_count(host) == 1
+        branch = _run("git", "-C", str(host), "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+        assert branch == "main"
+        assert (host / "file.txt").read_text() == "cave work\n"
+
+    def test_detached_head_uses_main_branch(self, tmp_path, monkeypatch):
+        """Pull from detached HEAD gitdir creates 'main' branch, not 'HEAD'.
+
+        Regression: e5e228a — git rev-parse --abbrev-ref HEAD returns literal
+        'HEAD' when detached, which was used as a branch name.
+        """
+        slug = "test-project"
+
+        # Empty host repo
+        host = tmp_path / "host"
+        host.mkdir()
+        _run("git", "-C", str(host), "init", "-b", "main")
+        _run("git", "-C", str(host), "config", "user.email", "host@test.com")
+        _run("git", "-C", str(host), "config", "user.name", "Host User")
+
+        # Create gitdir with a commit, then detach HEAD
+        source = tmp_path / "source"
+        source.mkdir()
+        _run("git", "-C", str(source), "init", "-b", "main")
+        _run("git", "-C", str(source), "config", "user.email", "cave@test.com")
+        _run("git", "-C", str(source), "config", "user.name", "cave-coder")
+        (source / "file.txt").write_text("work\n")
+        _run("git", "-C", str(source), "add", ".")
+        _run("git", "-C", str(source), "commit", "-m", "initial")
+
+        projects_dir = tmp_path / "projects"
+        proj_state = projects_dir / slug
+        proj_state.mkdir(parents=True)
+        tmpclone = tmp_path / "_tmpclone"
+        _run("git", "clone", "--no-checkout", "--local", str(source), str(tmpclone))
+        gitdir = proj_state / "gitdir"
+        (tmpclone / ".git").rename(gitdir)
+        tmpclone.rmdir()
+        _run("git", "--git-dir", str(gitdir), "remote", "remove", "origin", check=False)
+
+        # Detach HEAD by writing commit hash directly to HEAD file
+        # (git checkout --detach doesn't work cleanly on bare-ish gitdirs)
+        head_hash = _run("git", "--git-dir", str(gitdir), "rev-parse", "HEAD").stdout.strip()
+        (gitdir / "HEAD").write_text(head_hash + "\n")
+
+        # Verify it's detached
+        abbrev = _run("git", "--git-dir", str(gitdir),
+                       "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+        assert abbrev == "HEAD"
+
+        monkeypatch.setattr(wrapper, "PROJECTS_DIR", projects_dir)
+        monkeypatch.setattr(wrapper, "load_projects", lambda: {slug: str(host)})
+        for var in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
+                    "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"):
+            monkeypatch.delenv(var, raising=False)
+
+        wrapper.pull_project(slug)
+
+        branch = _run("git", "-C", str(host), "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+        assert branch == "main", f"Expected 'main', got '{branch}'"
+
+    def test_stale_cave_pull_branch(self, pull_env):
+        """Stale _cave_pull branch from interrupted pull doesn't crash.
+
+        Regression: 68dbc83 — git branch -d fails on _cave_pull when it has
+        rewritten commits not fully merged into main. Changed to -D.
+        """
+        env = pull_env
+
+        # Create a diverged _cave_pull branch (simulates interrupted pull)
+        _run("git", "-C", str(env.host), "checkout", "-b", "_cave_pull")
+        (env.host / "stale.txt").write_text("from interrupted pull\n")
+        _run("git", "-C", str(env.host), "add", "stale.txt")
+        _run("git", "-C", str(env.host), "commit", "-m", "stale rebase work")
+        _run("git", "-C", str(env.host), "checkout", "main")
+
+        # Make a cave commit
+        cave_commit(env, "new work", content="new\n")
+
+        # Pull should succeed despite stale _cave_pull
+        wrapper.pull_project(env.slug)
+        assert (env.host / "file.txt").read_text() == "new\n"
+
+        # _cave_pull should be cleaned up
+        branches = _run("git", "-C", str(env.host), "branch",
+                         "--list", "_cave_pull").stdout.strip()
+        assert branches == ""

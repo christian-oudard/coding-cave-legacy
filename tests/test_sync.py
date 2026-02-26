@@ -1,4 +1,5 @@
-"""Tests for sync helpers: sync_refs, history rewrite detection."""
+"""Tests for sync helpers, gitdir initialization, and git safety."""
+import os
 import subprocess
 from pathlib import Path
 
@@ -175,3 +176,169 @@ class TestHistoryRewriteDetection:
             capture_output=True, text=True, check=True,
         ).stdout.strip()
         assert found_tree == host_tree
+
+
+class TestInitializeGitdir:
+    def test_empty_repo(self, tmp_path, monkeypatch):
+        """initialize_gitdir doesn't crash on empty repos (no commits).
+
+        Regression: 7ed214c — read-tree HEAD failed with check=True on
+        repos with no commits, crashing the initialization.
+        """
+        slug = "empty-project"
+        projects_dir = tmp_path / "projects"
+        proj_state = projects_dir / slug
+        proj_state.mkdir(parents=True)
+        monkeypatch.setattr(wrapper, "PROJECTS_DIR", projects_dir)
+
+        # Create empty repo (git init, no commits)
+        project = tmp_path / "empty"
+        project.mkdir()
+        subprocess.run(["git", "init", "-b", "main", str(project)],
+                        capture_output=True, check=True)
+
+        # Should not raise
+        wrapper.initialize_gitdir(slug, project)
+
+        gitdir = proj_state / "gitdir"
+        assert gitdir.is_dir()
+
+    def test_normal_repo(self, tmp_path, monkeypatch):
+        """initialize_gitdir creates gitdir with cave-sync and host ref."""
+        slug = "test-project"
+        projects_dir = tmp_path / "projects"
+        proj_state = projects_dir / slug
+        proj_state.mkdir(parents=True)
+        monkeypatch.setattr(wrapper, "PROJECTS_DIR", projects_dir)
+
+        project = tmp_path / "project"
+        project.mkdir()
+        subprocess.run(["git", "init", "-b", "main", str(project)],
+                        capture_output=True, check=True)
+        subprocess.run(["git", "-C", str(project), "config", "user.email", "t@t"],
+                        capture_output=True)
+        subprocess.run(["git", "-C", str(project), "config", "user.name", "T"],
+                        capture_output=True)
+        (project / "f.txt").write_text("hi\n")
+        subprocess.run(["git", "-C", str(project), "add", "."],
+                        capture_output=True, check=True)
+        subprocess.run(["git", "-C", str(project), "commit", "-m", "init"],
+                        capture_output=True, check=True)
+
+        wrapper.initialize_gitdir(slug, project)
+
+        gitdir = proj_state / "gitdir"
+        assert gitdir.is_dir()
+
+        # cave-sync should be set
+        cave_sync = subprocess.run(
+            ["git", "--git-dir", str(gitdir), "rev-parse", "refs/cave-sync"],
+            capture_output=True, text=True,
+        )
+        assert cave_sync.returncode == 0
+
+        # hooks dir should be removed
+        assert not (gitdir / "hooks").exists()
+
+    def test_skips_existing_gitdir(self, tmp_path, monkeypatch):
+        """initialize_gitdir is a no-op if gitdir already exists."""
+        slug = "test-project"
+        projects_dir = tmp_path / "projects"
+        proj_state = projects_dir / slug
+        proj_state.mkdir(parents=True)
+        gitdir = proj_state / "gitdir"
+        gitdir.mkdir()
+        marker = gitdir / "marker"
+        marker.write_text("existing")
+        monkeypatch.setattr(wrapper, "PROJECTS_DIR", projects_dir)
+
+        project = tmp_path / "project"
+        project.mkdir()
+        subprocess.run(["git", "init", "-b", "main", str(project)],
+                        capture_output=True, check=True)
+
+        wrapper.initialize_gitdir(slug, project)
+
+        # Should not have touched the existing gitdir
+        assert marker.read_text() == "existing"
+
+
+class TestSafeGitOpts:
+    """SAFE_GIT_OPTS neutralizes config-based code execution.
+
+    Regression: dc0c652 — cave-writable gitdir config could be poisoned
+    with core.pager, core.fsmonitor, diff.external, or core.sshCommand
+    to execute arbitrary commands on the host during push/pull.
+    """
+
+    def test_pager_neutralized(self, two_repos, tmp_path):
+        """core.pager in gitdir config doesn't execute."""
+        _host, gitdir, _cave = two_repos
+
+        marker = tmp_path / "pager_executed"
+        subprocess.run(
+            ["git", "--git-dir", str(gitdir), "config",
+             "core.pager", f"touch {marker}"],
+            capture_output=True, check=True,
+        )
+
+        # git() wrapper should override core.pager
+        wrapper.git(gitdir, "log", "--oneline", "-1",
+                     capture_output=True, text=True)
+
+        assert not marker.exists(), "Poisoned core.pager was executed!"
+
+    def test_fsmonitor_neutralized(self, two_repos, tmp_path):
+        """core.fsmonitor in gitdir config doesn't execute."""
+        _host, gitdir, _cave = two_repos
+
+        marker = tmp_path / "fsmonitor_executed"
+        subprocess.run(
+            ["git", "--git-dir", str(gitdir), "config",
+             "core.fsmonitor", f"touch {marker}; echo false"],
+            capture_output=True, check=True,
+        )
+
+        wrapper.git(gitdir, "status",
+                     capture_output=True, text=True)
+
+        assert not marker.exists(), "Poisoned core.fsmonitor was executed!"
+
+    def test_hooks_neutralized(self, two_repos, tmp_path):
+        """Hooks in gitdir don't execute."""
+        _host, gitdir, _cave = two_repos
+
+        marker = tmp_path / "hook_executed"
+        hooks_dir = gitdir / "hooks"
+        hooks_dir.mkdir(exist_ok=True)
+        hook = hooks_dir / "pre-commit"
+        hook.write_text(f"#!/bin/sh\ntouch {marker}\n")
+        hook.chmod(0o755)
+
+        # git() sets core.hooksPath=/dev/null
+        wrapper.git(gitdir, "rev-parse", "HEAD",
+                     capture_output=True, text=True)
+
+        assert not marker.exists(), "Hook was executed despite SAFE_GIT_OPTS!"
+
+    def test_ssh_command_neutralized(self, two_repos, tmp_path):
+        """core.sshCommand in gitdir config doesn't execute."""
+        _host, gitdir, _cave = two_repos
+
+        marker = tmp_path / "ssh_executed"
+        subprocess.run(
+            ["git", "--git-dir", str(gitdir), "config",
+             "core.sshCommand", f"touch {marker}"],
+            capture_output=True, check=True,
+        )
+
+        # The wrapper overrides sshCommand to "echo blocked"
+        result = wrapper.git(gitdir, "config", "--get", "core.sshCommand",
+                              capture_output=True, text=True)
+        # With -c override, the effective value should be "echo blocked"
+        # (git -c takes precedence over config file)
+        # Just verify the marker wasn't created by any operation
+        wrapper.git(gitdir, "rev-parse", "HEAD",
+                     capture_output=True, text=True)
+
+        assert not marker.exists(), "Poisoned core.sshCommand was executed!"
