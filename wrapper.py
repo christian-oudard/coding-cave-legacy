@@ -753,7 +753,9 @@ def pull_project(slug, force=False):
         print(f"No commits to pull from {slug}.", file=sys.stderr)
         return
 
-    # Detect history rewrite
+    # Detect history rewrite: cave amended/squashed commits since last sync.
+    # When cave_sync == host_head, host hasn't moved independently — all
+    # commits being replaced originated from the cave, so auto-adopt.
     if (cave_sync_hash and cave_sync_hash == host_head
             and merge_base != host_head):
         host_count = subprocess.run(
@@ -761,13 +763,7 @@ def pull_project(slug, force=False):
             capture_output=True, text=True, check=True,
         ).stdout.strip()
 
-        if not force:
-            print(f"Cave rewrote history for {slug} "
-                  f"({host_count} host commit(s) -> {count} cave commit(s)).",
-                  file=sys.stderr)
-            print(f"Run 'coding-cave pull --force' to adopt the cave's history.",
-                  file=sys.stderr)
-            return
+        force = True
 
         stash_result = subprocess.run(
             host_git + ["stash", "--include-untracked"],
@@ -794,7 +790,7 @@ def pull_project(slug, force=False):
         if stashed:
             subprocess.run(host_git + ["stash", "pop"], capture_output=True)
 
-        print(f"Force-pulled {slug} ({host_count} commit(s) replaced with {count}):", file=sys.stderr)
+        print(f"Pulled {slug} ({host_count} commit(s) replaced with {count}):", file=sys.stderr)
         if old_log.returncode == 0 and old_log.stdout.strip():
             print(f"  Replaced:", file=sys.stderr)
             for line in old_log.stdout.rstrip().splitlines():
