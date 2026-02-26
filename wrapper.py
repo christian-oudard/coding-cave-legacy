@@ -30,6 +30,22 @@ SESSIONS_DIR = CAVE_DATA / "sessions"
 CAVE_HOME = CAVE_DATA / "home"
 
 
+# --- Helpers ---
+
+def format_age(started):
+    """Format a timestamp as relative age, e.g. '5m ago', '2h ago', '1d ago'."""
+    delta = int(time.time() - started)
+    if delta < 60:
+        return "just now"
+    elif delta < 3600:
+        return f"{delta // 60}m ago"
+    elif delta < 86400:
+        return f"{delta // 3600}h ago"
+    else:
+        days = delta // 86400
+        return f"{days}d ago"
+
+
 # --- Config ---
 
 def load_global_config():
@@ -1056,8 +1072,8 @@ def cmd_shell(args, gpu=False):
         else:
             print("Running sessions:", file=sys.stderr)
             for i, s in enumerate(sessions):
-                started = time.strftime("%H:%M", time.localtime(s["started"]))
-                print(f"  [{i}] [{started}] {s.get('project', '?')} (PID {s['bwrap_pid']})", file=sys.stderr)
+                age = format_age(s["started"])
+                print(f"  [{i}] [{age}] {s.get('project', '?')} (PID {s['bwrap_pid']})", file=sys.stderr)
             print(f"  [n] Start new session", file=sys.stderr)
             try:
                 choice = input("Join session: ").strip()
@@ -1425,8 +1441,8 @@ def cmd_status(args):
 
         sessions = list_sessions(project=slug)
         for s in sessions:
-            started = time.strftime("%H:%M", time.localtime(s["started"]))
-            print(f"    [{started}] PID {s['bwrap_pid']}  running", file=sys.stderr)
+            age = format_age(s["started"])
+            print(f"    [{age}] PID {s['bwrap_pid']}  running", file=sys.stderr)
 
 
 def build_parser():
