@@ -103,7 +103,7 @@ def detect_project_from_cwd():
         return None
     if answer in ("", "y", "yes"):
         return cwd
-    return None
+    sys.exit(0)
 
 
 def ensure_project(project_dir):
@@ -133,8 +133,6 @@ def ensure_project(project_dir):
 
 def cave_workdir(project):
     """Compute the working directory inside the cave based on host CWD."""
-    if not project:
-        return "/projects"
     cwd = Path.cwd().resolve()
     projects = load_projects()
     source = Path(projects.get(project, "")).resolve()
@@ -1098,10 +1096,11 @@ def cmd_agent(args, gpu=False, continue_session=False, resume=None, claude_args=
     global_config = load_global_config()
     setup_env(global_config)
 
-    project = None
     project_dir = detect_project_from_cwd()
-    if project_dir is not None:
-        project = ensure_project(project_dir)
+    if project_dir is None:
+        print("No project. Run 'coding-cave add' or cd into a project directory.", file=sys.stderr)
+        sys.exit(1)
+    project = ensure_project(project_dir)
 
     workdir = cave_workdir(project)
     claude_parts = ["claude", "--dangerously-skip-permissions"]
@@ -1129,10 +1128,11 @@ def cmd_shell(args, gpu=False):
 
     shell_type = Path(os.environ.get("SHELL", "/bin/bash")).name
 
-    project = None
     project_dir = detect_project_from_cwd()
-    if project_dir is not None:
-        project = ensure_project(project_dir)
+    if project_dir is None:
+        print("No project. Run 'coding-cave add' or cd into a project directory.", file=sys.stderr)
+        sys.exit(1)
+    project = ensure_project(project_dir)
 
     workdir = cave_workdir(project)
 
