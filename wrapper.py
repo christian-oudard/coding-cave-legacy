@@ -208,50 +208,8 @@ def try_unmount(path):
     return False
 
 
-def mount_project_overlay(slug, session_id=None):
-    """Mount a project overlay. If session_id is given, use per-session dirs."""
-    projects = load_projects()
-    if slug not in projects:
-        return None
-    proj_state = PROJECTS_DIR / slug
-    project_dir = projects[slug]
-
-    if not Path(project_dir).is_dir():
-        print(f"Warning: source directory for '{slug}' not found: {project_dir}", file=sys.stderr)
-        print(f"  Run 'coding-cave remove {slug}' to unregister it.", file=sys.stderr)
-        return None
-
-    if session_id:
-        sess_dir = proj_state / "sessions" / session_id
-        merged = sess_dir / "merged"
-        upper = sess_dir / "upper"
-        fuse_work = sess_dir / "fuse-work"
-    else:
-        merged = proj_state / "merged"
-        upper = proj_state / "upper"
-        fuse_work = proj_state / "fuse-work"
-
-    merged.mkdir(parents=True, exist_ok=True)
-    upper.mkdir(parents=True, exist_ok=True)
-    fuse_work.mkdir(parents=True, exist_ok=True)
-
-    if merged.is_mount():
-        try_unmount(merged)
-
-    uid = os.getuid()
-    gid = os.getgid()
-    subprocess.run([
-        "fuse-overlayfs",
-        "-o", f"lowerdir={project_dir},upperdir={upper},workdir={fuse_work}"
-               f",squash_to_uid={uid},squash_to_gid={gid}",
-        str(merged),
-    ], check=True)
-
-    return merged, project_dir
-
-
 def unmount_session_overlays(sid):
-    """Unmount all overlay mounts for a session."""
+    """Unmount any legacy fuse-overlayfs mounts for a session."""
     for slug in load_projects():
         sess_dir = PROJECTS_DIR / slug / "sessions" / sid
         merged = sess_dir / "merged"
@@ -290,7 +248,7 @@ def initialize_gitdir(slug, project_dir):
         return
     tmpclone = proj_state / "_tmpclone"
     subprocess.run(
-        ["git", "clone", "--no-checkout", "--local", "--quiet",
+        ["git", "clone", "--no-checkout", "--local", "--no-hardlinks", "--quiet",
          str(project_dir), str(tmpclone)],
         check=True, capture_output=True,
     )
@@ -392,11 +350,22 @@ def start_session(project, command, gpu=False):
     CAVE_DATA.mkdir(parents=True, exist_ok=True)
     sid = session_id()
 
-    # Nix overlay dirs (shared across sessions)
+    # Nix store overlay dirs (shared across sessions)
     (NIX_OVERLAY_DIR / "upper").mkdir(parents=True, exist_ok=True)
     (NIX_OVERLAY_DIR / "work").mkdir(parents=True, exist_ok=True)
     os.environ["CODING_CAVE_NIX_UPPER"] = str(NIX_OVERLAY_DIR / "upper")
     os.environ["CODING_CAVE_NIX_WORK"] = str(NIX_OVERLAY_DIR / "work")
+
+    # Seed nix DB from host so nix doesn't try to re-register (chmod)
+    # existing store paths, which fails on overlayfs in user namespaces.
+    host_nix_db = Path("/nix/var/nix/db/db.sqlite")
+    nix_db_dir = NIX_OVERLAY_DIR / "db"
+    nix_db_dir.mkdir(parents=True, exist_ok=True)
+    if host_nix_db.exists():
+        import shutil
+        shutil.copy2(host_nix_db, nix_db_dir / "db.sqlite")
+    if (nix_db_dir / "db.sqlite").exists():
+        os.environ["CODING_CAVE_NIX_DB_DIR"] = str(nix_db_dir)
 
     # Ensure gitdirs exist
     for slug, source in load_projects().items():
@@ -405,10 +374,7 @@ def start_session(project, command, gpu=False):
             print(f"Syncing {slug}...", file=sys.stderr)
         initialize_gitdir(slug, Path(source))
 
-    # Mount per-session overlays
     projects = load_projects()
-    for slug in projects:
-        mount_project_overlay(slug, session_id=sid)
 
     # Build extra bwrap args (project mounts, dotfiles, passwd)
     bwrap_args = []
@@ -447,20 +413,16 @@ def start_session(project, command, gpu=False):
     if bash_profile and Path(bash_profile).is_file():
         bwrap_args += ["--ro-bind", bash_profile, f"{JAIL_HOME}/.bash_profile"]
 
-    # Project mounts
+    # Project mounts (kernel overlayfs via bwrap --overlay)
     for slug, source in projects.items():
-        sess_merged = PROJECTS_DIR / slug / "sessions" / sid / "merged"
-        gitdir = PROJECTS_DIR / slug / "gitdir"
-        if sess_merged.exists() and sess_merged.is_mount():
-            bwrap_args += ["--bind", str(sess_merged), f"/projects/{slug}"]
-        elif Path(source).is_dir():
-            upper = PROJECTS_DIR / slug / "upper"
-            work = PROJECTS_DIR / slug / "work"
-            upper.mkdir(parents=True, exist_ok=True)
-            work.mkdir(parents=True, exist_ok=True)
-            bwrap_args += ["--overlay-src", source, "--overlay", str(upper), str(work), f"/projects/{slug}"]
-        else:
+        if not Path(source).is_dir():
             continue
+        upper = PROJECTS_DIR / slug / "sessions" / sid / "upper"
+        work = PROJECTS_DIR / slug / "sessions" / sid / "work"
+        upper.mkdir(parents=True, exist_ok=True)
+        work.mkdir(parents=True, exist_ok=True)
+        bwrap_args += ["--overlay-src", source, "--overlay", str(upper), str(work), f"/projects/{slug}"]
+        gitdir = PROJECTS_DIR / slug / "gitdir"
         if gitdir.is_dir():
             bwrap_args += ["--bind", str(gitdir), f"/projects/{slug}/.git"]
 
@@ -501,7 +463,7 @@ def start_session(project, command, gpu=False):
         "COLORTERM",
         "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "GITHUB_TOKEN",
         # coding-cave internal
-        "CODING_CAVE_NIX_UPPER", "CODING_CAVE_NIX_WORK",
+        "CODING_CAVE_NIX_UPPER", "CODING_CAVE_NIX_WORK", "CODING_CAVE_NIX_DB_DIR",
         "CODING_CAVE_BWRAP_ARGS",
         "CODING_CAVE_SESSION_ID",
     }

@@ -50,28 +50,25 @@
       # the surrounding network namespace (pasta's isolated one on the host,
       # or the outer cave's namespace when running nested).
       network
-
-      # /dev/fuse lets inner caves run fuse-overlayfs for per-session overlays.
-      (add-runtime ''
-        [ -e /dev/fuse ] && RUNTIME_ARGS+=(--dev-bind /dev/fuse /dev/fuse)
-      '')
       # no-new-session omitted: cave init needs its own session to survive terminal close
 
       # Nix CLI for autonomous package management inside the cave
-      # Nix store overlay: writable /nix backed by host store as lower layer
+      # Writable /nix/store overlay (kernel overlayfs via bwrap --overlay).
+      # Host nix DB is seeded at startup so nix doesn't try to re-register
+      # (chmod) existing lower-layer paths, which fails on overlayfs.
       (try-fwd-env "CODING_CAVE_NIX_UPPER")
       (try-fwd-env "CODING_CAVE_NIX_WORK")
+      (try-fwd-env "CODING_CAVE_NIX_DB_DIR")
       (add-runtime ''
         if [ -n "''${CODING_CAVE_NIX_UPPER:-}" ]; then
           RUNTIME_ARGS+=(--overlay-src /nix/store --overlay "$CODING_CAVE_NIX_UPPER" "$CODING_CAVE_NIX_WORK" /nix/store)
-          RUNTIME_ARGS+=(--tmpfs /nix/var)
+          RUNTIME_ARGS+=(--tmpfs /nix/var --dir /nix/var/nix)
+          if [ -n "''${CODING_CAVE_NIX_DB_DIR:-}" ] && [ -d "''${CODING_CAVE_NIX_DB_DIR}" ]; then
+            RUNTIME_ARGS+=(--bind "''${CODING_CAVE_NIX_DB_DIR}" /nix/var/nix/db)
+          fi
         fi
       '')
-      # Force nix to use the system store overlay at /nix rather than
-      # auto-selecting the user store (~/.local/share/nix/root).
-      # Without this, builds inside the cave produce paths that aren't
-      # accessible as /nix/store/... by the coding-cave wrapper.
-      (set-env "NIX_CONFIG" "sandbox = false\nexperimental-features = nix-command flakes\nstore = /nix")
+      (set-env "NIX_CONFIG" "sandbox = false\nexperimental-features = nix-command flakes")
 
       # Dev tools
       (add-pkg-deps (with pkgs; [
@@ -106,9 +103,6 @@
         uv
         claude-loop
         # For running nested coding caves from inside the cave
-        passt
-        fuse-overlayfs
-        fuse3
         util-linux
       ]))
       (set-env "EDITOR" "${pkgs.nano}/bin/nano")
@@ -188,7 +182,7 @@
     };
 
     baseScript = pkgs.writeText "coding-cave-script" ''
-      export PATH="${pkgs.lib.makeBinPath [pkgs.fuse-overlayfs pkgs.fuse3 pkgs.util-linux pkgs.passt]}:$PATH"
+      export PATH="${pkgs.lib.makeBinPath [pkgs.util-linux pkgs.passt]}:$PATH"
       exec ${pkgs.python3}/bin/python3 ${wrapperScript} "$@"
     '';
 
