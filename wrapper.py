@@ -188,33 +188,13 @@ def list_sessions(project=None):
 
 
 def cleanup_session(sid):
-    """Unmount overlays and remove session files."""
-    unmount_session_overlays(sid)
+    """Remove session files."""
     for slug in load_projects():
         sess_dir = PROJECTS_DIR / slug / "sessions" / sid
         if sess_dir.exists():
             shutil.rmtree(sess_dir, ignore_errors=True)
     (SESSIONS_DIR / f"{sid}.json").unlink(missing_ok=True)
     (SESSIONS_DIR / f"{sid}.manifest.json").unlink(missing_ok=True)
-
-
-# --- Overlay management ---
-
-def try_unmount(path):
-    for cmd in ["fusermount3 -u", "fusermount -u", "/run/wrappers/bin/fusermount -u"]:
-        subprocess.run(cmd.split() + [str(path)], capture_output=True)
-        if not path.is_mount():
-            return True
-    return False
-
-
-def unmount_session_overlays(sid):
-    """Unmount any legacy fuse-overlayfs mounts for a session."""
-    for slug in load_projects():
-        sess_dir = PROJECTS_DIR / slug / "sessions" / sid
-        merged = sess_dir / "merged"
-        if merged.exists() and merged.is_mount():
-            try_unmount(merged)
 
 
 # --- Git helpers ---
@@ -388,8 +368,8 @@ def start_session(project, command, gpu=False):
 
     projects = load_projects()
 
-    # When already inside a cave, overlayfs can't nest (userxattr conflict)
-    # and pasta must be skipped (outer cave's network is already isolated).
+    # When already inside a cave, pasta must be skipped (outer cave's
+    # network is already isolated).
     inside_cave = bool(os.environ.get("CODING_CAVE_VERSION"))
 
     # Build extra bwrap args (project mounts, dotfiles, passwd)
@@ -945,19 +925,7 @@ def reset_project_overlay(slug):
     projects = load_projects()
     proj_state = PROJECTS_DIR / slug
 
-    # Unmount any session overlays
-    if (proj_state / "sessions").exists():
-        for sess_dir in (proj_state / "sessions").iterdir():
-            merged = sess_dir / "merged"
-            if merged.exists() and merged.is_mount():
-                try_unmount(merged)
-
-    # Unmount shared overlay
-    merged = proj_state / "merged"
-    if merged.exists() and merged.is_mount():
-        try_unmount(merged)
-
-    for subdir in ["upper", "work", "fuse-work", "gitdir", "sessions"]:
+    for subdir in ["upper", "work", "gitdir", "sessions"]:
         p = proj_state / subdir
         if p.exists():
             for dirpath, dirnames, _filenames in os.walk(p):

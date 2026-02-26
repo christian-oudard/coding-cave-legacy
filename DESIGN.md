@@ -106,4 +106,4 @@ Credentials enter the cave only as environment variables (`--clearenv` + explici
 
 The environment is defined in a Nix flake. The nix store is mounted as an overlay so agents can `nix shell` additional packages without affecting the host. Project files are also on overlays: the host's files are the read-only lower layer, cave modifications go to the upper layer.
 
-fuse-overlayfs is used instead of kernel overlayfs because kernel overlayfs in user namespaces can't copy-up files with unmapped GIDs.
+Kernel overlayfs is used for both. Per-session overlay upper/work dirs are placed on tmpfs (a separate device from the project source) to prevent the kernel from auto-enabling `uuid=on`, which would block nested overlayfs in inner user namespaces.

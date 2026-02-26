@@ -51,10 +51,6 @@
       # or the outer cave's namespace when running nested).
       network
 
-      # /dev/fuse lets inner caves run fuse-overlayfs for per-session overlays.
-      (add-runtime ''
-        [ -e /dev/fuse ] && RUNTIME_ARGS+=(--dev-bind /dev/fuse /dev/fuse)
-      '')
       # no-new-session omitted: cave init needs its own session to survive terminal close
 
       # Nix CLI for autonomous package management inside the cave
@@ -107,9 +103,6 @@
         nano
         uv
         claude-loop
-        # For running nested coding caves from inside the cave
-        fuse-overlayfs
-        fuse3
         util-linux
       ]))
       (set-env "EDITOR" "${pkgs.nano}/bin/nano")
@@ -191,7 +184,7 @@
     };
 
     baseScript = pkgs.writeText "coding-cave-script" ''
-      export PATH="${pkgs.lib.makeBinPath [pkgs.fuse-overlayfs pkgs.fuse3 pkgs.util-linux pkgs.passt]}:$PATH"
+      export PATH="${pkgs.lib.makeBinPath [pkgs.util-linux pkgs.passt]}:$PATH"
       exec ${pkgs.python3}/bin/python3 ${wrapperScript} "$@"
     '';
 

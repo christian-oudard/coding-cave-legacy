@@ -15,7 +15,7 @@ Each agent session runs in its own **per-session bwrap namespace** with per-sess
 ### Source Files
 
 - **`flake.nix`**: Nix flake that builds two sandbox derivations (`sandbox`, `sandboxGpu`) using jail.nix combinators. Inputs: nixpkgs (unstable), jail.nix (`sourcehut:~alexdavid/jail.nix`), claude-code-nix (`github:sadjow/claude-code-nix`). Defines all bwrap arguments, environment variables, overlays, and the entrypoint (`exec "$@"`).
-- **`wrapper.py`**: Python CLI that manages per-session bwrap lifecycle, project registry, and git sync. Each `cav` invocation starts a new bwrap process with per-session overlays. Nix substitutes `@SANDBOX_BIN@` and `@SANDBOX_GPU_BIN@` at build time via `replaceVars`. The flake wraps this into a shell script that adds `fuse-overlayfs`, `fuse3`, and `util-linux` to `PATH`.
+- **`wrapper.py`**: Python CLI that manages per-session bwrap lifecycle, project registry, and git sync. Each `cav` invocation starts a new bwrap process with per-session overlays. Nix substitutes `@SANDBOX_BIN@` and `@SANDBOX_GPU_BIN@` at build time via `replaceVars`. The flake wraps this into a shell script that adds `util-linux` to `PATH`.
 - **`claude-settings.json`**: Default `~/.claude/settings.json` seeded on first cave run. Currently sets model to opus, high reasoning effort, and skips the dangerous mode permission prompt.
 
 ### Configuration Files (on host, outside this repo)
@@ -30,7 +30,7 @@ Each agent session runs in its own **per-session bwrap namespace** with per-sess
 - `sessions/<sid>.manifest.json` — per-session project manifest for bwrap
 - `home/` → `~` inside cave (persistent home directory bind mount; Claude Code state lives here naturally at `.claude/` and `.claude.json`)
 - `projects.json` — project registry (slug → source path)
-- `projects/<slug>/sessions/<sid>/upper/`, `fuse-work/`, `merged/` — per-session overlay dirs
+- `projects/<slug>/sessions/<sid>/upper/`, `work/` — per-session overlay dirs (on tmpfs)
 - `projects/<slug>/gitdir/` — bind-mounted at `/projects/<slug>/.git` inside cave (regular filesystem, not on overlayfs)
 - `nix-overlay/upper/`, `work/` — writable nix store overlay
 
@@ -39,7 +39,7 @@ Each agent session runs in its own **per-session bwrap namespace** with per-sess
 - jail.nix over raw bwrap: composable combinators, nix store closure binding, fake-passwd
 - `--clearenv` with explicit credential forwarding only (auditable)
 - Per-session bwrap: each agent gets its own namespace and overlay, no persistent idle process
-- fuse-overlayfs for per-session project overlays — kernel overlayfs in user namespaces can't copy-up files with unmapped GIDs (EOVERFLOW). The wrapper pre-mounts fuse-overlayfs on the host, and bwrap bind-mounts the merged dir. Falls back to kernel overlayfs if fuse-overlayfs isn't available.
+- Kernel overlayfs for per-session project overlays — upper/work dirs on tmpfs (separate device from project source) to prevent `uuid=on` auto-enabling, which would block nested overlayfs in inner user namespaces.
 - `.git` on bind mount, not overlay — kernel overlayfs in user namespaces breaks atomic rename (git index, refs). A dedicated `gitdir/` is bind-mounted at `/projects/<slug>/.git` so git operations work normally inside the cave.
 - `/nix/store` overlay — host nix store as lower layer, cave-local upper for autonomous `nix shell` package management
 - `pull` fetches from gitdir (host filesystem), rebases to re-author (strips cave-coder identity), then syncs gitdir back. Commits only — no working tree transfer.
