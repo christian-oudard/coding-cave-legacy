@@ -258,6 +258,34 @@ class TestInitializeGitdir:
         gitdir = proj_state / "gitdir"
         assert gitdir.is_dir()
 
+    def test_hardlinks_objects(self, tmp_path, monkeypatch):
+        """initialize_gitdir hardlinks objects from host when on same device."""
+        slug = "test-hardlinks"
+        projects_dir = tmp_path / "projects"
+        proj_state = projects_dir / slug
+        proj_state.mkdir(parents=True)
+        monkeypatch.setattr(wrapper, "PROJECTS_DIR", projects_dir)
+
+        project = tmp_path / "project"
+        project.mkdir()
+        git_run("git", "init", "-b", "main", str(project))
+        (project / "f.txt").write_text("content\n")
+        git_run("git", "-C", str(project), "add", ".")
+        git_run("git", "-C", str(project), "commit", "-m", "init")
+
+        wrapper.initialize_gitdir(slug, project)
+
+        gitdir = proj_state / "gitdir"
+        # Find a pack file in both host and gitdir — they should share inodes
+        host_packs = list((project / ".git" / "objects" / "pack").glob("*.pack"))
+        gitdir_packs = list((gitdir / "objects" / "pack").glob("*.pack"))
+        if host_packs and gitdir_packs:
+            host_ino = host_packs[0].stat().st_ino
+            gitdir_ino = gitdir_packs[0].stat().st_ino
+            assert host_ino == gitdir_ino, (
+                "Pack files should be hardlinked (same inode) on same filesystem"
+            )
+
         # cave-sync should be set
         cave_sync = subprocess.run(
             ["git", "--git-dir", str(gitdir), "rev-parse", "refs/cave-sync"],

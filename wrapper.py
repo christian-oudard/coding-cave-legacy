@@ -228,7 +228,7 @@ def initialize_gitdir(slug, project_dir):
         return
     tmpclone = proj_state / "_tmpclone"
     subprocess.run(
-        ["git", "clone", "--no-checkout", "--local", "--no-hardlinks", "--quiet",
+        ["git", "clone", "--no-checkout", "--local", "--quiet",
          str(project_dir), str(tmpclone)],
         check=True, capture_output=True,
     )
