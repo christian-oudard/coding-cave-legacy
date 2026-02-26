@@ -33,14 +33,14 @@ Each agent session runs in its own **per-session bwrap namespace** with per-sess
 - `projects.json` — project registry (slug → source path)
 - `projects/<slug>/gitdir/` — shared object store and canonical refs; `pull`/`push` operate on this
 - `session-overlays/<sid>/` — per-session overlay upper/work dirs and per-session gitdirs (`gitdir-<slug>/`)
-- `nix-overlay/upper/`, `work/` — writable nix store overlay
+- `nix-overlay/upper/`, `work/`, `merged/` — writable nix store overlay (fuse-overlayfs, shared across sessions)
 
 ### Key Design Decisions
 
 - jail.nix over raw bwrap: composable combinators, nix store closure binding, fake-passwd
 - `--clearenv` with explicit credential forwarding only (auditable)
 - Per-session bwrap: each agent gets its own namespace and overlay, no persistent idle process
-- Kernel overlayfs for per-session project overlays — upper/work dirs on tmpfs (separate device from project source) to prevent `uuid=on` auto-enabling, which would block nested overlayfs in inner user namespaces.
+- fuse-overlayfs for all overlays (project overlays and nix store) — kernel overlayfs in user namespaces has two issues: (1) forced `uuid=on` remaps inodes, causing EOVERFLOW on ext4 with high inode numbers, and (2) CVE-2023-0386 copy-up check requires all lower-layer UIDs/GIDs to be mapped in the mounter's namespace, but unprivileged users can only map 1 UID/GID. fuse-overlayfs handles copy-up in userspace, bypassing both. The wrapper mounts all overlays before spawning bwrap, passing merged dirs via `--bind`. `/dev/fuse` is bind-mounted into the cave for nested caves.
 - Per-session gitdirs — each session gets its own gitdir (HEAD, index, refs) with `objects/info/alternates` pointing to the shared object store. Bind-mounted at `/projects/.gitdirs/<slug>` with a `.git` file in the overlay upper pointing to it. Shared objects are ro-bind-mounted at `/projects/.shared-objects/<slug>`. On cleanup, branch refs are fast-forwarded into the shared gitdir; divergent refs are saved under `refs/sessions/<sid>/`.
 - `/nix/store` overlay — host nix store as lower layer, cave-local upper for autonomous `nix shell` package management
 - `pull` fetches from gitdir (host filesystem), rebases to re-author (strips cave-coder identity), then syncs gitdir back. Commits only — no working tree transfer.

@@ -1,19 +1,127 @@
-"""Tests for overlay writability across all mounted projects.
+"""Tests for overlay writability.
 
-These are integration tests that run INSIDE a cave session. They verify
-that every project overlay is writable in all subdirectories — catching
-the uuid=on EOVERFLOW bug where bwrap's --overlay forces uuid=on, which
-remaps inodes and can overflow on ext4 filesystems with high inode numbers.
+Unit tests reproduce the kernel overlayfs EOVERFLOW bug (CVE-2023-0386):
+when kernel overlayfs is mounted in a user namespace with limited UID/GID
+mappings, copy-up of lower-layer files with unmapped UIDs/GIDs fails with
+EOVERFLOW.  fuse-overlayfs avoids this by handling copy-up in userspace.
 
-Run from the host with:  coding-cave shell -- pytest tests/test_overlay.py
+Integration tests (requires_cave) verify that the actual cave project
+overlays are writable in all subdirectories.
 """
 import errno
 import os
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
 import pytest
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: reproduce kernel overlayfs EOVERFLOW from UID/GID mapping
+# ---------------------------------------------------------------------------
+
+# Helper script run in a child process with its own user namespace.
+# It mounts a kernel overlay and tries to write to a specific subdir.
+_OVERLAY_HELPER = r"""
+import os, subprocess, errno, sys
+
+uid, gid = int(sys.argv[1]), int(sys.argv[2])
+lower, upper, work, merged = sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6]
+target_subdir = sys.argv[7] if len(sys.argv) > 7 else ""
+
+os.unshare(os.CLONE_NEWUSER | os.CLONE_NEWNS)
+with open("/proc/self/uid_map", "w") as f:
+    f.write(f"0 {uid} 1")
+with open("/proc/self/setgroups", "w") as f:
+    f.write("deny")
+with open("/proc/self/gid_map", "w") as f:
+    f.write(f"0 {gid} 1")
+
+r = subprocess.run(
+    ["mount", "-t", "overlay", "overlay",
+     "-o", f"lowerdir={lower},upperdir={upper},workdir={work},userxattr",
+     merged],
+    capture_output=True, text=True,
+)
+if r.returncode != 0:
+    print(f"MOUNT_FAIL:{r.stderr.strip()}")
+    sys.exit(0)
+
+target = os.path.join(merged, target_subdir) if target_subdir else merged
+testfile = os.path.join(target, ".test-copyup")
+try:
+    fd = os.open(testfile, os.O_CREAT | os.O_WRONLY, 0o644)
+    os.close(fd)
+    os.unlink(testfile)
+    print("WRITE_OK")
+except OSError as e:
+    print(f"WRITE_FAIL:{e.errno}")
+"""
+
+
+def _run_overlay_test(lower, target_subdir=""):
+    """Mount a kernel overlay in a user namespace and try to write."""
+    uid, gid = os.getuid(), os.getgid()
+    with tempfile.TemporaryDirectory() as tmp:
+        upper = os.path.join(tmp, "upper")
+        work = os.path.join(tmp, "work")
+        merged = os.path.join(tmp, "merged")
+        for d in (upper, work, merged):
+            os.makedirs(d)
+        r = subprocess.run(
+            [sys.executable, "-c", _OVERLAY_HELPER,
+             str(uid), str(gid), lower, upper, work, merged, target_subdir],
+            capture_output=True, text=True,
+        )
+        return r.stdout.strip()
+
+
+def _find_unmapped_gid_dir():
+    """Find a directory with a GID that doesn't match the current user's GID.
+
+    Inside a cave, project overlays expose the host filesystem's real GIDs
+    through the overlay.  Directories whose GID appears as 65534 (overflow)
+    have an unmapped GID — exactly the condition that triggers the kernel
+    overlayfs EOVERFLOW.
+    """
+    projects = Path("/projects")
+    if not projects.is_dir():
+        return None, None
+    skip = {".gitdirs", ".shared-objects"}
+    my_gid = os.getgid()
+    for proj in sorted(projects.iterdir()):
+        if not proj.is_dir() or proj.name in skip:
+            continue
+        for sub in sorted(proj.iterdir()):
+            if sub.is_dir() and not sub.is_symlink():
+                try:
+                    if sub.stat().st_gid != my_gid:
+                        return str(proj), sub.name
+                except OSError:
+                    pass
+    return None, None
+
+
+def _find_mapped_gid_dir():
+    """Find a directory with a GID matching the current user's GID."""
+    projects = Path("/projects")
+    if not projects.is_dir():
+        return None, None
+    skip = {".gitdirs", ".shared-objects"}
+    my_gid = os.getgid()
+    for proj in sorted(projects.iterdir()):
+        if not proj.is_dir() or proj.name in skip:
+            continue
+        for sub in sorted(proj.iterdir()):
+            if sub.is_dir() and not sub.is_symlink():
+                try:
+                    if sub.stat().st_gid == my_gid:
+                        return str(proj), sub.name
+                except OSError:
+                    pass
+    return None, None
 
 
 def is_inside_cave():
@@ -26,12 +134,45 @@ requires_cave = pytest.mark.skipif(
 )
 
 
+@requires_cave
+def test_kernel_overlay_eoverflow_unmapped_gid():
+    """Kernel overlayfs copy-up MUST fail with EOVERFLOW for unmapped GIDs.
+
+    This reproduces the bug: mounting kernel overlayfs in a user namespace
+    with only 1 GID mapped, then writing to a subdir whose GID is not
+    mapped.  The kernel's CVE-2023-0386 check in ovl_copy_up_one() returns
+    -EOVERFLOW because kgid_has_mapping() fails.
+    """
+    lower, subdir = _find_unmapped_gid_dir()
+    if lower is None:
+        pytest.skip("no directory with unmapped GID found")
+    result = _run_overlay_test(lower, subdir)
+    assert result == f"WRITE_FAIL:{errno.EOVERFLOW}", (
+        f"Expected EOVERFLOW on unmapped-GID dir, got: {result}"
+    )
+
+
+@requires_cave
+def test_kernel_overlay_ok_mapped_gid():
+    """Kernel overlayfs copy-up should succeed when GIDs are mapped."""
+    lower, subdir = _find_mapped_gid_dir()
+    if lower is None:
+        pytest.skip("no directory with mapped GID found")
+    result = _run_overlay_test(lower, subdir)
+    assert result == "WRITE_OK", (
+        f"Expected write to succeed on mapped-GID dir, got: {result}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Integration tests: verify cave project overlays are all writable
+# ---------------------------------------------------------------------------
+
 def project_subdirs():
     """Yield (project_slug, subdir_path) for all mounted project subdirectories."""
     projects = Path("/projects")
     if not projects.is_dir():
         return
-    # Skip internal dirs (gitdirs, shared-objects are not project overlays)
     skip = {".gitdirs", ".shared-objects"}
     for proj in sorted(projects.iterdir()):
         if not proj.is_dir() or proj.name in skip:
@@ -57,58 +198,6 @@ def test_overlay_writable(slug, subdir):
         if e.errno == errno.EOVERFLOW:
             pytest.fail(
                 f"EOVERFLOW writing to {subdir} (inode {subdir.stat().st_ino}): "
-                f"bwrap overlay uuid=on is remapping inodes beyond representable range"
+                f"overlay copy-up failed (UID/GID mapping or inode overflow)"
             )
         raise
-
-
-@requires_cave
-def test_nested_bwrap_overlay():
-    """A nested bwrap overlay on a project dir must allow writes in all subdirs.
-
-    This simulates starting a nested cave on an existing project mount.
-    """
-    # Pick a project with subdirectories
-    projects = Path("/projects")
-    source = None
-    subdirs = []
-    for proj in sorted(projects.iterdir()):
-        if not proj.is_dir():
-            continue
-        subs = [s for s in proj.iterdir() if s.is_dir() and not s.is_symlink()]
-        if subs:
-            source = proj
-            subdirs = subs
-            break
-
-    if source is None:
-        pytest.skip("no project with subdirectories")
-
-    # Nest a bwrap overlay (simulating inner cave) using --tmp-overlay
-    write_cmds = []
-    for sub in subdirs:
-        rel = sub.relative_to(source)
-        write_cmds.append(
-            f'touch /nested/{rel}/.nest-test-$$ 2>&1 || '
-            f'echo "FAIL:{rel}"'
-        )
-
-    script = "; ".join(write_cmds)
-    result = subprocess.run(
-        ["bwrap", "--bind", "/", "/",
-         "--overlay-src", str(source),
-         "--tmp-overlay", "/nested",
-         "--", "bash", "-c", script],
-        capture_output=True, text=True,
-    )
-
-    failures = [
-        line.removeprefix("FAIL:")
-        for line in result.stdout.splitlines()
-        if line.startswith("FAIL:")
-    ]
-    if failures:
-        pytest.fail(
-            f"Nested overlay writes failed in: {', '.join(failures)}. "
-            f"uuid=on from outer overlay causes EOVERFLOW in nested mounts."
-        )

@@ -462,11 +462,21 @@ def start_session(project, command, gpu=False):
     CAVE_DATA.mkdir(parents=True, exist_ok=True)
     sid = session_id()
 
-    # Nix store overlay dirs (shared across sessions)
+    # Nix store overlay (shared across sessions, fuse-overlayfs)
     (NIX_OVERLAY_DIR / "upper").mkdir(parents=True, exist_ok=True)
     (NIX_OVERLAY_DIR / "work").mkdir(parents=True, exist_ok=True)
-    os.environ["CODING_CAVE_NIX_UPPER"] = str(NIX_OVERLAY_DIR / "upper")
-    os.environ["CODING_CAVE_NIX_WORK"] = str(NIX_OVERLAY_DIR / "work")
+    (NIX_OVERLAY_DIR / "merged").mkdir(parents=True, exist_ok=True)
+    nix_merged = str(NIX_OVERLAY_DIR / "merged")
+    # Only mount if not already mounted (shared across sessions)
+    nix_already_mounted = os.path.ismount(nix_merged)
+    if not nix_already_mounted:
+        subprocess.run(
+            ["fuse-overlayfs",
+             "-o", f"lowerdir=/nix/store,upperdir={NIX_OVERLAY_DIR / 'upper'},workdir={NIX_OVERLAY_DIR / 'work'}",
+             nix_merged],
+            check=True, capture_output=True,
+        )
+    os.environ["CODING_CAVE_NIX_MERGED"] = nix_merged
 
     # Seed nix DB from host/parent so nix doesn't try to re-register
     # (chmod) existing store paths, which fails on overlayfs.
@@ -541,7 +551,15 @@ def start_session(project, command, gpu=False):
     if bash_profile and Path(bash_profile).is_file():
         bwrap_args += ["--ro-bind", bash_profile, f"{JAIL_HOME}/.bash_profile"]
 
-    # Project mounts (kernel overlayfs via bwrap --overlay).
+    # Project overlays via fuse-overlayfs.
+    # Kernel overlayfs in user namespaces has two problems:
+    #   1. uuid=on (forced by kernel with userxattr) remaps inodes, causing
+    #      EOVERFLOW on ext4 with high inode numbers.
+    #   2. CVE-2023-0386: copy-up requires lower-layer UIDs/GIDs to be mapped
+    #      in the mounter's user namespace, but unprivileged users can only
+    #      map 1 UID and 1 GID, so files with other ownership fail.
+    # fuse-overlayfs handles copy-up in userspace, bypassing both issues.
+    #
     # Each session gets its own gitdir (with alternates to the shared object
     # store) so concurrent sessions have independent HEAD/index/refs.
     # Gitdirs are mounted at /projects/.gitdirs/<slug> instead of under
@@ -551,23 +569,39 @@ def start_session(project, command, gpu=False):
     # overlay upper points git to the separate gitdir mount.
     overlay_base = CAVE_DATA / "session-overlays" / sid
     overlay_base.mkdir(parents=True, exist_ok=True)
-    for slug, source in projects.items():
-        if not Path(source).is_dir():
-            continue
-        upper = overlay_base / f"{slug}-upper"
-        work = overlay_base / f"{slug}-work"
-        upper.mkdir(exist_ok=True)
-        work.mkdir(exist_ok=True)
-        shared_gitdir = PROJECTS_DIR / slug / "gitdir"
-        if shared_gitdir.is_dir():
-            session_gitdir = create_session_gitdir(slug, sid, overlay_base)
-            if session_gitdir:
-                (upper / ".git").write_text(f"gitdir: /projects/.gitdirs/{slug}\n")
-                bwrap_args += ["--bind", str(session_gitdir), f"/projects/.gitdirs/{slug}"]
-                # Shared objects accessible via alternates inside the cave
-                bwrap_args += ["--ro-bind", str(shared_gitdir / "objects"),
-                               f"/projects/.shared-objects/{slug}"]
-        bwrap_args += ["--overlay-src", source, "--overlay", str(upper), str(work), f"/projects/{slug}"]
+    overlay_mounts = []  # merged paths for cleanup
+    try:
+        for slug, source in projects.items():
+            if not Path(source).is_dir():
+                continue
+            upper = overlay_base / f"{slug}-upper"
+            work = overlay_base / f"{slug}-work"
+            merged = overlay_base / f"{slug}-merged"
+            upper.mkdir(exist_ok=True)
+            work.mkdir(exist_ok=True)
+            merged.mkdir(exist_ok=True)
+            shared_gitdir = PROJECTS_DIR / slug / "gitdir"
+            if shared_gitdir.is_dir():
+                session_gitdir = create_session_gitdir(slug, sid, overlay_base)
+                if session_gitdir:
+                    (upper / ".git").write_text(f"gitdir: /projects/.gitdirs/{slug}\n")
+                    bwrap_args += ["--bind", str(session_gitdir), f"/projects/.gitdirs/{slug}"]
+                    # Shared objects accessible via alternates inside the cave
+                    bwrap_args += ["--ro-bind", str(shared_gitdir / "objects"),
+                                   f"/projects/.shared-objects/{slug}"]
+            subprocess.run(
+                ["fuse-overlayfs",
+                 "-o", f"lowerdir={source},upperdir={upper},workdir={work}",
+                 str(merged)],
+                check=True, capture_output=True,
+            )
+            overlay_mounts.append(str(merged))
+            bwrap_args += ["--bind", str(merged), f"/projects/{slug}"]
+    except BaseException:
+        for merged in overlay_mounts:
+            subprocess.run(["fusermount3", "-u", merged], capture_output=True)
+        force_rmtree(overlay_base)
+        raise
 
     # Passwd/group files
     uid = os.getuid()
@@ -606,7 +640,7 @@ def start_session(project, command, gpu=False):
         "COLORTERM",
         "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "GITHUB_TOKEN",
         # coding-cave internal
-        "CODING_CAVE_NIX_UPPER", "CODING_CAVE_NIX_WORK", "CODING_CAVE_NIX_DB_DIR",
+        "CODING_CAVE_NIX_MERGED", "CODING_CAVE_NIX_DB_DIR",
         "CODING_CAVE_BWRAP_ARGS",
         "CODING_CAVE_SESSION_ID",
     }
@@ -660,10 +694,15 @@ def start_session(project, command, gpu=False):
     finally:
         merge_session_gitdirs(sid, overlay_base)
         cleanup_session(sid)
+        for merged in overlay_mounts:
+            subprocess.run(["fusermount3", "-u", merged],
+                           capture_output=True)
         force_rmtree(overlay_base)
         # Clean shared nix overlay when last session exits
         if not list_sessions():
-            for subdir in ["upper", "work", "db"]:
+            subprocess.run(["fusermount3", "-u", nix_merged],
+                           capture_output=True)
+            for subdir in ["upper", "work", "merged", "db"]:
                 force_rmtree(NIX_OVERLAY_DIR / subdir)
 
     sys.exit(ret)

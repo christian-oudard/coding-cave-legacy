@@ -35,6 +35,10 @@
       # pasta wraps bwrap in a user namespace where the host user appears as root.
       # Force bwrap to map whatever external UID it has to cave-coder (1000) inside.
       (unsafe-add-raw-args "--uid 1000 --gid 1000")
+      # /dev/fuse for fuse-overlayfs (needed for nested caves)
+      (add-runtime ''
+        [ -e /dev/fuse ] && RUNTIME_ARGS+=(--dev-bind /dev/fuse /dev/fuse)
+      '')
       (unsafe-add-raw-args "--symlink /bin/sh /bin/bash")
       (unsafe-add-raw-args "--symlink ${pkgs.zsh}/bin/zsh /bin/zsh")
       (set-env "SHELL" "/bin/bash")
@@ -57,12 +61,11 @@
       # Writable /nix/store overlay (kernel overlayfs via bwrap --overlay).
       # Host nix DB is seeded at startup so nix doesn't try to re-register
       # (chmod) existing lower-layer paths, which fails on overlayfs.
-      (try-fwd-env "CODING_CAVE_NIX_UPPER")
-      (try-fwd-env "CODING_CAVE_NIX_WORK")
+      (try-fwd-env "CODING_CAVE_NIX_MERGED")
       (try-fwd-env "CODING_CAVE_NIX_DB_DIR")
       (add-runtime ''
-        if [ -n "''${CODING_CAVE_NIX_UPPER:-}" ]; then
-          RUNTIME_ARGS+=(--overlay-src /nix/store --overlay "$CODING_CAVE_NIX_UPPER" "$CODING_CAVE_NIX_WORK" /nix/store)
+        if [ -n "''${CODING_CAVE_NIX_MERGED:-}" ]; then
+          RUNTIME_ARGS+=(--bind "$CODING_CAVE_NIX_MERGED" /nix/store)
           RUNTIME_ARGS+=(--tmpfs /nix/var --dir /nix/var/nix)
           if [ -n "''${CODING_CAVE_NIX_DB_DIR:-}" ] && [ -d "''${CODING_CAVE_NIX_DB_DIR}" ]; then
             RUNTIME_ARGS+=(--bind "''${CODING_CAVE_NIX_DB_DIR}" /nix/var/nix/db)
@@ -104,6 +107,8 @@
         uv
         claude-loop
         util-linux
+        fuse-overlayfs
+        fuse3
       ]))
       (set-env "EDITOR" "${pkgs.nano}/bin/nano")
       (set-env "TERMINFO_DIRS" "${pkgs.ncurses}/share/terminfo")
@@ -189,7 +194,7 @@
     };
 
     baseScript = pkgs.writeText "coding-cave-script" ''
-      export PATH="${pkgs.lib.makeBinPath [pkgs.util-linux pkgs.passt]}:$PATH"
+      export PATH="${pkgs.lib.makeBinPath [pkgs.util-linux pkgs.passt pkgs.fuse-overlayfs pkgs.fuse3]}:$PATH"
       exec ${pkgs.python3}/bin/python3 ${wrapperScript} "$@"
     '';
 

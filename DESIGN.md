@@ -102,8 +102,8 @@ Two locations make the state obvious: `/projects/` = synced with host, `~/unsync
 
 Credentials enter the cave only as environment variables (`--clearenv` + explicit forwarding). Nothing is written to disk inside the cave. OAuth tokens, API keys, and GitHub tokens are forwarded from the host config at entry time.
 
-## Nix for reproducibility, overlayfs for mutability
+## Nix for reproducibility, fuse-overlayfs for mutability
 
 The environment is defined in a Nix flake. The nix store is mounted as an overlay so agents can `nix shell` additional packages without affecting the host. Project files are also on overlays: the host's files are the read-only lower layer, cave modifications go to the upper layer.
 
-Kernel overlayfs is used for both. Per-session overlay upper/work dirs are placed on tmpfs (a separate device from the project source) to prevent the kernel from auto-enabling `uuid=on`, which would block nested overlayfs in inner user namespaces.
+All overlays use fuse-overlayfs. Kernel overlayfs in user namespaces has two problems: forced `uuid=on` remaps inodes causing EOVERFLOW on ext4, and the CVE-2023-0386 copy-up check requires all lower-layer UIDs/GIDs to be mapped but unprivileged users can only map one. fuse-overlayfs handles copy-up in userspace, bypassing both. The wrapper mounts all overlays before spawning bwrap and passes merged dirs via `--bind`. `/dev/fuse` is exposed inside the cave for nested caves.
