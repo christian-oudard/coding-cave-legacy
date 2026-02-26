@@ -47,8 +47,14 @@
         RUNTIME_ARGS+=(--bind "$CAVE_HOME" ${jailHome})
       '')
       # `network` prevents bwrap from doing --unshare-net, so it inherits
-      # pasta's isolated namespace instead of creating a new empty one.
+      # the surrounding network namespace (pasta's isolated one on the host,
+      # or the outer cave's namespace when running nested).
       network
+
+      # /dev/fuse lets inner caves run fuse-overlayfs for per-session overlays.
+      (add-runtime ''
+        [ -e /dev/fuse ] && RUNTIME_ARGS+=(--dev-bind /dev/fuse /dev/fuse)
+      '')
       # no-new-session omitted: cave init needs its own session to survive terminal close
 
       # Nix CLI for autonomous package management inside the cave
@@ -61,7 +67,11 @@
           RUNTIME_ARGS+=(--tmpfs /nix/var)
         fi
       '')
-      (set-env "NIX_CONFIG" "sandbox = false\nexperimental-features = nix-command flakes")
+      # Force nix to use the system store overlay at /nix rather than
+      # auto-selecting the user store (~/.local/share/nix/root).
+      # Without this, builds inside the cave produce paths that aren't
+      # accessible as /nix/store/... by the coding-cave wrapper.
+      (set-env "NIX_CONFIG" "sandbox = false\nexperimental-features = nix-command flakes\nstore = /nix")
 
       # Dev tools
       (add-pkg-deps (with pkgs; [
@@ -95,6 +105,11 @@
         nano
         uv
         claude-loop
+        # For running nested coding caves from inside the cave
+        passt
+        fuse-overlayfs
+        fuse3
+        util-linux
       ]))
       (set-env "EDITOR" "${pkgs.nano}/bin/nano")
       (set-env "TERMINFO_DIRS" "${pkgs.ncurses}/share/terminfo")

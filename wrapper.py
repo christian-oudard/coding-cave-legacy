@@ -507,20 +507,32 @@ def start_session(project, command, gpu=False):
     }
     bwrap_env = {k: v for k, v in os.environ.items() if k in BWRAP_ENV_ALLOWLIST}
 
-    # pasta provides an isolated network namespace with outbound-only access.
-    # --quiet: suppress startup messages
-    # --config-net: pasta directly configures the network interface (no DHCP wait)
-    # --map-host-loopback 192.0.2.1: disable gateway→host-loopback mapping
-    #   (pasta by default maps the gateway to host loopback, which would allow
-    #    access to host localhost services like 1Password, SSH agent)
-    # -T none -U none: disable all TCP/UDP port forwarding
-    proc = subprocess.Popen(
-        ["pasta", "--quiet", "--config-net",
-         "--map-host-loopback", "192.0.2.1",
-         "-T", "none", "-U", "none", "--", binary] + command,
-        start_new_session=False,
-        env=bwrap_env,
-    )
+    # When already inside a cave (CODING_CAVE_VERSION is set), skip pasta:
+    # the outer cave's network namespace is already isolated, and pasta needs
+    # capabilities it can't get inside an existing user namespace.
+    inside_cave = bool(os.environ.get("CODING_CAVE_VERSION"))
+
+    if inside_cave:
+        proc = subprocess.Popen(
+            [binary] + command,
+            start_new_session=False,
+            env=bwrap_env,
+        )
+    else:
+        # pasta provides an isolated network namespace with outbound-only access.
+        # --quiet: suppress startup messages
+        # --config-net: pasta directly configures the network interface (no DHCP wait)
+        # --map-host-loopback 192.0.2.1: disable gateway→host-loopback mapping
+        #   (pasta by default maps the gateway to host loopback, which would allow
+        #    access to host localhost services like 1Password, SSH agent)
+        # -T none -U none: disable all TCP/UDP port forwarding
+        proc = subprocess.Popen(
+            ["pasta", "--quiet", "--config-net",
+             "--map-host-loopback", "192.0.2.1",
+             "-T", "none", "-U", "none", "--", binary] + command,
+            start_new_session=False,
+            env=bwrap_env,
+        )
 
     register_session(sid, project, proc.pid)
     print("Started coding-cave.", file=sys.stderr)
