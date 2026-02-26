@@ -144,11 +144,15 @@
         fi
       '')
 
-      # Extra bwrap args from wrapper.py (project mounts, dotfiles, passwd)
+      # Extra bwrap args from wrapper.py (project mounts, dotfiles, passwd).
+      # Args are inlined into RUNTIME_ARGS rather than using --args FD,
+      # because --args FD causes bwrap to add uuid=on to overlay mounts
+      # which prevents nested overlayfs.
       (add-runtime ''
         if [ -n "''${CODING_CAVE_BWRAP_ARGS:-}" ] && [ -f "''${CODING_CAVE_BWRAP_ARGS}" ]; then
-          exec {EXTRA_ARGS_FD}<"''${CODING_CAVE_BWRAP_ARGS}"
-          RUNTIME_ARGS+=(--args "$EXTRA_ARGS_FD")
+          while IFS= read -r -d "" arg; do
+            RUNTIME_ARGS+=("$arg")
+          done < "''${CODING_CAVE_BWRAP_ARGS}"
         fi
       '')
 

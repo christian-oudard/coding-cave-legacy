@@ -418,10 +418,10 @@ def start_session(project, command, gpu=False):
         bwrap_args += ["--ro-bind", bash_profile, f"{JAIL_HOME}/.bash_profile"]
 
     # Project mounts (kernel overlayfs via bwrap --overlay).
-    # Upper/work dirs live under /tmp so they're on a different device
-    # from the project source. This prevents the kernel from adding uuid=on
-    # to the overlay mount, which would block nested overlayfs.
-    import tempfile
+    # Pre-write user.overlay.uuid + user.overlay.impure xattrs on upper
+    # dirs so the kernel reads an existing UUID (uuid=auto) instead of
+    # generating a new one (uuid=on).  uuid=on blocks nested overlayfs.
+    import tempfile, uuid as _uuid
     overlay_base = Path(tempfile.mkdtemp(prefix="cave-overlays-", dir="/tmp"))
     for slug, source in projects.items():
         if not Path(source).is_dir():
@@ -430,6 +430,8 @@ def start_session(project, command, gpu=False):
         work = overlay_base / f"{slug}-work"
         upper.mkdir()
         work.mkdir()
+        os.setxattr(str(upper), "user.overlay.uuid", _uuid.uuid4().bytes)
+        os.setxattr(str(upper), "user.overlay.impure", b"y")
         bwrap_args += ["--overlay-src", source, "--overlay", str(upper), str(work), f"/projects/{slug}"]
         gitdir = PROJECTS_DIR / slug / "gitdir"
         if gitdir.is_dir():
