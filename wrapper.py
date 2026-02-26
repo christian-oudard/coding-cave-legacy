@@ -356,15 +356,27 @@ def start_session(project, command, gpu=False):
     os.environ["CODING_CAVE_NIX_UPPER"] = str(NIX_OVERLAY_DIR / "upper")
     os.environ["CODING_CAVE_NIX_WORK"] = str(NIX_OVERLAY_DIR / "work")
 
-    # Seed nix DB from host so nix doesn't try to re-register (chmod)
-    # existing store paths, which fails on overlayfs in user namespaces.
+    # Seed nix DB from host/parent so nix doesn't try to re-register
+    # (chmod) existing store paths, which fails on overlayfs.
+    # Use sqlite3 backup API for a consistent copy (handles WAL mode).
     host_nix_db = Path("/nix/var/nix/db/db.sqlite")
     nix_db_dir = NIX_OVERLAY_DIR / "db"
     nix_db_dir.mkdir(parents=True, exist_ok=True)
+    cave_nix_db = nix_db_dir / "db.sqlite"
     if host_nix_db.exists():
-        import shutil
-        shutil.copy2(host_nix_db, nix_db_dir / "db.sqlite")
-    if (nix_db_dir / "db.sqlite").exists():
+        import sqlite3
+        try:
+            cave_nix_db.unlink(missing_ok=True)
+            for wal in nix_db_dir.glob("db.sqlite-*"):
+                wal.unlink()
+            src = sqlite3.connect(f"file:{host_nix_db}?mode=ro", uri=True)
+            dst = sqlite3.connect(str(cave_nix_db))
+            src.backup(dst)
+            dst.close()
+            src.close()
+        except sqlite3.Error:
+            pass
+    if cave_nix_db.exists():
         os.environ["CODING_CAVE_NIX_DB_DIR"] = str(nix_db_dir)
 
     # Ensure gitdirs exist
@@ -418,8 +430,11 @@ def start_session(project, command, gpu=False):
         bwrap_args += ["--ro-bind", bash_profile, f"{JAIL_HOME}/.bash_profile"]
 
     # Project mounts (kernel overlayfs via bwrap --overlay).
-    # Upper/work on CAVE_DATA (ext4 pool-home) — host /tmp is a ramdisk
-    # that can't be bind-mounted into nested user namespaces.
+    # Gitdirs are mounted at /projects/.gitdirs/<slug> instead of under
+    # the project overlay, because a child bind mount on the overlay
+    # creates a locked mount that blocks clone_private_mount() in nested
+    # user namespaces ("failed to clone lowerpath").  A .git file in the
+    # overlay upper points git to the separate gitdir mount.
     overlay_base = CAVE_DATA / "session-overlays" / sid
     overlay_base.mkdir(parents=True, exist_ok=True)
     for slug, source in projects.items():
@@ -429,10 +444,12 @@ def start_session(project, command, gpu=False):
         work = overlay_base / f"{slug}-work"
         upper.mkdir(exist_ok=True)
         work.mkdir(exist_ok=True)
-        bwrap_args += ["--overlay-src", source, "--overlay", str(upper), str(work), f"/projects/{slug}"]
         gitdir = PROJECTS_DIR / slug / "gitdir"
         if gitdir.is_dir():
-            bwrap_args += ["--bind", str(gitdir), f"/projects/{slug}/.git"]
+            # Write .git file in upper so it overrides the lower's .git dir
+            (upper / ".git").write_text(f"gitdir: /projects/.gitdirs/{slug}\n")
+            bwrap_args += ["--bind", str(gitdir), f"/projects/.gitdirs/{slug}"]
+        bwrap_args += ["--overlay-src", source, "--overlay", str(upper), str(work), f"/projects/{slug}"]
 
     # Passwd/group files
     uid = os.getuid()
