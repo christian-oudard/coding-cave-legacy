@@ -50,6 +50,10 @@ def setup_env(global_config):
     if claude_md.exists():
         os.environ["CODING_CAVE_CLAUDE_MD"] = str(claude_md)
 
+    claude_settings = Path.home() / ".config" / "coding-cave" / "settings.json"
+    if claude_settings.exists():
+        os.environ["CODING_CAVE_CLAUDE_SETTINGS"] = str(claude_settings)
+
     user_shell = Path(os.environ.get("SHELL", "/bin/bash")).name
     if user_shell == "zsh":
         zdotdir = Path.home() / ".config" / "zsh"

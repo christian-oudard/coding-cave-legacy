@@ -16,11 +16,12 @@ Each agent session runs in its own **per-session bwrap namespace** with per-sess
 
 - **`flake.nix`**: Nix flake that builds two sandbox derivations (`sandbox`, `sandboxGpu`) using jail.nix combinators. Inputs: nixpkgs (unstable), jail.nix (`sourcehut:~alexdavid/jail.nix`), claude-code-nix (`github:sadjow/claude-code-nix`). Defines all bwrap arguments, environment variables, overlays, and the entrypoint (`exec "$@"`).
 - **`wrapper.py`**: Python CLI that manages per-session bwrap lifecycle, project registry, and git sync. Each `cav` invocation starts a new bwrap process with per-session overlays. Nix substitutes `@SANDBOX_BIN@` and `@SANDBOX_GPU_BIN@` at build time via `replaceVars`. The flake wraps this into a shell script that adds `util-linux` to `PATH`.
-- **`claude-settings.json`**: Default `~/.claude/settings.json` seeded on first cave run. Currently sets model to opus, high reasoning effort, and skips the dangerous mode permission prompt.
+- **`claude-settings.json`**: Fallback `~/.claude/settings.json` seeded on first cave run when no per-user settings exist. Sets model to opus, high reasoning effort, and skips the dangerous mode permission prompt.
 
 ### Configuration Files (on host, outside this repo)
 
 - **Global config** (`~/.config/coding-cave/config.toml`): OAuth tokens (`credentials.claude-oauth-token`). Credentials are forwarded via env vars only, never written to disk inside the cave.
+- **Claude settings** (`~/.config/coding-cave/settings.json`): Per-user Claude Code settings, seeded into `~/.claude/settings.json` on first cave run. Falls back to the repo's `claude-settings.json` if not present.
 - **User CLAUDE.md** (`~/.config/coding-cave/CLAUDE.md`): Optional instructions file, bind-mounted read-only into cave home at `~/.claude/CLAUDE.md`.
 - **Shell dotfiles**: User's `~/.bashrc`/`~/.bash_profile` (ro-bind) or `~/.config/zsh/` (overlay for writable history) are forwarded into the cave.
 

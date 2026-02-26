@@ -126,12 +126,17 @@
       (try-fwd-env "CODING_CAVE_BWRAP_ARGS")
 
       # First-run init for Claude Code state
+      (try-fwd-env "CODING_CAVE_CLAUDE_SETTINGS")
       (add-runtime ''
         CAVE_HOME="$HOME/.local/share/coding-cave/home"
         CLAUDE_DIR="$CAVE_HOME/.claude"
         if [ ! -d "$CLAUDE_DIR" ]; then
           mkdir -p "$CLAUDE_DIR"
-          cp ${defaultClaudeSettings} "$CLAUDE_DIR/settings.json"
+          if [ -n "''${CODING_CAVE_CLAUDE_SETTINGS:-}" ] && [ -f "''${CODING_CAVE_CLAUDE_SETTINGS}" ]; then
+            cp "''${CODING_CAVE_CLAUDE_SETTINGS}" "$CLAUDE_DIR/settings.json"
+          else
+            cp ${defaultClaudeSettings} "$CLAUDE_DIR/settings.json"
+          fi
           chmod 644 "$CLAUDE_DIR/settings.json"
           printf '%s' '{"hasCompletedOnboarding":true,"theme":"dark","effortCalloutDismissed":true}' > "$CAVE_HOME/.claude.json"
         fi
