@@ -30,22 +30,6 @@ SESSIONS_DIR = CAVE_DATA / "sessions"
 CAVE_HOME = CAVE_DATA / "home"
 
 
-# --- Helpers ---
-
-def format_age(started):
-    """Format a timestamp as relative age, e.g. '5m ago', '2h ago', '1d ago'."""
-    delta = int(time.time() - started)
-    if delta < 60:
-        return "just now"
-    elif delta < 3600:
-        return f"{delta // 60}m ago"
-    elif delta < 86400:
-        return f"{delta // 3600}h ago"
-    else:
-        days = delta // 86400
-        return f"{days}d ago"
-
-
 # --- Config ---
 
 def load_global_config():
@@ -224,50 +208,8 @@ def try_unmount(path):
     return False
 
 
-def mount_project_overlay(slug, session_id=None):
-    """Mount a project overlay. If session_id is given, use per-session dirs."""
-    projects = load_projects()
-    if slug not in projects:
-        return None
-    proj_state = PROJECTS_DIR / slug
-    project_dir = projects[slug]
-
-    if not Path(project_dir).is_dir():
-        print(f"Warning: source directory for '{slug}' not found: {project_dir}", file=sys.stderr)
-        print(f"  Run 'coding-cave remove {slug}' to unregister it.", file=sys.stderr)
-        return None
-
-    if session_id:
-        sess_dir = proj_state / "sessions" / session_id
-        merged = sess_dir / "merged"
-        upper = sess_dir / "upper"
-        fuse_work = sess_dir / "fuse-work"
-    else:
-        merged = proj_state / "merged"
-        upper = proj_state / "upper"
-        fuse_work = proj_state / "fuse-work"
-
-    merged.mkdir(parents=True, exist_ok=True)
-    upper.mkdir(parents=True, exist_ok=True)
-    fuse_work.mkdir(parents=True, exist_ok=True)
-
-    if merged.is_mount():
-        try_unmount(merged)
-
-    uid = os.getuid()
-    gid = os.getgid()
-    subprocess.run([
-        "fuse-overlayfs",
-        "-o", f"lowerdir={project_dir},upperdir={upper},workdir={fuse_work}"
-               f",squash_to_uid={uid},squash_to_gid={gid}",
-        str(merged),
-    ], check=True)
-
-    return merged, project_dir
-
-
 def unmount_session_overlays(sid):
-    """Unmount all overlay mounts for a session."""
+    """Unmount any legacy fuse-overlayfs mounts for a session."""
     for slug in load_projects():
         sess_dir = PROJECTS_DIR / slug / "sessions" / sid
         merged = sess_dir / "merged"
@@ -306,7 +248,7 @@ def initialize_gitdir(slug, project_dir):
         return
     tmpclone = proj_state / "_tmpclone"
     subprocess.run(
-        ["git", "clone", "--no-checkout", "--local", "--quiet",
+        ["git", "clone", "--no-checkout", "--local", "--no-hardlinks", "--quiet",
          str(project_dir), str(tmpclone)],
         check=True, capture_output=True,
     )
@@ -432,10 +374,11 @@ def start_session(project, command, gpu=False):
             print(f"Syncing {slug}...", file=sys.stderr)
         initialize_gitdir(slug, Path(source))
 
-    # Mount per-session overlays
     projects = load_projects()
-    for slug in projects:
-        mount_project_overlay(slug, session_id=sid)
+
+    # When already inside a cave, overlayfs can't nest (userxattr conflict)
+    # and pasta must be skipped (outer cave's network is already isolated).
+    inside_cave = bool(os.environ.get("CODING_CAVE_VERSION"))
 
     # Build extra bwrap args (project mounts, dotfiles, passwd)
     bwrap_args = []
@@ -474,20 +417,20 @@ def start_session(project, command, gpu=False):
     if bash_profile and Path(bash_profile).is_file():
         bwrap_args += ["--ro-bind", bash_profile, f"{JAIL_HOME}/.bash_profile"]
 
-    # Project mounts
+    # Project mounts (kernel overlayfs via bwrap --overlay)
     for slug, source in projects.items():
-        sess_merged = PROJECTS_DIR / slug / "sessions" / sid / "merged"
-        gitdir = PROJECTS_DIR / slug / "gitdir"
-        if sess_merged.exists() and sess_merged.is_mount():
-            bwrap_args += ["--bind", str(sess_merged), f"/projects/{slug}"]
-        elif Path(source).is_dir():
-            upper = PROJECTS_DIR / slug / "upper"
-            work = PROJECTS_DIR / slug / "work"
+        if not Path(source).is_dir():
+            continue
+        if inside_cave:
+            # Nested overlayfs fails (userxattr conflict). Bind directly.
+            bwrap_args += ["--bind", source, f"/projects/{slug}"]
+        else:
+            upper = PROJECTS_DIR / slug / "sessions" / sid / "upper"
+            work = PROJECTS_DIR / slug / "sessions" / sid / "work"
             upper.mkdir(parents=True, exist_ok=True)
             work.mkdir(parents=True, exist_ok=True)
             bwrap_args += ["--overlay-src", source, "--overlay", str(upper), str(work), f"/projects/{slug}"]
-        else:
-            continue
+        gitdir = PROJECTS_DIR / slug / "gitdir"
         if gitdir.is_dir():
             bwrap_args += ["--bind", str(gitdir), f"/projects/{slug}/.git"]
 
@@ -533,11 +476,6 @@ def start_session(project, command, gpu=False):
         "CODING_CAVE_SESSION_ID",
     }
     bwrap_env = {k: v for k, v in os.environ.items() if k in BWRAP_ENV_ALLOWLIST}
-
-    # When already inside a cave (CODING_CAVE_VERSION is set), skip pasta:
-    # the outer cave's network namespace is already isolated, and pasta needs
-    # capabilities it can't get inside an existing user namespace.
-    inside_cave = bool(os.environ.get("CODING_CAVE_VERSION"))
 
     if inside_cave:
         proc = subprocess.Popen(
@@ -722,9 +660,7 @@ def pull_project(slug, force=False):
     # Host repo has no commits yet — fetch and create branch from cave
     if branch_result.returncode != 0:
         branch = git(gitdir, "rev-parse", "--abbrev-ref", "HEAD",
-            capture_output=True, text=True).stdout.strip()
-        if not branch or branch == "HEAD":
-            branch = "main"
+            capture_output=True, text=True).stdout.strip() or "main"
         subprocess.run(host_git + ["fetch", str(gitdir), "HEAD"], check=True, capture_output=True)
         subprocess.run(host_git + ["update-ref", f"refs/heads/{branch}", gitdir_head], check=True)
         subprocess.run(host_git + ["symbolic-ref", "HEAD", f"refs/heads/{branch}"], check=True)
@@ -1074,8 +1010,8 @@ def cmd_shell(args, gpu=False):
         else:
             print("Running sessions:", file=sys.stderr)
             for i, s in enumerate(sessions):
-                age = format_age(s["started"])
-                print(f"  [{i}] [{age}] {s.get('project', '?')} (PID {s['bwrap_pid']})", file=sys.stderr)
+                started = time.strftime("%H:%M", time.localtime(s["started"]))
+                print(f"  [{i}] [{started}] {s.get('project', '?')} (PID {s['bwrap_pid']})", file=sys.stderr)
             print(f"  [n] Start new session", file=sys.stderr)
             try:
                 choice = input("Join session: ").strip()
@@ -1094,10 +1030,18 @@ def cmd_shell(args, gpu=False):
     # Start new shell session
     workdir = cave_workdir(project)
     shell_bin = "/bin/zsh" if shell_type == "zsh" else "/bin/bash"
-    command = [
-        "--", "/bin/bash", "-c",
-        f"cd {workdir} && exec {shell_bin} -l",
-    ]
+    if args:
+        # Run a specific command (cav shell -- <cmd>)
+        user_cmd = shlex.join(args)
+        command = [
+            "--", "/bin/bash", "-c",
+            f"cd {workdir} && exec {user_cmd}",
+        ]
+    else:
+        command = [
+            "--", "/bin/bash", "-c",
+            f"cd {workdir} && exec {shell_bin} -l",
+        ]
 
     start_session(project, command, gpu=gpu)
 
@@ -1443,8 +1387,8 @@ def cmd_status(args):
 
         sessions = list_sessions(project=slug)
         for s in sessions:
-            age = format_age(s["started"])
-            print(f"    [{age}] PID {s['bwrap_pid']}  running", file=sys.stderr)
+            started = time.strftime("%H:%M", time.localtime(s["started"]))
+            print(f"    [{started}] PID {s['bwrap_pid']}  running", file=sys.stderr)
 
 
 def build_parser():
@@ -1506,7 +1450,7 @@ def main():
     elif parsed.command == "agent":
         cmd_agent([], gpu=parsed.gpu, continue_session=parsed.continue_session, resume=parsed.resume, claude_args=claude_args)
     elif parsed.command == "shell":
-        cmd_shell([], gpu=parsed.gpu)
+        cmd_shell(claude_args, gpu=parsed.gpu)
     elif parsed.command == "add":
         cmd_add([parsed.dir] if parsed.dir else [])
     elif parsed.command == "status":
