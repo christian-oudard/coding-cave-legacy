@@ -976,7 +976,7 @@ def reset_project_overlay(slug):
 
 # --- Commands ---
 
-def cmd_agent(args, gpu=False, continue_session=False, resume=False, claude_args=None):
+def cmd_agent(args, gpu=False, continue_session=False, resume=None, claude_args=None):
     """Start a new agent session."""
     global_config = load_global_config()
     setup_env(global_config)
@@ -990,8 +990,10 @@ def cmd_agent(args, gpu=False, continue_session=False, resume=False, claude_args
     claude_parts = ["claude", "--dangerously-skip-permissions"]
     if continue_session:
         claude_parts.append("--continue")
-    elif resume:
+    elif resume is not None:
         claude_parts.append("--resume")
+        if resume is not True:
+            claude_parts.append(resume)
     if claude_args:
         claude_parts.extend(claude_args)
     claude_cmd = shlex.join(claude_parts)
@@ -1414,12 +1416,12 @@ def build_parser():
     )
     parser.add_argument("--gpu", action="store_true", help="enable GPU access")
     parser.add_argument("-c", "--continue", action="store_true", dest="continue_session", help="continue most recent conversation")
-    parser.add_argument("-r", "--resume", action="store_true", help="resume a conversation (interactive picker)")
+    parser.add_argument("-r", "--resume", nargs="?", const=True, default=None, help="resume a conversation by session ID, or interactive picker")
     sub = parser.add_subparsers(dest="command")
 
     p_agent = sub.add_parser("agent", help="start a new agent session")
     p_agent.add_argument("-c", "--continue", action="store_true", dest="continue_session", help="continue most recent conversation")
-    p_agent.add_argument("-r", "--resume", action="store_true", help="resume a conversation (interactive picker)")
+    p_agent.add_argument("-r", "--resume", nargs="?", const=True, default=None, help="resume a conversation by session ID, or interactive picker")
     sub.add_parser("shell", help="start a shell or join a running session")
 
     p_add = sub.add_parser("add", help="register a project")
