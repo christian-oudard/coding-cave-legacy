@@ -10,7 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Two-layer isolation: bwrap namespace provides the security boundary, Nix provides reproducible environments. Claude Code runs with `--dangerously-skip-permissions` inside the box.
 
-Each agent session runs in its own **per-session bwrap namespace** with per-session overlays. Multiple agents get independent working trees and interact only through git commits to a shared gitdir. `cav shell` joins a running session via `nsenter`. Projects are mounted as overlays at `/projects/<name>`.
+Each agent session runs in its own **per-session bwrap namespace** with per-session overlays and per-session gitdirs. Multiple agents get independent working trees, HEAD, index, and refs. They share a common object store via git alternates and interact only through commits merged into the shared gitdir on session cleanup. `cav shell` joins a running session via `nsenter`. Projects are mounted as overlays at `/projects/<name>`.
 
 ### Source Files
 
@@ -30,8 +30,8 @@ Each agent session runs in its own **per-session bwrap namespace** with per-sess
 - `sessions/<sid>.manifest.json` — per-session project manifest for bwrap
 - `home/` → `~` inside cave (persistent home directory bind mount; Claude Code state lives here naturally at `.claude/` and `.claude.json`)
 - `projects.json` — project registry (slug → source path)
-- `projects/<slug>/sessions/<sid>/upper/`, `work/` — per-session overlay dirs (on tmpfs)
-- `projects/<slug>/gitdir/` — bind-mounted at `/projects/<slug>/.git` inside cave (regular filesystem, not on overlayfs)
+- `projects/<slug>/gitdir/` — shared object store and canonical refs; `pull`/`push` operate on this
+- `session-overlays/<sid>/` — per-session overlay upper/work dirs and per-session gitdirs (`gitdir-<slug>/`)
 - `nix-overlay/upper/`, `work/` — writable nix store overlay
 
 ### Key Design Decisions
@@ -40,11 +40,11 @@ Each agent session runs in its own **per-session bwrap namespace** with per-sess
 - `--clearenv` with explicit credential forwarding only (auditable)
 - Per-session bwrap: each agent gets its own namespace and overlay, no persistent idle process
 - Kernel overlayfs for per-session project overlays — upper/work dirs on tmpfs (separate device from project source) to prevent `uuid=on` auto-enabling, which would block nested overlayfs in inner user namespaces.
-- `.git` on bind mount, not overlay — kernel overlayfs in user namespaces breaks atomic rename (git index, refs). A dedicated `gitdir/` is bind-mounted at `/projects/<slug>/.git` so git operations work normally inside the cave.
+- Per-session gitdirs — each session gets its own gitdir (HEAD, index, refs) with `objects/info/alternates` pointing to the shared object store. Bind-mounted at `/projects/.gitdirs/<slug>` with a `.git` file in the overlay upper pointing to it. Shared objects are ro-bind-mounted at `/projects/.shared-objects/<slug>`. On cleanup, branch refs are fast-forwarded into the shared gitdir; divergent refs are saved under `refs/sessions/<sid>/`.
 - `/nix/store` overlay — host nix store as lower layer, cave-local upper for autonomous `nix shell` package management
 - `pull` fetches from gitdir (host filesystem), rebases to re-author (strips cave-coder identity), then syncs gitdir back. Commits only — no working tree transfer.
 - `push` updates gitdir refs/objects from host. Commits only — no working tree transfer.
-- Session cleanup: overlays unmounted and session dirs removed when bwrap exits
+- Session cleanup: session gitdir refs merged into shared gitdir, then overlays and session dirs removed when bwrap exits
 - GPU access opt-in via `--gpu` flag (two separate sandbox derivations)
 - CWD-based project detection: running `coding-cave` from inside a registered project dir auto-selects it; from an unregistered dir, prompts to add it
 

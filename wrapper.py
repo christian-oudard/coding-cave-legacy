@@ -323,6 +323,138 @@ def find_tree_merge_base(git, host_tree):
     return None
 
 
+# --- Per-session gitdir ---
+
+def create_session_gitdir(slug, sid, overlay_base):
+    """Create a per-session gitdir with alternates pointing to shared objects.
+
+    The session gitdir has its own HEAD, index, and refs but shares the object
+    store with the shared gitdir via alternates.  Two alternates paths are
+    written: the host-side path (used during cleanup on the host) and the
+    cave-internal path (used by git inside the bwrap namespace).
+    """
+    shared_gitdir = PROJECTS_DIR / slug / "gitdir"
+    if not shared_gitdir.is_dir():
+        return None
+
+    session_gitdir = overlay_base / f"gitdir-{slug}"
+    subprocess.run(
+        ["git", "init", "--bare", "-q", str(session_gitdir)],
+        capture_output=True, check=True,
+    )
+
+    # Not actually bare — used with a separate working tree via .git file
+    git(session_gitdir, "config", "core.bare", "false", capture_output=True)
+
+    # Alternates: host path (cleanup) + cave path (inside bwrap)
+    objects_info = session_gitdir / "objects" / "info"
+    objects_info.mkdir(parents=True, exist_ok=True)
+    (objects_info / "alternates").write_text(
+        f"{shared_gitdir / 'objects'}\n"
+        f"/projects/.shared-objects/{slug}\n"
+    )
+
+    # Copy HEAD
+    (session_gitdir / "HEAD").write_text((shared_gitdir / "HEAD").read_text())
+
+    # Copy all refs from shared gitdir
+    result = subprocess.run(
+        ["git", "--git-dir", str(shared_gitdir), "for-each-ref",
+         "--format=%(refname) %(objectname)"],
+        capture_output=True, text=True,
+    )
+    if result.returncode == 0:
+        for line in result.stdout.strip().splitlines():
+            if not line:
+                continue
+            ref, sha = line.split()
+            git(session_gitdir, "update-ref", ref, sha, capture_output=True)
+
+    # Populate index from HEAD so git status starts clean
+    git(session_gitdir, "read-tree", "HEAD", capture_output=True)
+
+    # Disable hooks
+    git(session_gitdir, "config", "core.hooksPath", "/dev/null",
+        capture_output=True)
+    hooks = session_gitdir / "hooks"
+    if hooks.exists():
+        shutil.rmtree(hooks)
+
+    return session_gitdir
+
+
+def merge_session_gitdirs(sid, overlay_base):
+    """Merge per-session gitdir refs and objects back into shared gitdirs.
+
+    Fast-forwards branch and tag refs.  When a ref can't be fast-forwarded
+    (another session already advanced it), the commit is saved under
+    refs/sessions/<sid>/<branch> so it's not lost.
+
+    Scans overlay_base for gitdir-<slug> directories rather than relying on
+    the project registry, so cleanup works even if the registry changes.
+    """
+    if not overlay_base.is_dir():
+        return
+    for entry in sorted(overlay_base.iterdir()):
+        if not entry.name.startswith("gitdir-") or not entry.is_dir():
+            continue
+        slug = entry.name.removeprefix("gitdir-")
+        session_gitdir = entry
+        shared_gitdir = PROJECTS_DIR / slug / "gitdir"
+        if not shared_gitdir.is_dir():
+            continue
+
+        # Collect session's branch refs
+        result = git(session_gitdir, "for-each-ref",
+                     "--format=%(refname) %(objectname)", "refs/heads/",
+                     capture_output=True, text=True)
+        if result.returncode != 0:
+            continue
+
+        for line in result.stdout.strip().splitlines():
+            if not line:
+                continue
+            ref, sha = line.split()
+            branch = ref.removeprefix("refs/heads/")
+
+            # Fetch the objects into shared gitdir
+            fetch = git(shared_gitdir, "fetch", str(session_gitdir), sha,
+                        capture_output=True)
+            if fetch.returncode != 0:
+                continue
+
+            # Check if fast-forward is possible
+            existing = git(shared_gitdir, "rev-parse", ref,
+                           capture_output=True, text=True)
+            if existing.returncode != 0:
+                # Ref doesn't exist in shared — create it
+                git(shared_gitdir, "update-ref", ref, sha,
+                    capture_output=True)
+                continue
+
+            existing_sha = existing.stdout.strip()
+            if existing_sha == sha:
+                continue  # already up to date
+
+            merge_base = git(shared_gitdir, "merge-base",
+                             existing_sha, sha,
+                             capture_output=True, text=True)
+            if (merge_base.returncode == 0
+                    and merge_base.stdout.strip() == existing_sha):
+                # Fast-forward
+                git(shared_gitdir, "update-ref", ref, sha,
+                    capture_output=True)
+            else:
+                # Diverged — save under session ref
+                git(shared_gitdir, "update-ref",
+                    f"refs/sessions/{sid}/{branch}", sha,
+                    capture_output=True)
+
+        # Also fetch tags
+        git(shared_gitdir, "fetch", str(session_gitdir),
+            "refs/tags/*:refs/tags/*", capture_output=True)
+
+
 # --- Session lifecycle ---
 
 def start_session(project, command, gpu=False):
@@ -410,6 +542,8 @@ def start_session(project, command, gpu=False):
         bwrap_args += ["--ro-bind", bash_profile, f"{JAIL_HOME}/.bash_profile"]
 
     # Project mounts (kernel overlayfs via bwrap --overlay).
+    # Each session gets its own gitdir (with alternates to the shared object
+    # store) so concurrent sessions have independent HEAD/index/refs.
     # Gitdirs are mounted at /projects/.gitdirs/<slug> instead of under
     # the project overlay, because a child bind mount on the overlay
     # creates a locked mount that blocks clone_private_mount() in nested
@@ -424,11 +558,15 @@ def start_session(project, command, gpu=False):
         work = overlay_base / f"{slug}-work"
         upper.mkdir(exist_ok=True)
         work.mkdir(exist_ok=True)
-        gitdir = PROJECTS_DIR / slug / "gitdir"
-        if gitdir.is_dir():
-            # Write .git file in upper so it overrides the lower's .git dir
-            (upper / ".git").write_text(f"gitdir: /projects/.gitdirs/{slug}\n")
-            bwrap_args += ["--bind", str(gitdir), f"/projects/.gitdirs/{slug}"]
+        shared_gitdir = PROJECTS_DIR / slug / "gitdir"
+        if shared_gitdir.is_dir():
+            session_gitdir = create_session_gitdir(slug, sid, overlay_base)
+            if session_gitdir:
+                (upper / ".git").write_text(f"gitdir: /projects/.gitdirs/{slug}\n")
+                bwrap_args += ["--bind", str(session_gitdir), f"/projects/.gitdirs/{slug}"]
+                # Shared objects accessible via alternates inside the cave
+                bwrap_args += ["--ro-bind", str(shared_gitdir / "objects"),
+                               f"/projects/.shared-objects/{slug}"]
         bwrap_args += ["--overlay-src", source, "--overlay", str(upper), str(work), f"/projects/{slug}"]
 
     # Passwd/group files
@@ -520,6 +658,7 @@ def start_session(project, command, gpu=False):
     except KeyboardInterrupt:
         ret = 130
     finally:
+        merge_session_gitdirs(sid, overlay_base)
         cleanup_session(sid)
         shutil.rmtree(str(overlay_base), ignore_errors=True)
 

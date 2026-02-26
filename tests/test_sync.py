@@ -1,11 +1,24 @@
 """Tests for sync helpers, gitdir initialization, and git safety."""
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
 import wrapper
+
+
+GIT_ENV = {
+    "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "t@t",
+    "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "t@t",
+}
+
+
+def git_run(*args, **kwargs):
+    """Run a git command with test identity."""
+    env = {**os.environ, **GIT_ENV}
+    return subprocess.run(list(args), capture_output=True, text=True, env=env, **kwargs)
 
 
 @pytest.fixture
@@ -49,6 +62,21 @@ def two_repos(tmp_path):
     )
 
     return host, gitdir, cave_workdir
+
+
+def make_cave_session(gitdir, workdir):
+    """Set up a working directory to use a gitdir (simulates .git file + bind mount)."""
+    (workdir / ".git").write_text(f"gitdir: {gitdir}\n")
+    return workdir
+
+
+def cave_git(workdir, *args, **kwargs):
+    """Run git in a cave working directory with test identity."""
+    env = {**os.environ, **GIT_ENV}
+    return subprocess.run(
+        ["git", "-C", str(workdir)] + list(args),
+        capture_output=True, text=True, env=env, **kwargs,
+    )
 
 
 def git_head(path, gitdir=False):
@@ -342,3 +370,317 @@ class TestSafeGitOpts:
                      capture_output=True, text=True)
 
         assert not marker.exists(), "Poisoned core.sshCommand was executed!"
+
+
+# --- Shared gitdir problems (motivating per-session gitdirs) ---
+
+class TestSharedGitdirProblems:
+    """Demonstrate problems with two sessions sharing a single gitdir."""
+
+    @pytest.fixture
+    def two_sessions_shared(self, tmp_path):
+        """Two working directories sharing the same gitdir (current behavior)."""
+        # Shared gitdir
+        host = tmp_path / "host"
+        host.mkdir()
+        git_run("git", "init", "-b", "main", str(host))
+        (host / "file.txt").write_text("initial\n")
+        git_run("git", "-C", str(host), "add", ".")
+        git_run("git", "-C", str(host), "commit", "-m", "initial")
+
+        gitdir = tmp_path / "gitdir"
+        tmpclone = tmp_path / "_clone"
+        git_run("git", "clone", "--no-checkout", "--local", str(host), str(tmpclone))
+        (tmpclone / ".git").rename(gitdir)
+        shutil.rmtree(tmpclone)
+        git_run("git", "--git-dir", str(gitdir), "remote", "remove", "origin")
+        git_run("git", "--git-dir", str(gitdir), "read-tree", "HEAD")
+
+        # Two working directories sharing the same gitdir
+        work_a = tmp_path / "session-a"
+        work_b = tmp_path / "session-b"
+        work_a.mkdir()
+        work_b.mkdir()
+        # Populate both from HEAD
+        for w in (work_a, work_b):
+            git_run("git", "--git-dir", str(gitdir), "--work-tree", str(w),
+                    "checkout", "HEAD", "--", ".")
+            make_cave_session(gitdir, w)
+
+        return gitdir, work_a, work_b
+
+    def test_commit_in_a_dirties_b(self, two_sessions_shared):
+        """When session A commits, session B's working tree appears dirty."""
+        gitdir, work_a, work_b = two_sessions_shared
+
+        # Session A modifies and commits
+        (work_a / "new.txt").write_text("from A\n")
+        cave_git(work_a, "add", "new.txt")
+        cave_git(work_a, "commit", "-m", "A's commit")
+
+        # Session B hasn't changed anything, but git status is dirty
+        # because HEAD now points to A's commit which includes new.txt
+        status = cave_git(work_b, "status", "--porcelain")
+        assert status.stdout.strip() != "", (
+            "Expected B's status to be dirty after A's commit (shared gitdir problem)"
+        )
+
+    def test_commit_in_a_moves_b_head(self, two_sessions_shared):
+        """Session A's commit moves HEAD for session B too."""
+        gitdir, work_a, work_b = two_sessions_shared
+
+        head_before = cave_git(work_b, "rev-parse", "HEAD").stdout.strip()
+
+        # Session A commits
+        (work_a / "new.txt").write_text("from A\n")
+        cave_git(work_a, "add", "new.txt")
+        cave_git(work_a, "commit", "-m", "A's commit")
+
+        head_after = cave_git(work_b, "rev-parse", "HEAD").stdout.strip()
+        assert head_before != head_after, (
+            "Expected B's HEAD to move when A commits (shared gitdir problem)"
+        )
+
+
+# --- Per-session gitdir tests ---
+
+class TestSessionGitdir:
+    """Test per-session gitdir creation, isolation, and merge-back."""
+
+    @pytest.fixture
+    def shared_project(self, tmp_path, monkeypatch):
+        """A host repo with initialized shared gitdir, ready for session creation.
+
+        Returns (host_dir, slug, projects_dir).
+        """
+        slug = "test-project"
+        projects_dir = tmp_path / "cave-projects"
+        monkeypatch.setattr(wrapper, "PROJECTS_DIR", projects_dir)
+        (projects_dir / slug).mkdir(parents=True)
+
+        host = tmp_path / "host"
+        host.mkdir()
+        git_run("git", "init", "-b", "main", str(host))
+        (host / "file.txt").write_text("initial\n")
+        git_run("git", "-C", str(host), "add", ".")
+        git_run("git", "-C", str(host), "commit", "-m", "initial")
+
+        wrapper.initialize_gitdir(slug, host)
+        return host, slug, projects_dir
+
+    def _make_session(self, tmp_path, slug, projects_dir, name):
+        """Create a session gitdir + working directory for testing."""
+        overlay_base = tmp_path / f"overlay-{name}"
+        overlay_base.mkdir()
+        session_gitdir = wrapper.create_session_gitdir(slug, f"sid-{name}", overlay_base)
+
+        workdir = tmp_path / f"work-{name}"
+        workdir.mkdir()
+        # Populate working directory from HEAD
+        git_run("git", "--git-dir", str(session_gitdir), "--work-tree", str(workdir),
+                "checkout", "HEAD", "--", ".")
+        make_cave_session(session_gitdir, workdir)
+        return session_gitdir, workdir, overlay_base
+
+    def test_session_gitdir_created(self, shared_project, tmp_path):
+        """create_session_gitdir produces a valid git repo."""
+        host, slug, projects_dir = shared_project
+        overlay = tmp_path / "overlay"
+        overlay.mkdir()
+
+        session_gd = wrapper.create_session_gitdir(slug, "test-sid", overlay)
+
+        assert session_gd is not None
+        assert session_gd.is_dir()
+        assert (session_gd / "HEAD").exists()
+        assert (session_gd / "objects" / "info" / "alternates").exists()
+
+    def test_session_has_shared_refs(self, shared_project, tmp_path):
+        """Session gitdir starts with the same HEAD as shared."""
+        host, slug, projects_dir = shared_project
+        shared_gd = projects_dir / slug / "gitdir"
+        shared_head = git_run("git", "--git-dir", str(shared_gd),
+                              "rev-parse", "HEAD").stdout.strip()
+
+        overlay = tmp_path / "overlay"
+        overlay.mkdir()
+        session_gd = wrapper.create_session_gitdir(slug, "test-sid", overlay)
+
+        session_head = git_run("git", "--git-dir", str(session_gd),
+                               "rev-parse", "HEAD").stdout.strip()
+        assert session_head == shared_head
+
+    def test_session_resolves_shared_objects(self, shared_project, tmp_path):
+        """Session gitdir can read objects from the shared store via alternates."""
+        host, slug, projects_dir = shared_project
+        overlay = tmp_path / "overlay"
+        overlay.mkdir()
+        session_gd = wrapper.create_session_gitdir(slug, "test-sid", overlay)
+
+        # Should be able to show the initial commit
+        log = git_run("git", "--git-dir", str(session_gd), "log", "--oneline")
+        assert log.returncode == 0
+        assert "initial" in log.stdout
+
+    def test_session_clean_status(self, shared_project, tmp_path):
+        """A fresh session with matching working tree shows clean git status."""
+        host, slug, projects_dir = shared_project
+        session_gd, workdir, _ = self._make_session(tmp_path, slug, projects_dir, "a")
+
+        status = cave_git(workdir, "status", "--porcelain")
+        assert status.stdout.strip() == "", f"Expected clean status, got: {status.stdout}"
+
+    def test_commit_in_a_does_not_dirty_b(self, shared_project, tmp_path):
+        """Two sessions: a commit in A does not affect B's status."""
+        host, slug, projects_dir = shared_project
+        _, work_a, _ = self._make_session(tmp_path, slug, projects_dir, "a")
+        _, work_b, _ = self._make_session(tmp_path, slug, projects_dir, "b")
+
+        # Session A commits
+        (work_a / "new.txt").write_text("from A\n")
+        cave_git(work_a, "add", "new.txt")
+        cave_git(work_a, "commit", "-m", "A's commit")
+
+        # Session B should be unaffected
+        status = cave_git(work_b, "status", "--porcelain")
+        assert status.stdout.strip() == "", (
+            f"B should have clean status after A commits, got: {status.stdout}"
+        )
+
+    def test_commit_in_a_does_not_move_b_head(self, shared_project, tmp_path):
+        """Two sessions: a commit in A does not change B's HEAD."""
+        host, slug, projects_dir = shared_project
+        _, work_a, _ = self._make_session(tmp_path, slug, projects_dir, "a")
+        _, work_b, _ = self._make_session(tmp_path, slug, projects_dir, "b")
+
+        head_before = cave_git(work_b, "rev-parse", "HEAD").stdout.strip()
+
+        (work_a / "new.txt").write_text("from A\n")
+        cave_git(work_a, "add", "new.txt")
+        cave_git(work_a, "commit", "-m", "A's commit")
+
+        head_after = cave_git(work_b, "rev-parse", "HEAD").stdout.strip()
+        assert head_before == head_after
+
+    def test_b_does_not_see_a_log(self, shared_project, tmp_path):
+        """Session B's log does not include session A's commits."""
+        host, slug, projects_dir = shared_project
+        _, work_a, _ = self._make_session(tmp_path, slug, projects_dir, "a")
+        _, work_b, _ = self._make_session(tmp_path, slug, projects_dir, "b")
+
+        (work_a / "new.txt").write_text("from A\n")
+        cave_git(work_a, "add", "new.txt")
+        cave_git(work_a, "commit", "-m", "A's commit")
+
+        log_b = cave_git(work_b, "log", "--oneline")
+        assert "A's commit" not in log_b.stdout
+
+    def test_merge_pushes_commits_to_shared(self, shared_project, tmp_path):
+        """After session ends, its commits appear in the shared gitdir."""
+        host, slug, projects_dir = shared_project
+        shared_gd = projects_dir / slug / "gitdir"
+        shared_head_before = git_run("git", "--git-dir", str(shared_gd),
+                                     "rev-parse", "HEAD").stdout.strip()
+
+        gd_a, work_a, overlay_a = self._make_session(tmp_path, slug, projects_dir, "a")
+
+        (work_a / "new.txt").write_text("from A\n")
+        cave_git(work_a, "add", "new.txt")
+        cave_git(work_a, "commit", "-m", "session commit")
+
+        wrapper.merge_session_gitdirs("sid-a", overlay_a)
+
+        shared_head_after = git_run("git", "--git-dir", str(shared_gd),
+                                    "rev-parse", "HEAD").stdout.strip()
+        assert shared_head_after != shared_head_before
+
+        log = git_run("git", "--git-dir", str(shared_gd), "log", "--oneline")
+        assert "session commit" in log.stdout
+
+    def test_merge_preserves_feature_branches(self, shared_project, tmp_path):
+        """Session on a feature branch: merge creates that branch in shared."""
+        host, slug, projects_dir = shared_project
+        shared_gd = projects_dir / slug / "gitdir"
+
+        _, work_a, overlay_a = self._make_session(tmp_path, slug, projects_dir, "a")
+
+        cave_git(work_a, "checkout", "-b", "feature-x")
+        (work_a / "feat.txt").write_text("feature\n")
+        cave_git(work_a, "add", "feat.txt")
+        cave_git(work_a, "commit", "-m", "feature commit")
+
+        wrapper.merge_session_gitdirs("sid-a", overlay_a)
+
+        # Shared gitdir should have the feature branch
+        branch = git_run("git", "--git-dir", str(shared_gd),
+                         "rev-parse", "refs/heads/feature-x")
+        assert branch.returncode == 0
+
+    def test_two_sessions_both_commit_on_main(self, shared_project, tmp_path):
+        """Two sessions both commit on main: first merges, second diverges."""
+        host, slug, projects_dir = shared_project
+        shared_gd = projects_dir / slug / "gitdir"
+
+        _, work_a, overlay_a = self._make_session(tmp_path, slug, projects_dir, "a")
+        _, work_b, overlay_b = self._make_session(tmp_path, slug, projects_dir, "b")
+
+        # Both commit on main
+        (work_a / "a.txt").write_text("from A\n")
+        cave_git(work_a, "add", "a.txt")
+        cave_git(work_a, "commit", "-m", "commit A")
+
+        (work_b / "b.txt").write_text("from B\n")
+        cave_git(work_b, "add", "b.txt")
+        cave_git(work_b, "commit", "-m", "commit B")
+
+        # Session A ends first — its main fast-forwards
+        wrapper.merge_session_gitdirs("sid-a", overlay_a)
+        log = git_run("git", "--git-dir", str(shared_gd), "log", "--oneline")
+        assert "commit A" in log.stdout
+
+        # Session B ends — its main can't fast-forward (diverged)
+        # B's commits should still be preserved (not lost)
+        wrapper.merge_session_gitdirs("sid-b", overlay_b)
+
+        # A's commit should still be on main
+        log = git_run("git", "--git-dir", str(shared_gd),
+                      "log", "--oneline", "refs/heads/main")
+        assert "commit A" in log.stdout
+
+        # B's commit should be reachable (saved under a session ref)
+        all_refs = git_run("git", "--git-dir", str(shared_gd),
+                           "for-each-ref", "--format=%(refname)")
+        b_commit_sha = cave_git(work_b, "rev-parse", "HEAD").stdout.strip()
+        # Verify B's commit object exists in shared
+        cat = git_run("git", "--git-dir", str(shared_gd),
+                      "cat-file", "-t", b_commit_sha)
+        assert cat.returncode == 0, "B's commit should exist in shared object store"
+
+    def test_no_gitdir_returns_none(self, tmp_path, monkeypatch):
+        """create_session_gitdir returns None when no shared gitdir exists."""
+        projects_dir = tmp_path / "projects"
+        (projects_dir / "missing").mkdir(parents=True)
+        monkeypatch.setattr(wrapper, "PROJECTS_DIR", projects_dir)
+
+        overlay = tmp_path / "overlay"
+        overlay.mkdir()
+        result = wrapper.create_session_gitdir("missing", "sid", overlay)
+        assert result is None
+
+    def test_empty_repo_session(self, tmp_path, monkeypatch):
+        """Session gitdir from an empty repo (no commits) doesn't crash."""
+        slug = "empty"
+        projects_dir = tmp_path / "projects"
+        (projects_dir / slug).mkdir(parents=True)
+        monkeypatch.setattr(wrapper, "PROJECTS_DIR", projects_dir)
+
+        host = tmp_path / "host"
+        host.mkdir()
+        git_run("git", "init", "-b", "main", str(host))
+        wrapper.initialize_gitdir(slug, host)
+
+        overlay = tmp_path / "overlay"
+        overlay.mkdir()
+        session_gd = wrapper.create_session_gitdir(slug, "sid", overlay)
+        # Should create something (or return None gracefully)
+        # Either is acceptable for an empty repo
