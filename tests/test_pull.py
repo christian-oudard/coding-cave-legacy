@@ -1,4 +1,5 @@
 """Tests for pull_project: normal pull, auto-force, and edge cases."""
+import json
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -354,3 +355,60 @@ class TestPullEdgeCases:
         branches = _run("git", "-C", str(env.host), "branch",
                          "--list", "_cave_pull").stdout.strip()
         assert branches == ""
+
+
+class TestPullMidSession:
+    """Pull picks up commits from running sessions."""
+
+    def test_pull_sees_session_commits(self, pull_env, tmp_path, monkeypatch):
+        """Commits in a per-session gitdir are visible to pull_project."""
+        env = pull_env
+        sid = "test-session-123"
+
+        # Create session overlay area and per-session gitdir
+        overlay_base = tmp_path / "session-overlays" / sid
+        overlay_base.mkdir(parents=True)
+        monkeypatch.setattr(wrapper, "CAVE_DATA", tmp_path)
+
+        session_gitdir = wrapper.create_session_gitdir(
+            env.slug, sid, overlay_base,
+        )
+        assert session_gitdir is not None
+
+        # Register a fake running session (use our own PID so it looks alive)
+        import os
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir(parents=True)
+        monkeypatch.setattr(wrapper, "SESSIONS_DIR", sessions_dir)
+        session_info = {
+            "sid": sid,
+            "project": env.slug,
+            "bwrap_pid": os.getpid(),
+            "started": 0,
+        }
+        (sessions_dir / f"{sid}.json").write_text(json.dumps(session_info))
+
+        # Commit in the session gitdir (not the shared one)
+        _run("git", "--git-dir", str(session_gitdir), "config",
+             "user.email", "cave@test.com")
+        _run("git", "--git-dir", str(session_gitdir), "config",
+             "user.name", "cave-coder")
+        session_cave = tmp_path / "session-cave"
+        session_cave.mkdir()
+        _run("git", "--git-dir", str(session_gitdir), "--work-tree",
+             str(session_cave), "checkout", "HEAD", "--", ".", check=False)
+        (session_cave / "file.txt").write_text("from session\n")
+        _run("git", "--git-dir", str(session_gitdir), "--work-tree",
+             str(session_cave), "add", "file.txt")
+        _run("git", "--git-dir", str(session_gitdir), "--work-tree",
+             str(session_cave), "commit", "-m", "session commit")
+
+        # Verify shared gitdir does NOT have this commit yet
+        shared_head = _head(env.gitdir, gitdir=True)
+        session_head = _run("git", "--git-dir", str(session_gitdir),
+                            "rev-parse", "HEAD").stdout.strip()
+        assert shared_head != session_head
+
+        # Pull should pick up the session commit
+        wrapper.pull_project(env.slug)
+        assert (env.host / "file.txt").read_text() == "from session\n"

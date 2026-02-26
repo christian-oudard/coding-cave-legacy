@@ -742,6 +742,17 @@ def enter_session(session_info, shell_type, workdir=None):
 
 # --- Pull / Push (commits only) ---
 
+def sync_live_sessions(slug):
+    """Merge refs from running sessions into the shared gitdir."""
+    for session in list_sessions(project=slug):
+        sid = session["sid"]
+        overlay_base = CAVE_DATA / "session-overlays" / sid
+        session_gitdir = overlay_base / f"gitdir-{slug}"
+        if session_gitdir.is_dir():
+            shared_gitdir = PROJECTS_DIR / slug / "gitdir"
+            merge_session_gitdirs(sid, overlay_base)
+
+
 def pull_project(slug, force=False):
     """Pull committed changes from cave gitdir into the host repo."""
     projects = load_projects()
@@ -757,6 +768,7 @@ def pull_project(slug, force=False):
         print(f"No gitdir for {slug} — run 'coding-cave reset' first.", file=sys.stderr)
         sys.exit(1)
 
+    sync_live_sessions(slug)
     ensure_cave_remote(project_dir, gitdir)
 
     host_git = ["git", "-C", str(project_dir)] + SAFE_GIT_OPTS
