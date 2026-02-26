@@ -417,19 +417,20 @@ def start_session(project, command, gpu=False):
     if bash_profile and Path(bash_profile).is_file():
         bwrap_args += ["--ro-bind", bash_profile, f"{JAIL_HOME}/.bash_profile"]
 
-    # Project mounts (kernel overlayfs via bwrap --overlay)
+    # Project mounts (kernel overlayfs via bwrap --overlay).
+    # Upper/work dirs live under /tmp so they're on a different device
+    # from the project source. This prevents the kernel from adding uuid=on
+    # to the overlay mount, which would block nested overlayfs.
+    import tempfile
+    overlay_base = Path(tempfile.mkdtemp(prefix="cave-overlays-", dir="/tmp"))
     for slug, source in projects.items():
         if not Path(source).is_dir():
             continue
-        if inside_cave:
-            # Nested overlayfs fails (userxattr conflict). Bind directly.
-            bwrap_args += ["--bind", source, f"/projects/{slug}"]
-        else:
-            upper = PROJECTS_DIR / slug / "sessions" / sid / "upper"
-            work = PROJECTS_DIR / slug / "sessions" / sid / "work"
-            upper.mkdir(parents=True, exist_ok=True)
-            work.mkdir(parents=True, exist_ok=True)
-            bwrap_args += ["--overlay-src", source, "--overlay", str(upper), str(work), f"/projects/{slug}"]
+        upper = overlay_base / f"{slug}-upper"
+        work = overlay_base / f"{slug}-work"
+        upper.mkdir()
+        work.mkdir()
+        bwrap_args += ["--overlay-src", source, "--overlay", str(upper), str(work), f"/projects/{slug}"]
         gitdir = PROJECTS_DIR / slug / "gitdir"
         if gitdir.is_dir():
             bwrap_args += ["--bind", str(gitdir), f"/projects/{slug}/.git"]
@@ -524,6 +525,7 @@ def start_session(project, command, gpu=False):
         ret = 130
     finally:
         cleanup_session(sid)
+        shutil.rmtree(overlay_base, ignore_errors=True)
 
     sys.exit(ret)
 
