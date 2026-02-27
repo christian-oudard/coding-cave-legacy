@@ -58,7 +58,7 @@
       # no-new-session omitted: cave init needs its own session to survive terminal close
 
       # Nix CLI for autonomous package management inside the cave
-      # Writable /nix/store overlay (kernel overlayfs via bwrap --overlay).
+      # Writable /nix/store overlay (fuse-overlayfs, mounted by wrapper.py).
       # Host nix DB is seeded at startup so nix doesn't try to re-register
       # (chmod) existing lower-layer paths, which fails on overlayfs.
       (try-fwd-env "CODING_CAVE_NIX_MERGED")
@@ -194,7 +194,7 @@
     };
 
     baseScript = pkgs.writeText "coding-cave-script" ''
-      export PATH="${pkgs.lib.makeBinPath [pkgs.util-linux pkgs.passt pkgs.fuse-overlayfs pkgs.fuse3]}:$PATH"
+      export PATH="${pkgs.lib.makeBinPath [pkgs.util-linux pkgs.passt pkgs.fuse-overlayfs]}:$PATH"
       exec ${pkgs.python3}/bin/python3 ${wrapperScript} "$@"
     '';
 

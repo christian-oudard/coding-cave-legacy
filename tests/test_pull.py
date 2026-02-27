@@ -108,14 +108,13 @@ def pull_env(tmp_path, monkeypatch):
     return SimpleNamespace(host=host, gitdir=gitdir, cave=cave, slug=slug)
 
 
-class TestPullAutoForce:
-    """Auto-force: cave amends/squashes adopted without --force."""
+class TestPullForceRequired:
+    """History rewrites require --force."""
 
-    def test_amend_after_sync(self, pull_env):
-        """Cave amends a synced commit -> pull auto-adopts."""
+    def test_amend_without_force_is_noop(self, pull_env):
+        """Cave amends a synced commit -> plain pull refuses."""
         env = pull_env
 
-        # Cave adds a commit, pull it
         cave_commit(env, "cave work", content="v1\n")
         wrapper.pull_project(env.slug)
         head_v1 = _head(env.host)
@@ -124,16 +123,29 @@ class TestPullAutoForce:
         # Cave amends the synced commit
         cave_commit(env, "amended work", content="v2\n", amend=True)
 
-        # Plain pull (no --force) should succeed
+        # Plain pull (no --force) should refuse
         wrapper.pull_project(env.slug)
+        assert _head(env.host) == head_v1
+        assert (env.host / "file.txt").read_text() == "v1\n"
+
+    def test_amend_with_force(self, pull_env):
+        """Cave amends a synced commit -> pull --force adopts."""
+        env = pull_env
+
+        cave_commit(env, "cave work", content="v1\n")
+        wrapper.pull_project(env.slug)
+        head_v1 = _head(env.host)
+
+        cave_commit(env, "amended work", content="v2\n", amend=True)
+
+        wrapper.pull_project(env.slug, force=True)
         assert _head(env.host) != head_v1
         assert (env.host / "file.txt").read_text() == "v2\n"
 
-    def test_squash_after_sync(self, pull_env):
-        """Cave squashes synced commits -> pull auto-adopts."""
+    def test_squash_with_force(self, pull_env):
+        """Cave squashes synced commits -> pull --force adopts."""
         env = pull_env
 
-        # Cave adds two commits, pull each
         cave_commit(env, "first", content="first\n")
         wrapper.pull_project(env.slug)
         cave_commit(env, "second", content="second\n")
@@ -151,20 +163,18 @@ class TestPullAutoForce:
         _run("git", "--git-dir", str(env.gitdir),
              "update-ref", "refs/heads/main", squashed)
 
-        # Pull should auto-adopt (2 host commits replaced with 1)
-        wrapper.pull_project(env.slug)
+        wrapper.pull_project(env.slug, force=True)
         assert (env.host / "file.txt").read_text() == "second\n"
         assert _log_count(env.host) == 2  # initial + squashed
 
-    def test_amend_then_new_commit(self, pull_env):
-        """After auto-force amend, normal commits still pull correctly."""
+    def test_force_then_normal_commit(self, pull_env):
+        """After force-pull, normal commits still pull correctly."""
         env = pull_env
 
-        # Amend cycle
         cave_commit(env, "first", content="v1\n")
         wrapper.pull_project(env.slug)
         cave_commit(env, "amended", content="v2\n", amend=True)
-        wrapper.pull_project(env.slug)
+        wrapper.pull_project(env.slug, force=True)
 
         # Now a fresh commit should pull normally
         cave_commit(env, "next", content="v3\n")

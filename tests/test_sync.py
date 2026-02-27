@@ -719,6 +719,52 @@ class TestSessionGitdir:
         wrapper.merge_session_gitdirs("sid-a", overlay_a)
         assert git_head(shared_gd, gitdir=True) == sha_b_prime
 
+    def test_reauthored_commit_not_overwritten(self, shared_project, tmp_path):
+        """Re-authored shared ref (same tree) must not be overwritten by session.
+
+        After pull re-authors commits (changing author from cave-coder to host
+        user), the shared gitdir has the re-authored commit while the session
+        still has the original.  merge_session_gitdirs must NOT overwrite the
+        re-authored ref, since the tree content is identical.
+        """
+        host, slug, projects_dir = shared_project
+        shared_gd = projects_dir / slug / "gitdir"
+
+        _, work_a, overlay_a = self._make_session(tmp_path, slug, projects_dir, "a")
+
+        # Session creates commit B
+        (work_a / "new.txt").write_text("content\n")
+        cave_git(work_a, "add", "new.txt")
+        cave_git(work_a, "commit", "-m", "commit B")
+        session_sha = cave_git(work_a, "rev-parse", "HEAD").stdout.strip()
+
+        # Mid-session sync advances shared to session's commit
+        wrapper.merge_session_gitdirs("sid-a", overlay_a)
+        assert git_head(shared_gd, gitdir=True) == session_sha
+
+        # Simulate pull re-authoring: create a new commit with same tree
+        # but different author (like --reset-author does)
+        tree = git_run("git", "--git-dir", str(shared_gd),
+                        "rev-parse", "HEAD^{tree}").stdout.strip()
+        parent = git_run("git", "--git-dir", str(shared_gd),
+                          "rev-parse", "HEAD^").stdout.strip()
+        env = {**os.environ, **GIT_ENV,
+               "GIT_AUTHOR_NAME": "Host User",
+               "GIT_AUTHOR_EMAIL": "host@test.com"}
+        reauthored = subprocess.run(
+            ["git", "--git-dir", str(shared_gd),
+             "commit-tree", tree, "-p", parent, "-m", "commit B"],
+            capture_output=True, text=True, check=True, env=env,
+        ).stdout.strip()
+        git_run("git", "--git-dir", str(shared_gd),
+                "update-ref", "refs/heads/main", reauthored)
+        assert reauthored != session_sha
+
+        # Session still has the original commit.
+        # merge_session_gitdirs should NOT overwrite the re-authored ref.
+        wrapper.merge_session_gitdirs("sid-a", overlay_a)
+        assert git_head(shared_gd, gitdir=True) == reauthored
+
     def test_no_gitdir_returns_none(self, tmp_path, monkeypatch):
         """create_session_gitdir returns None when no shared gitdir exists."""
         projects_dir = tmp_path / "projects"

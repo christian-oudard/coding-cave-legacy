@@ -445,8 +445,22 @@ def merge_session_gitdirs(sid, overlay_base):
                 git(shared_gitdir, "update-ref", ref, sha,
                     capture_output=True)
             else:
-                # Diverged (e.g. amend) — force-update shared ref.
-                # Back up the old ref so concurrent sessions' work isn't lost.
+                # Diverged — check if it's a real content change or just
+                # re-authoring (pull rewrites commits to change author).
+                session_tree = git(shared_gitdir, "rev-parse",
+                                   f"{sha}^{{tree}}",
+                                   capture_output=True, text=True)
+                shared_tree = git(shared_gitdir, "rev-parse",
+                                  f"{existing_sha}^{{tree}}",
+                                  capture_output=True, text=True)
+                if (session_tree.returncode == 0
+                        and shared_tree.returncode == 0
+                        and session_tree.stdout.strip()
+                            == shared_tree.stdout.strip()):
+                    continue  # same tree, just metadata (re-authoring)
+
+                # Real content change (e.g. amend with new code).
+                # Force-update shared ref, back up old ref.
                 git(shared_gitdir, "update-ref",
                     f"refs/sessions/{sid}/{branch}", existing_sha,
                     capture_output=True)
@@ -602,7 +616,7 @@ def start_session(project, command, gpu=False):
             bwrap_args += ["--bind", str(merged), f"/projects/{slug}"]
     except BaseException:
         for merged in overlay_mounts:
-            subprocess.run(["fusermount3", "-u", merged], capture_output=True)
+            unmount_fuse(merged)
         force_rmtree(overlay_base)
         raise
 
@@ -698,13 +712,11 @@ def start_session(project, command, gpu=False):
         merge_session_gitdirs(sid, overlay_base)
         cleanup_session(sid)
         for merged in overlay_mounts:
-            subprocess.run(["fusermount3", "-u", merged],
-                           capture_output=True)
+            unmount_fuse(merged)
         force_rmtree(overlay_base)
         # Clean shared nix overlay when last session exits
         if not list_sessions():
-            subprocess.run(["fusermount3", "-u", nix_merged],
-                           capture_output=True)
+            unmount_fuse(nix_merged)
             for subdir in ["upper", "work", "merged", "db"]:
                 force_rmtree(NIX_OVERLAY_DIR / subdir)
 
@@ -933,16 +945,21 @@ def pull_project(slug, force=False):
         return
 
     # Detect history rewrite: cave amended/squashed commits since last sync.
-    # When cave_sync == host_head, host hasn't moved independently — all
-    # commits being replaced originated from the cave, so auto-adopt.
     if (cave_sync_hash and cave_sync_hash == host_head
             and merge_base != host_head):
+        if not force:
+            host_count = subprocess.run(
+                host_git + ["rev-list", "--count", f"{merge_base}..HEAD"],
+                capture_output=True, text=True, check=True,
+            ).stdout.strip()
+            print(f"Cave rewrote history for {slug} ({host_count} commit(s) would be replaced with {count}).", file=sys.stderr)
+            print(f"Run 'coding-cave pull --force' to adopt.", file=sys.stderr)
+            return
+
         host_count = subprocess.run(
             host_git + ["rev-list", "--count", f"{merge_base}..HEAD"],
             capture_output=True, text=True, check=True,
         ).stdout.strip()
-
-        force = True
 
         stash_result = subprocess.run(
             host_git + ["stash", "--include-untracked"],
@@ -1117,6 +1134,24 @@ def push_project(slug, force=False):
     print(f"Pushed to {slug} ({host_head[:8]}).", file=sys.stderr)
 
 
+def unmount_fuse(mountpoint):
+    """Lazy-unmount a fuse mount.  Returns True if fusermount3 succeeded."""
+    r = subprocess.run(["fusermount3", "-uz", str(mountpoint)],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        # Most likely cause: non-setuid fusermount3 from nix store
+        # shadows the system's setuid one.  Try the system path.
+        for p in ["/run/wrappers/bin/fusermount3", "/usr/bin/fusermount3"]:
+            if os.path.isfile(p):
+                r = subprocess.run([p, "-uz", str(mountpoint)],
+                                   capture_output=True, text=True)
+                if r.returncode == 0:
+                    return True
+        print(f"fusermount3 -uz {mountpoint}: exit {r.returncode}: "
+              f"{r.stderr.strip()}", file=sys.stderr)
+    return r.returncode == 0
+
+
 def unmount_all_under(path):
     """Unmount any fuse mounts inside path (deepest first)."""
     path = Path(path).resolve()
@@ -1132,11 +1167,11 @@ def unmount_all_under(path):
         return
     # Unmount deepest first to avoid "busy" on parent mounts
     for mp in sorted(mounts, key=len, reverse=True):
-        subprocess.run(["fusermount3", "-u", mp], capture_output=True)
+        unmount_fuse(mp)
 
 
 def force_rmtree(path):
-    """Remove a directory tree, forcing permissions on read-only entries (e.g. nix store paths)."""
+    """Remove a directory tree, unmounting and forcing permissions as needed."""
     path = Path(path)
     if not path.exists():
         return
@@ -1147,7 +1182,10 @@ def force_rmtree(path):
                 (Path(dirpath) / name).chmod(0o700)
             except OSError:
                 pass
-    shutil.rmtree(path)
+    try:
+        shutil.rmtree(path)
+    except OSError as e:
+        print(f"Warning: could not remove {path}: {e}", file=sys.stderr)
 
 
 def reset_project_overlay(slug):
