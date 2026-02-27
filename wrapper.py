@@ -606,9 +606,11 @@ def start_session(project, command, gpu=False):
                     # Shared objects accessible via alternates inside the cave
                     bwrap_args += ["--ro-bind", str(shared_gitdir / "objects"),
                                    f"/projects/.shared-objects/{slug}"]
+            uid, gid = os.getuid(), os.getgid()
             subprocess.run(
                 ["fuse-overlayfs",
-                 "-o", f"lowerdir={source},upperdir={upper},workdir={work}",
+                 "-o", f"lowerdir={source},upperdir={upper},workdir={work},"
+                       f"squash_to_uid={uid},squash_to_gid={gid}",
                  str(merged)],
                 check=True, capture_output=True,
             )
