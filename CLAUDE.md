@@ -23,6 +23,7 @@ Each agent session runs in its own **per-session bwrap namespace** with per-sess
 - **Global config** (`~/.config/coding-cave/config.toml`): OAuth tokens (`credentials.claude-oauth-token`). Credentials are forwarded via env vars only, never written to disk inside the cave.
 - **Claude settings** (`~/.config/coding-cave/settings.json`): Per-user Claude Code settings, seeded into `~/.claude/settings.json` on first cave run. Falls back to the repo's `claude-settings.json` if not present.
 - **User CLAUDE.md** (`~/.config/coding-cave/CLAUDE.md`): Optional instructions file, bind-mounted read-only into cave home at `~/.claude/CLAUDE.md`.
+- **Custom skills** (`~/.config/coding-cave/skills/`): Optional directory of skill folders (each containing `SKILL.md`), seeded into `~/.claude/skills/` on startup (missing skills only). Built-in skills (claude-loop) are seeded automatically.
 - **Shell dotfiles**: User's `~/.bashrc`/`~/.bash_profile` (ro-bind) or `~/.config/zsh/` (overlay for writable history) are forwarded into the cave.
 
 ### Persistent State (`~/.local/share/coding-cave/`)
@@ -59,6 +60,8 @@ coding-cave pull [project]            pull commits from cave gitdir, re-author
 coding-cave push [project]            push host commits into cave gitdir
 coding-cave reset [project]           wipe overlay + gitdir to match host (no running sessions)
 coding-cave remove [project]          unregister a project and delete overlay data
+coding-cave cp <src>... <slug>:<path>  copy host files into a running session
+coding-cave cp <slug>:<path> <dest>   copy cave files out to host
 coding-cave move <slug> <new-path>    update a project's source path (and slug if dir name changed)
 coding-cave status [-a/--all]         show projects and running sessions
 coding-cave help                      show usage help

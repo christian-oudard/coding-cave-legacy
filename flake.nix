@@ -132,6 +132,7 @@
 
       # First-run init for Claude Code state
       (try-fwd-env "CODING_CAVE_CLAUDE_SETTINGS")
+      (try-fwd-env "CODING_CAVE_SKILLS_DIR")
       (add-runtime ''
         CAVE_HOME="$HOME/.local/share/coding-cave/home"
         CLAUDE_DIR="$CAVE_HOME/.claude"
@@ -144,6 +145,28 @@
           fi
           chmod 644 "$CLAUDE_DIR/settings.json"
           printf '%s' '{"hasCompletedOnboarding":true,"theme":"dark","effortCalloutDismissed":true}' > "$CAVE_HOME/.claude.json"
+        fi
+        # Seed built-in skills (claude-loop)
+        SKILLS_DIR="$CLAUDE_DIR/skills"
+        mkdir -p "$SKILLS_DIR"
+        for f in ${claude-loop.src}/commands/*.md; do
+          [ -f "$f" ] || continue
+          name="''${f##*/}"
+          name="''${name%.md}"
+          if [ ! -d "$SKILLS_DIR/$name" ]; then
+            mkdir -p "$SKILLS_DIR/$name"
+            cp "$f" "$SKILLS_DIR/$name/SKILL.md"
+          fi
+        done
+        # Seed per-user skills if missing
+        if [ -n "''${CODING_CAVE_SKILLS_DIR:-}" ] && [ -d "''${CODING_CAVE_SKILLS_DIR}" ]; then
+          for d in "''${CODING_CAVE_SKILLS_DIR}"/*/; do
+            [ -d "$d" ] || continue
+            base="$(basename "$d")"
+            if [ ! -d "$SKILLS_DIR/$base" ]; then
+              cp -r "$d" "$SKILLS_DIR/$base"
+            fi
+          done
         fi
       '')
 

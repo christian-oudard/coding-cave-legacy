@@ -54,6 +54,10 @@ def setup_env(global_config):
     if claude_settings.exists():
         os.environ["CODING_CAVE_CLAUDE_SETTINGS"] = str(claude_settings)
 
+    skills_dir = Path.home() / ".config" / "coding-cave" / "skills"
+    if skills_dir.is_dir():
+        os.environ["CODING_CAVE_SKILLS_DIR"] = str(skills_dir)
+
     user_shell = Path(os.environ.get("SHELL", "/bin/bash")).name
     if user_shell == "zsh":
         zdotdir = Path.home() / ".config" / "zsh"
