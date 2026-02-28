@@ -54,6 +54,29 @@ Per-session gitdirs are small (index file + refs + config). The bulk of git data
 
 On session end, refs and new objects from the session gitdir are merged into the shared gitdir, then the session gitdir is removed. `pull` and `push` operate on the shared gitdir as before.
 
+### Session merge and re-authoring
+
+Pull re-authors cave commits to replace the cave identity with the host user's. This creates new commit hashes for the same tree content. Push then writes these re-authored hashes back to the shared gitdir. But running sessions still have the OLD (pre-re-authoring) commit chain. When a session makes new commits, they build on the old chain, creating a divergence from the shared gitdir.
+
+Without handling this, every session merge would force-update the shared gitdir (undoing the re-authoring), and every subsequent pull would require `--force`. With multiple agents, this cycle never ends.
+
+The fix: when `merge_session_gitdirs` detects that a session's chain diverges from the shared gitdir, it checks whether the divergence is caused by re-authoring — commits with the same tree but different hashes. If it finds a re-authoring boundary, it rebases only the session's NEW commits (those beyond the boundary) onto the shared HEAD.
+
+Algorithm:
+
+1. Session has `initial -> A -> B -> C` (A, B are old; C is new work)
+2. Shared has `initial -> A' -> B'` (A', B' are re-authored: same trees as A, B but different hashes)
+3. Build a tree->commit map from the shared chain
+4. Walk the session chain backward from HEAD. For each commit, check if its tree matches one in the shared chain
+5. The first match is the "re-authoring boundary" — session commit B has the same tree as shared commit B'
+6. Commits above the boundary (C) are "new work" to rebase
+7. For each new commit, create a re-parented copy via `git commit-tree`, preserving the original tree and author metadata but changing the parent to the shared HEAD
+8. Update the shared ref to the final rebased commit
+
+This uses `git commit-tree` (not `git rebase`) because it works on bare gitdirs without a working tree. It's correct because re-authoring preserves tree hashes: if B and B' have the same tree, then C's tree (which includes B's changes) is already correct when parented on B'.
+
+The result: shared gitdir has `initial -> A' -> B' -> C'`, which is a clean fast-forward from the host's perspective. The next pull produces a normal fast-forward pull instead of requiring `--force`.
+
 ## Pull
 
 Pull brings committed cave work to the host. Uncommitted changes are not transferred — with multiple sessions per project, there is no single working tree to pull from. Agents must commit their work for it to be pullable.
@@ -66,10 +89,14 @@ The rebase uses `--no-reapply-cherry-picks` to skip commits already present on t
 
 Pull must not silently rewrite the host's history. When the cave rewrites history (squash, amend, rebase), pull detects this via `refs/cave-sync` — a marker of the last commit both repos agreed on. If the host hasn't moved since the last sync but the merge-base is older, the cave rewrote history.
 
-Without `--force`, pull warns and exits:
+Without `--force`, pull warns, shows what changed, and exits:
 
-    Cave rewrote history for project (5 host commit(s) → 1 cave commit(s)).
-    Run 'coding-cave pull --force' to adopt the cave's history.
+    Cave rewrote history for project (2 -> 3 commit(s)).
+      33a0f15 -> ae72b25 Per-user custom slash commands
+      + 3953fd8 Set NIX_PATH so <nixpkgs> resolves
+    Run 'coding-cave pull --force' to adopt.
+
+Amended commits show `old_hash -> new_hash`, new commits show `+`.
 
 With `--force`, pull adopts the cave's history directly (`reset --hard`) rather than rebasing. This preserves commit hashes that may already exist on a remote, keeping the host fast-forwardable from its tracking branch.
 
@@ -84,9 +111,9 @@ This is why the force path uses `reset --hard` (adopting exact commit objects) r
 
 ## Push
 
-Push brings host commits to the cave. It updates the gitdir's refs and objects to match the host. Uncommitted host changes are not transferred.
+Push brings host commits to the cave. It updates the shared gitdir's refs and objects to match the host. Uncommitted host changes are not transferred.
 
-Push refuses if the cave has commits that haven't been pulled yet, since updating the gitdir would lose them. It shows the unpulled commits and suggests `coding-cave pull` first, or `--force` to override.
+Push first syncs refs from any running sessions into the shared gitdir (same as pull), so it can detect unpulled commits even when they exist only in a session gitdir. It refuses if the cave has commits that haven't been pulled yet, since updating the gitdir would lose them. It shows the unpulled commits and suggests `coding-cave pull` first, or `--force` to override.
 
 The gitdir is bind-mounted into the cave, so push updates are immediately visible to running agents. No cave restart needed.
 
@@ -97,6 +124,17 @@ Projects can be created inside the cave without a host source directory. The age
 On the host, `cav pull <name>` discovers the unsynced project, clones it to the host CWD, and registers it as a normal project. The next cave session mounts it at `/projects/<name>/` with overlay + gitdir like any other project.
 
 Two locations make the state obvious: `/projects/` = synced with host, `~/unsynced-projects/` = cave-only.
+
+## File transfer
+
+`cp` copies files between the host and a running cave session without requiring a commit or restart. It operates directly on the session's fuse-overlayfs merged directory, which is accessible from the host even while bwrap is running.
+
+    coding-cave cp <file>... <project>:<path>    host → cave
+    coding-cave cp <project>:<path> <dest>       cave → host
+
+The project slug can be omitted (`:path`) if CWD is inside a registered project. When multiple sessions are running for the same project, `cp` prompts which to use.
+
+Files copied into the cave appear immediately — no restart needed. Files copied out of the cave capture the current overlay state (host lower + cave upper merged), including uncommitted modifications.
 
 ## Credential isolation
 

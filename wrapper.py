@@ -387,6 +387,89 @@ def create_session_gitdir(slug, sid, overlay_base):
     return session_gitdir
 
 
+def _rebase_onto_reauthored(gitdir, shared_sha, session_sha, merge_base):
+    """Rebase session commits onto a re-authored shared chain.
+
+    When the shared gitdir has re-authored commits (same trees, different
+    hashes from pull --reset-author), and the session has new commits on top
+    of the old chain, this rebases only the new commits onto the shared HEAD.
+
+    Returns the new tip SHA if successful, None if not applicable.
+    """
+    if not merge_base:
+        return None
+
+    # Build tree→commit map from shared chain (merge_base..shared_sha)
+    shared_log = git(gitdir, "log", "--format=%H %T",
+                     f"{merge_base}..{shared_sha}",
+                     capture_output=True, text=True)
+    if shared_log.returncode != 0:
+        return None
+    shared_trees = {}
+    for line in shared_log.stdout.strip().splitlines():
+        if not line:
+            continue
+        commit, tree = line.split()
+        shared_trees[tree] = commit
+    if not shared_trees:
+        return None
+
+    # Walk session chain (merge_base..session_sha) to find re-authoring boundary
+    session_log = git(gitdir, "log", "--format=%H %T",
+                      f"{merge_base}..{session_sha}",
+                      capture_output=True, text=True)
+    if session_log.returncode != 0:
+        return None
+    session_commits = []
+    for line in session_log.stdout.strip().splitlines():
+        if not line:
+            continue
+        commit, tree = line.split()
+        session_commits.append((commit, tree))
+
+    # Find boundary: first session commit whose tree exists in shared chain
+    # (session_commits is newest-first from git log)
+    boundary_idx = None
+    for i, (commit, tree) in enumerate(session_commits):
+        if tree in shared_trees:
+            boundary_idx = i
+            break
+    if boundary_idx is None:
+        return None
+
+    # Commits above the boundary are new work to rebase (reverse for oldest-first)
+    new_commits = list(reversed(session_commits[:boundary_idx]))
+    if not new_commits:
+        return None
+
+    # Rebase new commits onto shared HEAD using commit-tree
+    parent = shared_sha
+    for commit, tree in new_commits:
+        info = git(gitdir, "log", "-1", "--format=%an%n%ae%n%aI%n%B", commit,
+                   capture_output=True, text=True)
+        if info.returncode != 0:
+            return None
+        lines = info.stdout.rstrip("\n").split("\n", 3)
+        author_name, author_email, author_date = lines[0], lines[1], lines[2]
+        message = lines[3] if len(lines) > 3 else ""
+        env = {
+            **os.environ,
+            "GIT_AUTHOR_NAME": author_name,
+            "GIT_AUTHOR_EMAIL": author_email,
+            "GIT_AUTHOR_DATE": author_date,
+        }
+        result = subprocess.run(
+            ["git", "--git-dir", str(gitdir)] + SAFE_GIT_OPTS +
+            ["commit-tree", tree, "-p", parent, "-m", message],
+            capture_output=True, text=True, env=env,
+        )
+        if result.returncode != 0:
+            return None
+        parent = result.stdout.strip()
+
+    return parent
+
+
 def merge_session_gitdirs(sid, overlay_base):
     """Merge per-session gitdir refs and objects back into shared gitdirs.
 
@@ -462,6 +545,16 @@ def merge_session_gitdirs(sid, overlay_base):
                         and session_tree.stdout.strip()
                             == shared_tree.stdout.strip()):
                     continue  # same tree, just metadata (re-authoring)
+
+                # Try rebasing new session commits onto re-authored chain
+                rebased = _rebase_onto_reauthored(
+                    shared_gitdir, existing_sha, sha,
+                    merge_base.stdout.strip()
+                    if merge_base.returncode == 0 else None)
+                if rebased:
+                    git(shared_gitdir, "update-ref", ref, rebased,
+                        capture_output=True)
+                    continue
 
                 # Real content change (e.g. amend with new code).
                 # Force-update shared ref, back up old ref.
@@ -650,6 +743,7 @@ def start_session(project, command, gpu=False):
         for arg in bwrap_args:
             f.write(arg.encode() + b"\0")
     os.environ["CODING_CAVE_BWRAP_ARGS"] = str(args_file)
+    os.environ["CODING_CAVE_SESSION_ID"] = sid
 
     binary = SANDBOX_GPU_BIN if gpu else SANDBOX_BIN
 
@@ -950,6 +1044,52 @@ def pull_project(slug, force=False):
         print(f"No commits to pull from {slug}.", file=sys.stderr)
         return
 
+    def _parse_log(git_cmd, range_spec):
+        """Parse 'git log' output into [(hash, tree, subject), ...]."""
+        result = subprocess.run(
+            git_cmd + ["log", "--format=%h %T %s", range_spec],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return []
+        entries = []
+        for line in result.stdout.rstrip().splitlines():
+            parts = line.split(None, 2)
+            if len(parts) >= 2:
+                entries.append((parts[0], parts[1], parts[2] if len(parts) > 2 else ""))
+        return entries
+
+    def _print_rewrite_diff(host_git_cmd, merge_base_hash):
+        """Show what changed: amended commits (old -> new hash) and new commits."""
+        subprocess.run(
+            host_git_cmd + ["fetch", str(gitdir), "HEAD"],
+            capture_output=True,
+        )
+        old = _parse_log(host_git_cmd, f"{merge_base_hash}..HEAD")
+        new = _parse_log(host_git_cmd, f"{merge_base_hash}..FETCH_HEAD")
+        _print_rewrite_summary(old, new)
+
+    def _print_rewrite_summary(old_entries, new_entries):
+        # Match by subject first, then by tree hash
+        old_by_subject = {}
+        old_by_tree = {}
+        for h, tree, subj in old_entries:
+            old_by_subject[subj] = h
+            old_by_tree[tree] = (h, subj)
+        for h, tree, subj in new_entries:
+            old_h = old_by_subject.pop(subj, None)
+            if old_h and old_h != h:
+                print(f"  amend {old_h} -> {h} {subj}", file=sys.stderr)
+                old_by_tree.pop(tree, None)
+            elif old_h:
+                print(f"  {h} {subj}", file=sys.stderr)
+                old_by_tree.pop(tree, None)
+            elif tree in old_by_tree:
+                old_h, old_subj = old_by_tree.pop(tree)
+                print(f"  amend {old_h} -> {h} {subj}", file=sys.stderr)
+            else:
+                print(f"  + {h} {subj}", file=sys.stderr)
+
     # Detect history rewrite: cave amended/squashed commits since last sync.
     if (cave_sync_hash and cave_sync_hash == host_head
             and merge_base != host_head):
@@ -958,7 +1098,8 @@ def pull_project(slug, force=False):
                 host_git + ["rev-list", "--count", f"{merge_base}..HEAD"],
                 capture_output=True, text=True, check=True,
             ).stdout.strip()
-            print(f"Cave rewrote history for {slug} ({host_count} commit(s) would be replaced with {count}).", file=sys.stderr)
+            print(f"Cave rewrote history for {slug} ({host_count} -> {count} commit(s)).", file=sys.stderr)
+            _print_rewrite_diff(host_git, merge_base)
             print(f"Run 'coding-cave pull --force' to adopt.", file=sys.stderr)
             return
 
@@ -973,10 +1114,7 @@ def pull_project(slug, force=False):
         )
         stashed = stash_result.returncode == 0 and "No local changes" not in stash_result.stdout
 
-        old_log = subprocess.run(
-            host_git + ["log", "--oneline", f"{merge_base}..HEAD"],
-            capture_output=True, text=True,
-        )
+        old_entries = _parse_log(host_git, f"{merge_base}..HEAD")
 
         subprocess.run(host_git + ["reset", "--hard", merge_base], check=True, capture_output=True)
         subprocess.run(host_git + ["branch", "-f", "_cave_pull", "FETCH_HEAD"], check=True, capture_output=True)
@@ -992,20 +1130,9 @@ def pull_project(slug, force=False):
         if stashed:
             subprocess.run(host_git + ["stash", "pop"], capture_output=True)
 
-        print(f"Pulled {slug} ({host_count} commit(s) replaced with {count}):", file=sys.stderr)
-        if old_log.returncode == 0 and old_log.stdout.strip():
-            print(f"  Replaced:", file=sys.stderr)
-            for line in old_log.stdout.rstrip().splitlines():
-                print(f"    {line}", file=sys.stderr)
-
-        new_log = subprocess.run(
-            host_git + ["log", "--oneline", f"{merge_base}..HEAD"],
-            capture_output=True, text=True,
-        )
-        if new_log.returncode == 0 and new_log.stdout.strip():
-            print(f"  With:", file=sys.stderr)
-            for line in new_log.stdout.rstrip().splitlines():
-                print(f"    {line}", file=sys.stderr)
+        print(f"Pulled {slug} ({host_count} -> {count} commit(s)):", file=sys.stderr)
+        new_entries = _parse_log(host_git, f"{merge_base}..HEAD")
+        _print_rewrite_summary(old_entries, new_entries)
 
         host_head = subprocess.run(
             host_git + ["rev-parse", "HEAD"],
@@ -1096,6 +1223,7 @@ def push_project(slug, force=False):
         print(f"No gitdir for {slug} — run 'coding-cave reset' first.", file=sys.stderr)
         sys.exit(1)
 
+    sync_live_sessions(slug)
     ensure_cave_remote(project_dir, gitdir)
 
     branch_result = subprocess.run(
@@ -1627,6 +1755,98 @@ def project_sync_status(slug, source):
     return ", ".join(tags) if tags else ""
 
 
+def cmd_cp(srcs, dest):
+    """Copy files between host and a running cave session's overlay."""
+    session_overlays = CAVE_DATA / "session-overlays"
+
+    def resolve_cave_path(spec):
+        """Parse 'slug:path', ':path', or 'cave:path'. Returns (slug, path) or (None, None)."""
+        if ":" not in spec:
+            return None, None
+        slug, _, path = spec.partition(":")
+        if not slug or slug == "cave":
+            # Auto-detect from CWD
+            slug = None
+            cwd = Path.cwd().resolve()
+            for s, source in load_projects().items():
+                if cwd == Path(source).resolve() or cwd.is_relative_to(Path(source).resolve()):
+                    slug = s
+                    break
+            if not slug:
+                print("No project specified and CWD is not a registered project.", file=sys.stderr)
+                sys.exit(1)
+        return slug, path or "."
+
+    def find_session_merged(slug):
+        """Find the overlay merged dir for a running session of this project."""
+        sessions = list_sessions(project=slug)
+        if not sessions:
+            print(f"No running sessions for {slug}.", file=sys.stderr)
+            sys.exit(1)
+        if len(sessions) > 1:
+            print("Multiple sessions running:", file=sys.stderr)
+            for i, s in enumerate(sessions):
+                started = time.strftime("%H:%M", time.localtime(s["started"]))
+                print(f"  [{i}] [{started}] PID {s['bwrap_pid']}", file=sys.stderr)
+            try:
+                choice = int(input("Session: ").strip())
+                sid = sessions[choice]["sid"]
+            except (ValueError, IndexError, EOFError):
+                print("Invalid choice.", file=sys.stderr)
+                sys.exit(1)
+        else:
+            sid = sessions[0]["sid"]
+        merged = session_overlays / sid / f"{slug}-merged"
+        if not merged.is_dir():
+            print(f"Session overlay not found: {merged}", file=sys.stderr)
+            sys.exit(1)
+        return merged
+
+    # Determine direction: host→cave or cave→host
+    dest_slug, dest_path = resolve_cave_path(dest)
+    src_slug, src_path = resolve_cave_path(srcs[0]) if len(srcs) == 1 else (None, None)
+
+    if dest_slug:
+        # host → cave: cp <host-files>... <slug>:<cave-path>
+        merged = find_session_merged(dest_slug)
+        cave_dest = merged / dest_path.lstrip("/")
+        cave_dest.parent.mkdir(parents=True, exist_ok=True)
+        for src in srcs:
+            src_path_obj = Path(src).resolve()
+            if not src_path_obj.exists():
+                print(f"Source not found: {src}", file=sys.stderr)
+                sys.exit(1)
+            if src_path_obj.is_dir():
+                target = cave_dest / src_path_obj.name if cave_dest.is_dir() else cave_dest
+                shutil.copytree(src_path_obj, target, dirs_exist_ok=True)
+            else:
+                target = cave_dest / src_path_obj.name if cave_dest.is_dir() else cave_dest
+                shutil.copy2(src_path_obj, target)
+            print(f"  {src} -> {dest}", file=sys.stderr)
+    elif src_slug:
+        # cave → host: cp <slug>:<cave-path> <host-dest>
+        merged = find_session_merged(src_slug)
+        cave_src = merged / src_path.lstrip("/")
+        if not cave_src.exists():
+            print(f"Source not found in cave: {src_path}", file=sys.stderr)
+            sys.exit(1)
+        host_dest = Path(dest).resolve()
+        host_dest.parent.mkdir(parents=True, exist_ok=True)
+        if cave_src.is_dir():
+            target = host_dest / cave_src.name if host_dest.is_dir() else host_dest
+            shutil.copytree(cave_src, target, dirs_exist_ok=True)
+        else:
+            target = host_dest / cave_src.name if host_dest.is_dir() else host_dest
+            shutil.copy2(cave_src, target)
+        print(f"  {srcs[0]} -> {dest}", file=sys.stderr)
+    else:
+        print("One of source or destination must use cave: or slug:path syntax.", file=sys.stderr)
+        print("  coding-cave cp <file>... cave:              host → cave (project root)", file=sys.stderr)
+        print("  coding-cave cp <file>... cave:<path>        host → cave (subpath)", file=sys.stderr)
+        print("  coding-cave cp cave:<path> <dest>           cave → host", file=sys.stderr)
+        sys.exit(1)
+
+
 def cmd_status(args):
     show_all = "--all" in args or "-a" in args
 
@@ -1696,6 +1916,9 @@ def build_parser():
     p_remove = sub.add_parser("remove", help="unregister a project and delete data")
     p_remove.add_argument("project", nargs="?", help="project slug (default: CWD project)")
 
+    p_cp = sub.add_parser("cp", help="copy files to/from a running cave session")
+    p_cp.add_argument("paths", nargs="+", help="source(s) and destination (use slug:path for cave)")
+
     p_move = sub.add_parser("move", help="update a project's source path")
     p_move.add_argument("old_slug", help="current project name")
     p_move.add_argument("new_path", help="new directory path")
@@ -1743,6 +1966,11 @@ def main():
         cmd_reset([parsed.project] if parsed.project else [])
     elif parsed.command == "remove":
         cmd_remove([parsed.project] if parsed.project else [])
+    elif parsed.command == "cp":
+        if len(parsed.paths) < 2:
+            print("Usage: coding-cave cp <src>... <dest>", file=sys.stderr)
+            sys.exit(1)
+        cmd_cp(parsed.paths[:-1], parsed.paths[-1])
     elif parsed.command == "move":
         cmd_move(parsed.old_slug, parsed.new_path)
 

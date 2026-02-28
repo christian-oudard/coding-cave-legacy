@@ -645,14 +645,14 @@ class TestSessionGitdir:
         assert branch.returncode == 0
 
     def test_two_sessions_both_commit_on_main(self, shared_project, tmp_path):
-        """Two sessions both commit on main: last writer wins, old ref backed up."""
+        """Two sessions both commit on main: last writer wins, first backed up."""
         host, slug, projects_dir = shared_project
         shared_gd = projects_dir / slug / "gitdir"
 
         _, work_a, overlay_a = self._make_session(tmp_path, slug, projects_dir, "a")
         _, work_b, overlay_b = self._make_session(tmp_path, slug, projects_dir, "b")
 
-        # Both commit on main
+        # Both commit on main (touching different files)
         (work_a / "a.txt").write_text("from A\n")
         cave_git(work_a, "add", "a.txt")
         cave_git(work_a, "commit", "-m", "commit A")
@@ -667,15 +667,49 @@ class TestSessionGitdir:
         log = git_run("git", "--git-dir", str(shared_gd), "log", "--oneline")
         assert "commit A" in log.stdout
 
-        # Session B ends — diverged, force-updates main (last writer wins)
+        # Session B ends — diverged, B force-updates, A backed up
         wrapper.merge_session_gitdirs("sid-b", overlay_b)
 
-        # B's commit is now on main
+        # B wins on main (force-update)
         log = git_run("git", "--git-dir", str(shared_gd),
                       "log", "--oneline", "refs/heads/main")
         assert "commit B" in log.stdout
 
-        # A's old ref is backed up under refs/sessions/sid-b/main
+        # A's commit backed up under refs/sessions/sid-b/main
+        backup = git_run("git", "--git-dir", str(shared_gd),
+                         "rev-parse", "refs/sessions/sid-b/main")
+        assert backup.returncode == 0
+        assert backup.stdout.strip() == sha_a
+
+    def test_two_sessions_conflict_falls_back(self, shared_project, tmp_path):
+        """Two sessions editing the same file: rebase fails, falls back to force-update."""
+        host, slug, projects_dir = shared_project
+        shared_gd = projects_dir / slug / "gitdir"
+
+        _, work_a, overlay_a = self._make_session(tmp_path, slug, projects_dir, "a")
+        _, work_b, overlay_b = self._make_session(tmp_path, slug, projects_dir, "b")
+
+        # Both commit changes to the same file
+        (work_a / "file.txt").write_text("version A\n")
+        cave_git(work_a, "add", "file.txt")
+        cave_git(work_a, "commit", "-m", "commit A")
+        sha_a = cave_git(work_a, "rev-parse", "HEAD").stdout.strip()
+
+        (work_b / "file.txt").write_text("version B\n")
+        cave_git(work_b, "add", "file.txt")
+        cave_git(work_b, "commit", "-m", "commit B")
+
+        # Session A ends first
+        wrapper.merge_session_gitdirs("sid-a", overlay_a)
+
+        # Session B ends — rebase conflicts, falls back to force-update
+        wrapper.merge_session_gitdirs("sid-b", overlay_b)
+
+        # B wins (force-update fallback), A backed up
+        log = git_run("git", "--git-dir", str(shared_gd),
+                      "log", "--oneline", "refs/heads/main")
+        assert "commit B" in log.stdout
+
         backup = git_run("git", "--git-dir", str(shared_gd),
                          "rev-parse", "refs/sessions/sid-b/main")
         assert backup.returncode == 0
@@ -764,6 +798,139 @@ class TestSessionGitdir:
         # merge_session_gitdirs should NOT overwrite the re-authored ref.
         wrapper.merge_session_gitdirs("sid-a", overlay_a)
         assert git_head(shared_gd, gitdir=True) == reauthored
+
+    def test_rebase_onto_reauthored_chain(self, shared_project, tmp_path):
+        """New session commits rebase onto re-authored shared chain.
+
+        Scenario: session commits A, pull re-authors to A' and pushes back,
+        session then commits B on top of original A. merge_session_gitdirs
+        should produce A' -> B' (B rebased onto A'), not A -> B (which would
+        undo the re-authoring and require --force on next pull).
+        """
+        host, slug, projects_dir = shared_project
+        shared_gd = projects_dir / slug / "gitdir"
+
+        gd_a, work_a, overlay_a = self._make_session(
+            tmp_path, slug, projects_dir, "a")
+
+        # Session commits A
+        (work_a / "a.txt").write_text("from A\n")
+        cave_git(work_a, "add", "a.txt")
+        cave_git(work_a, "commit", "-m", "commit A")
+        session_sha_a = cave_git(
+            work_a, "rev-parse", "HEAD").stdout.strip()
+
+        # Mid-session sync: shared now has A
+        wrapper.merge_session_gitdirs("sid-a", overlay_a)
+        assert git_head(shared_gd, gitdir=True) == session_sha_a
+
+        # Simulate pull+push re-authoring: create A' with same tree,
+        # different author
+        tree_a = git_run("git", "--git-dir", str(shared_gd),
+                         "rev-parse", "HEAD^{tree}").stdout.strip()
+        parent = git_run("git", "--git-dir", str(shared_gd),
+                         "rev-parse", "HEAD^").stdout.strip()
+        env = {**os.environ, **GIT_ENV,
+               "GIT_AUTHOR_NAME": "Host User",
+               "GIT_AUTHOR_EMAIL": "host@test.com"}
+        reauthored_a = subprocess.run(
+            ["git", "--git-dir", str(shared_gd),
+             "commit-tree", tree_a, "-p", parent, "-m", "commit A"],
+            capture_output=True, text=True, check=True, env=env,
+        ).stdout.strip()
+        git_run("git", "--git-dir", str(shared_gd),
+                "update-ref", "refs/heads/main", reauthored_a)
+
+        # Session makes new commit B on top of original A
+        (work_a / "b.txt").write_text("from B\n")
+        cave_git(work_a, "add", "b.txt")
+        cave_git(work_a, "commit", "-m", "commit B")
+        session_sha_b = cave_git(
+            work_a, "rev-parse", "HEAD").stdout.strip()
+
+        # merge_session_gitdirs: should rebase B onto A', NOT force-update
+        wrapper.merge_session_gitdirs("sid-a", overlay_a)
+
+        # Shared HEAD should NOT be the session's B (that undoes re-authoring)
+        shared_head = git_head(shared_gd, gitdir=True)
+        assert shared_head != session_sha_b
+
+        # A' should still be an ancestor (re-authoring preserved)
+        is_ancestor = git_run("git", "--git-dir", str(shared_gd),
+                              "merge-base", "--is-ancestor",
+                              reauthored_a, shared_head)
+        assert is_ancestor.returncode == 0, \
+            "re-authored A' should be ancestor of new HEAD"
+
+        # The rebased B' should have B's tree
+        tree_b = git_run("git", "--git-dir", str(shared_gd),
+                         "rev-parse",
+                         f"{session_sha_b}^{{tree}}").stdout.strip()
+        rebased_tree = git_run("git", "--git-dir", str(shared_gd),
+                               "rev-parse",
+                               f"{shared_head}^{{tree}}").stdout.strip()
+        assert rebased_tree == tree_b, \
+            "rebased commit should have same tree as original"
+
+        # Log should show both commits
+        log = git_run("git", "--git-dir", str(shared_gd),
+                      "log", "--oneline", "refs/heads/main")
+        assert "commit A" in log.stdout
+        assert "commit B" in log.stdout
+
+    def test_rebase_multiple_new_commits_onto_reauthored(
+            self, shared_project, tmp_path):
+        """Multiple new session commits all rebase onto re-authored chain."""
+        host, slug, projects_dir = shared_project
+        shared_gd = projects_dir / slug / "gitdir"
+
+        gd_a, work_a, overlay_a = self._make_session(
+            tmp_path, slug, projects_dir, "a")
+
+        # Session commits A
+        (work_a / "a.txt").write_text("from A\n")
+        cave_git(work_a, "add", "a.txt")
+        cave_git(work_a, "commit", "-m", "commit A")
+
+        # Sync + re-author
+        wrapper.merge_session_gitdirs("sid-a", overlay_a)
+        tree_a = git_run("git", "--git-dir", str(shared_gd),
+                         "rev-parse", "HEAD^{tree}").stdout.strip()
+        parent = git_run("git", "--git-dir", str(shared_gd),
+                         "rev-parse", "HEAD^").stdout.strip()
+        env = {**os.environ, **GIT_ENV,
+               "GIT_AUTHOR_NAME": "Host User",
+               "GIT_AUTHOR_EMAIL": "host@test.com"}
+        reauthored_a = subprocess.run(
+            ["git", "--git-dir", str(shared_gd),
+             "commit-tree", tree_a, "-p", parent, "-m", "commit A"],
+            capture_output=True, text=True, check=True, env=env,
+        ).stdout.strip()
+        git_run("git", "--git-dir", str(shared_gd),
+                "update-ref", "refs/heads/main", reauthored_a)
+
+        # Session makes B and C on top of original A
+        (work_a / "b.txt").write_text("from B\n")
+        cave_git(work_a, "add", "b.txt")
+        cave_git(work_a, "commit", "-m", "commit B")
+        (work_a / "c.txt").write_text("from C\n")
+        cave_git(work_a, "add", "c.txt")
+        cave_git(work_a, "commit", "-m", "commit C")
+
+        wrapper.merge_session_gitdirs("sid-a", overlay_a)
+
+        # A' should be ancestor, and log should have all three commits
+        shared_head = git_head(shared_gd, gitdir=True)
+        is_ancestor = git_run("git", "--git-dir", str(shared_gd),
+                              "merge-base", "--is-ancestor",
+                              reauthored_a, shared_head)
+        assert is_ancestor.returncode == 0
+
+        log = git_run("git", "--git-dir", str(shared_gd),
+                      "log", "--oneline", "refs/heads/main")
+        assert "commit A" in log.stdout
+        assert "commit B" in log.stdout
+        assert "commit C" in log.stdout
 
     def test_no_gitdir_returns_none(self, tmp_path, monkeypatch):
         """create_session_gitdir returns None when no shared gitdir exists."""
