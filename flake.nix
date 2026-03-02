@@ -73,6 +73,7 @@
         fi
       '')
       (set-env "NIX_CONFIG" "sandbox = false\nexperimental-features = nix-command flakes")
+      (set-env "NIX_PATH" "nixpkgs=${nixpkgs}")
 
       # Dev tools
       (add-pkg-deps (with pkgs; [
