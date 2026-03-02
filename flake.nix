@@ -104,6 +104,7 @@
         zsh
         eza
         nano
+        direnv
         uv
         claude-loop
         util-linux
