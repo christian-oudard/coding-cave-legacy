@@ -607,6 +607,26 @@ def _forward_refs(sid, session_gitdir, shared_gitdir, *, force=False):
             # Try rebasing new session commits onto shared chain
             mb = (merge_base.stdout.strip()
                   if merge_base.returncode == 0 else None)
+
+            # Detect single-commit amendment: both sides have exactly
+            # 1 commit above the merge base (same parent).  This is
+            # the normal `git commit --amend` case — let the session
+            # version win since it has the most recent work.
+            if mb and not force:
+                shared_count = git(shared_gitdir, "rev-list", "--count",
+                                   f"{mb}..{existing_sha}",
+                                   capture_output=True, text=True)
+                session_count = git(shared_gitdir, "rev-list", "--count",
+                                    f"{mb}..{sha}",
+                                    capture_output=True, text=True)
+                if (shared_count.returncode == 0
+                        and session_count.returncode == 0
+                        and shared_count.stdout.strip() == "1"
+                        and session_count.stdout.strip() == "1"):
+                    git(shared_gitdir, "update-ref", ref, sha,
+                        capture_output=True)
+                    continue
+
             rebased = _rebase_onto_reauthored(
                 shared_gitdir, existing_sha, sha, mb)
             if not rebased:
