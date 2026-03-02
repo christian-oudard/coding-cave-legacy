@@ -86,6 +86,7 @@
         jq
         python3
         curl
+        coreutils
         gawk
         gnused
         gnugrep
