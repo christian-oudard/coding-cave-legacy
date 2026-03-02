@@ -114,10 +114,19 @@ class TestCpHostToCave:
         (src_dir / "one.txt").write_text("1\n")
         (src_dir / "two.txt").write_text("2\n")
 
-        wrapper.cmd_cp([str(src_dir)], f"{e.slug}:mydir")
+        wrapper.cmd_cp([str(src_dir)], f"{e.slug}:mydir", recursive=True)
 
         assert (e.merged / "mydir" / "one.txt").read_text() == "1\n"
         assert (e.merged / "mydir" / "two.txt").read_text() == "2\n"
+
+    def test_copy_directory_without_R_exits(self, cp_env):
+        e = cp_env
+        src_dir = e.tmp_path / "mydir"
+        src_dir.mkdir()
+        (src_dir / "one.txt").write_text("1\n")
+
+        with pytest.raises(SystemExit):
+            wrapper.cmd_cp([str(src_dir)], f"{e.slug}:mydir")
 
     def test_overwrite_existing_file(self, cp_env):
         e = cp_env
@@ -163,10 +172,19 @@ class TestCpCaveToHost:
         (e.merged / "subdir" / "b.txt").write_text("b\n")
         dest = e.tmp_path / "output-dir"
 
-        wrapper.cmd_cp([f"{e.slug}:subdir"], str(dest))
+        wrapper.cmd_cp([f"{e.slug}:subdir"], str(dest), recursive=True)
 
         assert (dest / "a.txt").read_text() == "a\n"
         assert (dest / "b.txt").read_text() == "b\n"
+
+    def test_copy_directory_out_without_R_exits(self, cp_env):
+        e = cp_env
+        (e.merged / "subdir").mkdir()
+        (e.merged / "subdir" / "a.txt").write_text("a\n")
+        dest = e.tmp_path / "output-dir"
+
+        with pytest.raises(SystemExit):
+            wrapper.cmd_cp([f"{e.slug}:subdir"], str(dest))
 
     def test_missing_cave_source_exits(self, cp_env):
         e = cp_env

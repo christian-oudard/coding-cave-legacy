@@ -1949,7 +1949,7 @@ def project_sync_status(slug, source):
     return ", ".join(tags) if tags else ""
 
 
-def cmd_cp(srcs, dest):
+def cmd_cp(srcs, dest, recursive=False):
     """Copy files between host and a running cave session's overlay."""
     session_overlays = CAVE_DATA / "session-overlays"
 
@@ -2015,6 +2015,9 @@ def cmd_cp(srcs, dest):
                 print(f"Source not found: {src}", file=sys.stderr)
                 sys.exit(1)
             if src_path_obj.is_dir():
+                if not recursive:
+                    print(f"cp: -R not specified; omitting directory '{src}'", file=sys.stderr)
+                    sys.exit(1)
                 target = cave_dest / src_path_obj.name if cave_dest.is_dir() else cave_dest
                 shutil.copytree(src_path_obj, target, dirs_exist_ok=True)
             else:
@@ -2031,6 +2034,9 @@ def cmd_cp(srcs, dest):
         host_dest = Path(dest).resolve()
         host_dest.parent.mkdir(parents=True, exist_ok=True)
         if cave_src.is_dir():
+            if not recursive:
+                print(f"cp: -R not specified; omitting directory '{srcs[0]}'", file=sys.stderr)
+                sys.exit(1)
             target = host_dest / cave_src.name if host_dest.is_dir() else host_dest
             shutil.copytree(cave_src, target, dirs_exist_ok=True)
         else:
@@ -2116,6 +2122,7 @@ def build_parser():
     p_remove.add_argument("project", nargs="?", help="project slug (default: CWD project)")
 
     p_cp = sub.add_parser("cp", help="copy files to/from a running cave session")
+    p_cp.add_argument("-R", "-r", "--recursive", action="store_true", help="copy directories recursively")
     p_cp.add_argument("paths", nargs="+", help="source(s) and destination (use slug:path for cave)")
 
     p_move = sub.add_parser("move", help="update a project's source path")
@@ -2169,7 +2176,7 @@ def main():
         if len(parsed.paths) < 2:
             print("Usage: coding-cave cp <src>... <dest>", file=sys.stderr)
             sys.exit(1)
-        cmd_cp(parsed.paths[:-1], parsed.paths[-1])
+        cmd_cp(parsed.paths[:-1], parsed.paths[-1], recursive=parsed.recursive)
     elif parsed.command == "move":
         cmd_move(parsed.old_slug, parsed.new_path)
 
