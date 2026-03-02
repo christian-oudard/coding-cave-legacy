@@ -190,6 +190,11 @@
         export PATH="$HOME/.local/bin:$PATH"
         export -p > /tmp/cave-env
         chmod 444 /tmp/cave-env
+        # Ensure shells started via nsenter get the cave environment.
+        # Without this, nsenter inherits the host's env and source
+        # cave-env from bash -c is unreliable.
+        printf '%s\n' '. /tmp/cave-env' > /etc/zshenv
+        printf '%s\n' '. /tmp/cave-env' > /etc/profile
         exec "$@"
       ''))
     ];

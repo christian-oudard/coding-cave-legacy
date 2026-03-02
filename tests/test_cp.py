@@ -233,6 +233,38 @@ class TestCpCavePrefix:
             wrapper.cmd_cp([str(src)], "cave:")
 
 
+class TestCpAbsoluteCavePaths:
+    """Absolute cave paths (/projects/<slug>/...) should resolve correctly."""
+
+    def test_absolute_path_strips_prefix(self, cp_env):
+        e = cp_env
+        (e.merged / "deep" / "file.txt").parent.mkdir(parents=True, exist_ok=True)
+        (e.merged / "deep" / "file.txt").write_text("found\n")
+        dest = e.tmp_path / "out.txt"
+
+        wrapper.cmd_cp([f"{e.slug}:/projects/{e.slug}/deep/file.txt"], str(dest))
+
+        assert dest.read_text() == "found\n"
+
+    def test_absolute_path_copy_to_cave(self, cp_env):
+        e = cp_env
+        src = e.tmp_path / "input.txt"
+        src.write_text("into cave\n")
+
+        wrapper.cmd_cp([str(src)], f"{e.slug}:/projects/{e.slug}/input.txt")
+
+        assert (e.merged / "input.txt").read_text() == "into cave\n"
+
+    def test_relative_path_still_works(self, cp_env):
+        e = cp_env
+        (e.merged / "rel.txt").write_text("relative\n")
+        dest = e.tmp_path / "out.txt"
+
+        wrapper.cmd_cp([f"{e.slug}:rel.txt"], str(dest))
+
+        assert dest.read_text() == "relative\n"
+
+
 class TestCpNoColonSyntax:
     """cp requires colon syntax for at least one argument."""
 

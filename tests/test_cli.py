@@ -1,4 +1,5 @@
 """Tests for CLI argument parsing and command construction."""
+import subprocess
 from pathlib import Path
 from unittest import mock
 
@@ -133,6 +134,70 @@ class TestDetectProjectFromCwd:
         monkeypatch.setattr(wrapper, "list_projects", lambda: [])
         monkeypatch.setattr("builtins.input", mock.Mock(side_effect=EOFError))
         assert wrapper.detect_project_from_cwd() is None
+
+
+class TestNsenterShellScript:
+    """Test nsenter_shell_script and that it clears host direnv state."""
+
+    def test_unsets_direnv_state(self):
+        script = wrapper.nsenter_shell_script("/bin/zsh", "/projects/test")
+        assert "unset DIRENV_DIFF" in script
+        assert "DIRENV_WATCHES" in script
+        assert "DIRENV_DIR" in script
+
+    def test_sources_cave_env(self):
+        script = wrapper.nsenter_shell_script("/bin/zsh", "/projects/test")
+        assert ". /tmp/cave-env" in script
+
+    def test_direnv_unset_before_cave_env(self):
+        script = wrapper.nsenter_shell_script("/bin/zsh", "/projects/test")
+        assert script.index("unset DIRENV") < script.index(". /tmp/cave-env")
+
+    def test_execs_shell(self):
+        script = wrapper.nsenter_shell_script("/bin/zsh", "/projects/test")
+        assert "exec /bin/zsh -l" in script
+        script = wrapper.nsenter_shell_script("/bin/bash", "/projects/test")
+        assert "exec /bin/bash -l" in script
+
+    def test_cds_to_workdir(self):
+        script = wrapper.nsenter_shell_script("/bin/zsh", "/projects/my-proj")
+        assert "cd /projects/my-proj" in script
+
+    def test_host_direnv_state_does_not_survive(self, tmp_path):
+        """Run nsenter_shell_script under a host-like env with active direnv."""
+        cave_env = tmp_path / "cave-env"
+        cave_env.write_text(
+            'declare -x PATH="/nix/store/cave-bin:/bin"\n'
+            'declare -x HOME="/home/cave-coder"\n'
+        )
+        # Build the real script, substituting the cave-env path.
+        script = wrapper.nsenter_shell_script(
+            "/bin/bash", str(tmp_path), cave_env=str(cave_env))
+        # Replace the exec with env printout so we can inspect.
+        script = script.replace(
+            "exec /bin/bash -l",
+            'echo "PATH=$PATH"; '
+            'echo "DIRENV_DIFF=${DIRENV_DIFF-UNSET}"; '
+            'echo "DIRENV_WATCHES=${DIRENV_WATCHES-UNSET}"; '
+            'echo "DIRENV_DIR=${DIRENV_DIR-UNSET}"')
+        result = subprocess.run(
+            ["/bin/bash", "-c", script],
+            capture_output=True, text=True,
+            env={
+                "PATH": "/home/christian/bin:/usr/bin",
+                "HOME": "/home/christian",
+                "DIRENV_DIFF": "eJxLzs9Ly0xOBQAJ4QLN",
+                "DIRENV_WATCHES": "W3sicGF0aCI6Ii9ob21lLy5lbnZyYyJ9XQ==",
+                "DIRENV_DIR": "-/home/christian/project",
+            },
+        )
+        lines = result.stdout.strip().split("\n")
+        env = dict(line.split("=", 1) for line in lines)
+        assert "/nix/store/cave-bin" in env["PATH"]
+        assert "/home/christian" not in env["PATH"]
+        assert env["DIRENV_DIFF"] == "UNSET"
+        assert env["DIRENV_WATCHES"] == "UNSET"
+        assert env["DIRENV_DIR"] == "UNSET"
 
 
 class TestProjectRequired:

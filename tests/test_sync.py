@@ -1328,6 +1328,141 @@ class TestSessionGitdir:
         # Other project's alternates should be untouched (never modified)
         assert alt2.read_text().strip() == cave_path2
 
+    def test_sync_live_stale_session_does_not_revert_amend(
+            self, shared_project, tmp_path, monkeypatch):
+        """A stale session whose ref was set by sync_refs must not revert
+        another session's amended commit.
+
+        Scenario (the actual bug):
+        1. Session A creates commit B, mid-sync forwards B to shared.
+        2. Host pull re-authors B to B', sync_refs updates shared to B'.
+        3. Session C starts, copies shared main (B') as its init ref.
+        4. Session A amends B to B'' (different tree).
+        5. sync_live_sessions must end with shared at B'', not reverted to B'.
+
+        Without refs/init tracking, step 5 would process session C last,
+        see a 1-commit amend (B' vs B''), and "let session C win" — reverting
+        the active session's work.
+        """
+        host, slug, projects_dir = shared_project
+        shared_gd = projects_dir / slug / "gitdir"
+
+        # Session A creates commit B
+        _, work_a, overlay_a = self._make_session(
+            tmp_path, slug, projects_dir, "active")
+        (work_a / "new.txt").write_text("v1\n")
+        cave_git(work_a, "add", "new.txt")
+        cave_git(work_a, "commit", "-m", "commit B")
+        sha_b = cave_git(work_a, "rev-parse", "HEAD").stdout.strip()
+
+        # Mid-session sync forwards B to shared
+        gd_active = overlay_a / f"gitdir-{slug}"
+        wrapper.forward_session_refs(slug, gd_active, shared_gd)
+        assert git_head(shared_gd, gitdir=True) == sha_b
+
+        # Simulate pull re-authoring: create B' (same tree, different author)
+        tree = git_run("git", "--git-dir", str(shared_gd),
+                       "rev-parse", f"{sha_b}^{{tree}}").stdout.strip()
+        parent = git_run("git", "--git-dir", str(shared_gd),
+                         "rev-parse", f"{sha_b}^").stdout.strip()
+        b_prime = git_run(
+            "git", "--git-dir", str(shared_gd), "commit-tree", tree,
+            "-p", parent, "-m", "commit B re-authored",
+        ).stdout.strip()
+        # sync_refs updates shared main to B'
+        git_run("git", "--git-dir", str(shared_gd),
+                "update-ref", "refs/heads/main", b_prime)
+
+        # Session C starts now (copies shared main = B')
+        ov_stale = tmp_path / "ov-stale"
+        ov_stale.mkdir()
+        wrapper.create_session_gitdir(slug, "sid-stale", ov_stale)
+
+        # Session A amends B to B'' (different tree)
+        (work_a / "new.txt").write_text("v2 amended\n")
+        cave_git(work_a, "add", "new.txt")
+        cave_git(work_a, "commit", "--amend", "-m", "commit B amended")
+        sha_b_double_prime = cave_git(
+            work_a, "rev-parse", "HEAD").stdout.strip()
+        assert sha_b_double_prime != sha_b
+        assert sha_b_double_prime != b_prime
+
+        # Wire up sync_live_sessions
+        monkeypatch.setattr(wrapper, "list_sessions", lambda: [
+            {"sid": "sid-active"}, {"sid": "sid-stale"},
+        ])
+        monkeypatch.setattr(wrapper, "CAVE_DATA", tmp_path / "cave-data")
+        for sid, ov in [("sid-active", overlay_a),
+                        ("sid-stale", ov_stale)]:
+            session_dir = tmp_path / "cave-data" / "session-overlays" / sid
+            session_dir.mkdir(parents=True)
+            (session_dir / f"gitdir-{slug}").symlink_to(
+                ov / f"gitdir-{slug}")
+
+        wrapper.sync_live_sessions(slug)
+
+        # Shared must have the amended commit, not the re-authored one
+        final = git_head(shared_gd, gitdir=True)
+        assert final == sha_b_double_prime, (
+            f"Stale session reverted amend: shared={final[:8]}, "
+            f"expected={sha_b_double_prime[:8]}"
+        )
+
+    def test_first_sync_after_amend_detects_amend(
+            self, shared_project, tmp_path):
+        """When a session amends a commit and syncs for the first time
+        (no refs/synced yet), the amend should still be detected via
+        refs/init matching the shared ref.
+
+        Without this, _rebase_commits tries a three-way merge that
+        conflicts (both sides modify the same files from the same parent),
+        and the diverged ref is silently skipped.
+        """
+        host, slug, projects_dir = shared_project
+        shared_gd = projects_dir / slug / "gitdir"
+
+        # Add a second commit so the amend isn't of a root commit
+        # (git merge-base fails for root commits).
+        (host / "base.txt").write_text("base\n")
+        git_run("git", "-C", str(host), "add", ".")
+        git_run("git", "-C", str(host), "commit", "-m", "base commit")
+        # Sync the new commit into shared gitdir (fetch objects, then
+        # update-ref since main is checked out and git refuses to
+        # fetch directly into the checked-out branch).
+        git_run("git", "--git-dir", str(shared_gd),
+                "fetch", str(host), "main")
+        new_head = git_run("git", "-C", str(host),
+                           "rev-parse", "HEAD").stdout.strip()
+        git_run("git", "--git-dir", str(shared_gd),
+                "update-ref", "refs/heads/main", new_head)
+        shared_before = git_head(shared_gd, gitdir=True)
+
+        # Create session (refs/init/main = shared_before)
+        _, work, overlay = self._make_session(
+            tmp_path, slug, projects_dir, "sess")
+
+        # Amend the latest commit (same parent, different tree)
+        (work / "base.txt").write_text("amended content\n")
+        cave_git(work, "add", "base.txt")
+        cave_git(work, "commit", "--amend", "-m", "amended commit")
+        amended_sha = cave_git(work, "rev-parse", "HEAD").stdout.strip()
+        assert amended_sha != shared_before
+
+        # First sync — no refs/synced exists yet
+        gd = overlay / f"gitdir-{slug}"
+        synced = git_run("git", "--git-dir", str(gd),
+                         "rev-parse", "refs/synced/main")
+        assert synced.returncode != 0, "refs/synced should not exist yet"
+
+        wrapper.forward_session_refs(slug, gd, shared_gd)
+
+        # Shared should have the amended commit
+        final = git_head(shared_gd, gitdir=True)
+        assert final == amended_sha, (
+            f"First sync after amend failed: shared={final[:8]}, "
+            f"expected={amended_sha[:8]}"
+        )
+
     def test_no_gitdir_returns_none(self, tmp_path, monkeypatch):
         """create_session_gitdir returns None when no shared gitdir exists."""
         projects_dir = tmp_path / "projects"

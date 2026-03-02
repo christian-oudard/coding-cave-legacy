@@ -360,7 +360,7 @@ def create_session_gitdir(slug, sid, overlay_base):
     # Copy HEAD
     (session_gitdir / "HEAD").write_text((shared_gitdir / "HEAD").read_text())
 
-    # Copy all refs from shared gitdir
+    # Copy all refs from shared gitdir and record initial state
     result = subprocess.run(
         ["git", "--git-dir", str(shared_gitdir), "for-each-ref",
          "--format=%(refname) %(objectname)"],
@@ -372,6 +372,12 @@ def create_session_gitdir(slug, sid, overlay_base):
                 continue
             ref, sha = line.split()
             git(session_gitdir, "update-ref", ref, sha, capture_output=True)
+            # Record initial ref state so _forward_refs can skip
+            # unmodified refs during live sync.
+            if ref.startswith("refs/heads/"):
+                branch = ref.removeprefix("refs/heads/")
+                git(session_gitdir, "update-ref",
+                    f"refs/init/{branch}", sha, capture_output=True)
 
     # Populate index from HEAD so git status starts clean
     git(session_gitdir, "read-tree", "HEAD", capture_output=True)
@@ -559,6 +565,17 @@ def _forward_refs(sid, session_gitdir, shared_gitdir, *, force=False):
         ref, sha = line.split()
         branch = ref.removeprefix("refs/heads/")
 
+        # Skip refs the session never modified (still at init value).
+        # Without this, a session that hasn't touched a project can
+        # revert another session's amend by forwarding its stale ref.
+        if not force:
+            init_ref = git(session_gitdir, "rev-parse",
+                           f"refs/init/{branch}",
+                           capture_output=True, text=True)
+            if (init_ref.returncode == 0
+                    and init_ref.stdout.strip() == sha):
+                continue
+
         # Fetch the objects into shared gitdir
         fetch = git(shared_gitdir, "fetch", str(session_gitdir), sha,
                     capture_output=True)
@@ -586,6 +603,9 @@ def _forward_refs(sid, session_gitdir, shared_gitdir, *, force=False):
             # Fast-forward
             git(shared_gitdir, "update-ref", ref, sha,
                 capture_output=True)
+            # Record that this session has synced this branch
+            git(session_gitdir, "update-ref",
+                f"refs/synced/{branch}", sha, capture_output=True)
         elif (merge_base.returncode == 0
                   and merge_base.stdout.strip() == sha):
             continue  # session is behind shared, skip
@@ -612,7 +632,20 @@ def _forward_refs(sid, session_gitdir, shared_gitdir, *, force=False):
             # 1 commit above the merge base (same parent).  This is
             # the normal `git commit --amend` case — let the session
             # version win since it has the most recent work.
-            if mb and not force:
+            # Trigger when either:
+            #   - refs/synced exists (session previously synced this branch)
+            #   - refs/init equals shared sha (session was born with this
+            #     exact commit and amended it — first sync after amend)
+            has_synced = git(session_gitdir, "rev-parse",
+                             f"refs/synced/{branch}",
+                             capture_output=True, text=True)
+            init_ref = git(session_gitdir, "rev-parse",
+                           f"refs/init/{branch}",
+                           capture_output=True, text=True)
+            init_matches_shared = (init_ref.returncode == 0
+                                   and init_ref.stdout.strip() == existing_sha)
+            if mb and not force and (has_synced.returncode == 0
+                                     or init_matches_shared):
                 shared_count = git(shared_gitdir, "rev-list", "--count",
                                    f"{mb}..{existing_sha}",
                                    capture_output=True, text=True)
@@ -624,6 +657,9 @@ def _forward_refs(sid, session_gitdir, shared_gitdir, *, force=False):
                         and shared_count.stdout.strip() == "1"
                         and session_count.stdout.strip() == "1"):
                     git(shared_gitdir, "update-ref", ref, sha,
+                        capture_output=True)
+                    git(session_gitdir, "update-ref",
+                        f"refs/synced/{branch}", sha,
                         capture_output=True)
                     continue
 
@@ -980,6 +1016,21 @@ def find_bwrap_child(bwrap_pid):
     return None
 
 
+def nsenter_shell_script(shell_bin, workdir, cave_env="/tmp/cave-env"):
+    """Build the bash -c script for nsenter shell entry.
+
+    Clears host direnv state (DIRENV_DIFF contains the host's original PATH;
+    direnv's precmd would "unload" it and restore the host PATH), then sources
+    cave-env for the full cave environment.
+    """
+    return (
+        f'unset DIRENV_DIFF DIRENV_WATCHES DIRENV_DIR; '
+        f'. {cave_env} 2>/dev/null; '
+        f'cd {workdir} 2>/dev/null; '
+        f'exec {shell_bin} -l'
+    )
+
+
 def enter_session(session_info, shell_type, workdir=None):
     """nsenter into a running session."""
     bwrap_pid = session_info["bwrap_pid"]
@@ -1003,16 +1054,13 @@ def enter_session(session_info, shell_type, workdir=None):
 
     shell_bin = "/bin/zsh" if shell_type == "zsh" else "/bin/bash"
 
-    # Source cave-env (written at bwrap entry) for the full cave environment,
-    # then launch the user's shell. /tmp/cave-env is per-session (tmpfs inside
-    # bwrap), so it's safe from cross-session tampering.
     proc = subprocess.Popen([
         "nsenter",
         f"--target={child_pid}",
         "--user", "--mount", "--net", "--pid", "--uts", "--ipc",
         "--preserve-credentials",
         "--", "/bin/bash", "-c",
-        f'source /tmp/cave-env 2>/dev/null; cd {workdir or "/projects"} 2>/dev/null; exec {shell_bin} -l',
+        nsenter_shell_script(shell_bin, workdir or "/projects"),
     ])
 
     try:
@@ -1921,6 +1969,10 @@ def cmd_cp(srcs, dest):
             if not slug:
                 print("No project specified and CWD is not a registered project.", file=sys.stderr)
                 sys.exit(1)
+        # Strip /projects/<slug>/ prefix so absolute cave paths work.
+        prefix = f"/projects/{slug}/"
+        if path.startswith(prefix):
+            path = path[len(prefix):]
         return slug, path or "."
 
     def find_session_merged(slug):
