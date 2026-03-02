@@ -469,10 +469,76 @@ def _rebase_onto_reauthored(gitdir, shared_sha, session_sha, merge_base):
     return parent
 
 
+def _rebase_commits(gitdir, shared_sha, session_sha, merge_base):
+    """Rebase session commits onto shared HEAD using three-way merge.
+
+    For each commit in merge_base..session_sha, compute a three-way merge
+    (base=commit's parent, ours=current target, theirs=commit) using
+    git merge-tree --write-tree.  Returns the new tip SHA if all merges
+    succeed cleanly, None if any conflict.
+    """
+    if not merge_base:
+        return None
+
+    # Collect session commits after merge_base (newest-first from log)
+    session_log = git(gitdir, "log", "--format=%H",
+                      f"{merge_base}..{session_sha}",
+                      capture_output=True, text=True)
+    if session_log.returncode != 0:
+        return None
+    commits = [c for c in session_log.stdout.strip().splitlines() if c]
+    if not commits:
+        return None
+    commits.reverse()  # oldest-first
+
+    parent = shared_sha
+    for commit in commits:
+        # Get this commit's parent (for the merge base of the cherry-pick)
+        cp = git(gitdir, "rev-parse", f"{commit}^",
+                 capture_output=True, text=True)
+        if cp.returncode != 0:
+            return None
+        commit_parent = cp.stdout.strip()
+
+        # Three-way merge: base=commit_parent, ours=parent, theirs=commit
+        merge = git(gitdir, "merge-tree", "--write-tree",
+                    f"--merge-base={commit_parent}", parent, commit,
+                    capture_output=True, text=True)
+        if merge.returncode != 0:
+            return None  # conflict
+        merged_tree = merge.stdout.strip().splitlines()[0]
+
+        # Preserve original author info
+        info = git(gitdir, "log", "-1", "--format=%an%n%ae%n%aI%n%B", commit,
+                   capture_output=True, text=True)
+        if info.returncode != 0:
+            return None
+        lines = info.stdout.rstrip("\n").split("\n", 3)
+        author_name, author_email, author_date = lines[0], lines[1], lines[2]
+        message = lines[3] if len(lines) > 3 else ""
+        env = {
+            **os.environ,
+            "GIT_AUTHOR_NAME": author_name,
+            "GIT_AUTHOR_EMAIL": author_email,
+            "GIT_AUTHOR_DATE": author_date,
+        }
+        result = subprocess.run(
+            ["git", "--git-dir", str(gitdir)] + SAFE_GIT_OPTS +
+            ["commit-tree", merged_tree, "-p", parent, "-m", message],
+            capture_output=True, text=True, env=env,
+        )
+        if result.returncode != 0:
+            return None
+        parent = result.stdout.strip()
+
+    return parent
+
+
 def _forward_refs(sid, session_gitdir, shared_gitdir, *, force=False):
     """Forward branch refs from a session gitdir into the shared gitdir.
 
-    Handles fast-forwards, re-authoring detection, and rebase-onto-reauthored.
+    Handles fast-forwards, re-authoring detection, rebase-onto-reauthored,
+    and general rebase (when shared moved forward while session was working).
 
     When force=False (live sync): never force-updates, never moves refs
     backward.  Diverged refs that can't be resolved by fast-forward or
@@ -538,11 +604,14 @@ def _forward_refs(sid, session_gitdir, shared_gitdir, *, force=False):
                         == shared_tree.stdout.strip()):
                 continue  # same tree, just metadata (re-authoring)
 
-            # Try rebasing new session commits onto re-authored chain
+            # Try rebasing new session commits onto shared chain
+            mb = (merge_base.stdout.strip()
+                  if merge_base.returncode == 0 else None)
             rebased = _rebase_onto_reauthored(
-                shared_gitdir, existing_sha, sha,
-                merge_base.stdout.strip()
-                if merge_base.returncode == 0 else None)
+                shared_gitdir, existing_sha, sha, mb)
+            if not rebased:
+                rebased = _rebase_commits(
+                    shared_gitdir, existing_sha, sha, mb)
             if rebased:
                 git(shared_gitdir, "update-ref", ref, rebased,
                     capture_output=True)
