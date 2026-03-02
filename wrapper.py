@@ -469,12 +469,125 @@ def _rebase_onto_reauthored(gitdir, shared_sha, session_sha, merge_base):
     return parent
 
 
+def _forward_refs(sid, session_gitdir, shared_gitdir, *, force=False):
+    """Forward branch refs from a session gitdir into the shared gitdir.
+
+    Handles fast-forwards, re-authoring detection, and rebase-onto-reauthored.
+
+    When force=False (live sync): never force-updates, never moves refs
+    backward.  Diverged refs that can't be resolved by fast-forward or
+    rebase are skipped — they'll be picked up on final cleanup.
+
+    When force=True (final cleanup): force-updates diverged refs and backs
+    up the old shared ref under refs/sessions/<sid>/<branch>.
+    """
+    result = git(session_gitdir, "for-each-ref",
+                 "--format=%(refname) %(objectname)", "refs/heads/",
+                 capture_output=True, text=True)
+    if result.returncode != 0:
+        return
+
+    for line in result.stdout.strip().splitlines():
+        if not line:
+            continue
+        ref, sha = line.split()
+        branch = ref.removeprefix("refs/heads/")
+
+        # Fetch the objects into shared gitdir
+        fetch = git(shared_gitdir, "fetch", str(session_gitdir), sha,
+                    capture_output=True)
+        if fetch.returncode != 0:
+            continue
+
+        # Check if fast-forward is possible
+        existing = git(shared_gitdir, "rev-parse", ref,
+                       capture_output=True, text=True)
+        if existing.returncode != 0:
+            # Ref doesn't exist in shared — create it
+            git(shared_gitdir, "update-ref", ref, sha,
+                capture_output=True)
+            continue
+
+        existing_sha = existing.stdout.strip()
+        if existing_sha == sha:
+            continue  # already up to date
+
+        merge_base = git(shared_gitdir, "merge-base",
+                         existing_sha, sha,
+                         capture_output=True, text=True)
+        if (merge_base.returncode == 0
+                and merge_base.stdout.strip() == existing_sha):
+            # Fast-forward
+            git(shared_gitdir, "update-ref", ref, sha,
+                capture_output=True)
+        elif (merge_base.returncode == 0
+                  and merge_base.stdout.strip() == sha):
+            continue  # session is behind shared, skip
+        else:
+            # Diverged — check if it's a real content change or just
+            # re-authoring (pull rewrites commits to change author).
+            session_tree = git(shared_gitdir, "rev-parse",
+                               f"{sha}^{{tree}}",
+                               capture_output=True, text=True)
+            shared_tree = git(shared_gitdir, "rev-parse",
+                              f"{existing_sha}^{{tree}}",
+                              capture_output=True, text=True)
+            if (session_tree.returncode == 0
+                    and shared_tree.returncode == 0
+                    and session_tree.stdout.strip()
+                        == shared_tree.stdout.strip()):
+                continue  # same tree, just metadata (re-authoring)
+
+            # Try rebasing new session commits onto re-authored chain
+            rebased = _rebase_onto_reauthored(
+                shared_gitdir, existing_sha, sha,
+                merge_base.stdout.strip()
+                if merge_base.returncode == 0 else None)
+            if rebased:
+                git(shared_gitdir, "update-ref", ref, rebased,
+                    capture_output=True)
+                continue
+
+            if not force:
+                continue  # live sync: skip diverged refs
+
+            # Final cleanup: force-update shared ref, back up old ref.
+            git(shared_gitdir, "update-ref",
+                f"refs/sessions/{sid}/{branch}", existing_sha,
+                capture_output=True)
+            git(shared_gitdir, "update-ref", ref, sha,
+                capture_output=True)
+
+    # Also fetch tags
+    git(shared_gitdir, "fetch", str(session_gitdir),
+        "refs/tags/*:refs/tags/*", capture_output=True)
+
+
+def forward_session_refs(slug, session_gitdir, shared_gitdir):
+    """Forward refs from a live session into the shared gitdir (safe).
+
+    Called by sync_live_sessions during pull/push.  Temporarily rewrites
+    alternates to host path for git operations, then restores cave path.
+    Never force-updates — diverged refs are skipped.
+    """
+    alt_file = session_gitdir / "objects" / "info" / "alternates"
+    cave_path = None
+    if alt_file.exists():
+        cave_path = alt_file.read_text().strip()
+        alt_file.write_text(f"{shared_gitdir / 'objects'}\n")
+
+    _forward_refs(None, session_gitdir, shared_gitdir, force=False)
+
+    # Restore cave-internal alternates path
+    if cave_path is not None:
+        alt_file.write_text(f"{cave_path}\n")
+
+
 def merge_session_gitdirs(sid, overlay_base):
     """Merge per-session gitdir refs and objects back into shared gitdirs.
 
-    Fast-forwards branch and tag refs.  When a ref can't be fast-forwarded
-    (e.g. amend or concurrent sessions), force-updates the shared ref and
-    backs up the old shared ref under refs/sessions/<sid>/<branch>.
+    Called on session exit (final cleanup).  Force-updates diverged refs
+    with backup under refs/sessions/<sid>/<branch>.
 
     Scans overlay_base for gitdir-<slug> directories rather than relying on
     the project registry, so cleanup works even if the registry changes.
@@ -495,85 +608,7 @@ def merge_session_gitdirs(sid, overlay_base):
         if alt_file.exists():
             alt_file.write_text(f"{shared_gitdir / 'objects'}\n")
 
-        # Collect session's branch refs
-        result = git(session_gitdir, "for-each-ref",
-                     "--format=%(refname) %(objectname)", "refs/heads/",
-                     capture_output=True, text=True)
-        if result.returncode != 0:
-            continue
-
-        for line in result.stdout.strip().splitlines():
-            if not line:
-                continue
-            ref, sha = line.split()
-            branch = ref.removeprefix("refs/heads/")
-
-            # Fetch the objects into shared gitdir
-            fetch = git(shared_gitdir, "fetch", str(session_gitdir), sha,
-                        capture_output=True)
-            if fetch.returncode != 0:
-                continue
-
-            # Check if fast-forward is possible
-            existing = git(shared_gitdir, "rev-parse", ref,
-                           capture_output=True, text=True)
-            if existing.returncode != 0:
-                # Ref doesn't exist in shared — create it
-                git(shared_gitdir, "update-ref", ref, sha,
-                    capture_output=True)
-                continue
-
-            existing_sha = existing.stdout.strip()
-            if existing_sha == sha:
-                continue  # already up to date
-
-            merge_base = git(shared_gitdir, "merge-base",
-                             existing_sha, sha,
-                             capture_output=True, text=True)
-            if (merge_base.returncode == 0
-                    and merge_base.stdout.strip() == existing_sha):
-                # Fast-forward
-                git(shared_gitdir, "update-ref", ref, sha,
-                    capture_output=True)
-            elif (merge_base.returncode == 0
-                      and merge_base.stdout.strip() == sha):
-                continue  # session is behind shared, skip
-            else:
-                # Diverged — check if it's a real content change or just
-                # re-authoring (pull rewrites commits to change author).
-                session_tree = git(shared_gitdir, "rev-parse",
-                                   f"{sha}^{{tree}}",
-                                   capture_output=True, text=True)
-                shared_tree = git(shared_gitdir, "rev-parse",
-                                  f"{existing_sha}^{{tree}}",
-                                  capture_output=True, text=True)
-                if (session_tree.returncode == 0
-                        and shared_tree.returncode == 0
-                        and session_tree.stdout.strip()
-                            == shared_tree.stdout.strip()):
-                    continue  # same tree, just metadata (re-authoring)
-
-                # Try rebasing new session commits onto re-authored chain
-                rebased = _rebase_onto_reauthored(
-                    shared_gitdir, existing_sha, sha,
-                    merge_base.stdout.strip()
-                    if merge_base.returncode == 0 else None)
-                if rebased:
-                    git(shared_gitdir, "update-ref", ref, rebased,
-                        capture_output=True)
-                    continue
-
-                # Real content change (e.g. amend with new code).
-                # Force-update shared ref, back up old ref.
-                git(shared_gitdir, "update-ref",
-                    f"refs/sessions/{sid}/{branch}", existing_sha,
-                    capture_output=True)
-                git(shared_gitdir, "update-ref", ref, sha,
-                    capture_output=True)
-
-        # Also fetch tags
-        git(shared_gitdir, "fetch", str(session_gitdir),
-            "refs/tags/*:refs/tags/*", capture_output=True)
+        _forward_refs(sid, session_gitdir, shared_gitdir, force=True)
 
 
 # --- Session lifecycle ---
@@ -917,26 +952,20 @@ def enter_session(session_info, shell_type, workdir=None):
 # --- Pull / Push (commits only) ---
 
 def sync_live_sessions(slug):
-    """Merge refs from running sessions into the shared gitdir.
+    """Forward refs from running sessions into the shared gitdir.
 
-    Scans ALL live sessions, not just those whose primary project matches slug,
-    because a session started for project A may also have commits for project B.
+    Uses forward_session_refs which handles alternates rewrite/restore
+    internally and never force-updates refs.
     """
+    shared_gitdir = PROJECTS_DIR / slug / "gitdir"
+    if not shared_gitdir.is_dir():
+        return
     for session in list_sessions():
         sid = session["sid"]
         overlay_base = CAVE_DATA / "session-overlays" / sid
         session_gitdir = overlay_base / f"gitdir-{slug}"
         if session_gitdir.is_dir():
-            merge_session_gitdirs(sid, overlay_base)
-            # Restore cave-internal alternates for all gitdirs in this session.
-            # merge_session_gitdirs rewrites them to host paths for its git
-            # operations, but live sessions need the cave path.
-            for entry in sorted(overlay_base.iterdir()):
-                if entry.name.startswith("gitdir-") and entry.is_dir():
-                    s = entry.name.removeprefix("gitdir-")
-                    alt = entry / "objects" / "info" / "alternates"
-                    if alt.exists():
-                        alt.write_text(f"/projects/.shared-objects/{s}\n")
+            forward_session_refs(slug, session_gitdir, shared_gitdir)
 
 
 def pull_project(slug, force=False):

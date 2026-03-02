@@ -54,6 +54,31 @@ Per-session gitdirs are small (index file + refs + config). The bulk of git data
 
 On session end, refs and new objects from the session gitdir are merged into the shared gitdir, then the session gitdir is removed. `pull` and `push` operate on the shared gitdir as before.
 
+### Alternates path management
+
+Session gitdirs use `objects/info/alternates` to share the object store with the shared gitdir. The alternates path must differ between two contexts:
+
+- **Inside the cave** (bwrap namespace): `/projects/.shared-objects/<slug>` — the ro-bind mount of the shared object store.
+- **On the host** (during pull/push/cleanup): the real host path like `~/.local/share/coding-cave/projects/<slug>/gitdir/objects`.
+
+`create_session_gitdir` writes the host path. `start_session` rewrites it to the cave path before bwrap. Code that reads git objects from a session gitdir on the host must ensure the alternates point to the host path first.
+
+### Live sync vs final cleanup
+
+There are two distinct operations that move refs from session gitdirs to the shared gitdir. They have different safety requirements because one operates on live sessions and the other on dead ones.
+
+**Live sync** (`forward_session_refs`): called by `pull` and `push` to pick up in-flight commits from running sessions. Safety constraints:
+
+- **Read-only from the session's perspective**: must not modify the session gitdir in any way visible to the running agent. Alternates must be temporarily rewritten for host-side git operations, then restored.
+- **Never move shared refs backward**: a session that hasn't committed since it started (behind shared) must be skipped. Only fast-forwards and re-authoring rebases are allowed.
+- **Never force-update**: if a session diverged from shared in a way that can't be resolved by fast-forward or rebase, skip it. The session's commits will be picked up on final cleanup.
+
+**Final cleanup** (`merge_session_gitdirs`): called when a session exits. The session is dead, its overlay is about to be deleted. Safety constraints are relaxed:
+
+- **Force-update is acceptable**: this is the session's last chance to push its refs. If it diverges from shared, force-update and back up the old shared ref under `refs/sessions/<sid>/`.
+- **Alternates don't need restoration**: the session gitdir is about to be deleted.
+- **All refs must be preserved**: even divergent refs get backed up, so no work is lost.
+
 ### Session merge and re-authoring
 
 Pull re-authors cave commits to replace the cave identity with the host user's. This creates new commit hashes for the same tree content. Push then writes these re-authored hashes back to the shared gitdir. But running sessions still have the OLD (pre-re-authoring) commit chain. When a session makes new commits, they build on the old chain, creating a divergence from the shared gitdir.

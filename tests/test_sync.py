@@ -1008,39 +1008,86 @@ class TestSessionGitdir:
         assert "commit B" in log.stdout
         assert "commit C" in log.stdout
 
+    def test_forward_session_refs_restores_alternates(
+            self, shared_project, tmp_path):
+        """forward_session_refs restores cave-internal alternates after sync.
+
+        The function temporarily rewrites alternates to host path for git
+        operations, then restores the original cave path.
+        """
+        host, slug, projects_dir = shared_project
+        shared_gd = projects_dir / slug / "gitdir"
+        overlay = tmp_path / "overlay"
+        overlay.mkdir()
+        session_gd = wrapper.create_session_gitdir(slug, "test-sid", overlay)
+
+        cave_path = f"/projects/.shared-objects/{slug}"
+        alt_file = session_gd / "objects" / "info" / "alternates"
+        alt_file.write_text(f"{cave_path}\n")
+
+        wrapper.forward_session_refs(slug, session_gd, shared_gd)
+
+        assert alt_file.read_text().strip() == cave_path
+
+    def test_forward_session_refs_skips_diverged(
+            self, shared_project, tmp_path):
+        """forward_session_refs skips diverged refs instead of force-updating.
+
+        When a session and shared have diverged in a way that can't be
+        resolved by fast-forward or rebase, live sync must skip the ref.
+        merge_session_gitdirs (final cleanup) would force-update and back up.
+        """
+        host, slug, projects_dir = shared_project
+        shared_gd = projects_dir / slug / "gitdir"
+
+        _, work_a, overlay_a = self._make_session(tmp_path, slug, projects_dir, "a")
+        _, work_b, overlay_b = self._make_session(tmp_path, slug, projects_dir, "b")
+
+        # Both sessions commit on main (same file, different content = diverge)
+        (work_a / "file.txt").write_text("version A\n")
+        cave_git(work_a, "add", "file.txt")
+        cave_git(work_a, "commit", "-m", "commit A")
+
+        (work_b / "file.txt").write_text("version B\n")
+        cave_git(work_b, "add", "file.txt")
+        cave_git(work_b, "commit", "-m", "commit B")
+
+        # A merges first (cleanup), advancing shared
+        wrapper.merge_session_gitdirs("sid-a", overlay_a)
+        shared_after_a = git_head(shared_gd, gitdir=True)
+
+        # Live sync B — should SKIP because B diverges from shared
+        session_gd_b = overlay_b / f"gitdir-{slug}"
+        wrapper.forward_session_refs(slug, session_gd_b, shared_gd)
+
+        # Shared should still be at A's commit (not overwritten by B)
+        assert git_head(shared_gd, gitdir=True) == shared_after_a
+
+        # No backup ref should exist (that's a cleanup-only behavior)
+        backup = git_run("git", "--git-dir", str(shared_gd),
+                         "rev-parse", "refs/sessions/sid-b/main")
+        assert backup.returncode != 0
+
     def test_sync_live_sessions_restores_alternates(
             self, shared_project, tmp_path, monkeypatch):
-        """sync_live_sessions restores cave-internal alternates after merge.
-
-        merge_session_gitdirs rewrites alternates to host paths for its git
-        operations.  For live sessions, the cave path must be restored
-        afterward, otherwise git inside the cave breaks.
-
-        Regression: sync_live_sessions (called by pull/push) would clobber
-        the cave-internal alternates path, breaking all git operations in
-        every running session.
-        """
+        """sync_live_sessions restores cave-internal alternates via forward_session_refs."""
         host, slug, projects_dir = shared_project
         overlay_base = tmp_path / "overlay"
         overlay_base.mkdir()
         session_gd = wrapper.create_session_gitdir(slug, "test-sid", overlay_base)
 
-        # Simulate cave path (what start_session writes before bwrap)
         cave_path = f"/projects/.shared-objects/{slug}"
         alt_file = session_gd / "objects" / "info" / "alternates"
         alt_file.write_text(f"{cave_path}\n")
 
-        # Fake a live session so sync_live_sessions finds it
         monkeypatch.setattr(wrapper, "list_sessions", lambda: [{"sid": "test-sid"}])
         monkeypatch.setattr(wrapper, "CAVE_DATA", tmp_path / "cave-data")
         session_overlay = tmp_path / "cave-data" / "session-overlays" / "test-sid"
         session_overlay.mkdir(parents=True)
-        # Symlink so sync_live_sessions finds the gitdir at the expected path
         (session_overlay / f"gitdir-{slug}").symlink_to(session_gd)
 
         wrapper.sync_live_sessions(slug)
 
-        # Alternates must be restored to cave path, not left at host path
         assert alt_file.read_text().strip() == cave_path
 
     def test_sync_live_stale_session_preserves_active(
@@ -1095,17 +1142,17 @@ class TestSessionGitdir:
             f"Active session's commit missing from shared. HEAD={shared_head[:8]}"
         )
 
-    def test_sync_live_restores_alternates_for_all_projects(
+    def test_sync_live_does_not_touch_other_projects(
             self, shared_project, tmp_path, monkeypatch):
-        """sync_live_sessions restores alternates for ALL gitdirs, not just the synced slug.
+        """sync_live_sessions only processes the requested slug's gitdir.
 
-        Regression: pulling project A triggers merge_session_gitdirs which
-        processes ALL gitdir-* in the session overlay, clobbering alternates
-        for projects B, C, etc.  The restore must cover all of them.
+        Regression: the old code called merge_session_gitdirs which processed
+        ALL gitdir-* in the session overlay.  Now sync_live_sessions calls
+        forward_session_refs for only the requested slug, so other projects'
+        alternates are never touched.
         """
         host, slug, projects_dir = shared_project
 
-        # Create a second project in the same session overlay
         slug2 = "other-project"
         host2 = tmp_path / "host2"
         host2.mkdir()
@@ -1121,7 +1168,6 @@ class TestSessionGitdir:
         wrapper.create_session_gitdir(slug, "test-sid", overlay_base)
         gd2 = wrapper.create_session_gitdir(slug2, "test-sid", overlay_base)
 
-        # Set cave paths for both gitdirs
         cave_path1 = f"/projects/.shared-objects/{slug}"
         cave_path2 = f"/projects/.shared-objects/{slug2}"
         alt1 = overlay_base / f"gitdir-{slug}" / "objects" / "info" / "alternates"
@@ -1129,7 +1175,6 @@ class TestSessionGitdir:
         alt1.write_text(f"{cave_path1}\n")
         alt2.write_text(f"{cave_path2}\n")
 
-        # Mock sync for just slug (like cav pull <slug> would do)
         monkeypatch.setattr(wrapper, "list_sessions", lambda: [{"sid": "test-sid"}])
         monkeypatch.setattr(wrapper, "CAVE_DATA", tmp_path / "cave-data")
         session_dir = tmp_path / "cave-data" / "session-overlays" / "test-sid"
@@ -1137,16 +1182,12 @@ class TestSessionGitdir:
         (session_dir / f"gitdir-{slug}").symlink_to(overlay_base / f"gitdir-{slug}")
         (session_dir / f"gitdir-{slug2}").symlink_to(gd2)
 
-        # Sync only slug — but merge_session_gitdirs processes ALL gitdirs
         wrapper.sync_live_sessions(slug)
 
-        # Both projects' alternates must be restored to cave paths
-        assert alt1.read_text().strip() == cave_path1, (
-            f"slug alternates not restored: {alt1.read_text().strip()}"
-        )
-        assert alt2.read_text().strip() == cave_path2, (
-            f"other project's alternates clobbered: {alt2.read_text().strip()}"
-        )
+        # Synced slug's alternates should be restored
+        assert alt1.read_text().strip() == cave_path1
+        # Other project's alternates should be untouched (never modified)
+        assert alt2.read_text().strip() == cave_path2
 
     def test_no_gitdir_returns_none(self, tmp_path, monkeypatch):
         """create_session_gitdir returns None when no shared gitdir exists."""
