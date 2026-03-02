@@ -914,13 +914,16 @@ def enter_session(session_info, shell_type, workdir=None):
 # --- Pull / Push (commits only) ---
 
 def sync_live_sessions(slug):
-    """Merge refs from running sessions into the shared gitdir."""
-    for session in list_sessions(project=slug):
+    """Merge refs from running sessions into the shared gitdir.
+
+    Scans ALL live sessions, not just those whose primary project matches slug,
+    because a session started for project A may also have commits for project B.
+    """
+    for session in list_sessions():
         sid = session["sid"]
         overlay_base = CAVE_DATA / "session-overlays" / sid
         session_gitdir = overlay_base / f"gitdir-{slug}"
         if session_gitdir.is_dir():
-            shared_gitdir = PROJECTS_DIR / slug / "gitdir"
             merge_session_gitdirs(sid, overlay_base)
 
 

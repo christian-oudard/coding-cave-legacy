@@ -422,3 +422,55 @@ class TestPullMidSession:
         # Pull should pick up the session commit
         wrapper.pull_project(env.slug)
         assert (env.host / "file.txt").read_text() == "from session\n"
+
+    def test_cross_project_session_commits(self, pull_env, tmp_path, monkeypatch):
+        """Pull project B sees commits from a session started for project A.
+
+        Reproduction: start a session in folder A, agent edits and commits to
+        project B, `cav pull B` from host should get the commit.  Bug: the
+        session's "project" field is A, so sync_live_sessions("B") skipped it.
+        """
+        env = pull_env  # project B (slug="test-project", has host+gitdir)
+        sid = "test-session-cross"
+
+        overlay_base = tmp_path / "session-overlays" / sid
+        overlay_base.mkdir(parents=True)
+        monkeypatch.setattr(wrapper, "CAVE_DATA", tmp_path)
+
+        # Create per-session gitdir for project B within this session
+        session_gitdir = wrapper.create_session_gitdir(
+            env.slug, sid, overlay_base,
+        )
+        assert session_gitdir is not None
+
+        # Register session with a DIFFERENT primary project
+        import os
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir(parents=True)
+        monkeypatch.setattr(wrapper, "SESSIONS_DIR", sessions_dir)
+        session_info = {
+            "sid": sid,
+            "project": "other-project",  # <-- not env.slug
+            "bwrap_pid": os.getpid(),
+            "started": 0,
+        }
+        (sessions_dir / f"{sid}.json").write_text(json.dumps(session_info))
+
+        # Commit in the session gitdir
+        _run("git", "--git-dir", str(session_gitdir), "config",
+             "user.email", "cave@test.com")
+        _run("git", "--git-dir", str(session_gitdir), "config",
+             "user.name", "cave-coder")
+        session_cave = tmp_path / "session-cave"
+        session_cave.mkdir()
+        _run("git", "--git-dir", str(session_gitdir), "--work-tree",
+             str(session_cave), "checkout", "HEAD", "--", ".", check=False)
+        (session_cave / "file.txt").write_text("cross-project\n")
+        _run("git", "--git-dir", str(session_gitdir), "--work-tree",
+             str(session_cave), "add", "file.txt")
+        _run("git", "--git-dir", str(session_gitdir), "--work-tree",
+             str(session_cave), "commit", "-m", "cross-project commit")
+
+        # Pull project B — should find the commit even though session is for A
+        wrapper.pull_project(env.slug)
+        assert (env.host / "file.txt").read_text() == "cross-project\n"
