@@ -108,6 +108,7 @@
         nano
         direnv
         uv
+        glibc.bin
         claude-loop
         util-linux
         fuse-overlayfs
