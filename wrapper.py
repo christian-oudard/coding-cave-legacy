@@ -535,6 +535,9 @@ def merge_session_gitdirs(sid, overlay_base):
                 # Fast-forward
                 git(shared_gitdir, "update-ref", ref, sha,
                     capture_output=True)
+            elif (merge_base.returncode == 0
+                      and merge_base.stdout.strip() == sha):
+                continue  # session is behind shared, skip
             else:
                 # Diverged — check if it's a real content change or just
                 # re-authoring (pull rewrites commits to change author).
@@ -925,6 +928,15 @@ def sync_live_sessions(slug):
         session_gitdir = overlay_base / f"gitdir-{slug}"
         if session_gitdir.is_dir():
             merge_session_gitdirs(sid, overlay_base)
+            # Restore cave-internal alternates for all gitdirs in this session.
+            # merge_session_gitdirs rewrites them to host paths for its git
+            # operations, but live sessions need the cave path.
+            for entry in sorted(overlay_base.iterdir()):
+                if entry.name.startswith("gitdir-") and entry.is_dir():
+                    s = entry.name.removeprefix("gitdir-")
+                    alt = entry / "objects" / "info" / "alternates"
+                    if alt.exists():
+                        alt.write_text(f"/projects/.shared-objects/{s}\n")
 
 
 def pull_project(slug, force=False):
@@ -1904,12 +1916,12 @@ def build_parser():
     )
     parser.add_argument("--gpu", action="store_true", help="enable GPU access")
     parser.add_argument("-c", "--continue", action="store_true", dest="continue_session", help="continue most recent conversation")
-    parser.add_argument("-r", "--resume", nargs="?", const=True, default=None, help="resume a conversation by session ID, or interactive picker")
+    parser.add_argument("-r", "--resume", nargs="?", const=True, default=None, metavar="SESSION_ID", help="resume a conversation by session ID, or interactive picker")
     sub = parser.add_subparsers(dest="command")
 
     p_agent = sub.add_parser("agent", help="start a new agent session")
     p_agent.add_argument("-c", "--continue", action="store_true", dest="continue_session", help="continue most recent conversation")
-    p_agent.add_argument("-r", "--resume", nargs="?", const=True, default=None, help="resume a conversation by session ID, or interactive picker")
+    p_agent.add_argument("-r", "--resume", nargs="?", const=True, default=None, metavar="SESSION_ID", help="resume a conversation by session ID, or interactive picker")
     sub.add_parser("shell", help="start a shell or join a running session")
 
     p_add = sub.add_parser("add", help="register a project")
