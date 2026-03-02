@@ -1167,6 +1167,46 @@ class TestSessionGitdir:
         # Shared HEAD should NOT have moved
         assert git_head(shared_gd, gitdir=True) == shared_after_push
 
+    def test_forward_refs_live_sync_handles_amendment(
+            self, shared_project, tmp_path):
+        """Live sync updates shared when session amends a commit.
+
+        Scenario: session creates commit B, mid-session sync advances shared
+        to B, session amends B to B'.  forward_session_refs (live sync,
+        force=False) must detect the single-commit amendment and update
+        shared to B'.
+
+        Regression: forward_session_refs skipped the diverged ref, leaving
+        shared at B.  cav pull then saw host_head == gitdir_head and reported
+        "No new commits."
+        """
+        host, slug, projects_dir = shared_project
+        shared_gd = projects_dir / slug / "gitdir"
+
+        _, work_a, overlay_a = self._make_session(tmp_path, slug, projects_dir, "a")
+
+        # Session creates commit B
+        (work_a / "new.txt").write_text("v1\n")
+        cave_git(work_a, "add", "new.txt")
+        cave_git(work_a, "commit", "-m", "commit B")
+        sha_b = cave_git(work_a, "rev-parse", "HEAD").stdout.strip()
+
+        # Mid-session sync advances shared to B
+        session_gd = overlay_a / f"gitdir-{slug}"
+        wrapper.forward_session_refs(slug, session_gd, shared_gd)
+        assert git_head(shared_gd, gitdir=True) == sha_b
+
+        # Session amends B to B' (different tree)
+        (work_a / "new.txt").write_text("v2\n")
+        cave_git(work_a, "add", "new.txt")
+        cave_git(work_a, "commit", "--amend", "-m", "commit B amended")
+        sha_b_prime = cave_git(work_a, "rev-parse", "HEAD").stdout.strip()
+        assert sha_b_prime != sha_b
+
+        # Live sync should detect amendment and update shared to B'
+        wrapper.forward_session_refs(slug, session_gd, shared_gd)
+        assert git_head(shared_gd, gitdir=True) == sha_b_prime
+
     def test_sync_live_sessions_restores_alternates(
             self, shared_project, tmp_path, monkeypatch):
         """sync_live_sessions restores cave-internal alternates via forward_session_refs."""
