@@ -1943,6 +1943,7 @@ def build_parser():
         prog="coding-cave",
         description="Sandboxed Claude Code agent sessions with Nix environments. Use -- to pass extra arguments to claude.",
     )
+    parser.add_argument("--version", action="version", version=f"coding-cave {VERSION}")
     parser.add_argument("--gpu", action="store_true", help="enable GPU access")
     parser.add_argument("-c", "--continue", action="store_true", dest="continue_session", help="continue most recent conversation")
     parser.add_argument("-r", "--resume", nargs="?", const=True, default=None, metavar="SESSION_ID", help="resume a conversation by session ID, or interactive picker")
