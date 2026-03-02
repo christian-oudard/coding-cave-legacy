@@ -333,9 +333,9 @@ def create_session_gitdir(slug, sid, overlay_base):
     """Create a per-session gitdir with alternates pointing to shared objects.
 
     The session gitdir has its own HEAD, index, and refs but shares the object
-    store with the shared gitdir via alternates.  Two alternates paths are
-    written: the host-side path (used during cleanup on the host) and the
-    cave-internal path (used by git inside the bwrap namespace).
+    store with the shared gitdir via alternates.  Alternates starts with the
+    host path; the caller rewrites it to the cave-internal path before bwrap,
+    and merge_session_gitdirs rewrites it back for cleanup.
     """
     shared_gitdir = PROJECTS_DIR / slug / "gitdir"
     if not shared_gitdir.is_dir():
@@ -350,12 +350,11 @@ def create_session_gitdir(slug, sid, overlay_base):
     # Not actually bare — used with a separate working tree via .git file
     git(session_gitdir, "config", "core.bare", "false", capture_output=True)
 
-    # Alternates: host path (cleanup) + cave path (inside bwrap)
+    # Alternates: host path (tests + cleanup use this directly)
     objects_info = session_gitdir / "objects" / "info"
     objects_info.mkdir(parents=True, exist_ok=True)
     (objects_info / "alternates").write_text(
         f"{shared_gitdir / 'objects'}\n"
-        f"/projects/.shared-objects/{slug}\n"
     )
 
     # Copy HEAD
@@ -490,6 +489,11 @@ def merge_session_gitdirs(sid, overlay_base):
         shared_gitdir = PROJECTS_DIR / slug / "gitdir"
         if not shared_gitdir.is_dir():
             continue
+
+        # Rewrite alternates to host path (cave path won't exist on host)
+        alt_file = session_gitdir / "objects" / "info" / "alternates"
+        if alt_file.exists():
+            alt_file.write_text(f"{shared_gitdir / 'objects'}\n")
 
         # Collect session's branch refs
         result = git(session_gitdir, "for-each-ref",
@@ -704,6 +708,9 @@ def start_session(project, command, gpu=False):
             if shared_gitdir.is_dir():
                 session_gitdir = create_session_gitdir(slug, sid, overlay_base)
                 if session_gitdir:
+                    # Rewrite alternates from host path to cave path
+                    (session_gitdir / "objects" / "info" / "alternates").write_text(
+                        f"/projects/.shared-objects/{slug}\n")
                     (upper / ".git").write_text(f"gitdir: /projects/.gitdirs/{slug}\n")
                     bwrap_args += ["--bind", str(session_gitdir), f"/projects/.gitdirs/{slug}"]
                     # Shared objects accessible via alternates inside the cave
