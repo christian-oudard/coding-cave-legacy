@@ -655,6 +655,12 @@ def start_session(project, command, gpu=False):
                     dest.touch()
             else:
                 bwrap_args += ["--ro-bind", str(f), f"{zsh_cave}/{f.name}"]
+        for f in sorted(Path(zdotdir).iterdir()):
+            if not f.is_file() or f.name.startswith("."):
+                continue
+            if "private" in f.name or "secret" in f.name:
+                continue
+            bwrap_args += ["--ro-bind", str(f), f"{zsh_cave}/{f.name}"]
         bwrap_args += ["--setenv", "ZDOTDIR", zsh_cave]
 
     # Bash dotfiles
