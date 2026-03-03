@@ -1,2 +1,4 @@
 result
 jail.nix/
+__pycache__/
+.venv/
