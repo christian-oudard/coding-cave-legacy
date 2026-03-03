@@ -379,8 +379,22 @@ def create_session_gitdir(slug, sid, overlay_base):
                 git(session_gitdir, "update-ref",
                     f"refs/init/{branch}", sha, capture_output=True)
 
-    # Populate index from HEAD so git status starts clean
-    git(session_gitdir, "read-tree", "HEAD", capture_output=True)
+    # Copy stash reflog (stash ref itself is copied above with all refs,
+    # but the reflog tracks the full stash stack)
+    src_stash_log = shared_gitdir / "logs" / "refs" / "stash"
+    if src_stash_log.is_file():
+        dst_stash_log = session_gitdir / "logs" / "refs" / "stash"
+        dst_stash_log.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src_stash_log, dst_stash_log)
+
+    # Restore saved index if available (preserves staging area from prior
+    # session), otherwise populate from HEAD so git status starts clean.
+    saved_index = PROJECTS_DIR / slug / "saved-index"
+    if saved_index.is_file():
+        shutil.copy2(saved_index, session_gitdir / "index")
+        saved_index.unlink()
+    else:
+        git(session_gitdir, "read-tree", "HEAD", capture_output=True)
 
     # Disable hooks
     git(session_gitdir, "config", "core.hooksPath", "/dev/null",
@@ -687,6 +701,23 @@ def _forward_refs(sid, session_gitdir, shared_gitdir, *, force=False):
     git(shared_gitdir, "fetch", str(session_gitdir),
         "refs/tags/*:refs/tags/*", capture_output=True)
 
+    # Forward stash (ref + reflog for the full stash stack)
+    stash = git(session_gitdir, "rev-parse", "refs/stash",
+                capture_output=True, text=True)
+    if stash.returncode == 0:
+        stash_sha = stash.stdout.strip()
+        fetch = git(shared_gitdir, "fetch", str(session_gitdir), stash_sha,
+                    capture_output=True)
+        if fetch.returncode == 0:
+            git(shared_gitdir, "update-ref", "refs/stash", stash_sha,
+                capture_output=True)
+            # Copy reflog to preserve the full stash stack
+            src_log = session_gitdir / "logs" / "refs" / "stash"
+            dst_log = Path(str(shared_gitdir)) / "logs" / "refs" / "stash"
+            if src_log.is_file():
+                dst_log.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src_log, dst_log)
+
 
 def forward_session_refs(slug, session_gitdir, shared_gitdir):
     """Forward refs from a live session into the shared gitdir (safe).
@@ -706,6 +737,49 @@ def forward_session_refs(slug, session_gitdir, shared_gitdir):
     # Restore cave-internal alternates path
     if cave_path is not None:
         alt_file.write_text(f"{cave_path}\n")
+
+
+def _save_session_index(session_gitdir, shared_gitdir, slug):
+    """Save session index and its loose objects for staging area preservation.
+
+    Only saves if the index differs from HEAD (has staged changes).
+    Copies loose objects (blobs from git-add not reachable from commits)
+    from the session gitdir into the shared gitdir, then saves the index
+    file to a persistent location.
+    """
+    index_file = session_gitdir / "index"
+    if not index_file.is_file():
+        return
+    # Check if index has staged changes (differs from HEAD tree).
+    # If index matches HEAD, don't save — avoids clobbering another
+    # session's saved-index with a clean index.
+    diff = git(session_gitdir, "diff-index", "--cached", "--quiet", "HEAD",
+               capture_output=True)
+    if diff.returncode == 0:
+        return  # index matches HEAD, nothing staged
+    # Copy loose objects to shared gitdir
+    objects_dir = session_gitdir / "objects"
+    shared_objects = shared_gitdir / "objects"
+    for subdir in objects_dir.iterdir():
+        if not subdir.is_dir() or subdir.name in ("info", "pack"):
+            continue
+        if len(subdir.name) != 2:
+            continue
+        dst_subdir = shared_objects / subdir.name
+        dst_subdir.mkdir(exist_ok=True)
+        for obj_file in subdir.iterdir():
+            dst = dst_subdir / obj_file.name
+            if not dst.exists():
+                try:
+                    shutil.copy2(obj_file, dst)
+                except OSError:
+                    pass
+    # Save index file
+    saved_index = PROJECTS_DIR / slug / "saved-index"
+    try:
+        shutil.copy2(index_file, saved_index)
+    except OSError:
+        pass
 
 
 def merge_session_gitdirs(sid, overlay_base):
@@ -735,6 +809,11 @@ def merge_session_gitdirs(sid, overlay_base):
 
         _forward_refs(sid, session_gitdir, shared_gitdir, force=True)
 
+        # Save index and its loose objects so staging area survives
+        # session restarts.  Loose objects in the session gitdir include
+        # blobs from git-add that aren't reachable from any commit.
+        _save_session_index(session_gitdir, shared_gitdir, slug)
+
 
 # --- Session lifecycle ---
 
@@ -743,17 +822,21 @@ def start_session(project, command, gpu=False):
     CAVE_DATA.mkdir(parents=True, exist_ok=True)
     sid = session_id()
 
-    # Nix store overlay (shared across sessions, fuse-overlayfs)
+    # Nix store overlay (shared across sessions, fuse-overlayfs).
+    # Upper and db persist across sessions so nix packages survive.
     (NIX_OVERLAY_DIR / "upper").mkdir(parents=True, exist_ok=True)
-    (NIX_OVERLAY_DIR / "work").mkdir(parents=True, exist_ok=True)
     (NIX_OVERLAY_DIR / "merged").mkdir(parents=True, exist_ok=True)
     nix_merged = str(NIX_OVERLAY_DIR / "merged")
     # Only mount if not already mounted (shared across sessions)
     nix_already_mounted = os.path.ismount(nix_merged)
     if not nix_already_mounted:
+        # Work dir must be empty for fuse-overlayfs
+        nix_work = NIX_OVERLAY_DIR / "work"
+        force_rmtree(nix_work)
+        nix_work.mkdir(parents=True, exist_ok=True)
         subprocess.run(
             ["fuse-overlayfs",
-             "-o", f"lowerdir=/nix/store,upperdir={NIX_OVERLAY_DIR / 'upper'},workdir={NIX_OVERLAY_DIR / 'work'}",
+             "-o", f"lowerdir=/nix/store,upperdir={NIX_OVERLAY_DIR / 'upper'},workdir={nix_work}",
              nix_merged],
             check=True, capture_output=True,
         )
@@ -761,15 +844,15 @@ def start_session(project, command, gpu=False):
 
     # Seed nix DB from host/parent so nix doesn't try to re-register
     # (chmod) existing store paths, which fails on overlayfs.
+    # Only seed if no existing cave DB (to preserve cave-installed pkgs).
     # Use sqlite3 backup API for a consistent copy (handles WAL mode).
     host_nix_db = Path("/nix/var/nix/db/db.sqlite")
     nix_db_dir = NIX_OVERLAY_DIR / "db"
     nix_db_dir.mkdir(parents=True, exist_ok=True)
     cave_nix_db = nix_db_dir / "db.sqlite"
-    if host_nix_db.exists():
+    if host_nix_db.exists() and not cave_nix_db.exists():
         import sqlite3
         try:
-            cave_nix_db.unlink(missing_ok=True)
             for wal in nix_db_dir.glob("db.sqlite-*"):
                 wal.unlink()
             src = sqlite3.connect(f"file:{host_nix_db}?mode=ro", uri=True)
@@ -864,16 +947,23 @@ def start_session(project, command, gpu=False):
             upper = overlay_base / f"{slug}-upper"
             work = overlay_base / f"{slug}-work"
             merged = overlay_base / f"{slug}-merged"
-            upper.mkdir(exist_ok=True)
+            # Restore saved upper from previous session if available.
+            # This preserves uncommitted changes, untracked files, and
+            # deletions across session restarts.
+            saved_upper = PROJECTS_DIR / slug / "saved-upper"
+            has_saved_upper = False
+            if saved_upper.is_dir():
+                saved_upper.rename(upper)
+                has_saved_upper = True
+            else:
+                upper.mkdir(exist_ok=True)
             work.mkdir(exist_ok=True)
             merged.mkdir(exist_ok=True)
             shared_gitdir = PROJECTS_DIR / slug / "gitdir"
+            session_gitdir = None
             if shared_gitdir.is_dir():
                 session_gitdir = create_session_gitdir(slug, sid, overlay_base)
                 if session_gitdir:
-                    # Rewrite alternates from host path to cave path
-                    (session_gitdir / "objects" / "info" / "alternates").write_text(
-                        f"/projects/.shared-objects/{slug}\n")
                     (upper / ".git").write_text(f"gitdir: /projects/.gitdirs/{slug}\n")
                     bwrap_args += ["--bind", str(session_gitdir), f"/projects/.gitdirs/{slug}"]
                     # Shared objects accessible via alternates inside the cave
@@ -889,6 +979,32 @@ def start_session(project, command, gpu=False):
             )
             overlay_mounts.append(str(merged))
             bwrap_args += ["--bind", str(merged), f"/projects/{slug}"]
+            # Sync working tree to HEAD when shared gitdir has unpulled
+            # commits and no saved upper exists.  When a saved upper is
+            # restored, it already contains the correct working tree
+            # state (both committed and uncommitted changes).
+            if session_gitdir and not has_saved_upper:
+                host_tree = subprocess.run(
+                    ["git", "-C", source, "rev-parse", "HEAD^{tree}"],
+                    capture_output=True, text=True,
+                )
+                session_tree = git(session_gitdir, "rev-parse",
+                                   "HEAD^{tree}",
+                                   capture_output=True, text=True)
+                if (host_tree.returncode == 0
+                        and session_tree.returncode == 0
+                        and host_tree.stdout.strip()
+                            != session_tree.stdout.strip()):
+                    subprocess.run(
+                        ["git", "--git-dir", str(session_gitdir),
+                         "--work-tree", str(merged)] + SAFE_GIT_OPTS +
+                        ["checkout", "-f"],
+                        capture_output=True,
+                    )
+            # Rewrite alternates from host path to cave path
+            if session_gitdir:
+                (session_gitdir / "objects" / "info" / "alternates").write_text(
+                    f"/projects/.shared-objects/{slug}\n")
     except BaseException:
         for merged in overlay_mounts:
             unmount_fuse(merged)
@@ -989,11 +1105,32 @@ def start_session(project, command, gpu=False):
         cleanup_session(sid)
         for merged in overlay_mounts:
             unmount_fuse(merged)
+        # Save overlay uppers for session continuity (uncommitted
+        # changes, untracked files, deletions).  Must happen after
+        # unmount (upper is busy while mounted) and before rmtree.
+        # Skip uppers that only contain .git (no real changes) to
+        # avoid clobbering another concurrent session's saved state.
+        for slug in projects:
+            upper = overlay_base / f"{slug}-upper"
+            if not upper.is_dir():
+                continue
+            entries = set(os.listdir(upper))
+            entries.discard(".git")
+            if not entries:
+                continue
+            saved = PROJECTS_DIR / slug / "saved-upper"
+            force_rmtree(saved)
+            try:
+                upper.rename(saved)
+            except OSError:
+                pass
         force_rmtree(overlay_base)
-        # Clean shared nix overlay when last session exits
+        # Unmount shared nix overlay when last session exits but keep
+        # upper and db so installed packages persist across sessions.
+        # Work dir must be cleaned (fuse-overlayfs needs it empty).
         if not list_sessions():
             unmount_fuse(nix_merged)
-            for subdir in ["upper", "work", "merged", "db"]:
+            for subdir in ["work", "merged"]:
                 force_rmtree(NIX_OVERLAY_DIR / subdir)
 
     sys.exit(ret)
@@ -1521,12 +1658,13 @@ def reset_project_overlay(slug):
     projects = load_projects()
     proj_state = PROJECTS_DIR / slug
 
-    for subdir in ["upper", "work", "gitdir", "sessions"]:
+    for subdir in ["upper", "work", "gitdir", "sessions", "saved-upper"]:
         p = proj_state / subdir
         if p.exists():
             force_rmtree(p)
-            if subdir not in ("gitdir", "sessions"):
+            if subdir not in ("gitdir", "sessions", "saved-upper"):
                 p.mkdir()
+    (proj_state / "saved-index").unlink(missing_ok=True)
 
     if slug in projects:
         initialize_gitdir(slug, Path(projects[slug]))

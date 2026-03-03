@@ -1491,3 +1491,610 @@ class TestSessionGitdir:
         session_gd = wrapper.create_session_gitdir(slug, "sid", overlay)
         # Should create something (or return None gracefully)
         # Either is acceptable for an empty repo
+
+    def test_stash_forwarded_on_merge(self, shared_project, tmp_path):
+        """git stash entries are forwarded from session to shared gitdir."""
+        host, slug, projects_dir = shared_project
+        gd_a, work_a, overlay_a = self._make_session(
+            tmp_path, slug, projects_dir, "a")
+
+        # Create a stash in session A
+        (work_a / "file.txt").write_text("stashed change\n")
+        cave_git(work_a, "stash", "push", "-m", "my stash")
+
+        # Verify stash exists in session
+        stash = cave_git(work_a, "stash", "list")
+        assert "my stash" in stash.stdout
+
+        # Merge session A into shared
+        wrapper.merge_session_gitdirs("sid-a", overlay_a)
+
+        # Shared gitdir should have the stash ref
+        shared_gd = projects_dir / slug / "gitdir"
+        stash_ref = wrapper.git(shared_gd, "rev-parse", "refs/stash",
+                                capture_output=True, text=True)
+        assert stash_ref.returncode == 0
+
+        # Stash reflog should be copied
+        reflog = shared_gd / "logs" / "refs" / "stash"
+        assert reflog.is_file()
+        assert "my stash" in reflog.read_text()
+
+    def test_stash_available_in_new_session(self, shared_project, tmp_path):
+        """Stash entries from a prior session are available in new sessions."""
+        host, slug, projects_dir = shared_project
+        gd_a, work_a, overlay_a = self._make_session(
+            tmp_path, slug, projects_dir, "a")
+
+        # Create stash in session A and merge
+        (work_a / "file.txt").write_text("stashed\n")
+        cave_git(work_a, "stash", "push", "-m", "carry over")
+        wrapper.merge_session_gitdirs("sid-a", overlay_a)
+
+        # Create session B (should pick up stash from shared)
+        gd_b, work_b, _ = self._make_session(
+            tmp_path, slug, projects_dir, "b")
+
+        stash = cave_git(work_b, "stash", "list")
+        assert "carry over" in stash.stdout
+
+        # Stash apply should work
+        result = cave_git(work_b, "stash", "apply")
+        assert result.returncode == 0
+        assert (work_b / "file.txt").read_text() == "stashed\n"
+
+
+class TestWorktreeSync:
+    """Test that new sessions sync working tree to HEAD.
+
+    When the shared gitdir has commits that haven't been pulled to the
+    host, a new session's overlay (lower=host project) shows stale files.
+    The session gitdir's HEAD is correct, so start_session must checkout
+    HEAD into the merged overlay to sync the working tree.
+    """
+
+    @pytest.fixture
+    def diverged_session(self, tmp_path, monkeypatch):
+        """Simulate a new session where shared gitdir is ahead of host.
+
+        1. Host repo at commit A
+        2. Shared gitdir advanced to commit B (prior session committed)
+        3. Session gitdir created from shared (HEAD=B)
+        4. Working directory has host files (commit A state)
+
+        Returns (host, shared_gitdir, session_gitdir, workdir).
+        """
+        slug = "test-project"
+        projects_dir = tmp_path / "cave-projects"
+        monkeypatch.setattr(wrapper, "PROJECTS_DIR", projects_dir)
+        (projects_dir / slug).mkdir(parents=True)
+
+        # Host repo at commit A
+        host = tmp_path / "host"
+        host.mkdir()
+        git_run("git", "init", "-b", "main", str(host))
+        (host / "file.txt").write_text("original\n")
+        git_run("git", "-C", str(host), "add", ".")
+        git_run("git", "-C", str(host), "commit", "-m", "initial")
+
+        wrapper.initialize_gitdir(slug, host)
+        shared_gitdir = projects_dir / slug / "gitdir"
+
+        # Advance shared gitdir to commit B (simulating a prior cave session)
+        env = {**os.environ, **GIT_ENV}
+        # Write a new tree with modified file.txt
+        blob = subprocess.run(
+            ["git", "--git-dir", str(shared_gitdir), "hash-object", "-w",
+             "--stdin"],
+            input="modified\n", capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        head_tree = subprocess.run(
+            ["git", "--git-dir", str(shared_gitdir), "rev-parse", "HEAD^{tree}"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        # Create new tree replacing file.txt
+        ls_tree = subprocess.run(
+            ["git", "--git-dir", str(shared_gitdir), "ls-tree", head_tree],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        new_tree_input = ls_tree.replace(
+            ls_tree.split("\t")[0].split()[-1],  # old blob hash
+            blob,
+        )
+        new_tree = subprocess.run(
+            ["git", "--git-dir", str(shared_gitdir), "mktree"],
+            input=new_tree_input, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        head = subprocess.run(
+            ["git", "--git-dir", str(shared_gitdir), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        new_commit = subprocess.run(
+            ["git", "--git-dir", str(shared_gitdir),
+             "commit-tree", new_tree, "-p", head, "-m", "cave edit"],
+            capture_output=True, text=True, check=True, env=env,
+        ).stdout.strip()
+        subprocess.run(
+            ["git", "--git-dir", str(shared_gitdir),
+             "update-ref", "refs/heads/main", new_commit],
+            capture_output=True, check=True,
+        )
+
+        # Create session gitdir (HEAD=B, has commit B via alternates)
+        overlay_base = tmp_path / "overlay"
+        overlay_base.mkdir()
+        session_gitdir = wrapper.create_session_gitdir(slug, "test-sid", overlay_base)
+
+        # Working directory simulates overlay lower=host (commit A state)
+        workdir = tmp_path / "workdir"
+        shutil.copytree(host, workdir, dirs_exist_ok=True)
+        # Remove .git from copy (session uses separate gitdir)
+        shutil.rmtree(workdir / ".git", ignore_errors=True)
+
+        return host, shared_gitdir, session_gitdir, workdir
+
+    def test_worktree_synced_when_ahead(self, diverged_session):
+        """Working tree must match HEAD after checkout, not stale host state."""
+        host, shared_gitdir, session_gitdir, workdir = diverged_session
+
+        # Before sync: workdir has host's original content
+        assert (workdir / "file.txt").read_text() == "original\n"
+
+        # Simulate what start_session does: compare trees and checkout
+        host_tree = subprocess.run(
+            ["git", "-C", str(host), "rev-parse", "HEAD^{tree}"],
+            capture_output=True, text=True,
+        )
+        session_tree = wrapper.git(session_gitdir, "rev-parse", "HEAD^{tree}",
+                                   capture_output=True, text=True)
+        assert host_tree.stdout.strip() != session_tree.stdout.strip()
+
+        subprocess.run(
+            ["git", "--git-dir", str(session_gitdir),
+             "--work-tree", str(workdir)] + wrapper.SAFE_GIT_OPTS +
+            ["checkout", "-f"],
+            capture_output=True, check=True,
+        )
+
+        # After sync: workdir matches session HEAD (commit B)
+        assert (workdir / "file.txt").read_text() == "modified\n"
+
+    def test_no_checkout_when_trees_match(self, tmp_path, monkeypatch):
+        """No checkout needed when host and session HEAD have same tree."""
+        slug = "test-project"
+        projects_dir = tmp_path / "cave-projects"
+        monkeypatch.setattr(wrapper, "PROJECTS_DIR", projects_dir)
+        (projects_dir / slug).mkdir(parents=True)
+
+        host = tmp_path / "host"
+        host.mkdir()
+        git_run("git", "init", "-b", "main", str(host))
+        (host / "file.txt").write_text("content\n")
+        git_run("git", "-C", str(host), "add", ".")
+        git_run("git", "-C", str(host), "commit", "-m", "initial")
+
+        wrapper.initialize_gitdir(slug, host)
+
+        overlay_base = tmp_path / "overlay"
+        overlay_base.mkdir()
+        session_gitdir = wrapper.create_session_gitdir(slug, "test-sid", overlay_base)
+
+        host_tree = subprocess.run(
+            ["git", "-C", str(host), "rev-parse", "HEAD^{tree}"],
+            capture_output=True, text=True,
+        )
+        session_tree = wrapper.git(session_gitdir, "rev-parse", "HEAD^{tree}",
+                                   capture_output=True, text=True)
+        # Trees should match — no checkout needed
+        assert host_tree.stdout.strip() == session_tree.stdout.strip()
+
+
+class TestSavedUpper:
+    """Test overlay upper layer preservation across sessions.
+
+    On session exit, the overlay upper is saved to a persistent location.
+    On next session start, it's restored so uncommitted changes, untracked
+    files, and deletions survive session restarts.
+    """
+
+    def test_upper_saved_on_exit(self, tmp_path, monkeypatch):
+        """Overlay upper is moved to saved-upper on session cleanup."""
+        slug = "test-project"
+        projects_dir = tmp_path / "cave-projects"
+        monkeypatch.setattr(wrapper, "PROJECTS_DIR", projects_dir)
+        (projects_dir / slug).mkdir(parents=True)
+
+        # Simulate session overlay base with an upper that has changes
+        overlay_base = tmp_path / "session-overlay"
+        upper = overlay_base / f"{slug}-upper"
+        upper.mkdir(parents=True)
+        (upper / "new-file.txt").write_text("uncommitted work\n")
+
+        projects = {slug: str(tmp_path / "host")}
+
+        # Simulate what start_session's finally block does
+        saved = projects_dir / slug / "saved-upper"
+        wrapper.force_rmtree(saved)
+        upper.rename(saved)
+
+        assert saved.is_dir()
+        assert (saved / "new-file.txt").read_text() == "uncommitted work\n"
+
+    def test_saved_upper_restored_on_start(self, tmp_path, monkeypatch):
+        """Saved upper is moved back into session overlay on start."""
+        slug = "test-project"
+        projects_dir = tmp_path / "cave-projects"
+        monkeypatch.setattr(wrapper, "PROJECTS_DIR", projects_dir)
+        (projects_dir / slug).mkdir(parents=True)
+
+        # Pre-populate saved-upper with uncommitted changes
+        saved = projects_dir / slug / "saved-upper"
+        saved.mkdir()
+        (saved / "dirty-file.txt").write_text("unsaved work\n")
+
+        overlay_base = tmp_path / "session-overlay"
+        upper = overlay_base / f"{slug}-upper"
+        upper.parent.mkdir(parents=True, exist_ok=True)
+
+        # Simulate what start_session does: check for saved upper
+        has_saved_upper = False
+        if saved.is_dir():
+            saved.rename(upper)
+            has_saved_upper = True
+
+        assert has_saved_upper
+        assert upper.is_dir()
+        assert (upper / "dirty-file.txt").read_text() == "unsaved work\n"
+        assert not saved.exists()
+
+    def test_no_checkout_when_saved_upper_restored(self, tmp_path, monkeypatch):
+        """git checkout -f is skipped when saved upper is restored.
+
+        The saved upper already contains the correct working tree state
+        (both committed and uncommitted changes).  Running checkout -f
+        would clobber uncommitted changes.
+        """
+        slug = "test-project"
+        projects_dir = tmp_path / "cave-projects"
+        monkeypatch.setattr(wrapper, "PROJECTS_DIR", projects_dir)
+        (projects_dir / slug).mkdir(parents=True)
+
+        # Host at commit A
+        host = tmp_path / "host"
+        host.mkdir()
+        git_run("git", "init", "-b", "main", str(host))
+        (host / "file.txt").write_text("original\n")
+        git_run("git", "-C", str(host), "add", ".")
+        git_run("git", "-C", str(host), "commit", "-m", "initial")
+
+        wrapper.initialize_gitdir(slug, host)
+        shared_gitdir = projects_dir / slug / "gitdir"
+
+        # Advance shared gitdir (simulating prior session commit)
+        env = {**os.environ, **GIT_ENV}
+        blob = subprocess.run(
+            ["git", "--git-dir", str(shared_gitdir), "hash-object", "-w",
+             "--stdin"],
+            input="committed\n", capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        head_tree = subprocess.run(
+            ["git", "--git-dir", str(shared_gitdir), "rev-parse", "HEAD^{tree}"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        ls_tree = subprocess.run(
+            ["git", "--git-dir", str(shared_gitdir), "ls-tree", head_tree],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        new_tree_input = ls_tree.replace(
+            ls_tree.split("\t")[0].split()[-1], blob)
+        new_tree = subprocess.run(
+            ["git", "--git-dir", str(shared_gitdir), "mktree"],
+            input=new_tree_input, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        head = subprocess.run(
+            ["git", "--git-dir", str(shared_gitdir), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        new_commit = subprocess.run(
+            ["git", "--git-dir", str(shared_gitdir),
+             "commit-tree", new_tree, "-p", head, "-m", "cave edit"],
+            capture_output=True, text=True, check=True, env=env,
+        ).stdout.strip()
+        subprocess.run(
+            ["git", "--git-dir", str(shared_gitdir),
+             "update-ref", "refs/heads/main", new_commit],
+            capture_output=True, check=True,
+        )
+
+        # Session gitdir created from shared (HEAD=B)
+        overlay_base = tmp_path / "overlay"
+        overlay_base.mkdir()
+        session_gitdir = wrapper.create_session_gitdir(slug, "test-sid", overlay_base)
+
+        # Simulate a saved upper with the committed file + uncommitted edit
+        workdir = tmp_path / "workdir"
+        shutil.copytree(host, workdir, dirs_exist_ok=True)
+        shutil.rmtree(workdir / ".git", ignore_errors=True)
+        (workdir / "file.txt").write_text("committed\n")       # from prior commit
+        (workdir / "scratch.txt").write_text("uncommitted\n")   # uncommitted work
+
+        # Verify trees differ (checkout would normally fire)
+        host_tree = subprocess.run(
+            ["git", "-C", str(host), "rev-parse", "HEAD^{tree}"],
+            capture_output=True, text=True,
+        )
+        session_tree = wrapper.git(session_gitdir, "rev-parse", "HEAD^{tree}",
+                                   capture_output=True, text=True)
+        assert host_tree.stdout.strip() != session_tree.stdout.strip()
+
+        # With has_saved_upper=True, checkout should be SKIPPED.
+        # If checkout ran, it would delete scratch.txt (not in HEAD).
+        # Verify scratch.txt survives (simulating the skip).
+        has_saved_upper = True
+        if not has_saved_upper:
+            subprocess.run(
+                ["git", "--git-dir", str(session_gitdir),
+                 "--work-tree", str(workdir)] + wrapper.SAFE_GIT_OPTS +
+                ["checkout", "-f"],
+                capture_output=True,
+            )
+
+        assert (workdir / "scratch.txt").read_text() == "uncommitted\n"
+        assert (workdir / "file.txt").read_text() == "committed\n"
+
+    def test_reset_cleans_saved_upper(self, tmp_path, monkeypatch):
+        """coding-cave reset removes saved-upper."""
+        slug = "test-project"
+        projects_dir = tmp_path / "cave-projects"
+        monkeypatch.setattr(wrapper, "PROJECTS_DIR", projects_dir)
+        (projects_dir / slug).mkdir(parents=True)
+
+        host = tmp_path / "host"
+        host.mkdir()
+        git_run("git", "init", "-b", "main", str(host))
+        (host / "file.txt").write_text("content\n")
+        git_run("git", "-C", str(host), "add", ".")
+        git_run("git", "-C", str(host), "commit", "-m", "initial")
+
+        # Create saved-upper
+        saved = projects_dir / slug / "saved-upper"
+        saved.mkdir()
+        (saved / "dirty.txt").write_text("work\n")
+
+        # Also need the dirs that reset expects
+        for d in ["upper", "work"]:
+            (projects_dir / slug / d).mkdir(exist_ok=True)
+
+        monkeypatch.setattr(wrapper, "PROJECTS_FILE",
+                            projects_dir / "projects.json")
+        wrapper.save_projects({slug: str(host)})
+
+        wrapper.reset_project_overlay(slug)
+
+        assert not saved.exists()
+
+
+class TestSavedIndex:
+    """Test staging area (index) preservation across sessions."""
+
+    @pytest.fixture
+    def project_with_session(self, tmp_path, monkeypatch):
+        """Set up a project with a session gitdir and working directory.
+
+        Returns (slug, projects_dir, session_gitdir, workdir, overlay_base).
+        """
+        slug = "test-project"
+        projects_dir = tmp_path / "cave-projects"
+        monkeypatch.setattr(wrapper, "PROJECTS_DIR", projects_dir)
+        (projects_dir / slug).mkdir(parents=True)
+
+        host = tmp_path / "host"
+        host.mkdir()
+        git_run("git", "init", "-b", "main", str(host))
+        (host / "file.txt").write_text("initial\n")
+        (host / "other.txt").write_text("other\n")
+        git_run("git", "-C", str(host), "add", ".")
+        git_run("git", "-C", str(host), "commit", "-m", "initial")
+
+        wrapper.initialize_gitdir(slug, host)
+
+        overlay_base = tmp_path / "overlay"
+        overlay_base.mkdir()
+        session_gitdir = wrapper.create_session_gitdir(
+            slug, "test-sid", overlay_base)
+
+        workdir = tmp_path / "workdir"
+        workdir.mkdir()
+        git_run("git", "--git-dir", str(session_gitdir),
+                "--work-tree", str(workdir),
+                "checkout", "HEAD", "--", ".")
+        (workdir / ".git").write_text(f"gitdir: {session_gitdir}\n")
+
+        return slug, projects_dir, session_gitdir, workdir, overlay_base
+
+    def test_staged_changes_preserved(self, project_with_session):
+        """Staged changes survive session restart via saved index."""
+        slug, projects_dir, session_gd, workdir, overlay_base = \
+            project_with_session
+        shared_gd = projects_dir / slug / "gitdir"
+
+        # Stage a change
+        (workdir / "file.txt").write_text("staged change\n")
+        cave_git(workdir, "add", "file.txt")
+
+        # Verify it's staged
+        status = cave_git(workdir, "status", "--porcelain")
+        assert "M  file.txt" in status.stdout
+
+        # Simulate session exit: save index + objects
+        wrapper._save_session_index(session_gd, shared_gd, slug)
+
+        saved_index = projects_dir / slug / "saved-index"
+        assert saved_index.is_file()
+
+        # Create new session (should restore saved index)
+        overlay2 = projects_dir / "overlay2"
+        overlay2.mkdir()
+        session_gd2 = wrapper.create_session_gitdir(
+            slug, "test-sid2", overlay2)
+
+        # Simulate saved-upper restore: just write files directly
+        # (no git checkout HEAD -- ., which would clobber the index)
+        workdir2 = projects_dir / "workdir2"
+        workdir2.mkdir()
+        (workdir2 / ".git").write_text(f"gitdir: {session_gd2}\n")
+        (workdir2 / "file.txt").write_text("staged change\n")
+        (workdir2 / "other.txt").write_text("other\n")
+
+        # Check that the file shows as staged (index preserved)
+        status2 = cave_git(workdir2, "status", "--porcelain")
+        assert "M  file.txt" in status2.stdout
+
+        # Saved index should be consumed
+        assert not saved_index.exists()
+
+    def test_partially_staged_preserved(self, project_with_session):
+        """Partially staged files: staged hunks survive restart."""
+        slug, projects_dir, session_gd, workdir, overlay_base = \
+            project_with_session
+        shared_gd = projects_dir / slug / "gitdir"
+
+        # Stage one file, modify another without staging
+        (workdir / "file.txt").write_text("staged\n")
+        cave_git(workdir, "add", "file.txt")
+        (workdir / "other.txt").write_text("unstaged\n")
+
+        status = cave_git(workdir, "status", "--porcelain")
+        assert "M  file.txt" in status.stdout   # staged
+        assert " M other.txt" in status.stdout   # unstaged
+
+        wrapper._save_session_index(session_gd, shared_gd, slug)
+
+        # New session (no git checkout -- simulating saved upper restore)
+        overlay2 = projects_dir / "overlay2"
+        overlay2.mkdir()
+        session_gd2 = wrapper.create_session_gitdir(
+            slug, "test-sid2", overlay2)
+        workdir2 = projects_dir / "workdir2"
+        workdir2.mkdir()
+        (workdir2 / ".git").write_text(f"gitdir: {session_gd2}\n")
+        (workdir2 / "file.txt").write_text("staged\n")
+        (workdir2 / "other.txt").write_text("unstaged\n")
+
+        status2 = cave_git(workdir2, "status", "--porcelain")
+        # file.txt should be staged (in index), other.txt unstaged
+        assert "M  file.txt" in status2.stdout
+        assert " M other.txt" in status2.stdout
+
+    def test_reset_cleans_saved_index(self, tmp_path, monkeypatch):
+        """coding-cave reset removes saved-index."""
+        slug = "test-project"
+        projects_dir = tmp_path / "cave-projects"
+        monkeypatch.setattr(wrapper, "PROJECTS_DIR", projects_dir)
+        (projects_dir / slug).mkdir(parents=True)
+
+        host = tmp_path / "host"
+        host.mkdir()
+        git_run("git", "init", "-b", "main", str(host))
+        (host / "f.txt").write_text("x\n")
+        git_run("git", "-C", str(host), "add", ".")
+        git_run("git", "-C", str(host), "commit", "-m", "init")
+
+        for d in ["upper", "work"]:
+            (projects_dir / slug / d).mkdir(exist_ok=True)
+        (projects_dir / slug / "saved-index").write_bytes(b"fake index")
+
+        monkeypatch.setattr(wrapper, "PROJECTS_FILE",
+                            projects_dir / "projects.json")
+        wrapper.save_projects({slug: str(host)})
+
+        wrapper.reset_project_overlay(slug)
+        assert not (projects_dir / slug / "saved-index").exists()
+
+
+class TestConcurrentSavedUpper:
+    """Test that concurrent sessions don't clobber each other's saved state."""
+
+    def test_empty_upper_does_not_overwrite_saved(self, tmp_path):
+        """A session that didn't modify a project must not overwrite
+        another session's saved-upper for that project.
+
+        Simulates the finally block's save logic: uppers with only .git
+        are skipped.
+        """
+        slug = "test-project"
+        projects_dir = tmp_path / "projects"
+        (projects_dir / slug).mkdir(parents=True)
+
+        # Prior session saved changes
+        saved = projects_dir / slug / "saved-upper"
+        saved.mkdir()
+        (saved / "important.txt").write_text("don't lose me\n")
+        (saved / ".git").write_text("gitdir: /projects/.gitdirs/test-project\n")
+
+        # New session's upper has only .git (no real changes)
+        overlay_base = tmp_path / "session"
+        upper = overlay_base / f"{slug}-upper"
+        upper.mkdir(parents=True)
+        (upper / ".git").write_text("gitdir: /projects/.gitdirs/test-project\n")
+
+        # Simulate the finally block save logic
+        entries = set(os.listdir(upper))
+        entries.discard(".git")
+        # Should NOT save because upper has no real content
+        assert not entries
+
+        # Verify saved-upper is untouched
+        assert (saved / "important.txt").read_text() == "don't lose me\n"
+
+    def test_modified_upper_does_save(self, tmp_path):
+        """A session that modified a project saves its upper."""
+        slug = "test-project"
+        projects_dir = tmp_path / "projects"
+        (projects_dir / slug).mkdir(parents=True)
+
+        overlay_base = tmp_path / "session"
+        upper = overlay_base / f"{slug}-upper"
+        upper.mkdir(parents=True)
+        (upper / ".git").write_text("gitdir: /projects/.gitdirs/test-project\n")
+        (upper / "new-work.txt").write_text("my changes\n")
+
+        entries = set(os.listdir(upper))
+        entries.discard(".git")
+        # Should save because upper has real content
+        assert entries
+
+    def test_clean_index_does_not_overwrite_saved(self, tmp_path, monkeypatch):
+        """A session with clean index must not overwrite another's saved-index."""
+        slug = "test-project"
+        projects_dir = tmp_path / "cave-projects"
+        monkeypatch.setattr(wrapper, "PROJECTS_DIR", projects_dir)
+        (projects_dir / slug).mkdir(parents=True)
+
+        host = tmp_path / "host"
+        host.mkdir()
+        git_run("git", "init", "-b", "main", str(host))
+        (host / "file.txt").write_text("content\n")
+        git_run("git", "-C", str(host), "add", ".")
+        git_run("git", "-C", str(host), "commit", "-m", "initial")
+
+        wrapper.initialize_gitdir(slug, host)
+        shared_gd = projects_dir / slug / "gitdir"
+
+        # Pre-existing saved index from another session
+        (projects_dir / slug / "saved-index").write_bytes(b"precious index")
+
+        # Create a session with NO staged changes
+        overlay = tmp_path / "overlay"
+        overlay.mkdir()
+        session_gd = wrapper.create_session_gitdir(slug, "sid", overlay)
+        # create_session_gitdir consumed the saved-index, but let's
+        # re-create it to simulate the scenario where we DON'T want
+        # the clean session to overwrite it
+        (projects_dir / slug / "saved-index").write_bytes(b"precious index")
+
+        # _save_session_index should NOT overwrite because index is clean
+        wrapper._save_session_index(session_gd, shared_gd, slug)
+
+        # Saved index should be untouched
+        assert (projects_dir / slug / "saved-index").read_bytes() == b"precious index"

@@ -33,8 +33,11 @@ Each agent session runs in its own **per-session bwrap namespace** with per-sess
 - `home/` → `~` inside cave (persistent home directory bind mount; Claude Code state lives here naturally at `.claude/` and `.claude.json`)
 - `projects.json` — project registry (slug → source path)
 - `projects/<slug>/gitdir/` — shared object store and canonical refs; `pull`/`push` operate on this
+- `projects/<slug>/saved-upper/` — overlay upper from last session (uncommitted changes, untracked files, deletions)
+- `projects/<slug>/saved-index` — git index from last session (staging area preservation)
 - `session-overlays/<sid>/` — per-session overlay upper/work dirs and per-session gitdirs (`gitdir-<slug>/`)
-- `nix-overlay/upper/`, `work/`, `merged/` — writable nix store overlay (fuse-overlayfs, shared across sessions)
+- `nix-overlay/upper/`, `db/` — persistent nix store overlay and DB (survive session restarts)
+- `nix-overlay/work/`, `merged/` — transient nix overlay state (cleaned on last session exit)
 
 ### Key Design Decisions
 
@@ -43,10 +46,11 @@ Each agent session runs in its own **per-session bwrap namespace** with per-sess
 - Per-session bwrap: each agent gets its own namespace and overlay, no persistent idle process
 - fuse-overlayfs for all overlays (project overlays and nix store) — kernel overlayfs in user namespaces has two issues: (1) forced `uuid=on` remaps inodes, causing EOVERFLOW on ext4 with high inode numbers, and (2) CVE-2023-0386 copy-up check requires all lower-layer UIDs/GIDs to be mapped in the mounter's namespace, but unprivileged users can only map 1 UID/GID. fuse-overlayfs handles copy-up in userspace, bypassing both. The wrapper mounts all overlays before spawning bwrap, passing merged dirs via `--bind`. `/dev/fuse` is bind-mounted into the cave for nested caves.
 - Per-session gitdirs — each session gets its own gitdir (HEAD, index, refs) with `objects/info/alternates` pointing to the shared object store. Bind-mounted at `/projects/.gitdirs/<slug>` with a `.git` file in the overlay upper pointing to it. Shared objects are ro-bind-mounted at `/projects/.shared-objects/<slug>`. On cleanup, branch refs are fast-forwarded into the shared gitdir; divergent refs are saved under `refs/sessions/<sid>/`.
-- `/nix/store` overlay — host nix store as lower layer, cave-local upper for autonomous `nix shell` package management
+- `/nix/store` overlay — host nix store as lower layer, cave-local upper for autonomous `nix shell` package management. Upper and DB persist across sessions so installed packages survive restarts; DB is only seeded from host on first run
 - `pull` fetches from gitdir (host filesystem), rebases to re-author (strips cave-coder identity), then syncs gitdir back. Commits only — no working tree transfer.
 - `push` updates gitdir refs/objects from host. Commits only — no working tree transfer.
-- Session cleanup: session gitdir refs merged into shared gitdir, then overlays and session dirs removed when bwrap exits
+- Session continuity: on exit, overlay upper is saved to `saved-upper/` (preserves uncommitted changes, untracked files, deletions); on start, restored into the new session's overlay. Git stash (ref + reflog) and index (with loose objects) are also preserved. On start, if the shared gitdir's HEAD is ahead of the host (unpulled commits), `git checkout -f` syncs the working tree — but only when no saved upper exists (saved upper already has the correct state). Concurrent sessions: uppers with only `.git` and clean indexes are not saved, preventing idle sessions from clobbering another session's state. **Limitation**: uncommitted state (saved-upper, saved-index, stash) uses a single per-project slot — when multiple sessions with uncommitted changes to the same project exit, last-to-exit wins. Committed changes are safe (refs are merged/rebased/backed up).
+- Session cleanup: session gitdir refs merged into shared gitdir, overlay upper saved, then session dirs removed when bwrap exits
 - GPU access opt-in via `--gpu` flag (two separate sandbox derivations)
 - CWD-based project detection: running `coding-cave` from inside a registered project dir auto-selects it; from an unregistered dir, prompts to add it
 
