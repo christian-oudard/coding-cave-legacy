@@ -1,5 +1,6 @@
 """Tests for pull_project: normal pull, auto-force, and edge cases."""
 import json
+import os
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -7,6 +8,8 @@ from types import SimpleNamespace
 import pytest
 
 import wrapper
+from coding_cave import _state
+from tests.conftest import write_projects
 
 
 def _run(*args, check=True):
@@ -49,18 +52,10 @@ def cave_commit(env, msg, filename="file.txt", content=None, amend=False):
 
 
 @pytest.fixture
-def pull_env(tmp_path, monkeypatch):
-    """Pull testing environment: synced host repo + cave gitdir.
-
-    After setup:
-    - Host has 1 commit (file.txt = "initial")
-    - Gitdir mirrors host (same commit, cave-sync set)
-    - Cave working dir matches
-    - wrapper globals patched for pull_project
-    """
+def pull_env(tmp_path):
+    """Pull testing environment: synced host repo + cave gitdir."""
     slug = "test-project"
 
-    # Host repo
     host = tmp_path / "host"
     host.mkdir()
     _run("git", "-C", str(host), "init", "-b", "main")
@@ -70,7 +65,6 @@ def pull_env(tmp_path, monkeypatch):
     _run("git", "-C", str(host), "add", ".")
     _run("git", "-C", str(host), "commit", "-m", "initial")
 
-    # Gitdir (simulates initialize_gitdir)
     tmpclone = tmp_path / "_tmpclone"
     _run("git", "clone", "--no-checkout", "--local", str(host), str(tmpclone))
     projects_dir = tmp_path / "projects"
@@ -84,28 +78,28 @@ def pull_env(tmp_path, monkeypatch):
     _run("git", "--git-dir", str(gitdir), "config", "user.name", "cave-coder")
     _run("git", "--git-dir", str(gitdir), "read-tree", "HEAD")
 
-    # Cave working dir
     cave = tmp_path / "cave"
     cave.mkdir()
     _run("git", "--git-dir", str(gitdir), "--work-tree", str(cave),
          "checkout", "HEAD", "--", ".")
 
-    # Patch wrapper globals
-    monkeypatch.setattr(wrapper, "PROJECTS_DIR", projects_dir)
-    monkeypatch.setattr(wrapper, "load_projects", lambda: {slug: str(host)})
+    _state.set_cave_data(tmp_path)
+    write_projects(tmp_path, {slug: str(host)})
 
-    # Unset cave git identity env vars so --reset-author uses repo config
-    # (on the real host these aren't set; in the cave they override everything)
+    saved_env = {}
     for var in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
                 "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"):
-        monkeypatch.delenv(var, raising=False)
+        saved_env[var] = os.environ.pop(var, None)
 
-    # Set up cave remote + initial sync
     wrapper.ensure_cave_remote(host, gitdir)
     host_head = _head(host)
     wrapper.sync_refs(gitdir, host, host_head, "main")
 
-    return SimpleNamespace(host=host, gitdir=gitdir, cave=cave, slug=slug)
+    yield SimpleNamespace(host=host, gitdir=gitdir, cave=cave, slug=slug)
+
+    for var, val in saved_env.items():
+        if val is not None:
+            os.environ[var] = val
 
 
 class TestPullForceRequired:
@@ -233,7 +227,7 @@ class TestPullNormal:
 class TestPullEdgeCases:
     """Edge cases: empty repos, stale state, detached HEAD."""
 
-    def test_pull_into_empty_host(self, tmp_path, monkeypatch):
+    def test_pull_into_empty_host(self, tmp_path):
         """Pull into a host repo with no commits initializes from cave.
 
         Regression: 0a7e904 — pull crashed on empty host repos because
@@ -241,14 +235,12 @@ class TestPullEdgeCases:
         """
         slug = "test-project"
 
-        # Empty host repo (no commits)
         host = tmp_path / "host"
         host.mkdir()
         _run("git", "-C", str(host), "init", "-b", "main")
         _run("git", "-C", str(host), "config", "user.email", "host@test.com")
         _run("git", "-C", str(host), "config", "user.name", "Host User")
 
-        # Gitdir with commits (simulate cave that already has work)
         source = tmp_path / "source"
         source.mkdir()
         _run("git", "-C", str(source), "init", "-b", "main")
@@ -258,7 +250,6 @@ class TestPullEdgeCases:
         _run("git", "-C", str(source), "add", ".")
         _run("git", "-C", str(source), "commit", "-m", "cave commit")
 
-        # Create gitdir from source
         projects_dir = tmp_path / "projects"
         proj_state = projects_dir / slug
         proj_state.mkdir(parents=True)
@@ -269,11 +260,8 @@ class TestPullEdgeCases:
         tmpclone.rmdir()
         _run("git", "--git-dir", str(gitdir), "remote", "remove", "origin", check=False)
 
-        monkeypatch.setattr(wrapper, "PROJECTS_DIR", projects_dir)
-        monkeypatch.setattr(wrapper, "load_projects", lambda: {slug: str(host)})
-        for var in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
-                    "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"):
-            monkeypatch.delenv(var, raising=False)
+        _state.set_cave_data(tmp_path)
+        write_projects(tmp_path, {slug: str(host)})
 
         wrapper.pull_project(slug)
 
@@ -283,7 +271,7 @@ class TestPullEdgeCases:
         assert branch == "main"
         assert (host / "file.txt").read_text() == "cave work\n"
 
-    def test_detached_head_uses_main_branch(self, tmp_path, monkeypatch):
+    def test_detached_head_uses_main_branch(self, tmp_path):
         """Pull from detached HEAD gitdir creates 'main' branch, not 'HEAD'.
 
         Regression: e5e228a — git rev-parse --abbrev-ref HEAD returns literal
@@ -291,14 +279,12 @@ class TestPullEdgeCases:
         """
         slug = "test-project"
 
-        # Empty host repo
         host = tmp_path / "host"
         host.mkdir()
         _run("git", "-C", str(host), "init", "-b", "main")
         _run("git", "-C", str(host), "config", "user.email", "host@test.com")
         _run("git", "-C", str(host), "config", "user.name", "Host User")
 
-        # Create gitdir with a commit, then detach HEAD
         source = tmp_path / "source"
         source.mkdir()
         _run("git", "-C", str(source), "init", "-b", "main")
@@ -318,21 +304,14 @@ class TestPullEdgeCases:
         tmpclone.rmdir()
         _run("git", "--git-dir", str(gitdir), "remote", "remove", "origin", check=False)
 
-        # Detach HEAD by writing commit hash directly to HEAD file
-        # (git checkout --detach doesn't work cleanly on bare-ish gitdirs)
         head_hash = _run("git", "--git-dir", str(gitdir), "rev-parse", "HEAD").stdout.strip()
         (gitdir / "HEAD").write_text(head_hash + "\n")
-
-        # Verify it's detached
         abbrev = _run("git", "--git-dir", str(gitdir),
                        "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
         assert abbrev == "HEAD"
 
-        monkeypatch.setattr(wrapper, "PROJECTS_DIR", projects_dir)
-        monkeypatch.setattr(wrapper, "load_projects", lambda: {slug: str(host)})
-        for var in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
-                    "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"):
-            monkeypatch.delenv(var, raising=False)
+        _state.set_cave_data(tmp_path)
+        write_projects(tmp_path, {slug: str(host)})
 
         wrapper.pull_project(slug)
 
@@ -370,7 +349,7 @@ class TestPullEdgeCases:
 class TestPullMidSession:
     """Pull picks up commits from running sessions."""
 
-    def test_pull_sees_session_commits(self, pull_env, tmp_path, monkeypatch):
+    def test_pull_sees_session_commits(self, pull_env, tmp_path):
         """Commits in a per-session gitdir are visible to pull_project."""
         env = pull_env
         sid = "test-session-123"
@@ -378,7 +357,6 @@ class TestPullMidSession:
         # Create session overlay area and per-session gitdir
         overlay_base = tmp_path / "session-overlays" / sid
         overlay_base.mkdir(parents=True)
-        monkeypatch.setattr(wrapper, "CAVE_DATA", tmp_path)
 
         session_gitdir = wrapper.create_session_gitdir(
             env.slug, sid, overlay_base,
@@ -389,7 +367,6 @@ class TestPullMidSession:
         import os
         sessions_dir = tmp_path / "sessions"
         sessions_dir.mkdir(parents=True)
-        monkeypatch.setattr(wrapper, "SESSIONS_DIR", sessions_dir)
         session_info = {
             "sid": sid,
             "project": env.slug,
@@ -423,7 +400,7 @@ class TestPullMidSession:
         wrapper.pull_project(env.slug)
         assert (env.host / "file.txt").read_text() == "from session\n"
 
-    def test_cross_project_session_commits(self, pull_env, tmp_path, monkeypatch):
+    def test_cross_project_session_commits(self, pull_env, tmp_path):
         """Pull project B sees commits from a session started for project A.
 
         Reproduction: start a session in folder A, agent edits and commits to
@@ -435,7 +412,6 @@ class TestPullMidSession:
 
         overlay_base = tmp_path / "session-overlays" / sid
         overlay_base.mkdir(parents=True)
-        monkeypatch.setattr(wrapper, "CAVE_DATA", tmp_path)
 
         # Create per-session gitdir for project B within this session
         session_gitdir = wrapper.create_session_gitdir(
@@ -447,7 +423,6 @@ class TestPullMidSession:
         import os
         sessions_dir = tmp_path / "sessions"
         sessions_dir.mkdir(parents=True)
-        monkeypatch.setattr(wrapper, "SESSIONS_DIR", sessions_dir)
         session_info = {
             "sid": sid,
             "project": "other-project",  # <-- not env.slug

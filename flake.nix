@@ -219,15 +219,19 @@
     sandbox = jail "coding-cave" pkgs.bashInteractive baseCombinators;
     sandboxGpu = jail "coding-cave" pkgs.bashInteractive (baseCombinators ++ gpuCombinators);
 
-    wrapperScript = pkgs.replaceVars ./wrapper.py {
-      SANDBOX_BIN = "${sandbox}/bin/coding-cave";
-      SANDBOX_GPU_BIN = "${sandboxGpu}/bin/coding-cave";
-      VERSION = version;
-    };
+    codingCavePkg = pkgs.runCommand "coding-cave-pkg" {} ''
+      mkdir -p $out/coding_cave
+      cp ${./coding_cave}/*.py $out/coding_cave/
+      substitute ${./coding_cave/_state.py} $out/coding_cave/_state.py \
+        --subst-var-by SANDBOX_BIN "${sandbox}/bin/coding-cave" \
+        --subst-var-by SANDBOX_GPU_BIN "${sandboxGpu}/bin/coding-cave" \
+        --subst-var-by VERSION "${version}"
+    '';
 
     baseScript = pkgs.writeText "coding-cave-script" ''
       export PATH="${pkgs.lib.makeBinPath [pkgs.util-linux pkgs.passt pkgs.fuse-overlayfs]}:$PATH"
-      exec ${pkgs.python3}/bin/python3 ${wrapperScript} "$@"
+      export PYTHONPATH="${codingCavePkg}:''${PYTHONPATH:-}"
+      exec ${pkgs.python3}/bin/python3 -m coding_cave "$@"
     '';
 
     wrapper = pkgs.runCommand "coding-cave-with-alias" {} ''

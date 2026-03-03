@@ -3,103 +3,18 @@
 Documents what works and what doesn't when host or cave has uncommitted
 (untracked, modified, staged) files during push/pull/overlay operations.
 """
-import json
 import os
-import subprocess
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 import wrapper
-
-
-GIT_ENV = {
-    "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "t@t",
-    "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "t@t",
-}
-
-
-def git(*args, **kwargs):
-    env = {**os.environ, **GIT_ENV}
-    return subprocess.run(list(args), capture_output=True, text=True, env=env, **kwargs)
-
-
-def git_head(path, gitdir=False):
-    if gitdir:
-        return git("git", "--git-dir", str(path), "rev-parse", "HEAD").stdout.strip()
-    return git("git", "-C", str(path), "rev-parse", "HEAD").stdout.strip()
-
-
-@pytest.fixture
-def env(tmp_path, monkeypatch):
-    """Full testing environment with host, shared gitdir, session gitdir, and cave workdir.
-
-    Host has one commit (file.txt = "initial").
-    Cave overlay simulated: workdir populated from HEAD, .git pointing to session gitdir.
-    """
-    slug = "test-project"
-
-    # Host repo
-    host = tmp_path / "host"
-    host.mkdir()
-    git("git", "init", "-b", "main", str(host))
-    git("git", "-C", str(host), "config", "user.email", "host@test.com")
-    git("git", "-C", str(host), "config", "user.name", "Host User")
-    (host / "file.txt").write_text("initial\n")
-    git("git", "-C", str(host), "add", ".")
-    git("git", "-C", str(host), "commit", "-m", "initial")
-
-    # Shared gitdir
-    projects_dir = tmp_path / "projects"
-    (projects_dir / slug).mkdir(parents=True)
-    monkeypatch.setattr(wrapper, "PROJECTS_DIR", projects_dir)
-    monkeypatch.setattr(wrapper, "load_projects", lambda: {slug: str(host)})
-    for var in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
-                "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"):
-        monkeypatch.delenv(var, raising=False)
-
-    wrapper.initialize_gitdir(slug, host)
-    shared_gd = projects_dir / slug / "gitdir"
-
-    # Session gitdir
-    monkeypatch.setattr(wrapper, "CAVE_DATA", tmp_path)
-    overlay_base = tmp_path / "session-overlays" / "sid-test"
-    overlay_base.mkdir(parents=True)
-    session_gd = wrapper.create_session_gitdir(slug, "sid-test", overlay_base)
-    git("git", "--git-dir", str(session_gd), "config", "user.email", "cave@test.com")
-    git("git", "--git-dir", str(session_gd), "config", "user.name", "cave-coder")
-
-    # Cave working directory (simulates overlay merged view)
-    cave = tmp_path / "cave"
-    cave.mkdir()
-    git("git", "--git-dir", str(session_gd), "--work-tree", str(cave),
-        "checkout", "HEAD", "--", ".")
-    (cave / ".git").write_text(f"gitdir: {session_gd}\n")
-
-    # Set up cave-sync and cave remote for pull
-    wrapper.ensure_cave_remote(host, shared_gd)
-    host_head = git_head(host)
-    wrapper.sync_refs(shared_gd, host, host_head, "main")
-
-    # Register fake session
-    sessions_dir = tmp_path / "sessions"
-    sessions_dir.mkdir(parents=True)
-    monkeypatch.setattr(wrapper, "SESSIONS_DIR", sessions_dir)
-    (sessions_dir / "sid-test.json").write_text(json.dumps({
-        "sid": "sid-test", "project": slug,
-        "bwrap_pid": os.getpid(), "started": 0,
-    }))
-
-    return SimpleNamespace(
-        host=host, cave=cave, shared_gd=shared_gd,
-        session_gd=session_gd, overlay_base=overlay_base,
-        slug=slug, tmp_path=tmp_path,
-    )
+from coding_cave import _state
+from tests.conftest import git_run, git_head, write_projects, write_session
 
 
 def cave_git(e, *args):
-    return git("git", "-C", str(e.cave), *args)
+    return git_run("git", "-C", str(e.cave), *args)
 
 
 def cave_commit(e, msg, filename="file.txt", content=None, amend=False):
@@ -110,6 +25,71 @@ def cave_commit(e, msg, filename="file.txt", content=None, amend=False):
     if amend:
         args.append("--amend")
     cave_git(e, *args)
+
+
+@pytest.fixture
+def env(tmp_path):
+    """Full testing environment with host, shared gitdir, session gitdir, and cave workdir.
+
+    Host has one commit (file.txt = "initial").
+    Cave overlay simulated: workdir populated from HEAD, .git pointing to session gitdir.
+    """
+    slug = "test-project"
+
+    # Host repo
+    host = tmp_path / "host"
+    host.mkdir()
+    git_run("git", "init", "-b", "main", str(host))
+    git_run("git", "-C", str(host), "config", "user.email", "host@test.com")
+    git_run("git", "-C", str(host), "config", "user.name", "Host User")
+    (host / "file.txt").write_text("initial\n")
+    git_run("git", "-C", str(host), "add", ".")
+    git_run("git", "-C", str(host), "commit", "-m", "initial")
+
+    # Set up cave data paths
+    _state.set_cave_data(tmp_path)
+    (_state.projects_dir() / slug).mkdir(parents=True)
+    write_projects(tmp_path, {slug: str(host)})
+
+    saved_env = {}
+    for var in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
+                "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"):
+        saved_env[var] = os.environ.pop(var, None)
+
+    wrapper.initialize_gitdir(slug, host)
+    shared_gd = _state.projects_dir() / slug / "gitdir"
+
+    # Session gitdir
+    overlay_base = tmp_path / "session-overlays" / "sid-test"
+    overlay_base.mkdir(parents=True)
+    session_gd = wrapper.create_session_gitdir(slug, "sid-test", overlay_base)
+    git_run("git", "--git-dir", str(session_gd), "config", "user.email", "cave@test.com")
+    git_run("git", "--git-dir", str(session_gd), "config", "user.name", "cave-coder")
+
+    # Cave working directory (simulates overlay merged view)
+    cave = tmp_path / "cave"
+    cave.mkdir()
+    git_run("git", "--git-dir", str(session_gd), "--work-tree", str(cave),
+            "checkout", "HEAD", "--", ".")
+    (cave / ".git").write_text(f"gitdir: {session_gd}\n")
+
+    # Set up cave-sync and cave remote for pull
+    wrapper.ensure_cave_remote(host, shared_gd)
+    host_head = git_head(host)
+    wrapper.sync_refs(shared_gd, host, host_head, "main")
+
+    # Register session
+    write_session(tmp_path, "sid-test", slug)
+
+    yield SimpleNamespace(
+        host=host, cave=cave, shared_gd=shared_gd,
+        session_gd=session_gd, overlay_base=overlay_base,
+        slug=slug, tmp_path=tmp_path,
+    )
+
+    for var, val in saved_env.items():
+        if val is not None:
+            os.environ[var] = val
 
 
 # --- Overlay visibility: host uncommitted files visible in cave ---
@@ -182,7 +162,7 @@ class TestPushUncommitted:
     def test_push_ignores_host_staged_files(self, env):
         """Host staged files don't affect push."""
         (env.host / "staged.txt").write_text("staged\n")
-        git("git", "-C", str(env.host), "add", "staged.txt")
+        git_run("git", "-C", str(env.host), "add", "staged.txt")
 
         old_head = git_head(env.shared_gd, gitdir=True)
         wrapper.push_project(env.slug)
@@ -194,8 +174,8 @@ class TestPushUncommitted:
         """Push transfers only committed changes from host."""
         # Host commits something new
         (env.host / "new.txt").write_text("committed\n")
-        git("git", "-C", str(env.host), "add", "new.txt")
-        git("git", "-C", str(env.host), "commit", "-m", "host commit")
+        git_run("git", "-C", str(env.host), "add", "new.txt")
+        git_run("git", "-C", str(env.host), "commit", "-m", "host commit")
 
         # Also has uncommitted changes
         (env.host / "uncommitted.txt").write_text("not in push\n")
@@ -207,8 +187,8 @@ class TestPushUncommitted:
         assert old_head != new_head  # Committed change was pushed
 
         # But the uncommitted file is not in the gitdir
-        ls_tree = git("git", "--git-dir", str(env.shared_gd),
-                       "ls-tree", "HEAD", "--name-only")
+        ls_tree = git_run("git", "--git-dir", str(env.shared_gd),
+                          "ls-tree", "HEAD", "--name-only")
         assert "uncommitted.txt" not in ls_tree.stdout
 
 
@@ -298,7 +278,7 @@ class TestPullPreservesHostUncommitted:
     def test_pull_preserves_host_staged(self, env):
         """Host staged files survive a pull."""
         (env.host / "staged.txt").write_text("staged\n")
-        git("git", "-C", str(env.host), "add", "staged.txt")
+        git_run("git", "-C", str(env.host), "add", "staged.txt")
 
         cave_commit(env, "cave work", filename="other.txt", content="new\n")
         wrapper.pull_project(env.slug)
@@ -321,8 +301,8 @@ class TestSessionLifecycleUncommitted:
         wrapper.merge_session_gitdirs("sid-test", env.overlay_base)
 
         # Shared gitdir should NOT have the uncommitted file
-        ls_tree = git("git", "--git-dir", str(env.shared_gd),
-                       "ls-tree", "HEAD", "--name-only")
+        ls_tree = git_run("git", "--git-dir", str(env.shared_gd),
+                          "ls-tree", "HEAD", "--name-only")
         assert "wip.txt" not in ls_tree.stdout
 
     def test_committed_survives_session_merge(self, env):
@@ -331,8 +311,8 @@ class TestSessionLifecycleUncommitted:
 
         wrapper.merge_session_gitdirs("sid-test", env.overlay_base)
 
-        ls_tree = git("git", "--git-dir", str(env.shared_gd),
-                       "ls-tree", "HEAD", "--name-only")
+        ls_tree = git_run("git", "--git-dir", str(env.shared_gd),
+                          "ls-tree", "HEAD", "--name-only")
         assert "saved.txt" in ls_tree.stdout
 
     def test_staged_not_committed_lost_on_merge(self, env):
@@ -343,8 +323,8 @@ class TestSessionLifecycleUncommitted:
 
         wrapper.merge_session_gitdirs("sid-test", env.overlay_base)
 
-        ls_tree = git("git", "--git-dir", str(env.shared_gd),
-                       "ls-tree", "HEAD", "--name-only")
+        ls_tree = git_run("git", "--git-dir", str(env.shared_gd),
+                          "ls-tree", "HEAD", "--name-only")
         assert "staged.txt" not in ls_tree.stdout
 
 
@@ -360,14 +340,14 @@ class TestPushWithCaveUncommitted:
 
         # Host makes a new commit
         (env.host / "new.txt").write_text("from host\n")
-        git("git", "-C", str(env.host), "add", "new.txt")
-        git("git", "-C", str(env.host), "commit", "-m", "host update")
+        git_run("git", "-C", str(env.host), "add", "new.txt")
+        git_run("git", "-C", str(env.host), "commit", "-m", "host update")
 
         wrapper.push_project(env.slug)
 
         # Gitdir should have the host commit
-        ls_tree = git("git", "--git-dir", str(env.shared_gd),
-                       "ls-tree", "HEAD", "--name-only")
+        ls_tree = git_run("git", "--git-dir", str(env.shared_gd),
+                          "ls-tree", "HEAD", "--name-only")
         assert "new.txt" in ls_tree.stdout
 
     def test_push_does_not_see_cave_session_commits(self, env):
@@ -384,8 +364,8 @@ class TestPushWithCaveUncommitted:
 
         # Host also commits (divergent)
         (env.host / "host.txt").write_text("from host\n")
-        git("git", "-C", str(env.host), "add", "host.txt")
-        git("git", "-C", str(env.host), "commit", "-m", "host update")
+        git_run("git", "-C", str(env.host), "add", "host.txt")
+        git_run("git", "-C", str(env.host), "commit", "-m", "host update")
 
         # Push should warn about unpulled commits
         with pytest.raises(SystemExit):
@@ -397,8 +377,8 @@ class TestPushWithCaveUncommitted:
         wrapper.merge_session_gitdirs("sid-test", env.overlay_base)
 
         (env.host / "host.txt").write_text("from host\n")
-        git("git", "-C", str(env.host), "add", "host.txt")
-        git("git", "-C", str(env.host), "commit", "-m", "host update")
+        git_run("git", "-C", str(env.host), "add", "host.txt")
+        git_run("git", "-C", str(env.host), "commit", "-m", "host update")
 
         wrapper.push_project(env.slug, force=True)
 

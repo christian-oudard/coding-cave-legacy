@@ -1,69 +1,13 @@
 """Tests for CLI commands: add, remove, move, reset, status, and helpers."""
-import json
 import os
 import subprocess
-from io import StringIO
 from pathlib import Path
-from types import SimpleNamespace
-from unittest import mock
 
 import pytest
 
 import wrapper
-
-
-GIT_ENV = {
-    "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "t@t",
-    "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "t@t",
-}
-
-
-def git(*args, **kwargs):
-    env = {**os.environ, **GIT_ENV}
-    return subprocess.run(list(args), capture_output=True, text=True, env=env, **kwargs)
-
-
-def _head(path):
-    return git("git", "-C", str(path), "rev-parse", "HEAD").stdout.strip()
-
-
-@pytest.fixture
-def cave_env(tmp_path, monkeypatch):
-    """Minimal cave environment with patched globals."""
-    cave_data = tmp_path / "cave-data"
-    projects_dir = cave_data / "projects"
-    projects_dir.mkdir(parents=True)
-    sessions_dir = cave_data / "sessions"
-    sessions_dir.mkdir(parents=True)
-    projects_file = cave_data / "projects.json"
-
-    monkeypatch.setattr(wrapper, "CAVE_DATA", cave_data)
-    monkeypatch.setattr(wrapper, "PROJECTS_DIR", projects_dir)
-    monkeypatch.setattr(wrapper, "PROJECTS_FILE", projects_file)
-    monkeypatch.setattr(wrapper, "SESSIONS_DIR", sessions_dir)
-    monkeypatch.setattr(wrapper, "CAVE_HOME", cave_data / "home")
-
-    for var in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
-                "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"):
-        monkeypatch.delenv(var, raising=False)
-
-    return SimpleNamespace(
-        cave_data=cave_data, projects_dir=projects_dir,
-        sessions_dir=sessions_dir, projects_file=projects_file,
-        tmp_path=tmp_path,
-    )
-
-
-def make_repo(path, name="main"):
-    """Create a git repo with one commit."""
-    path.mkdir(parents=True, exist_ok=True)
-    git("git", "-C", str(path), "init", "-b", name)
-    git("git", "-C", str(path), "config", "user.email", "test@test.com")
-    git("git", "-C", str(path), "config", "user.name", "Test")
-    (path / "file.txt").write_text("initial\n")
-    git("git", "-C", str(path), "add", ".")
-    git("git", "-C", str(path), "commit", "-m", "initial")
-    return path
+from coding_cave import _state
+from tests.conftest import GIT_ENV, git_run, make_repo, write_projects
 
 
 # --- Slugify ---
@@ -124,11 +68,9 @@ class TestSessionTracking:
         assert len(wrapper.list_sessions()) == 2
 
     def test_stale_session_cleaned(self, cave_env):
-        # Register with a dead PID
         wrapper.register_session("dead-session", "proj", 999999)
         sessions = wrapper.list_sessions()
         assert len(sessions) == 0
-        # Session file should be cleaned up
         assert not (cave_env.sessions_dir / "dead-session.json").exists()
 
     def test_cleanup_session(self, cave_env):
@@ -198,7 +140,6 @@ class TestCmdRemove:
 
         with pytest.raises(SystemExit):
             wrapper.cmd_remove(["my-project"])
-        # Project should still exist
         assert "my-project" in wrapper.load_projects()
 
     def test_remove_from_cwd(self, cave_env, monkeypatch):
@@ -266,7 +207,6 @@ class TestCmdMove:
             wrapper.cmd_move("proj", str(cave_env.tmp_path / "new"))
 
     def test_move_same_slug(self, cave_env):
-        """Move to new path with same dir name (only path changes)."""
         subdir = cave_env.tmp_path / "dir1"
         subdir.mkdir()
         repo = make_repo(subdir / "proj")
@@ -291,7 +231,6 @@ class TestCmdReset:
         gitdir = cave_env.projects_dir / "proj" / "gitdir"
         assert gitdir.is_dir()
 
-        # Add a marker file inside gitdir
         (gitdir / "marker").write_text("old")
 
         wrapper.cmd_reset(["proj"])
@@ -311,11 +250,9 @@ class TestCmdReset:
             wrapper.cmd_reset(["nonexistent"])
 
     def test_reset_warns_unpulled(self, cave_env, monkeypatch):
-        """Reset with unpulled commits prompts for confirmation."""
         repo = make_repo(cave_env.tmp_path / "proj")
         wrapper.cmd_add([str(repo)])
 
-        # Make a cave commit that host doesn't have
         gitdir = cave_env.projects_dir / "proj" / "gitdir"
         cave_work = cave_env.tmp_path / "cave-work"
         cave_work.mkdir()
@@ -336,11 +273,9 @@ class TestCmdReset:
             capture_output=True, env={**os.environ, **GIT_ENV},
         )
 
-        # Decline confirmation
         monkeypatch.setattr("builtins.input", lambda _: "n")
         wrapper.cmd_reset(["proj"])
 
-        # Gitdir should NOT be wiped (user declined)
         head = subprocess.run(
             ["git", "--git-dir", str(gitdir), "rev-parse", "HEAD"],
             capture_output=True, text=True,
@@ -352,7 +287,6 @@ class TestCmdReset:
         wrapper.cmd_add([str(repo)])
         monkeypatch.chdir(repo)
         wrapper.cmd_reset([])
-        # Should succeed without error
 
 
 # --- project_sync_status ---
@@ -368,7 +302,6 @@ class TestProjectSyncStatus:
         repo = make_repo(cave_env.tmp_path / "proj")
         wrapper.cmd_add([str(repo)])
 
-        # Make a cave commit
         gitdir = cave_env.projects_dir / "proj" / "gitdir"
         cave_work = cave_env.tmp_path / "cave-work"
         cave_work.mkdir()
@@ -396,10 +329,9 @@ class TestProjectSyncStatus:
         repo = make_repo(cave_env.tmp_path / "proj")
         wrapper.cmd_add([str(repo)])
 
-        # Make a host commit
         (repo / "new.txt").write_text("host\n")
-        git("git", "-C", str(repo), "add", ".")
-        git("git", "-C", str(repo), "commit", "-m", "host commit")
+        git_run("git", "-C", str(repo), "add", ".")
+        git_run("git", "-C", str(repo), "commit", "-m", "host commit")
 
         status = wrapper.project_sync_status("proj", str(repo))
         assert "to push" in status
@@ -424,29 +356,14 @@ class TestProjectSyncStatus:
 # --- _parse_oneline / _print_rewrite_summary ---
 
 class TestRewriteHelpers:
-    """Test the pull_project helper functions for rewrite messaging."""
-
-    def _make_completed_process(self, stdout, returncode=0):
-        return subprocess.CompletedProcess(
-            args=[], returncode=returncode, stdout=stdout, stderr="",
-        )
-
-    def test_force_pull_shows_amend_label(self, tmp_path, monkeypatch, capsys):
-        """Force pull output shows amended vs new commits."""
+    def test_force_pull_shows_amend_label(self, tmp_path, capsys):
         slug = "test-project"
 
-        host = tmp_path / "host"
-        host.mkdir()
-        subprocess.run(["git", "-C", str(host), "init", "-b", "main"],
-                       capture_output=True)
-        subprocess.run(["git", "-C", str(host), "config", "user.email", "h@t"],
-                       capture_output=True)
-        subprocess.run(["git", "-C", str(host), "config", "user.name", "Host"],
-                       capture_output=True)
-        (host / "file.txt").write_text("initial\n")
-        subprocess.run(["git", "-C", str(host), "add", "."], capture_output=True)
-        subprocess.run(["git", "-C", str(host), "commit", "-m", "initial"],
-                       capture_output=True)
+        host = make_repo(tmp_path / "host")
+
+        # Set up gitdir + cave working dir
+        _state.set_cave_data(tmp_path)
+        write_projects(tmp_path, {slug: str(host)})
 
         projects_dir = tmp_path / "projects"
         proj_state = projects_dir / slug
@@ -466,59 +383,60 @@ class TestRewriteHelpers:
         subprocess.run(["git", "--git-dir", str(gitdir), "read-tree", "HEAD"],
                        capture_output=True)
 
-        monkeypatch.setattr(wrapper, "PROJECTS_DIR", projects_dir)
-        monkeypatch.setattr(wrapper, "load_projects", lambda: {slug: str(host)})
+        # Unset cave identity
+        saved = {}
         for var in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
                     "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"):
-            monkeypatch.delenv(var, raising=False)
+            saved[var] = os.environ.pop(var, None)
 
-        wrapper.ensure_cave_remote(host, gitdir)
-        host_head = subprocess.run(
-            ["git", "-C", str(host), "rev-parse", "HEAD"],
-            capture_output=True, text=True,
-        ).stdout.strip()
-        wrapper.sync_refs(gitdir, host, host_head, "main")
+        try:
+            wrapper.ensure_cave_remote(host, gitdir)
+            host_head = subprocess.run(
+                ["git", "-C", str(host), "rev-parse", "HEAD"],
+                capture_output=True, text=True,
+            ).stdout.strip()
+            wrapper.sync_refs(gitdir, host, host_head, "main")
 
-        # Cave: make a commit, pull it, then amend + add new
-        cave = tmp_path / "cave"
-        cave.mkdir()
-        subprocess.run(["git", "--git-dir", str(gitdir), "--work-tree", str(cave),
-                        "checkout", "HEAD", "--", "."], capture_output=True)
-        (cave / "file.txt").write_text("v1\n")
-        subprocess.run(["git", "--git-dir", str(gitdir), "--work-tree", str(cave),
-                        "add", "file.txt"], capture_output=True)
-        subprocess.run(["git", "--git-dir", str(gitdir), "--work-tree", str(cave),
-                        "commit", "-m", "cave work"], capture_output=True)
-        wrapper.pull_project(slug)
+            cave = tmp_path / "cave"
+            cave.mkdir()
+            subprocess.run(["git", "--git-dir", str(gitdir), "--work-tree", str(cave),
+                            "checkout", "HEAD", "--", "."], capture_output=True)
+            (cave / "file.txt").write_text("v1\n")
+            subprocess.run(["git", "--git-dir", str(gitdir), "--work-tree", str(cave),
+                            "add", "file.txt"], capture_output=True)
+            subprocess.run(["git", "--git-dir", str(gitdir), "--work-tree", str(cave),
+                            "commit", "-m", "cave work"], capture_output=True)
+            wrapper.pull_project(slug)
 
-        # Now amend the commit and add a new one
-        (cave / "file.txt").write_text("v2\n")
-        subprocess.run(["git", "--git-dir", str(gitdir), "--work-tree", str(cave),
-                        "add", "file.txt"], capture_output=True)
-        subprocess.run(["git", "--git-dir", str(gitdir), "--work-tree", str(cave),
-                        "commit", "--amend", "-m", "cave work"],
-                       capture_output=True)
-        (cave / "extra.txt").write_text("bonus\n")
-        subprocess.run(["git", "--git-dir", str(gitdir), "--work-tree", str(cave),
-                        "add", "extra.txt"], capture_output=True)
-        subprocess.run(["git", "--git-dir", str(gitdir), "--work-tree", str(cave),
-                        "commit", "-m", "extra work"], capture_output=True)
+            (cave / "file.txt").write_text("v2\n")
+            subprocess.run(["git", "--git-dir", str(gitdir), "--work-tree", str(cave),
+                            "add", "file.txt"], capture_output=True)
+            subprocess.run(["git", "--git-dir", str(gitdir), "--work-tree", str(cave),
+                            "commit", "--amend", "-m", "cave work"],
+                           capture_output=True)
+            (cave / "extra.txt").write_text("bonus\n")
+            subprocess.run(["git", "--git-dir", str(gitdir), "--work-tree", str(cave),
+                            "add", "extra.txt"], capture_output=True)
+            subprocess.run(["git", "--git-dir", str(gitdir), "--work-tree", str(cave),
+                            "commit", "-m", "extra work"], capture_output=True)
 
-        # Without force: should refuse and show diff
-        capsys.readouterr()  # clear
-        wrapper.pull_project(slug)
-        refuse_output = capsys.readouterr().err
-        assert "rewrote history" in refuse_output
-        assert "1 -> 2" in refuse_output
-        assert "->" in refuse_output  # amended commit
-        assert "+" in refuse_output   # new commit
+            capsys.readouterr()
+            wrapper.pull_project(slug)
+            refuse_output = capsys.readouterr().err
+            assert "rewrote history" in refuse_output
+            assert "1 -> 2" in refuse_output
+            assert "->" in refuse_output
+            assert "+" in refuse_output
 
-        # With force: should succeed
-        capsys.readouterr()
-        wrapper.pull_project(slug, force=True)
-        force_output = capsys.readouterr().err
-        assert "1 -> 2" in force_output
-        assert (host / "extra.txt").read_text() == "bonus\n"
+            capsys.readouterr()
+            wrapper.pull_project(slug, force=True)
+            force_output = capsys.readouterr().err
+            assert "1 -> 2" in force_output
+            assert (host / "extra.txt").read_text() == "bonus\n"
+        finally:
+            for var, val in saved.items():
+                if val is not None:
+                    os.environ[var] = val
 
 
 # --- ensure_project ---

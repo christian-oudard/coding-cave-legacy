@@ -1,44 +1,30 @@
 """Tests for coding-cave cp: file transfer to/from running sessions."""
-import json
-import os
-import subprocess
-from pathlib import Path
-
 import pytest
 
 import wrapper
-
-
-GIT_ENV = {
-    "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "t@t",
-    "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "t@t",
-}
-
-
-def git(*args, **kwargs):
-    env = {**os.environ, **GIT_ENV}
-    return subprocess.run(list(args), capture_output=True, text=True, env=env, **kwargs)
+from coding_cave import _state
+from tests.conftest import git_run, write_projects, write_session
 
 
 @pytest.fixture
-def cp_env(tmp_path, monkeypatch):
+def cp_env(tmp_path):
     """Environment with a running session, simulating the overlay merged dir.
 
-    Returns namespace with: host, slug, merged (overlay merged dir), sessions_dir.
+    Returns namespace with: host, slug, merged (overlay merged dir), tmp_path.
     """
     slug = "test-project"
 
     # Host repo
     host = tmp_path / "host"
     host.mkdir()
-    git("git", "init", "-b", "main", str(host))
+    git_run("git", "init", "-b", "main", str(host))
     (host / "file.txt").write_text("initial\n")
-    git("git", "-C", str(host), "add", ".")
-    git("git", "-C", str(host), "commit", "-m", "initial")
+    git_run("git", "-C", str(host), "add", ".")
+    git_run("git", "-C", str(host), "commit", "-m", "initial")
 
-    # Set up CAVE_DATA
+    # Set up cave data
     cave_data = tmp_path / "cave-data"
-    monkeypatch.setattr(wrapper, "CAVE_DATA", cave_data)
+    _state.set_cave_data(cave_data)
 
     # Session overlay merged dir (simulates fuse-overlayfs merged view)
     sid = "test-session-1"
@@ -48,19 +34,11 @@ def cp_env(tmp_path, monkeypatch):
     (merged / "file.txt").write_text("initial\n")
 
     # Session tracking
-    sessions_dir = cave_data / "sessions"
-    sessions_dir.mkdir(parents=True)
-    monkeypatch.setattr(wrapper, "SESSIONS_DIR", sessions_dir)
-    (sessions_dir / f"{sid}.json").write_text(json.dumps({
-        "sid": sid, "project": slug,
-        "bwrap_pid": os.getpid(), "started": 0,
-    }))
+    write_session(cave_data, sid, slug)
 
     # Project registry
-    projects_dir = cave_data / "projects"
-    (projects_dir / slug).mkdir(parents=True)
-    monkeypatch.setattr(wrapper, "PROJECTS_DIR", projects_dir)
-    monkeypatch.setattr(wrapper, "load_projects", lambda: {slug: str(host)})
+    (_state.projects_dir() / slug).mkdir(parents=True)
+    write_projects(cave_data, {slug: str(host)})
 
     class Env:
         pass
@@ -198,7 +176,7 @@ class TestCpNoSession:
     def test_no_session_exits(self, cp_env):
         e = cp_env
         # Remove the session file
-        for f in (wrapper.SESSIONS_DIR).iterdir():
+        for f in _state.sessions_dir().iterdir():
             f.unlink()
 
         src = e.tmp_path / "data.txt"

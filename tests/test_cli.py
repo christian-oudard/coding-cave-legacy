@@ -6,6 +6,8 @@ from unittest import mock
 import pytest
 
 import wrapper
+from coding_cave import _state
+from tests.conftest import write_projects
 
 
 def parse(argv):
@@ -102,27 +104,31 @@ class TestDetectProjectFromCwd:
     def test_registered_project_returns_path(self, tmp_path, monkeypatch):
         monkeypatch.setattr(Path, "cwd", staticmethod(lambda: tmp_path))
         monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path.parent))
-        monkeypatch.setattr(wrapper, "list_projects", lambda: [("proj", str(tmp_path))])
+        _state.set_cave_data(tmp_path / "cave-data")
+        write_projects(tmp_path / "cave-data", {"proj": str(tmp_path)})
         assert wrapper.detect_project_from_cwd() == tmp_path
 
     def test_accept_prompt_returns_cwd(self, tmp_path, monkeypatch):
         monkeypatch.setattr(Path, "cwd", staticmethod(lambda: tmp_path))
         monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path.parent))
-        monkeypatch.setattr(wrapper, "list_projects", lambda: [])
+        _state.set_cave_data(tmp_path / "cave-data")
+        write_projects(tmp_path / "cave-data", {})
         monkeypatch.setattr("builtins.input", lambda _: "y")
         assert wrapper.detect_project_from_cwd() == tmp_path
 
     def test_empty_input_accepts(self, tmp_path, monkeypatch):
         monkeypatch.setattr(Path, "cwd", staticmethod(lambda: tmp_path))
         monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path.parent))
-        monkeypatch.setattr(wrapper, "list_projects", lambda: [])
+        _state.set_cave_data(tmp_path / "cave-data")
+        write_projects(tmp_path / "cave-data", {})
         monkeypatch.setattr("builtins.input", lambda _: "")
         assert wrapper.detect_project_from_cwd() == tmp_path
 
     def test_decline_prompt_exits(self, tmp_path, monkeypatch):
         monkeypatch.setattr(Path, "cwd", staticmethod(lambda: tmp_path))
         monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path.parent))
-        monkeypatch.setattr(wrapper, "list_projects", lambda: [])
+        _state.set_cave_data(tmp_path / "cave-data")
+        write_projects(tmp_path / "cave-data", {})
         monkeypatch.setattr("builtins.input", lambda _: "n")
         with pytest.raises(SystemExit) as exc_info:
             wrapper.detect_project_from_cwd()
@@ -131,7 +137,8 @@ class TestDetectProjectFromCwd:
     def test_eof_returns_none(self, tmp_path, monkeypatch):
         monkeypatch.setattr(Path, "cwd", staticmethod(lambda: tmp_path))
         monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path.parent))
-        monkeypatch.setattr(wrapper, "list_projects", lambda: [])
+        _state.set_cave_data(tmp_path / "cave-data")
+        write_projects(tmp_path / "cave-data", {})
         monkeypatch.setattr("builtins.input", mock.Mock(side_effect=EOFError))
         assert wrapper.detect_project_from_cwd() is None
 
@@ -203,20 +210,20 @@ class TestNsenterShellScript:
 class TestProjectRequired:
     """cmd_agent and cmd_shell exit with error when no project is detected."""
 
-    def _patch_no_project(self, monkeypatch):
-        monkeypatch.setattr(wrapper, "detect_project_from_cwd", lambda: None)
-        monkeypatch.setattr(wrapper, "load_global_config", lambda: {})
-        monkeypatch.setattr(wrapper, "setup_env", lambda _: None)
-
-    def test_cmd_agent_exits_without_project(self, monkeypatch, capsys):
-        self._patch_no_project(monkeypatch)
+    def test_cmd_agent_exits_without_project(self, tmp_path, monkeypatch, capsys):
+        # CWD == home makes detect_project_from_cwd return None
+        monkeypatch.setattr(Path, "cwd", staticmethod(lambda: tmp_path))
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        _state.set_cave_data(tmp_path / "cave-data")
         with pytest.raises(SystemExit) as exc_info:
             wrapper.cmd_agent(None)
         assert exc_info.value.code == 1
         assert "No project" in capsys.readouterr().err
 
-    def test_cmd_shell_exits_without_project(self, monkeypatch, capsys):
-        self._patch_no_project(monkeypatch)
+    def test_cmd_shell_exits_without_project(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setattr(Path, "cwd", staticmethod(lambda: tmp_path))
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        _state.set_cave_data(tmp_path / "cave-data")
         with pytest.raises(SystemExit) as exc_info:
             wrapper.cmd_shell(None)
         assert exc_info.value.code == 1

@@ -7,6 +7,9 @@ from pathlib import Path
 import pytest
 
 import wrapper
+from coding_cave import _state
+from coding_cave.gitdir import _save_session_index
+from tests.conftest import write_projects, write_session
 
 
 GIT_ENV = {
@@ -207,17 +210,16 @@ class TestHistoryRewriteDetection:
 
 
 class TestInitializeGitdir:
-    def test_empty_repo(self, tmp_path, monkeypatch):
+    def test_empty_repo(self, tmp_path):
         """initialize_gitdir doesn't crash on empty repos (no commits).
 
         Regression: 7ed214c — read-tree HEAD failed with check=True on
         repos with no commits, crashing the initialization.
         """
         slug = "empty-project"
-        projects_dir = tmp_path / "projects"
-        proj_state = projects_dir / slug
+        _state.set_cave_data(tmp_path)
+        proj_state = _state.projects_dir() / slug
         proj_state.mkdir(parents=True)
-        monkeypatch.setattr(wrapper, "PROJECTS_DIR", projects_dir)
 
         # Create empty repo (git init, no commits)
         project = tmp_path / "empty"
@@ -231,13 +233,12 @@ class TestInitializeGitdir:
         gitdir = proj_state / "gitdir"
         assert gitdir.is_dir()
 
-    def test_normal_repo(self, tmp_path, monkeypatch):
+    def test_normal_repo(self, tmp_path):
         """initialize_gitdir creates gitdir with cave-sync and host ref."""
         slug = "test-project"
-        projects_dir = tmp_path / "projects"
-        proj_state = projects_dir / slug
+        _state.set_cave_data(tmp_path)
+        proj_state = _state.projects_dir() / slug
         proj_state.mkdir(parents=True)
-        monkeypatch.setattr(wrapper, "PROJECTS_DIR", projects_dir)
 
         project = tmp_path / "project"
         project.mkdir()
@@ -258,13 +259,12 @@ class TestInitializeGitdir:
         gitdir = proj_state / "gitdir"
         assert gitdir.is_dir()
 
-    def test_hardlinks_objects(self, tmp_path, monkeypatch):
+    def test_hardlinks_objects(self, tmp_path):
         """initialize_gitdir hardlinks objects from host when on same device."""
         slug = "test-hardlinks"
-        projects_dir = tmp_path / "projects"
-        proj_state = projects_dir / slug
+        _state.set_cave_data(tmp_path)
+        proj_state = _state.projects_dir() / slug
         proj_state.mkdir(parents=True)
-        monkeypatch.setattr(wrapper, "PROJECTS_DIR", projects_dir)
 
         project = tmp_path / "project"
         project.mkdir()
@@ -296,17 +296,16 @@ class TestInitializeGitdir:
         # hooks dir should be removed
         assert not (gitdir / "hooks").exists()
 
-    def test_skips_existing_gitdir(self, tmp_path, monkeypatch):
+    def test_skips_existing_gitdir(self, tmp_path):
         """initialize_gitdir is a no-op if gitdir already exists."""
         slug = "test-project"
-        projects_dir = tmp_path / "projects"
-        proj_state = projects_dir / slug
+        _state.set_cave_data(tmp_path)
+        proj_state = _state.projects_dir() / slug
         proj_state.mkdir(parents=True)
         gitdir = proj_state / "gitdir"
         gitdir.mkdir()
         marker = gitdir / "marker"
         marker.write_text("existing")
-        monkeypatch.setattr(wrapper, "PROJECTS_DIR", projects_dir)
 
         project = tmp_path / "project"
         project.mkdir()
@@ -339,7 +338,7 @@ class TestSafeGitOpts:
         )
 
         # git() wrapper should override core.pager
-        wrapper.git(gitdir, "log", "--oneline", "-1",
+        wrapper.safe_git(gitdir, "log", "--oneline", "-1",
                      capture_output=True, text=True)
 
         assert not marker.exists(), "Poisoned core.pager was executed!"
@@ -355,7 +354,7 @@ class TestSafeGitOpts:
             capture_output=True, check=True,
         )
 
-        wrapper.git(gitdir, "status",
+        wrapper.safe_git(gitdir, "status",
                      capture_output=True, text=True)
 
         assert not marker.exists(), "Poisoned core.fsmonitor was executed!"
@@ -372,7 +371,7 @@ class TestSafeGitOpts:
         hook.chmod(0o755)
 
         # git() sets core.hooksPath=/dev/null
-        wrapper.git(gitdir, "rev-parse", "HEAD",
+        wrapper.safe_git(gitdir, "rev-parse", "HEAD",
                      capture_output=True, text=True)
 
         assert not marker.exists(), "Hook was executed despite SAFE_GIT_OPTS!"
@@ -389,12 +388,12 @@ class TestSafeGitOpts:
         )
 
         # The wrapper overrides sshCommand to "echo blocked"
-        result = wrapper.git(gitdir, "config", "--get", "core.sshCommand",
+        result = wrapper.safe_git(gitdir, "config", "--get", "core.sshCommand",
                               capture_output=True, text=True)
         # With -c override, the effective value should be "echo blocked"
         # (git -c takes precedence over config file)
         # Just verify the marker wasn't created by any operation
-        wrapper.git(gitdir, "rev-parse", "HEAD",
+        wrapper.safe_git(gitdir, "rev-parse", "HEAD",
                      capture_output=True, text=True)
 
         assert not marker.exists(), "Poisoned core.sshCommand was executed!"
@@ -476,14 +475,14 @@ class TestSessionGitdir:
     """Test per-session gitdir creation, isolation, and merge-back."""
 
     @pytest.fixture
-    def shared_project(self, tmp_path, monkeypatch):
+    def shared_project(self, tmp_path):
         """A host repo with initialized shared gitdir, ready for session creation.
 
         Returns (host_dir, slug, projects_dir).
         """
         slug = "test-project"
-        projects_dir = tmp_path / "cave-projects"
-        monkeypatch.setattr(wrapper, "PROJECTS_DIR", projects_dir)
+        _state.set_cave_data(tmp_path)
+        projects_dir = _state.projects_dir()
         (projects_dir / slug).mkdir(parents=True)
 
         host = tmp_path / "host"
@@ -1208,29 +1207,25 @@ class TestSessionGitdir:
         assert git_head(shared_gd, gitdir=True) == sha_b_prime
 
     def test_sync_live_sessions_restores_alternates(
-            self, shared_project, tmp_path, monkeypatch):
+            self, shared_project, tmp_path):
         """sync_live_sessions restores cave-internal alternates via forward_session_refs."""
         host, slug, projects_dir = shared_project
-        overlay_base = tmp_path / "overlay"
-        overlay_base.mkdir()
-        session_gd = wrapper.create_session_gitdir(slug, "test-sid", overlay_base)
+        session_overlay = _state.cave_data() / "session-overlays" / "test-sid"
+        session_overlay.mkdir(parents=True)
+        session_gd = wrapper.create_session_gitdir(slug, "test-sid", session_overlay)
 
         cave_path = f"/projects/.shared-objects/{slug}"
         alt_file = session_gd / "objects" / "info" / "alternates"
         alt_file.write_text(f"{cave_path}\n")
 
-        monkeypatch.setattr(wrapper, "list_sessions", lambda: [{"sid": "test-sid"}])
-        monkeypatch.setattr(wrapper, "CAVE_DATA", tmp_path / "cave-data")
-        session_overlay = tmp_path / "cave-data" / "session-overlays" / "test-sid"
-        session_overlay.mkdir(parents=True)
-        (session_overlay / f"gitdir-{slug}").symlink_to(session_gd)
+        write_session(_state.cave_data(), "test-sid", slug)
 
         wrapper.sync_live_sessions(slug)
 
         assert alt_file.read_text().strip() == cave_path
 
     def test_sync_live_stale_session_preserves_active(
-            self, shared_project, tmp_path, monkeypatch):
+            self, shared_project, tmp_path):
         """sync_live_sessions with active + stale sessions preserves active commits.
 
         Full integration scenario from today: two sessions exist, one active
@@ -1241,12 +1236,12 @@ class TestSessionGitdir:
         host, slug, projects_dir = shared_project
         shared_gd = projects_dir / slug / "gitdir"
 
-        # Create two sessions (both start at same point)
-        ov_active = tmp_path / "ov-active"
-        ov_active.mkdir()
+        # Create two sessions at standard overlay locations
+        ov_active = _state.cave_data() / "session-overlays" / "sid-active"
+        ov_active.mkdir(parents=True)
         gd_active = wrapper.create_session_gitdir(slug, "sid-active", ov_active)
-        ov_stale = tmp_path / "ov-stale"
-        ov_stale.mkdir()
+        ov_stale = _state.cave_data() / "session-overlays" / "sid-stale"
+        ov_stale.mkdir(parents=True)
         wrapper.create_session_gitdir(slug, "sid-stale", ov_stale)
 
         # Active session commits
@@ -1260,15 +1255,9 @@ class TestSessionGitdir:
         cave_git(work, "commit", "-m", "active commit")
         active_head = cave_git(work, "rev-parse", "HEAD").stdout.strip()
 
-        # Mock list_sessions to return both
-        monkeypatch.setattr(wrapper, "list_sessions", lambda: [
-            {"sid": "sid-active"}, {"sid": "sid-stale"},
-        ])
-        monkeypatch.setattr(wrapper, "CAVE_DATA", tmp_path / "cave-data")
-        for sid, ov in [("sid-active", ov_active), ("sid-stale", ov_stale)]:
-            session_dir = tmp_path / "cave-data" / "session-overlays" / sid
-            session_dir.mkdir(parents=True)
-            (session_dir / f"gitdir-{slug}").symlink_to(ov / f"gitdir-{slug}")
+        # Register both sessions
+        write_session(_state.cave_data(), "sid-active", slug)
+        write_session(_state.cave_data(), "sid-stale", slug)
 
         wrapper.sync_live_sessions(slug)
 
@@ -1282,7 +1271,7 @@ class TestSessionGitdir:
         )
 
     def test_sync_live_does_not_touch_other_projects(
-            self, shared_project, tmp_path, monkeypatch):
+            self, shared_project, tmp_path):
         """sync_live_sessions only processes the requested slug's gitdir.
 
         Regression: the old code called merge_session_gitdirs which processed
@@ -1302,24 +1291,19 @@ class TestSessionGitdir:
         (projects_dir / slug2).mkdir(parents=True)
         wrapper.initialize_gitdir(slug2, host2)
 
-        overlay_base = tmp_path / "overlay"
-        overlay_base.mkdir()
-        wrapper.create_session_gitdir(slug, "test-sid", overlay_base)
-        gd2 = wrapper.create_session_gitdir(slug2, "test-sid", overlay_base)
+        session_overlay = _state.cave_data() / "session-overlays" / "test-sid"
+        session_overlay.mkdir(parents=True)
+        wrapper.create_session_gitdir(slug, "test-sid", session_overlay)
+        gd2 = wrapper.create_session_gitdir(slug2, "test-sid", session_overlay)
 
         cave_path1 = f"/projects/.shared-objects/{slug}"
         cave_path2 = f"/projects/.shared-objects/{slug2}"
-        alt1 = overlay_base / f"gitdir-{slug}" / "objects" / "info" / "alternates"
+        alt1 = session_overlay / f"gitdir-{slug}" / "objects" / "info" / "alternates"
         alt2 = gd2 / "objects" / "info" / "alternates"
         alt1.write_text(f"{cave_path1}\n")
         alt2.write_text(f"{cave_path2}\n")
 
-        monkeypatch.setattr(wrapper, "list_sessions", lambda: [{"sid": "test-sid"}])
-        monkeypatch.setattr(wrapper, "CAVE_DATA", tmp_path / "cave-data")
-        session_dir = tmp_path / "cave-data" / "session-overlays" / "test-sid"
-        session_dir.mkdir(parents=True)
-        (session_dir / f"gitdir-{slug}").symlink_to(overlay_base / f"gitdir-{slug}")
-        (session_dir / f"gitdir-{slug2}").symlink_to(gd2)
+        write_session(_state.cave_data(), "test-sid", slug)
 
         wrapper.sync_live_sessions(slug)
 
@@ -1329,7 +1313,7 @@ class TestSessionGitdir:
         assert alt2.read_text().strip() == cave_path2
 
     def test_sync_live_stale_session_does_not_revert_amend(
-            self, shared_project, tmp_path, monkeypatch):
+            self, shared_project, tmp_path):
         """A stale session whose ref was set by sync_refs must not revert
         another session's amended commit.
 
@@ -1374,8 +1358,8 @@ class TestSessionGitdir:
                 "update-ref", "refs/heads/main", b_prime)
 
         # Session C starts now (copies shared main = B')
-        ov_stale = tmp_path / "ov-stale"
-        ov_stale.mkdir()
+        ov_stale = _state.cave_data() / "session-overlays" / "sid-stale"
+        ov_stale.mkdir(parents=True)
         wrapper.create_session_gitdir(slug, "sid-stale", ov_stale)
 
         # Session A amends B to B'' (different tree)
@@ -1387,17 +1371,14 @@ class TestSessionGitdir:
         assert sha_b_double_prime != sha_b
         assert sha_b_double_prime != b_prime
 
-        # Wire up sync_live_sessions
-        monkeypatch.setattr(wrapper, "list_sessions", lambda: [
-            {"sid": "sid-active"}, {"sid": "sid-stale"},
-        ])
-        monkeypatch.setattr(wrapper, "CAVE_DATA", tmp_path / "cave-data")
-        for sid, ov in [("sid-active", overlay_a),
-                        ("sid-stale", ov_stale)]:
-            session_dir = tmp_path / "cave-data" / "session-overlays" / sid
-            session_dir.mkdir(parents=True)
-            (session_dir / f"gitdir-{slug}").symlink_to(
-                ov / f"gitdir-{slug}")
+        # Register both sessions and symlink active overlay
+        write_session(_state.cave_data(), "sid-active", slug)
+        write_session(_state.cave_data(), "sid-stale", slug)
+        active_session_dir = _state.cave_data() / "session-overlays" / "sid-active"
+        active_session_dir.mkdir(parents=True, exist_ok=True)
+        active_gitdir_link = active_session_dir / f"gitdir-{slug}"
+        if not active_gitdir_link.exists():
+            active_gitdir_link.symlink_to(overlay_a / f"gitdir-{slug}")
 
         wrapper.sync_live_sessions(slug)
 
@@ -1463,23 +1444,21 @@ class TestSessionGitdir:
             f"expected={amended_sha[:8]}"
         )
 
-    def test_no_gitdir_returns_none(self, tmp_path, monkeypatch):
+    def test_no_gitdir_returns_none(self, tmp_path):
         """create_session_gitdir returns None when no shared gitdir exists."""
-        projects_dir = tmp_path / "projects"
-        (projects_dir / "missing").mkdir(parents=True)
-        monkeypatch.setattr(wrapper, "PROJECTS_DIR", projects_dir)
+        _state.set_cave_data(tmp_path)
+        (_state.projects_dir() / "missing").mkdir(parents=True)
 
         overlay = tmp_path / "overlay"
         overlay.mkdir()
         result = wrapper.create_session_gitdir("missing", "sid", overlay)
         assert result is None
 
-    def test_empty_repo_session(self, tmp_path, monkeypatch):
+    def test_empty_repo_session(self, tmp_path):
         """Session gitdir from an empty repo (no commits) doesn't crash."""
         slug = "empty"
-        projects_dir = tmp_path / "projects"
-        (projects_dir / slug).mkdir(parents=True)
-        monkeypatch.setattr(wrapper, "PROJECTS_DIR", projects_dir)
+        _state.set_cave_data(tmp_path)
+        (_state.projects_dir() / slug).mkdir(parents=True)
 
         host = tmp_path / "host"
         host.mkdir()
@@ -1511,7 +1490,7 @@ class TestSessionGitdir:
 
         # Shared gitdir should have the stash ref
         shared_gd = projects_dir / slug / "gitdir"
-        stash_ref = wrapper.git(shared_gd, "rev-parse", "refs/stash",
+        stash_ref = wrapper.safe_git(shared_gd, "rev-parse", "refs/stash",
                                 capture_output=True, text=True)
         assert stash_ref.returncode == 0
 
@@ -1554,7 +1533,7 @@ class TestWorktreeSync:
     """
 
     @pytest.fixture
-    def diverged_session(self, tmp_path, monkeypatch):
+    def diverged_session(self, tmp_path):
         """Simulate a new session where shared gitdir is ahead of host.
 
         1. Host repo at commit A
@@ -1565,8 +1544,8 @@ class TestWorktreeSync:
         Returns (host, shared_gitdir, session_gitdir, workdir).
         """
         slug = "test-project"
-        projects_dir = tmp_path / "cave-projects"
-        monkeypatch.setattr(wrapper, "PROJECTS_DIR", projects_dir)
+        _state.set_cave_data(tmp_path)
+        projects_dir = _state.projects_dir()
         (projects_dir / slug).mkdir(parents=True)
 
         # Host repo at commit A
@@ -1645,7 +1624,7 @@ class TestWorktreeSync:
             ["git", "-C", str(host), "rev-parse", "HEAD^{tree}"],
             capture_output=True, text=True,
         )
-        session_tree = wrapper.git(session_gitdir, "rev-parse", "HEAD^{tree}",
+        session_tree = wrapper.safe_git(session_gitdir, "rev-parse", "HEAD^{tree}",
                                    capture_output=True, text=True)
         assert host_tree.stdout.strip() != session_tree.stdout.strip()
 
@@ -1659,11 +1638,11 @@ class TestWorktreeSync:
         # After sync: workdir matches session HEAD (commit B)
         assert (workdir / "file.txt").read_text() == "modified\n"
 
-    def test_no_checkout_when_trees_match(self, tmp_path, monkeypatch):
+    def test_no_checkout_when_trees_match(self, tmp_path):
         """No checkout needed when host and session HEAD have same tree."""
         slug = "test-project"
-        projects_dir = tmp_path / "cave-projects"
-        monkeypatch.setattr(wrapper, "PROJECTS_DIR", projects_dir)
+        _state.set_cave_data(tmp_path)
+        projects_dir = _state.projects_dir()
         (projects_dir / slug).mkdir(parents=True)
 
         host = tmp_path / "host"
@@ -1683,7 +1662,7 @@ class TestWorktreeSync:
             ["git", "-C", str(host), "rev-parse", "HEAD^{tree}"],
             capture_output=True, text=True,
         )
-        session_tree = wrapper.git(session_gitdir, "rev-parse", "HEAD^{tree}",
+        session_tree = wrapper.safe_git(session_gitdir, "rev-parse", "HEAD^{tree}",
                                    capture_output=True, text=True)
         # Trees should match — no checkout needed
         assert host_tree.stdout.strip() == session_tree.stdout.strip()
@@ -1697,11 +1676,11 @@ class TestSavedUpper:
     files, and deletions survive session restarts.
     """
 
-    def test_upper_saved_on_exit(self, tmp_path, monkeypatch):
+    def test_upper_saved_on_exit(self, tmp_path):
         """Overlay upper is moved to saved-upper on session cleanup."""
         slug = "test-project"
-        projects_dir = tmp_path / "cave-projects"
-        monkeypatch.setattr(wrapper, "PROJECTS_DIR", projects_dir)
+        _state.set_cave_data(tmp_path)
+        projects_dir = _state.projects_dir()
         (projects_dir / slug).mkdir(parents=True)
 
         # Simulate session overlay base with an upper that has changes
@@ -1720,11 +1699,11 @@ class TestSavedUpper:
         assert saved.is_dir()
         assert (saved / "new-file.txt").read_text() == "uncommitted work\n"
 
-    def test_saved_upper_restored_on_start(self, tmp_path, monkeypatch):
+    def test_saved_upper_restored_on_start(self, tmp_path):
         """Saved upper is moved back into session overlay on start."""
         slug = "test-project"
-        projects_dir = tmp_path / "cave-projects"
-        monkeypatch.setattr(wrapper, "PROJECTS_DIR", projects_dir)
+        _state.set_cave_data(tmp_path)
+        projects_dir = _state.projects_dir()
         (projects_dir / slug).mkdir(parents=True)
 
         # Pre-populate saved-upper with uncommitted changes
@@ -1747,7 +1726,7 @@ class TestSavedUpper:
         assert (upper / "dirty-file.txt").read_text() == "unsaved work\n"
         assert not saved.exists()
 
-    def test_no_checkout_when_saved_upper_restored(self, tmp_path, monkeypatch):
+    def test_no_checkout_when_saved_upper_restored(self, tmp_path):
         """git checkout -f is skipped when saved upper is restored.
 
         The saved upper already contains the correct working tree state
@@ -1755,8 +1734,8 @@ class TestSavedUpper:
         would clobber uncommitted changes.
         """
         slug = "test-project"
-        projects_dir = tmp_path / "cave-projects"
-        monkeypatch.setattr(wrapper, "PROJECTS_DIR", projects_dir)
+        _state.set_cave_data(tmp_path)
+        projects_dir = _state.projects_dir()
         (projects_dir / slug).mkdir(parents=True)
 
         # Host at commit A
@@ -1823,7 +1802,7 @@ class TestSavedUpper:
             ["git", "-C", str(host), "rev-parse", "HEAD^{tree}"],
             capture_output=True, text=True,
         )
-        session_tree = wrapper.git(session_gitdir, "rev-parse", "HEAD^{tree}",
+        session_tree = wrapper.safe_git(session_gitdir, "rev-parse", "HEAD^{tree}",
                                    capture_output=True, text=True)
         assert host_tree.stdout.strip() != session_tree.stdout.strip()
 
@@ -1842,11 +1821,11 @@ class TestSavedUpper:
         assert (workdir / "scratch.txt").read_text() == "uncommitted\n"
         assert (workdir / "file.txt").read_text() == "committed\n"
 
-    def test_reset_cleans_saved_upper(self, tmp_path, monkeypatch):
+    def test_reset_cleans_saved_upper(self, tmp_path):
         """coding-cave reset removes saved-upper."""
         slug = "test-project"
-        projects_dir = tmp_path / "cave-projects"
-        monkeypatch.setattr(wrapper, "PROJECTS_DIR", projects_dir)
+        _state.set_cave_data(tmp_path)
+        projects_dir = _state.projects_dir()
         (projects_dir / slug).mkdir(parents=True)
 
         host = tmp_path / "host"
@@ -1865,9 +1844,7 @@ class TestSavedUpper:
         for d in ["upper", "work"]:
             (projects_dir / slug / d).mkdir(exist_ok=True)
 
-        monkeypatch.setattr(wrapper, "PROJECTS_FILE",
-                            projects_dir / "projects.json")
-        wrapper.save_projects({slug: str(host)})
+        write_projects(tmp_path, {slug: str(host)})
 
         wrapper.reset_project_overlay(slug)
 
@@ -1878,14 +1855,14 @@ class TestSavedIndex:
     """Test staging area (index) preservation across sessions."""
 
     @pytest.fixture
-    def project_with_session(self, tmp_path, monkeypatch):
+    def project_with_session(self, tmp_path):
         """Set up a project with a session gitdir and working directory.
 
         Returns (slug, projects_dir, session_gitdir, workdir, overlay_base).
         """
         slug = "test-project"
-        projects_dir = tmp_path / "cave-projects"
-        monkeypatch.setattr(wrapper, "PROJECTS_DIR", projects_dir)
+        _state.set_cave_data(tmp_path)
+        projects_dir = _state.projects_dir()
         (projects_dir / slug).mkdir(parents=True)
 
         host = tmp_path / "host"
@@ -1927,7 +1904,7 @@ class TestSavedIndex:
         assert "M  file.txt" in status.stdout
 
         # Simulate session exit: save index + objects
-        wrapper._save_session_index(session_gd, shared_gd, slug)
+        _save_session_index(session_gd, shared_gd, slug)
 
         saved_index = projects_dir / slug / "saved-index"
         assert saved_index.is_file()
@@ -1968,7 +1945,7 @@ class TestSavedIndex:
         assert "M  file.txt" in status.stdout   # staged
         assert " M other.txt" in status.stdout   # unstaged
 
-        wrapper._save_session_index(session_gd, shared_gd, slug)
+        _save_session_index(session_gd, shared_gd, slug)
 
         # New session (no git checkout -- simulating saved upper restore)
         overlay2 = projects_dir / "overlay2"
@@ -1986,11 +1963,11 @@ class TestSavedIndex:
         assert "M  file.txt" in status2.stdout
         assert " M other.txt" in status2.stdout
 
-    def test_reset_cleans_saved_index(self, tmp_path, monkeypatch):
+    def test_reset_cleans_saved_index(self, tmp_path):
         """coding-cave reset removes saved-index."""
         slug = "test-project"
-        projects_dir = tmp_path / "cave-projects"
-        monkeypatch.setattr(wrapper, "PROJECTS_DIR", projects_dir)
+        _state.set_cave_data(tmp_path)
+        projects_dir = _state.projects_dir()
         (projects_dir / slug).mkdir(parents=True)
 
         host = tmp_path / "host"
@@ -2004,9 +1981,7 @@ class TestSavedIndex:
             (projects_dir / slug / d).mkdir(exist_ok=True)
         (projects_dir / slug / "saved-index").write_bytes(b"fake index")
 
-        monkeypatch.setattr(wrapper, "PROJECTS_FILE",
-                            projects_dir / "projects.json")
-        wrapper.save_projects({slug: str(host)})
+        write_projects(tmp_path, {slug: str(host)})
 
         wrapper.reset_project_overlay(slug)
         assert not (projects_dir / slug / "saved-index").exists()
@@ -2064,11 +2039,11 @@ class TestConcurrentSavedUpper:
         # Should save because upper has real content
         assert entries
 
-    def test_clean_index_does_not_overwrite_saved(self, tmp_path, monkeypatch):
+    def test_clean_index_does_not_overwrite_saved(self, tmp_path):
         """A session with clean index must not overwrite another's saved-index."""
         slug = "test-project"
-        projects_dir = tmp_path / "cave-projects"
-        monkeypatch.setattr(wrapper, "PROJECTS_DIR", projects_dir)
+        _state.set_cave_data(tmp_path)
+        projects_dir = _state.projects_dir()
         (projects_dir / slug).mkdir(parents=True)
 
         host = tmp_path / "host"
@@ -2094,7 +2069,7 @@ class TestConcurrentSavedUpper:
         (projects_dir / slug / "saved-index").write_bytes(b"precious index")
 
         # _save_session_index should NOT overwrite because index is clean
-        wrapper._save_session_index(session_gd, shared_gd, slug)
+        _save_session_index(session_gd, shared_gd, slug)
 
         # Saved index should be untouched
         assert (projects_dir / slug / "saved-index").read_bytes() == b"precious index"
