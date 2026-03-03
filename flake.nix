@@ -243,10 +243,17 @@
       cp ${codingCaveState}            $out/coding_cave/_state.py
     '';
 
+    # -c with explicit sys.path avoids CWD shadowing the built package
+    # (python3 -m puts CWD at sys.path[0], which finds unsubstituted
+    # source _state.py when run from the project directory).
     baseScript = pkgs.writeText "coding-cave-script" ''
       export PATH="${pkgs.lib.makeBinPath [pkgs.util-linux pkgs.passt pkgs.fuse-overlayfs]}:$PATH"
-      export PYTHONPATH="${codingCavePkg}:''${PYTHONPATH:-}"
-      exec ${pkgs.python3}/bin/python3 -m coding_cave "$@"
+      exec ${pkgs.python3}/bin/python3 -c '
+import sys
+sys.path.insert(0, "${codingCavePkg}")
+from coding_cave.cli import main
+main()
+' "$@"
     '';
 
     wrapper = pkgs.runCommand "coding-cave-with-alias" {} ''
