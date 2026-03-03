@@ -24,11 +24,11 @@
     "claude-loop-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1772120504,
-        "narHash": "sha256-KA16SqlmHLuJiJXwSkJFCQRTY6+/AEfvAmoFG1RCwCo=",
+        "lastModified": 1772574600,
+        "narHash": "sha256-uCbzYCf1CB6c3b+TgBrzJzCR2PxmY3zoDZ7m4trOdDs=",
         "owner": "christian-oudard",
         "repo": "claude-loop",
-        "rev": "dcd7f822ce36c633ac96761c27e7c35f57027b4c",
+        "rev": "152904e95db68a44f88b1032e5678ac527f4275e",
         "type": "github"
       },
       "original": {

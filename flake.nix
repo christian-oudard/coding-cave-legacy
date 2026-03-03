@@ -219,13 +219,28 @@
     sandbox = jail "coding-cave" pkgs.bashInteractive baseCombinators;
     sandboxGpu = jail "coding-cave" pkgs.bashInteractive (baseCombinators ++ gpuCombinators);
 
+    # Reference individual files to avoid copying a directory to the Nix
+    # store (chmod on dirs fails on fuse-overlayfs inside the cave).
+    codingCaveState = pkgs.replaceVars ./coding_cave/_state.py {
+      SANDBOX_BIN = "${sandbox}/bin/coding-cave";
+      SANDBOX_GPU_BIN = "${sandboxGpu}/bin/coding-cave";
+      VERSION = version;
+    };
     codingCavePkg = pkgs.runCommand "coding-cave-pkg" {} ''
       mkdir -p $out/coding_cave
-      cp ${./coding_cave}/*.py $out/coding_cave/
-      substitute ${./coding_cave/_state.py} $out/coding_cave/_state.py \
-        --subst-var-by SANDBOX_BIN "${sandbox}/bin/coding-cave" \
-        --subst-var-by SANDBOX_GPU_BIN "${sandboxGpu}/bin/coding-cave" \
-        --subst-var-by VERSION "${version}"
+      cp ${./coding_cave/__init__.py}  $out/coding_cave/__init__.py
+      cp ${./coding_cave/__main__.py}  $out/coding_cave/__main__.py
+      cp ${./coding_cave/cli.py}       $out/coding_cave/cli.py
+      cp ${./coding_cave/commands.py}  $out/coding_cave/commands.py
+      cp ${./coding_cave/config.py}    $out/coding_cave/config.py
+      cp ${./coding_cave/git.py}       $out/coding_cave/git.py
+      cp ${./coding_cave/gitdir.py}    $out/coding_cave/gitdir.py
+      cp ${./coding_cave/lifecycle.py} $out/coding_cave/lifecycle.py
+      cp ${./coding_cave/overlay.py}   $out/coding_cave/overlay.py
+      cp ${./coding_cave/projects.py}  $out/coding_cave/projects.py
+      cp ${./coding_cave/sessions.py}  $out/coding_cave/sessions.py
+      cp ${./coding_cave/sync.py}      $out/coding_cave/sync.py
+      cp ${codingCaveState}            $out/coding_cave/_state.py
     '';
 
     baseScript = pkgs.writeText "coding-cave-script" ''
