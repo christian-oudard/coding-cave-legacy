@@ -271,6 +271,55 @@ class TestPullEdgeCases:
         assert branch == "main"
         assert (host / "file.txt").read_text() == "cave work\n"
 
+    def test_pull_into_empty_host_reauthors(self, tmp_path):
+        """Pull into empty host re-authors commits with host identity.
+
+        Bug: the empty-host path did fetch + update-ref directly, skipping
+        the rebase --reset-author step. Commits kept cave-coder identity.
+        """
+        slug = "test-project"
+
+        host = tmp_path / "host"
+        host.mkdir()
+        _run("git", "-C", str(host), "init", "-b", "main")
+        _run("git", "-C", str(host), "config", "user.email", "host@test.com")
+        _run("git", "-C", str(host), "config", "user.name", "Host User")
+
+        source = tmp_path / "source"
+        source.mkdir()
+        _run("git", "-C", str(source), "init", "-b", "main")
+        _run("git", "-C", str(source), "config", "user.email", "cave@test.com")
+        _run("git", "-C", str(source), "config", "user.name", "cave-coder")
+        (source / "file.txt").write_text("cave work\n")
+        _run("git", "-C", str(source), "add", ".")
+        _run("git", "-C", str(source), "commit", "-m", "cave commit")
+
+        projects_dir = tmp_path / "projects"
+        proj_state = projects_dir / slug
+        proj_state.mkdir(parents=True)
+        tmpclone = tmp_path / "_tmpclone"
+        _run("git", "clone", "--no-checkout", "--local", str(source), str(tmpclone))
+        gitdir = proj_state / "gitdir"
+        (tmpclone / ".git").rename(gitdir)
+        tmpclone.rmdir()
+        _run("git", "--git-dir", str(gitdir), "remote", "remove", "origin", check=False)
+
+        _state.set_cave_data(tmp_path)
+        write_projects(tmp_path, {slug: str(host)})
+
+        # Unset cave identity env vars (pull runs on the host, not in the cave)
+        saved = {}
+        for var in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
+                    "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"):
+            saved[var] = os.environ.pop(var, None)
+        try:
+            wrapper.pull_project(slug)
+            assert _last_author(host) == "Host User"
+        finally:
+            for var, val in saved.items():
+                if val is not None:
+                    os.environ[var] = val
+
     def test_detached_head_uses_main_branch(self, tmp_path):
         """Pull from detached HEAD gitdir creates 'main' branch, not 'HEAD'.
 

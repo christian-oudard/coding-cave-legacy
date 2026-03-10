@@ -124,9 +124,18 @@ def pull_project(slug, force=False):
         subprocess.run(host_git + ["update-ref", f"refs/heads/{branch}", gitdir_head], check=True)
         subprocess.run(host_git + ["symbolic-ref", "HEAD", f"refs/heads/{branch}"], check=True)
         subprocess.run(host_git + ["checkout", branch], capture_output=True)
+        # Re-author all commits with host identity
+        subprocess.run(host_git + [
+            "rebase", "--root",
+            "--exec", "git -c core.hooksPath=/dev/null -c core.pager=cat -c core.fsmonitor= commit --amend --reset-author --allow-empty --no-edit --quiet",
+        ], capture_output=True)
         print(f"Pulled {slug} (initialized from cave):", file=sys.stderr)
         subprocess.run(host_git + ["log", "--oneline"], check=False)
-        git_mod.update_cave_sync(gitdir_path, project_dir, gitdir_head, branch=branch)
+        host_head = subprocess.run(
+            host_git + ["rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        git_mod.sync_refs(gitdir_path, project_dir, host_head, branch)
         return
 
     branch = branch_result.stdout.strip()
