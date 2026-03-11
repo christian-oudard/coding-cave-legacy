@@ -129,24 +129,8 @@
       (try-fwd-env "CODING_CAVE_GIT_GPG_SIGN")
       (try-fwd-env "CODING_CAVE_GPG_AGENT_SOCK")
       (try-fwd-env "CODING_CAVE_GNUPGHOME")
-      (add-runtime ''
-        if [ -n "''${CODING_CAVE_GIT_NAME:-}" ]; then
-          GIT_AUTHOR_NAME="''${CODING_CAVE_GIT_NAME}"
-          GIT_COMMITTER_NAME="''${CODING_CAVE_GIT_NAME}"
-        else
-          GIT_AUTHOR_NAME="coding-cave"
-          GIT_COMMITTER_NAME="coding-cave"
-        fi
-        export GIT_AUTHOR_NAME GIT_COMMITTER_NAME
-        if [ -n "''${CODING_CAVE_GIT_EMAIL:-}" ]; then
-          GIT_AUTHOR_EMAIL="''${CODING_CAVE_GIT_EMAIL}"
-          GIT_COMMITTER_EMAIL="''${CODING_CAVE_GIT_EMAIL}"
-        else
-          GIT_AUTHOR_EMAIL="coding-cave@noreply"
-          GIT_COMMITTER_EMAIL="coding-cave@noreply"
-        fi
-        export GIT_AUTHOR_EMAIL GIT_COMMITTER_EMAIL
-      '')
+      # Git identity is set in wrap-entry (add-runtime runs on host
+      # before bwrap, but --clearenv drops vars set there).
 
       # Credential forwarding
       (try-fwd-env "CLAUDE_CODE_OAUTH_TOKEN")
@@ -224,6 +208,21 @@
         fi
         if [ -n "''${CODING_CAVE_GIT_GPG_SIGN:-}" ]; then
           git config --global commit.gpgsign "''${CODING_CAVE_GIT_GPG_SIGN}"
+        fi
+        # Git identity from forwarded host vars (or fallback).
+        if [ -n "''${CODING_CAVE_GIT_NAME:-}" ]; then
+          export GIT_AUTHOR_NAME="''${CODING_CAVE_GIT_NAME}"
+          export GIT_COMMITTER_NAME="''${CODING_CAVE_GIT_NAME}"
+        else
+          export GIT_AUTHOR_NAME="coding-cave"
+          export GIT_COMMITTER_NAME="coding-cave"
+        fi
+        if [ -n "''${CODING_CAVE_GIT_EMAIL:-}" ]; then
+          export GIT_AUTHOR_EMAIL="''${CODING_CAVE_GIT_EMAIL}"
+          export GIT_COMMITTER_EMAIL="''${CODING_CAVE_GIT_EMAIL}"
+        else
+          export GIT_AUTHOR_EMAIL="coding-cave@noreply"
+          export GIT_COMMITTER_EMAIL="coding-cave@noreply"
         fi
         export -p > /tmp/cave-env
         chmod 444 /tmp/cave-env

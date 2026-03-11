@@ -258,6 +258,23 @@ class TestFlakeNixSafety:
             assert "git config --global commit.gpgsign" not in block, \
                 "gpgsign config must be in wrap-entry, not add-runtime"
 
+    def test_git_identity_in_wrap_entry_not_add_runtime(self):
+        """GIT_AUTHOR/COMMITTER env vars must be set in wrap-entry.
+
+        add-runtime runs on the host before bwrap, but bwrap uses --clearenv,
+        so env vars exported in add-runtime are dropped. The identity setup
+        must happen in wrap-entry (inside the cave) where CODING_CAVE_GIT_*
+        vars have already been forwarded via try-fwd-env.
+        """
+        flake = FLAKE_NIX.read_text()
+        add_runtime_blocks = self._extract_blocks(flake, "add-runtime")
+        for block in add_runtime_blocks:
+            clean = block.replace("''$", "$").replace("''\\", "\\")
+            assert "GIT_AUTHOR_NAME" not in clean, \
+                "GIT_AUTHOR_NAME must be set in wrap-entry, not add-runtime (--clearenv drops it)"
+            assert "GIT_COMMITTER_NAME" not in clean, \
+                "GIT_COMMITTER_NAME must be set in wrap-entry, not add-runtime (--clearenv drops it)"
+
 
 class TestGpgLifecycleSafety:
     """Verify GPG forwarding in lifecycle.py doesn't expose private keys."""
@@ -349,7 +366,7 @@ def _sync_nix_db():
     if entries:
         load = subprocess.run(
             ["nix-store", "--load-db"],
-            input="\n".join(entries),
+            input="\n".join(entries) + "\n",
             capture_output=True, text=True,
         )
         if load.returncode != 0:
@@ -432,6 +449,16 @@ class TestNixBuild:
             "sandbox missing GNUPGHOME forwarding"
         assert "CODING_CAVE_GIT_SIGNING_KEY" in sandbox_script, \
             "sandbox missing signing key forwarding"
+
+    def test_sandbox_entry_has_git_identity(self, sandbox_scripts):
+        """Built entry script sets GIT_AUTHOR/COMMITTER from forwarded vars."""
+        _, entry_script = sandbox_scripts
+        assert "GIT_AUTHOR_NAME" in entry_script, \
+            "entry script missing GIT_AUTHOR_NAME setup"
+        assert "GIT_COMMITTER_NAME" in entry_script, \
+            "entry script missing GIT_COMMITTER_NAME setup"
+        assert "CODING_CAVE_GIT_NAME" in entry_script, \
+            "entry script missing CODING_CAVE_GIT_NAME reference"
 
     def test_sandbox_has_gnupg_in_path(self, sandbox_scripts):
         """Built sandbox includes gnupg in PATH."""
