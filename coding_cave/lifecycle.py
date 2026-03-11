@@ -202,6 +202,21 @@ def start_session(project, command, gpu=False):
         overlay.force_rmtree(overlay_base)
         raise
 
+    # GPG agent socket forwarding (for commit signing without private key)
+    gpg_sock = os.environ.get("CODING_CAVE_GPG_AGENT_SOCK", "")
+    if gpg_sock and os.path.exists(gpg_sock):
+        cave_gpg_sock = f"{_state.JAIL_HOME}/.gnupg/S.gpg-agent"
+        bwrap_args += ["--bind", gpg_sock, cave_gpg_sock]
+    # GPG public keyring (read-only, for key lookup)
+    gnupghome = os.environ.get("CODING_CAVE_GNUPGHOME", "")
+    if gnupghome and os.path.isdir(gnupghome):
+        cave_gnupghome = f"{_state.JAIL_HOME}/.gnupg"
+        # Bind individual files read-only to avoid exposing private keys
+        for fname in ("pubring.kbx", "pubring.gpg", "trustdb.gpg"):
+            src = os.path.join(gnupghome, fname)
+            if os.path.isfile(src):
+                bwrap_args += ["--ro-bind", src, f"{cave_gnupghome}/{fname}"]
+
     # Passwd/group files
     uid = os.getuid()
     gid = os.getgid()
@@ -239,6 +254,10 @@ def start_session(project, command, gpu=False):
         # Forwarded into cave via try-fwd-env
         "COLORTERM",
         "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "GITHUB_TOKEN",
+        # Host git identity and GPG signing
+        "CODING_CAVE_GIT_NAME", "CODING_CAVE_GIT_EMAIL",
+        "CODING_CAVE_GIT_SIGNING_KEY", "CODING_CAVE_GIT_GPG_SIGN",
+        "CODING_CAVE_GPG_AGENT_SOCK", "CODING_CAVE_GNUPGHOME",
         # coding-cave internal
         "CODING_CAVE_NIX_MERGED", "CODING_CAVE_NIX_DB_DIR",
         "CODING_CAVE_BWRAP_ARGS",

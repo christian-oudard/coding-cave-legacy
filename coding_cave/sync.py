@@ -1,9 +1,41 @@
 """Pull/push synchronization between host and cave."""
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 from . import _state, projects, sessions, git as git_mod, gitdir
+
+
+def _needs_reauthoring(gitdir_path, project_dir):
+    """Check if cave commits need re-authoring on pull.
+
+    Returns False when the cave is already using the host's git identity
+    (GPG agent forwarding mode), True when the cave uses the throwaway
+    cave-coder identity and commits need to be rewritten.
+    """
+    # Get the author of the latest cave commit
+    cave_author = git_mod.git(gitdir_path, "log", "-1", "--format=%ae",
+        capture_output=True, text=True)
+    if cave_author.returncode != 0 or not cave_author.stdout.strip():
+        return True  # can't determine, default to re-authoring
+    cave_email = cave_author.stdout.strip()
+
+    # Get the host's configured email (local config, then global)
+    host_email = subprocess.run(
+        ["git", "-C", str(project_dir), "config", "user.email"],
+        capture_output=True, text=True,
+    )
+    if host_email.returncode != 0 or not host_email.stdout.strip():
+        # Try global config
+        host_email = subprocess.run(
+            ["git", "config", "--global", "user.email"],
+            capture_output=True, text=True,
+        )
+    if host_email.returncode != 0 or not host_email.stdout.strip():
+        return True  # can't determine host identity
+
+    return cave_email != host_email.stdout.strip()
 
 
 def sync_live_sessions(slug):
@@ -124,11 +156,12 @@ def pull_project(slug, force=False):
         subprocess.run(host_git + ["update-ref", f"refs/heads/{branch}", gitdir_head], check=True)
         subprocess.run(host_git + ["symbolic-ref", "HEAD", f"refs/heads/{branch}"], check=True)
         subprocess.run(host_git + ["checkout", branch], capture_output=True)
-        # Re-author all commits with host identity
-        subprocess.run(host_git + [
-            "rebase", "--root",
-            "--exec", "git -c core.hooksPath=/dev/null -c core.pager=cat -c core.fsmonitor= commit --amend --reset-author --allow-empty --no-edit --quiet",
-        ], capture_output=True)
+        # Re-author only if cave used throwaway identity
+        if _needs_reauthoring(gitdir_path, project_dir):
+            subprocess.run(host_git + [
+                "rebase", "--root",
+                "--exec", "git -c core.hooksPath=/dev/null -c core.pager=cat -c core.fsmonitor= commit --amend --reset-author --allow-empty --no-edit --quiet",
+            ], capture_output=True)
         print(f"Pulled {slug} (initialized from cave):", file=sys.stderr)
         subprocess.run(host_git + ["log", "--oneline"], check=False)
         host_head = subprocess.run(
@@ -234,11 +267,15 @@ def pull_project(slug, force=False):
 
         subprocess.run(host_git + ["reset", "--hard", merge_base], check=True, capture_output=True)
         subprocess.run(host_git + ["branch", "-f", "_cave_pull", "FETCH_HEAD"], check=True, capture_output=True)
-        subprocess.run(host_git + [
+        rebase_cmd = host_git + [
             "rebase", "--onto", branch, merge_base, "_cave_pull",
             "--no-reapply-cherry-picks",
-            "--exec", "git -c core.hooksPath=/dev/null -c core.pager=cat -c core.fsmonitor= commit --amend --reset-author --allow-empty --no-edit --quiet",
-        ], check=True, capture_output=True)
+        ]
+        if _needs_reauthoring(gitdir_path, project_dir):
+            rebase_cmd += [
+                "--exec", "git -c core.hooksPath=/dev/null -c core.pager=cat -c core.fsmonitor= commit --amend --reset-author --allow-empty --no-edit --quiet",
+            ]
+        subprocess.run(rebase_cmd, check=True, capture_output=True)
         subprocess.run(host_git + ["checkout", branch], check=True, capture_output=True)
         subprocess.run(host_git + ["merge", "--ff-only", "_cave_pull"], check=True, capture_output=True)
         subprocess.run(host_git + ["branch", "-D", "_cave_pull"], capture_output=True)
@@ -269,11 +306,15 @@ def pull_project(slug, force=False):
     stashed = stash_result.returncode == 0 and "No local changes" not in stash_result.stdout
 
     subprocess.run(host_git + ["branch", "-f", "_cave_pull", "FETCH_HEAD"], check=True, capture_output=True)
-    result = subprocess.run(host_git + [
+    rebase_cmd = host_git + [
         "rebase", "--onto", branch, merge_base, "_cave_pull",
         "--no-reapply-cherry-picks",
-        "--exec", "git -c core.hooksPath=/dev/null -c core.pager=cat -c core.fsmonitor= commit --amend --reset-author --allow-empty --no-edit --quiet",
-    ], capture_output=True)
+    ]
+    if _needs_reauthoring(gitdir_path, project_dir):
+        rebase_cmd += [
+            "--exec", "git -c core.hooksPath=/dev/null -c core.pager=cat -c core.fsmonitor= commit --amend --reset-author --allow-empty --no-edit --quiet",
+        ]
+    result = subprocess.run(rebase_cmd, capture_output=True)
     if result.returncode != 0:
         rebase_in_progress = ((host_git_dir / "rebase-merge").is_dir() or
                               (host_git_dir / "rebase-apply").is_dir())

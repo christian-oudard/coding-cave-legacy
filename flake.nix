@@ -113,6 +113,7 @@
         util-linux
         fuse-overlayfs
         fuse3
+        gnupg
       ]))
       (set-env "EDITOR" "${pkgs.nano}/bin/nano")
       (set-env "TERMINFO_DIRS" "${pkgs.ncurses}/share/terminfo")
@@ -120,11 +121,39 @@
       (set-env "LANG" "en_US.UTF-8")
       (try-fwd-env "COLORTERM")
 
-      # Git identity (throwaway — pull re-authors commits outside the sandbox)
-      (set-env "GIT_AUTHOR_NAME" "coding-cave")
-      (set-env "GIT_AUTHOR_EMAIL" "coding-cave@noreply")
-      (set-env "GIT_COMMITTER_NAME" "coding-cave")
-      (set-env "GIT_COMMITTER_EMAIL" "coding-cave@noreply")
+      # Git identity: forwarded from host when available (eliminates
+      # re-authoring on pull).  Falls back to throwaway identity.
+      (try-fwd-env "CODING_CAVE_GIT_NAME")
+      (try-fwd-env "CODING_CAVE_GIT_EMAIL")
+      (try-fwd-env "CODING_CAVE_GIT_SIGNING_KEY")
+      (try-fwd-env "CODING_CAVE_GIT_GPG_SIGN")
+      (try-fwd-env "CODING_CAVE_GPG_AGENT_SOCK")
+      (try-fwd-env "CODING_CAVE_GNUPGHOME")
+      (add-runtime ''
+        if [ -n "''${CODING_CAVE_GIT_NAME:-}" ]; then
+          GIT_AUTHOR_NAME="''${CODING_CAVE_GIT_NAME}"
+          GIT_COMMITTER_NAME="''${CODING_CAVE_GIT_NAME}"
+        else
+          GIT_AUTHOR_NAME="coding-cave"
+          GIT_COMMITTER_NAME="coding-cave"
+        fi
+        export GIT_AUTHOR_NAME GIT_COMMITTER_NAME
+        if [ -n "''${CODING_CAVE_GIT_EMAIL:-}" ]; then
+          GIT_AUTHOR_EMAIL="''${CODING_CAVE_GIT_EMAIL}"
+          GIT_COMMITTER_EMAIL="''${CODING_CAVE_GIT_EMAIL}"
+        else
+          GIT_AUTHOR_EMAIL="coding-cave@noreply"
+          GIT_COMMITTER_EMAIL="coding-cave@noreply"
+        fi
+        export GIT_AUTHOR_EMAIL GIT_COMMITTER_EMAIL
+        # GPG commit signing via forwarded agent socket.
+        # Git reads signing key and gpgsign from config, not env vars.
+        # Write a global gitconfig inside the cave with these settings.
+        if [ -n "''${CODING_CAVE_GPG_AGENT_SOCK:-}" ] && [ -e "''${CODING_CAVE_GPG_AGENT_SOCK}" ]; then
+          mkdir -p ${jailHome}/.gnupg
+          chmod 700 ${jailHome}/.gnupg 2>/dev/null || true
+        fi
+      '')
 
       # Credential forwarding
       (try-fwd-env "CLAUDE_CODE_OAUTH_TOKEN")
@@ -183,12 +212,19 @@
         fi
       '')
 
-      # Entry: set up /projects, save env for nsenter shells, then exec
+      # Entry: set up /projects, configure GPG signing, save env, then exec
       (wrap-entry (entry: ''
         mkdir -p /projects
         export TMPDIR="$HOME/.cache/tmp"
         mkdir -p "$TMPDIR"
         export PATH="$HOME/.local/bin:$PATH"
+        # Configure GPG commit signing if host forwarded signing key
+        if [ -n "''${CODING_CAVE_GIT_SIGNING_KEY:-}" ]; then
+          git config --global user.signingkey "''${CODING_CAVE_GIT_SIGNING_KEY}"
+        fi
+        if [ -n "''${CODING_CAVE_GIT_GPG_SIGN:-}" ]; then
+          git config --global commit.gpgsign "''${CODING_CAVE_GIT_GPG_SIGN}"
+        fi
         export -p > /tmp/cave-env
         chmod 444 /tmp/cave-env
         # Ensure shells started via nsenter get the cave environment.

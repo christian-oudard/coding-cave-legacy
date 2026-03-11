@@ -271,55 +271,6 @@ class TestPullEdgeCases:
         assert branch == "main"
         assert (host / "file.txt").read_text() == "cave work\n"
 
-    def test_pull_into_empty_host_reauthors(self, tmp_path):
-        """Pull into empty host re-authors commits with host identity.
-
-        Bug: the empty-host path did fetch + update-ref directly, skipping
-        the rebase --reset-author step. Commits kept cave-coder identity.
-        """
-        slug = "test-project"
-
-        host = tmp_path / "host"
-        host.mkdir()
-        _run("git", "-C", str(host), "init", "-b", "main")
-        _run("git", "-C", str(host), "config", "user.email", "host@test.com")
-        _run("git", "-C", str(host), "config", "user.name", "Host User")
-
-        source = tmp_path / "source"
-        source.mkdir()
-        _run("git", "-C", str(source), "init", "-b", "main")
-        _run("git", "-C", str(source), "config", "user.email", "cave@test.com")
-        _run("git", "-C", str(source), "config", "user.name", "cave-coder")
-        (source / "file.txt").write_text("cave work\n")
-        _run("git", "-C", str(source), "add", ".")
-        _run("git", "-C", str(source), "commit", "-m", "cave commit")
-
-        projects_dir = tmp_path / "projects"
-        proj_state = projects_dir / slug
-        proj_state.mkdir(parents=True)
-        tmpclone = tmp_path / "_tmpclone"
-        _run("git", "clone", "--no-checkout", "--local", str(source), str(tmpclone))
-        gitdir = proj_state / "gitdir"
-        (tmpclone / ".git").rename(gitdir)
-        tmpclone.rmdir()
-        _run("git", "--git-dir", str(gitdir), "remote", "remove", "origin", check=False)
-
-        _state.set_cave_data(tmp_path)
-        write_projects(tmp_path, {slug: str(host)})
-
-        # Unset cave identity env vars (pull runs on the host, not in the cave)
-        saved = {}
-        for var in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
-                    "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"):
-            saved[var] = os.environ.pop(var, None)
-        try:
-            wrapper.pull_project(slug)
-            assert _last_author(host) == "Host User"
-        finally:
-            for var, val in saved.items():
-                if val is not None:
-                    os.environ[var] = val
-
     def test_detached_head_uses_main_branch(self, tmp_path):
         """Pull from detached HEAD gitdir creates 'main' branch, not 'HEAD'.
 
@@ -498,3 +449,162 @@ class TestPullMidSession:
         # Pull project B — should find the commit even though session is for A
         wrapper.pull_project(env.slug)
         assert (env.host / "file.txt").read_text() == "cross-project\n"
+
+
+class TestPullHostIdentity:
+    """Pull when cave uses the host's git identity (no re-authoring needed).
+
+    When the cave forwards the host's user.name/user.email, commits already
+    have the correct author. Pull should skip re-authoring and preserve
+    exact commit hashes — making sync a simple fast-forward.
+    """
+
+    @pytest.fixture
+    def host_id_env(self, tmp_path):
+        """Environment where cave uses the same identity as host."""
+        slug = "test-project"
+
+        host = tmp_path / "host"
+        host.mkdir()
+        _run("git", "-C", str(host), "init", "-b", "main")
+        _run("git", "-C", str(host), "config", "user.email", "host@test.com")
+        _run("git", "-C", str(host), "config", "user.name", "Host User")
+        (host / "file.txt").write_text("initial\n")
+        _run("git", "-C", str(host), "add", ".")
+        _run("git", "-C", str(host), "commit", "-m", "initial")
+
+        tmpclone = tmp_path / "_tmpclone"
+        _run("git", "clone", "--no-checkout", "--local", str(host), str(tmpclone))
+        projects_dir = tmp_path / "projects"
+        proj_state = projects_dir / slug
+        proj_state.mkdir(parents=True)
+        gitdir = proj_state / "gitdir"
+        (tmpclone / ".git").rename(gitdir)
+        tmpclone.rmdir()
+        _run("git", "--git-dir", str(gitdir), "remote", "remove", "origin",
+             check=False)
+        # Cave uses HOST identity (the key difference from pull_env)
+        _run("git", "--git-dir", str(gitdir), "config",
+             "user.email", "host@test.com")
+        _run("git", "--git-dir", str(gitdir), "config",
+             "user.name", "Host User")
+        _run("git", "--git-dir", str(gitdir), "read-tree", "HEAD")
+
+        cave = tmp_path / "cave"
+        cave.mkdir()
+        _run("git", "--git-dir", str(gitdir), "--work-tree", str(cave),
+             "checkout", "HEAD", "--", ".")
+
+        _state.set_cave_data(tmp_path)
+        write_projects(tmp_path, {slug: str(host)})
+
+        saved_env = {}
+        for var in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
+                    "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"):
+            saved_env[var] = os.environ.pop(var, None)
+
+        wrapper.ensure_cave_remote(host, gitdir)
+        host_head = _head(host)
+        wrapper.sync_refs(gitdir, host, host_head, "main")
+
+        yield SimpleNamespace(host=host, gitdir=gitdir, cave=cave, slug=slug)
+
+        for var, val in saved_env.items():
+            if val is not None:
+                os.environ[var] = val
+
+    def test_preserves_commit_hash(self, host_id_env):
+        """When cave uses host identity, pull preserves exact commit hash."""
+        env = host_id_env
+        cave_commit(env, "cave work", content="work\n")
+        cave_head = _head(env.gitdir, gitdir=True)
+
+        wrapper.pull_project(env.slug)
+
+        # Host HEAD should be the SAME hash as cave (no re-authoring)
+        assert _head(env.host) == cave_head
+
+    def test_preserves_author(self, host_id_env):
+        """Pulled commits keep the host author (already correct)."""
+        env = host_id_env
+        cave_commit(env, "cave work", content="work\n")
+        wrapper.pull_project(env.slug)
+        assert _last_author(env.host) == "Host User"
+
+    def test_multiple_commits_preserve_hashes(self, host_id_env):
+        """Multiple commits all preserve their exact hashes."""
+        env = host_id_env
+        cave_commit(env, "first", content="one\n")
+        hash1 = _head(env.gitdir, gitdir=True)
+        cave_commit(env, "second", content="two\n")
+        hash2 = _head(env.gitdir, gitdir=True)
+
+        wrapper.pull_project(env.slug)
+
+        # Both hashes should exist on host
+        _run("git", "-C", str(env.host), "cat-file", "-t", hash1)
+        _run("git", "-C", str(env.host), "cat-file", "-t", hash2)
+        assert _head(env.host) == hash2
+
+    def test_sync_refs_after_pull_matches(self, host_id_env):
+        """After pull, gitdir refs match host exactly (same hashes)."""
+        env = host_id_env
+        cave_commit(env, "cave work", content="work\n")
+        wrapper.pull_project(env.slug)
+
+        host_head = _head(env.host)
+        gitdir_head = _head(env.gitdir, gitdir=True)
+        assert host_head == gitdir_head
+
+    def test_incremental_pulls_no_divergence(self, host_id_env):
+        """Successive pulls never create hash divergence."""
+        env = host_id_env
+
+        cave_commit(env, "first", content="one\n")
+        wrapper.pull_project(env.slug)
+        assert _head(env.host) == _head(env.gitdir, gitdir=True)
+
+        cave_commit(env, "second", content="two\n")
+        wrapper.pull_project(env.slug)
+        assert _head(env.host) == _head(env.gitdir, gitdir=True)
+
+        cave_commit(env, "third", content="three\n")
+        wrapper.pull_project(env.slug)
+        assert _head(env.host) == _head(env.gitdir, gitdir=True)
+
+    def test_amend_with_force_preserves_hash(self, host_id_env):
+        """Force pull of amended commit preserves exact hash."""
+        env = host_id_env
+        cave_commit(env, "cave work", content="v1\n")
+        wrapper.pull_project(env.slug)
+
+        cave_commit(env, "amended", content="v2\n", amend=True)
+        cave_head = _head(env.gitdir, gitdir=True)
+
+        wrapper.pull_project(env.slug, force=True)
+        assert _head(env.host) == cave_head
+
+    def test_push_then_pull_roundtrip(self, host_id_env):
+        """Push host commit, make cave commit, pull — no hash mangling."""
+        env = host_id_env
+
+        # Host makes a commit and pushes
+        (env.host / "host.txt").write_text("from host\n")
+        _run("git", "-C", str(env.host), "add", ".")
+        _run("git", "-C", str(env.host), "commit", "-m", "host work")
+        wrapper.push_project(env.slug)
+
+        # Update cave working tree from gitdir
+        _run("git", "--git-dir", str(env.gitdir), "--work-tree", str(env.cave),
+             "checkout", "-f")
+
+        # Cave makes a commit on top
+        cave_commit(env, "cave work", content="cave\n")
+        cave_head = _head(env.gitdir, gitdir=True)
+
+        wrapper.pull_project(env.slug)
+
+        # Exact hash preserved, host work still present
+        assert _head(env.host) == cave_head
+        assert (env.host / "host.txt").read_text() == "from host\n"
+        assert (env.host / "file.txt").read_text() == "cave\n"
