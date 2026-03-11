@@ -193,6 +193,28 @@ class TestPushSyncsLiveSessions:
         assert _head(env.gitdir, gitdir=True) == _head(env.host)
 
 
+class TestPushEmptyHost:
+    def test_push_empty_host_does_not_crash(self, tmp_path):
+        """push_project handles an empty host repo (no commits) gracefully."""
+        slug = "empty-host"
+        _state.set_cave_data(tmp_path)
+
+        host = tmp_path / "host"
+        host.mkdir()
+        _run("git", "-C", str(host), "init", "-b", "main")
+
+        projects_dir = _state.projects_dir()
+        proj_state = projects_dir / slug
+        proj_state.mkdir(parents=True)
+        # Create a minimal gitdir (also empty)
+        gitdir = proj_state / "gitdir"
+        _run("git", "init", "--bare", "-q", str(gitdir))
+
+        write_projects(tmp_path, {slug: str(host)})
+        # Should not raise
+        wrapper.push_project(slug)
+
+
 class TestPushNotFound:
     def test_unknown_project_exits(self, push_env):
         with pytest.raises(SystemExit):

@@ -348,10 +348,14 @@ def push_project(slug, force=False):
     )
     branch = branch_result.stdout.strip() if branch_result.returncode == 0 else "main"
 
-    host_head = subprocess.run(
+    host_head_result = subprocess.run(
         ["git", "-C", str(project_dir), "rev-parse", "HEAD"],
-        capture_output=True, text=True, check=True,
-    ).stdout.strip()
+        capture_output=True, text=True,
+    )
+    if host_head_result.returncode != 0:
+        print(f"Host repo has no commits for {slug} -- nothing to push.", file=sys.stderr)
+        return
+    host_head = host_head_result.stdout.strip()
 
     cave_head = git_mod.git(gitdir_path, "rev-parse", "HEAD",
         capture_output=True, text=True)

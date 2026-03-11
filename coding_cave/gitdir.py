@@ -257,15 +257,24 @@ def _forward_refs(sid, session_gitdir, shared_gitdir, *, force=False):
         ref, sha = line.split()
         branch = ref.removeprefix("refs/heads/")
 
-        # Skip refs the session never modified (still at init value).
+        # Skip refs the session never modified (still at init value)
+        # or hasn't changed since last sync (still at synced value).
         # Without this, a session that hasn't touched a project can
-        # revert another session's amend by forwarding its stale ref.
+        # revert another session's amend by forwarding its stale ref,
+        # and a session whose commits were re-authored by pull would
+        # overwrite the re-authored ref with its original.
         if not force:
             init_ref = git_mod.git(session_gitdir, "rev-parse",
                            f"refs/init/{branch}",
                            capture_output=True, text=True)
             if (init_ref.returncode == 0
                     and init_ref.stdout.strip() == sha):
+                continue
+            synced_ref = git_mod.git(session_gitdir, "rev-parse",
+                             f"refs/synced/{branch}",
+                             capture_output=True, text=True)
+            if (synced_ref.returncode == 0
+                    and synced_ref.stdout.strip() == sha):
                 continue
 
         # Fetch the objects into shared gitdir
@@ -314,7 +323,21 @@ def _forward_refs(sid, session_gitdir, shared_gitdir, *, force=False):
                     and shared_tree.returncode == 0
                     and session_tree.stdout.strip()
                         == shared_tree.stdout.strip()):
-                continue  # same tree, just metadata (re-authoring)
+                # Same final tree.  If the session changed since last
+                # sync, it rewrote history (squash/amend) preserving
+                # content -- update shared so pull can detect the
+                # rewrite.  Otherwise it's just re-authoring metadata.
+                synced = git_mod.git(session_gitdir, "rev-parse",
+                              f"refs/synced/{branch}",
+                              capture_output=True, text=True)
+                if (synced.returncode == 0
+                        and synced.stdout.strip() != sha):
+                    git_mod.git(shared_gitdir, "update-ref", ref, sha,
+                        capture_output=True)
+                    git_mod.git(session_gitdir, "update-ref",
+                        f"refs/synced/{branch}", sha,
+                        capture_output=True)
+                continue
 
             # Try rebasing new session commits onto shared chain
             mb = (merge_base.stdout.strip()

@@ -1444,6 +1444,120 @@ class TestSessionGitdir:
             f"expected={amended_sha[:8]}"
         )
 
+    def test_live_sync_squash_after_pull_updates_shared(
+            self, shared_project, tmp_path):
+        """Live sync detects squash of previously-synced commits.
+
+        Reproduces: session makes 2 commits, synced to shared, pull
+        re-authors them (sync_refs updates shared to re-authored tip),
+        session squashes to 1 commit.  forward_session_refs must update
+        shared to the squashed commit so pull can detect the rewrite.
+
+        Without the fix, the same-tree check treats squash as re-authoring
+        metadata and skips it, leaving shared at the re-authored tip.
+        pull then sees host_head == gitdir_head and reports "no new commits."
+        """
+        host, slug, projects_dir = shared_project
+        shared_gd = projects_dir / slug / "gitdir"
+        init_head = git_head(shared_gd, gitdir=True)
+
+        _, work, overlay = self._make_session(
+            tmp_path, slug, projects_dir, "squash")
+        session_gd = overlay / f"gitdir-{slug}"
+
+        # Session creates 2 commits
+        (work / "a.txt").write_text("a\n")
+        cave_git(work, "add", "a.txt")
+        cave_git(work, "commit", "-m", "add a")
+        (work / "b.txt").write_text("b\n")
+        cave_git(work, "add", "b.txt")
+        cave_git(work, "commit", "-m", "add b")
+        sha_b = cave_git(work, "rev-parse", "HEAD").stdout.strip()
+
+        # Mid-session sync advances shared
+        wrapper.forward_session_refs(slug, session_gd, shared_gd)
+        assert git_head(shared_gd, gitdir=True) == sha_b
+
+        # Simulate pull re-authoring: recreate chain with different author
+        tree_a = git_run("git", "--git-dir", str(shared_gd),
+                         "log", "--format=%T", "-1", f"{sha_b}^").stdout.strip()
+        tree_b = git_run("git", "--git-dir", str(shared_gd),
+                         "rev-parse", f"{sha_b}^{{tree}}").stdout.strip()
+        env = {**os.environ, **GIT_ENV,
+               "GIT_AUTHOR_NAME": "Host User",
+               "GIT_AUTHOR_EMAIL": "host@test.com"}
+        a_prime = subprocess.run(
+            ["git", "--git-dir", str(shared_gd),
+             "commit-tree", tree_a, "-p", init_head, "-m", "add a"],
+            capture_output=True, text=True, check=True, env=env,
+        ).stdout.strip()
+        b_prime = subprocess.run(
+            ["git", "--git-dir", str(shared_gd),
+             "commit-tree", tree_b, "-p", a_prime, "-m", "add b"],
+            capture_output=True, text=True, check=True, env=env,
+        ).stdout.strip()
+        # sync_refs updates shared to re-authored tip
+        git_run("git", "--git-dir", str(shared_gd),
+                "update-ref", "refs/heads/main", b_prime)
+
+        # Session squashes both commits into one
+        cave_git(work, "reset", "--soft", f"HEAD~2")
+        cave_git(work, "commit", "-m", "add a and b")
+        squashed = cave_git(work, "rev-parse", "HEAD").stdout.strip()
+        assert squashed != sha_b
+        assert squashed != b_prime
+
+        # Live sync must update shared to squashed commit
+        wrapper.forward_session_refs(slug, session_gd, shared_gd)
+        final = git_head(shared_gd, gitdir=True)
+        assert final == squashed, (
+            f"Squash not forwarded: shared={final[:8]}, "
+            f"expected={squashed[:8]}"
+        )
+
+    def test_live_sync_unchanged_after_reauthoring_skips(
+            self, shared_project, tmp_path):
+        """Session unchanged since sync is skipped even after re-authoring.
+
+        After pull re-authors commits and sync_refs updates shared, a
+        session that hasn't made new commits should not overwrite the
+        re-authored ref with its original.
+        """
+        host, slug, projects_dir = shared_project
+        shared_gd = projects_dir / slug / "gitdir"
+        init_head = git_head(shared_gd, gitdir=True)
+
+        _, work, overlay = self._make_session(
+            tmp_path, slug, projects_dir, "reauth")
+        session_gd = overlay / f"gitdir-{slug}"
+
+        # Session creates a commit
+        (work / "x.txt").write_text("x\n")
+        cave_git(work, "add", "x.txt")
+        cave_git(work, "commit", "-m", "add x")
+
+        # Mid-session sync (sets refs/synced)
+        wrapper.forward_session_refs(slug, session_gd, shared_gd)
+
+        # Simulate pull re-authoring
+        session_sha = cave_git(work, "rev-parse", "HEAD").stdout.strip()
+        tree = git_run("git", "--git-dir", str(shared_gd),
+                       "rev-parse", f"{session_sha}^{{tree}}").stdout.strip()
+        env = {**os.environ, **GIT_ENV,
+               "GIT_AUTHOR_NAME": "Host User",
+               "GIT_AUTHOR_EMAIL": "host@test.com"}
+        reauthored = subprocess.run(
+            ["git", "--git-dir", str(shared_gd),
+             "commit-tree", tree, "-p", init_head, "-m", "add x"],
+            capture_output=True, text=True, check=True, env=env,
+        ).stdout.strip()
+        git_run("git", "--git-dir", str(shared_gd),
+                "update-ref", "refs/heads/main", reauthored)
+
+        # Live sync: session unchanged since sync, should NOT overwrite
+        wrapper.forward_session_refs(slug, session_gd, shared_gd)
+        assert git_head(shared_gd, gitdir=True) == reauthored
+
     def test_no_gitdir_returns_none(self, tmp_path):
         """create_session_gitdir returns None when no shared gitdir exists."""
         _state.set_cave_data(tmp_path)
