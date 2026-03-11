@@ -15,46 +15,54 @@ def start_session(project, command, gpu=False):
 
     # Nix store overlay (shared across sessions, fuse-overlayfs).
     # Upper and db persist across sessions so nix packages survive.
-    (_state.nix_overlay_dir() / "upper").mkdir(parents=True, exist_ok=True)
-    (_state.nix_overlay_dir() / "merged").mkdir(parents=True, exist_ok=True)
-    nix_merged = str(_state.nix_overlay_dir() / "merged")
-    # Only mount if not already mounted (shared across sessions)
-    nix_already_mounted = os.path.ismount(nix_merged)
-    if not nix_already_mounted:
-        # Work dir must be empty for fuse-overlayfs
-        nix_work = _state.nix_overlay_dir() / "work"
-        overlay.force_rmtree(nix_work)
-        nix_work.mkdir(parents=True, exist_ok=True)
-        subprocess.run(
-            ["fuse-overlayfs",
-             "-o", f"lowerdir=/nix/store,upperdir={_state.nix_overlay_dir() / 'upper'},workdir={nix_work}",
-             nix_merged],
-            check=True, capture_output=True,
-        )
+    # When already inside a cave, /nix/store is the parent's overlay
+    # and we can't fuse-mount again — just pass it through.
+    inside_cave = bool(os.environ.get("CODING_CAVE_VERSION"))
+    nix_already_mounted = False
+    if inside_cave:
+        nix_merged = "/nix/store"
+    else:
+        (_state.nix_overlay_dir() / "upper").mkdir(parents=True, exist_ok=True)
+        (_state.nix_overlay_dir() / "merged").mkdir(parents=True, exist_ok=True)
+        nix_merged = str(_state.nix_overlay_dir() / "merged")
+        # Only mount if not already mounted (shared across sessions)
+        nix_already_mounted = os.path.ismount(nix_merged)
+        if not nix_already_mounted:
+            # Work dir must be empty for fuse-overlayfs
+            nix_work = _state.nix_overlay_dir() / "work"
+            overlay.force_rmtree(nix_work)
+            nix_work.mkdir(parents=True, exist_ok=True)
+            subprocess.run(
+                ["fuse-overlayfs",
+                 "-o", f"lowerdir=/nix/store,upperdir={_state.nix_overlay_dir() / 'upper'},workdir={nix_work}",
+                 nix_merged],
+                check=True, capture_output=True,
+            )
     os.environ["CODING_CAVE_NIX_MERGED"] = nix_merged
 
     # Seed nix DB from host/parent so nix doesn't try to re-register
     # (chmod) existing store paths, which fails on overlayfs.
     # Only seed if no existing cave DB (to preserve cave-installed pkgs).
     # Use sqlite3 backup API for a consistent copy (handles WAL mode).
-    host_nix_db = Path("/nix/var/nix/db/db.sqlite")
-    nix_db_dir = _state.nix_overlay_dir() / "db"
-    nix_db_dir.mkdir(parents=True, exist_ok=True)
-    cave_nix_db = nix_db_dir / "db.sqlite"
-    if host_nix_db.exists() and not cave_nix_db.exists():
-        import sqlite3
-        try:
-            for wal in nix_db_dir.glob("db.sqlite-*"):
-                wal.unlink()
-            src = sqlite3.connect(f"file:{host_nix_db}?mode=ro", uri=True)
-            dst = sqlite3.connect(str(cave_nix_db))
-            src.backup(dst)
-            dst.close()
-            src.close()
-        except sqlite3.Error:
-            pass
-    if cave_nix_db.exists():
-        os.environ["CODING_CAVE_NIX_DB_DIR"] = str(nix_db_dir)
+    if not inside_cave:
+        host_nix_db = Path("/nix/var/nix/db/db.sqlite")
+        nix_db_dir = _state.nix_overlay_dir() / "db"
+        nix_db_dir.mkdir(parents=True, exist_ok=True)
+        cave_nix_db = nix_db_dir / "db.sqlite"
+        if host_nix_db.exists() and not cave_nix_db.exists():
+            import sqlite3
+            try:
+                for wal in nix_db_dir.glob("db.sqlite-*"):
+                    wal.unlink()
+                src = sqlite3.connect(f"file:{host_nix_db}?mode=ro", uri=True)
+                dst = sqlite3.connect(str(cave_nix_db))
+                src.backup(dst)
+                dst.close()
+                src.close()
+            except sqlite3.Error:
+                pass
+        if cave_nix_db.exists():
+            os.environ["CODING_CAVE_NIX_DB_DIR"] = str(nix_db_dir)
 
     # Ensure gitdirs exist
     for slug, source in projects.load_projects().items():
@@ -64,10 +72,6 @@ def start_session(project, command, gpu=False):
         git_mod.initialize_gitdir(slug, Path(source))
 
     loaded_projects = projects.load_projects()
-
-    # When already inside a cave, pasta must be skipped (outer cave's
-    # network is already isolated).
-    inside_cave = bool(os.environ.get("CODING_CAVE_VERSION"))
 
     # Build extra bwrap args (project mounts, dotfiles, passwd)
     bwrap_args = []
@@ -320,7 +324,8 @@ def start_session(project, command, gpu=False):
         # Unmount shared nix overlay when last session exits but keep
         # upper and db so installed packages persist across sessions.
         # Work dir must be cleaned (fuse-overlayfs needs it empty).
-        if not sessions.list_sessions():
+        # Skip when inside a cave (nix_merged is /nix/store, not ours).
+        if not inside_cave and not sessions.list_sessions():
             overlay.unmount_fuse(nix_merged)
             for subdir in ["work", "merged"]:
                 overlay.force_rmtree(_state.nix_overlay_dir() / subdir)
