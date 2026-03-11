@@ -146,11 +146,12 @@ class TestHistoryRewriteDetection:
         )
 
         # Simulate cave rewriting history: amend the commit in gitdir
+        env = {**os.environ, **GIT_ENV}
         subprocess.run(
             ["git", "--git-dir", str(gitdir), "--work-tree", str(cave),
              "commit", "--amend", "-m", "rewritten",
              "--author", "Test <test@test.com>"],
-            capture_output=True, check=True,
+            capture_output=True, check=True, env=env,
         )
         new_gitdir_head = git_head(gitdir, gitdir=True)
         assert new_gitdir_head != host_head
@@ -1666,12 +1667,14 @@ class TestSessionGitdir:
                                "show", f"HEAD:x.txt").stdout
         assert tree_content.strip() == "v3"
 
-    def test_session_reset_hard_back(self, shared_project, tmp_path):
-        """Session git reset --hard to earlier commit is forwarded.
+    def test_session_reset_hard_back_live_sync_skips(
+            self, shared_project, tmp_path):
+        """Live sync skips when session resets behind shared.
 
-        Session makes A, B, C. Syncs. Then resets to A.
-        The reset should update shared (same tree as A, session changed
-        since sync).  Pull will detect the history rewrite.
+        Session makes A, B, C. Live-syncs (shared at C). Then resets to A.
+        Live sync (force=False) correctly skips — session is behind shared,
+        moving shared backward during live sync would lose other sessions'
+        work.  The reset is handled at cleanup (force=True).
         """
         host, slug, projects_dir = shared_project
         shared_gd = projects_dir / slug / "gitdir"
@@ -1693,17 +1696,61 @@ class TestSessionGitdir:
         (work / "c.txt").write_text("c\n")
         cave_git(work, "add", "c.txt")
         cave_git(work, "commit", "-m", "add c")
+        sha_c = cave_git(work, "rev-parse", "HEAD").stdout.strip()
 
-        # Sync
+        # Live sync — shared at C
         wrapper.forward_session_refs(slug, session_gd, shared_gd)
+        assert git_head(shared_gd, gitdir=True) == sha_c
 
         # Reset to commit A
         cave_git(work, "reset", "--hard", sha_a)
-        assert cave_git(work, "rev-parse", "HEAD").stdout.strip() == sha_a
 
-        # Sync — shared should update to A (different tree, session changed)
+        # Live sync — session behind shared, skipped
         wrapper.forward_session_refs(slug, session_gd, shared_gd)
-        assert git_head(shared_gd, gitdir=True) == sha_a
+        assert git_head(shared_gd, gitdir=True) == sha_c, \
+            "live sync must not move shared backward"
+
+    def test_session_reset_hard_back_cleanup_keeps_shared(
+            self, shared_project, tmp_path):
+        """Cleanup keeps shared at most-advanced commit when session reset behind.
+
+        Session makes A, B, C. Live-syncs (shared at C). Resets to A.
+        Cleanup (force=True) sees session behind shared — skips.  Shared
+        stays at C because moving backward would lose committed work.
+        """
+        host, slug, projects_dir = shared_project
+        shared_gd = projects_dir / slug / "gitdir"
+
+        _, work, overlay = self._make_session(
+            tmp_path, slug, projects_dir, "reset")
+
+        # Make 3 commits
+        (work / "a.txt").write_text("a\n")
+        cave_git(work, "add", "a.txt")
+        cave_git(work, "commit", "-m", "add a")
+
+        (work / "b.txt").write_text("b\n")
+        cave_git(work, "add", "b.txt")
+        cave_git(work, "commit", "-m", "add b")
+
+        (work / "c.txt").write_text("c\n")
+        cave_git(work, "add", "c.txt")
+        cave_git(work, "commit", "-m", "add c")
+        sha_c = cave_git(work, "rev-parse", "HEAD").stdout.strip()
+
+        # Live sync first so shared advances to C
+        session_gd = overlay / f"gitdir-{slug}"
+        wrapper.forward_session_refs(slug, session_gd, shared_gd)
+        assert git_head(shared_gd, gitdir=True) == sha_c
+
+        # Reset to A
+        cave_git(work, "reset", "--hard",
+                 cave_git(work, "rev-parse", "HEAD~2").stdout.strip())
+
+        # Cleanup — session behind shared, skip (don't move backward)
+        wrapper.merge_session_gitdirs("sid-reset", overlay)
+        assert git_head(shared_gd, gitdir=True) == sha_c, \
+            "cleanup must not move shared backward"
 
     def test_force_cleanup_same_tree_no_prior_sync(
             self, shared_project, tmp_path):
@@ -1713,7 +1760,8 @@ class TestSessionGitdir:
         shared to A', B' (re-authored, same trees). This session exits
         without ever being live-synced (no refs/synced).
 
-        force=True must force-update (with backup), not silently skip.
+        Same final tree means content is identical — the skip is correct.
+        No content is lost, so no backup is required.
         """
         host, slug, projects_dir = shared_project
         shared_gd = projects_dir / slug / "gitdir"
@@ -1733,7 +1781,6 @@ class TestSessionGitdir:
 
         # Another session's cleanup re-authors shared to same trees
         # (simulate by creating commits with same trees, different authors)
-        # Fetch session objects into shared first so we can read trees
         git_run("git", "--git-dir", str(shared_gd), "fetch",
                 str(overlay / f"gitdir-{slug}"), session_sha)
         sha_a = cave_git(work, "rev-parse", "HEAD~1").stdout.strip()
@@ -1765,21 +1812,11 @@ class TestSessionGitdir:
         # Session exits — merge_session_gitdirs (force=True)
         wrapper.merge_session_gitdirs("sid-nosync", overlay)
 
-        # With same tree and no synced ref, the same-tree check skips.
-        # force=True should still have the session's version preserved
-        # (either by updating shared or backing up under refs/sessions/).
+        # Same tree, no prior sync → skip is correct (content identical).
+        # Shared keeps the re-authored version.
         final = git_head(shared_gd, gitdir=True)
-        if final == b_prime:
-            # Shared stayed at re-authored version (same content, skip is OK).
-            # But session's commits must be backed up.
-            backup = git_run("git", "--git-dir", str(shared_gd),
-                             "rev-parse", "refs/sessions/sid-nosync/main")
-            assert backup.returncode == 0, (
-                "Same-tree skip without backup loses session history"
-            )
-        else:
-            # Session won — also acceptable
-            assert final == session_sha
+        assert final == b_prime, \
+            "same-tree divergence should keep shared's version"
 
     def test_two_sessions_sequential_sync(self, shared_project, tmp_path):
         """Two sessions both making new commits, sequential live syncs.

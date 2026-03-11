@@ -142,19 +142,22 @@ def _rebase_onto_reauthored(gitdir, shared_sha, session_sha, merge_base):
     # Rebase new commits onto shared HEAD using commit-tree
     parent = shared_sha
     for commit, tree in new_commits:
-        info = git_mod.git(gitdir, "log", "-1", "--format=%an%n%ae%n%aI%n%B", commit,
+        info = git_mod.git(gitdir, "log", "-1",
+                   "--format=%an%n%ae%n%aI%n%cn%n%ce%n%cI%n%B", commit,
                    capture_output=True, text=True)
         if info.returncode != 0:
             return None
-        lines = info.stdout.rstrip("\n").split("\n", 3)
-        author_name, author_email, author_date = lines[0], lines[1], lines[2]
-        message = lines[3] if len(lines) > 3 else ""
+        lines = info.stdout.rstrip("\n").split("\n", 6)
         env = {
             **os.environ,
-            "GIT_AUTHOR_NAME": author_name,
-            "GIT_AUTHOR_EMAIL": author_email,
-            "GIT_AUTHOR_DATE": author_date,
+            "GIT_AUTHOR_NAME": lines[0],
+            "GIT_AUTHOR_EMAIL": lines[1],
+            "GIT_AUTHOR_DATE": lines[2],
+            "GIT_COMMITTER_NAME": lines[3],
+            "GIT_COMMITTER_EMAIL": lines[4],
+            "GIT_COMMITTER_DATE": lines[5],
         }
+        message = lines[6] if len(lines) > 6 else ""
         result = subprocess.run(
             ["git", "--git-dir", str(gitdir)] + git_mod.SAFE_GIT_OPTS +
             ["commit-tree", tree, "-p", parent, "-m", message],
@@ -206,20 +209,23 @@ def _rebase_commits(gitdir, shared_sha, session_sha, merge_base):
             return None  # conflict
         merged_tree = merge.stdout.strip().splitlines()[0]
 
-        # Preserve original author info
-        info = git_mod.git(gitdir, "log", "-1", "--format=%an%n%ae%n%aI%n%B", commit,
+        # Preserve original author and committer info
+        info = git_mod.git(gitdir, "log", "-1",
+                   "--format=%an%n%ae%n%aI%n%cn%n%ce%n%cI%n%B", commit,
                    capture_output=True, text=True)
         if info.returncode != 0:
             return None
-        lines = info.stdout.rstrip("\n").split("\n", 3)
-        author_name, author_email, author_date = lines[0], lines[1], lines[2]
-        message = lines[3] if len(lines) > 3 else ""
+        lines = info.stdout.rstrip("\n").split("\n", 6)
         env = {
             **os.environ,
-            "GIT_AUTHOR_NAME": author_name,
-            "GIT_AUTHOR_EMAIL": author_email,
-            "GIT_AUTHOR_DATE": author_date,
+            "GIT_AUTHOR_NAME": lines[0],
+            "GIT_AUTHOR_EMAIL": lines[1],
+            "GIT_AUTHOR_DATE": lines[2],
+            "GIT_COMMITTER_NAME": lines[3],
+            "GIT_COMMITTER_EMAIL": lines[4],
+            "GIT_COMMITTER_DATE": lines[5],
         }
+        message = lines[6] if len(lines) > 6 else ""
         result = subprocess.run(
             ["git", "--git-dir", str(gitdir)] + git_mod.SAFE_GIT_OPTS +
             ["commit-tree", merged_tree, "-p", parent, "-m", message],
