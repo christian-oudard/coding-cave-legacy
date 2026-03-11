@@ -146,13 +146,6 @@
           GIT_COMMITTER_EMAIL="coding-cave@noreply"
         fi
         export GIT_AUTHOR_EMAIL GIT_COMMITTER_EMAIL
-        # GPG commit signing via forwarded agent socket.
-        # Git reads signing key and gpgsign from config, not env vars.
-        # Write a global gitconfig inside the cave with these settings.
-        if [ -n "''${CODING_CAVE_GPG_AGENT_SOCK:-}" ] && [ -e "''${CODING_CAVE_GPG_AGENT_SOCK}" ]; then
-          mkdir -p ${jailHome}/.gnupg
-          chmod 700 ${jailHome}/.gnupg 2>/dev/null || true
-        fi
       '')
 
       # Credential forwarding
@@ -218,6 +211,13 @@
         export TMPDIR="$HOME/.cache/tmp"
         mkdir -p "$TMPDIR"
         export PATH="$HOME/.local/bin:$PATH"
+        # GPG commit signing via forwarded agent socket.
+        # Create .gnupg dir inside the cave (must be here, not add-runtime,
+        # because add-runtime runs on host where /home/cave-coder doesn't exist).
+        if [ -n "''${CODING_CAVE_GPG_AGENT_SOCK:-}" ]; then
+          mkdir -p "$HOME/.gnupg"
+          chmod 700 "$HOME/.gnupg" 2>/dev/null || true
+        fi
         # Configure GPG commit signing if host forwarded signing key
         if [ -n "''${CODING_CAVE_GIT_SIGNING_KEY:-}" ]; then
           git config --global user.signingkey "''${CODING_CAVE_GIT_SIGNING_KEY}"
