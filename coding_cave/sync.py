@@ -484,6 +484,8 @@ def project_sync_status(slug, source):
     if not gitdir_path.exists():
         return "no gitdir"
 
+    sync_live_sessions(slug)
+
     host_head = subprocess.run(
         ["git", "-C", str(project_dir), "rev-parse", "HEAD"],
         capture_output=True, text=True,

@@ -352,6 +352,42 @@ class TestProjectSyncStatus:
         status = wrapper.project_sync_status("proj", str(repo))
         assert status == "no gitdir"
 
+    def test_session_commit_shows_to_pull(self, cave_env):
+        """Commits only in a session gitdir should show as 'to pull'."""
+        repo = make_repo(cave_env.tmp_path / "proj")
+        wrapper.cmd_add([str(repo)])
+
+        # Register a live session
+        sid = "test-session"
+        wrapper.register_session(sid, "proj", os.getpid())
+
+        # Create a session gitdir with a new commit
+        overlay_base = cave_env.cave_data / "session-overlays" / sid
+        overlay_base.mkdir(parents=True, exist_ok=True)
+        session_gitdir = wrapper.create_session_gitdir("proj", sid, overlay_base)
+
+        cave_work = cave_env.tmp_path / "session-work"
+        cave_work.mkdir()
+        subprocess.run(
+            ["git", "--git-dir", str(session_gitdir), "--work-tree", str(cave_work),
+             "checkout", "HEAD", "--", "."],
+            capture_output=True, env={**os.environ, **GIT_ENV},
+        )
+        (cave_work / "session.txt").write_text("from session\n")
+        subprocess.run(
+            ["git", "--git-dir", str(session_gitdir), "--work-tree", str(cave_work),
+             "add", "session.txt"],
+            capture_output=True, env={**os.environ, **GIT_ENV},
+        )
+        subprocess.run(
+            ["git", "--git-dir", str(session_gitdir), "--work-tree", str(cave_work),
+             "commit", "-m", "session commit"],
+            capture_output=True, env={**os.environ, **GIT_ENV},
+        )
+
+        status = wrapper.project_sync_status("proj", str(repo))
+        assert "to pull" in status
+
 
 # --- _parse_oneline / _print_rewrite_summary ---
 
