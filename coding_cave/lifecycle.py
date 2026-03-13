@@ -149,31 +149,48 @@ def start_session(project, command, gpu=False):
     # these must exist in /nix/store before fuse-overlayfs snapshots it.
     user_env = config.build_user_env()
 
-    # Nix store overlay (shared across sessions, fuse-overlayfs).
-    # Upper and db persist across sessions so nix packages survive.
+    # Nix store overlay (per-session fuse-overlayfs mount).
+    # Upper and db are shared across sessions so nix packages persist.
+    # Each session gets its own fuse-overlayfs mount (and FUSE daemon)
+    # so that newly-built host store paths are always visible — the
+    # FUSE kernel dentry cache starts clean per session.
     # When already inside a cave, /nix/store is the parent's overlay
     # and we can't fuse-mount again — just pass it through.
     inside_cave = bool(os.environ.get("CODING_CAVE_VERSION"))
-    nix_already_mounted = False
     if inside_cave:
         nix_merged = "/nix/store"
     else:
-        (_state.nix_overlay_dir() / "upper").mkdir(parents=True, exist_ok=True)
-        (_state.nix_overlay_dir() / "merged").mkdir(parents=True, exist_ok=True)
-        nix_merged = str(_state.nix_overlay_dir() / "merged")
-        # Only mount if not already mounted (shared across sessions)
-        nix_already_mounted = os.path.ismount(nix_merged)
-        if not nix_already_mounted:
-            # Work dir must be empty for fuse-overlayfs
-            nix_work = _state.nix_overlay_dir() / "work"
-            overlay.force_rmtree(nix_work)
-            nix_work.mkdir(parents=True, exist_ok=True)
-            subprocess.run(
-                ["fuse-overlayfs",
-                 "-o", f"lowerdir=/nix/store,upperdir={_state.nix_overlay_dir() / 'upper'},workdir={nix_work}",
-                 nix_merged],
-                check=True, capture_output=True,
-            )
+        nix_upper = _state.nix_overlay_dir() / "upper"
+        nix_upper.mkdir(parents=True, exist_ok=True)
+        # Remove stale upper entries that shadow host store paths.
+        # fuse-overlayfs copies up directories to the upper when nix
+        # touches them (chmod, xattr, etc).  The copy-up may be empty
+        # or marked opaque (via xattr), hiding the real contents in
+        # the lower layer.  Any upper entry for a path that also
+        # exists in the host's /nix/store is a stale artifact — nix
+        # store paths are immutable, so upper modifications are never
+        # intentional.  Cave-installed packages (via nix shell) only
+        # exist in the upper, so the host_path check preserves them.
+        import shutil
+        for entry in os.scandir(str(nix_upper)):
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+            host_path = Path("/nix/store") / entry.name
+            if host_path.is_dir():
+                shutil.rmtree(entry.path)
+        # Per-session work and merged dirs (clean FUSE cache each session)
+        session_nix = _state.cave_data() / "session-overlays" / sid / "nix"
+        nix_work = session_nix / "work"
+        nix_work.mkdir(parents=True, exist_ok=True)
+        nix_merged_dir = session_nix / "merged"
+        nix_merged_dir.mkdir(parents=True, exist_ok=True)
+        nix_merged = str(nix_merged_dir)
+        subprocess.run(
+            ["fuse-overlayfs",
+             "-o", f"lowerdir=/nix/store,upperdir={nix_upper},workdir={nix_work}",
+             nix_merged],
+            check=True, capture_output=True,
+        )
     os.environ["CODING_CAVE_NIX_MERGED"] = nix_merged
 
     # Seed nix DB from host/parent so nix doesn't try to re-register
@@ -335,6 +352,8 @@ def start_session(project, command, gpu=False):
     except BaseException:
         for merged in overlay_mounts:
             overlay.unmount_fuse(merged)
+        if not inside_cave:
+            overlay.unmount_fuse(nix_merged)
         overlay.force_rmtree(overlay_base)
         raise
 
@@ -356,17 +375,16 @@ def start_session(project, command, gpu=False):
     # User environment: extra packages, skills, env from cave.nix
     if user_env:
         import json
-        # Bind-mount user-env and its package targets directly, bypassing
-        # the nix store overlay.  fuse-overlayfs can have stale negative
-        # dentry cache entries for newly-built store paths, making them
-        # invisible at startup.
+        # Bind-mount user-env and its package closure directly.
+        # This guarantees visibility even if the nix store overlay
+        # has stale upper entries or dentry cache issues.
         bwrap_args += ["--ro-bind", str(user_env), str(user_env)]
         # Extra PATH entries from user packages
         packages_dir = user_env / "packages"
         if packages_dir.is_dir():
             extra_paths = []
             for pkg in sorted(packages_dir.iterdir()):
-                # Bind-mount the symlink target (the actual package store path)
+                # Bind-mount symlink targets (package store paths)
                 if pkg.is_symlink():
                     target = pkg.resolve()
                     if str(target).startswith("/nix/store/"):
@@ -493,6 +511,11 @@ def start_session(project, command, gpu=False):
         sessions.update_pane_titles(project)
         for merged in overlay_mounts:
             overlay.unmount_fuse(merged)
+        # Unmount per-session nix overlay before rmtree since the
+        # merged dir lives under overlay_base.  Upper and db are shared
+        # and persist across sessions.
+        if not inside_cave:
+            overlay.unmount_fuse(nix_merged)
         # Save overlay uppers for session continuity (uncommitted
         # changes, untracked files, deletions).  Must happen after
         # unmount (upper is busy while mounted) and before rmtree.
@@ -513,14 +536,6 @@ def start_session(project, command, gpu=False):
             except OSError:
                 pass
         overlay.force_rmtree(overlay_base)
-        # Unmount shared nix overlay when last session exits but keep
-        # upper and db so installed packages persist across sessions.
-        # Work dir must be cleaned (fuse-overlayfs needs it empty).
-        # Skip when inside a cave (nix_merged is /nix/store, not ours).
-        if not inside_cave and not sessions.list_sessions():
-            overlay.unmount_fuse(nix_merged)
-            for subdir in ["work", "merged"]:
-                overlay.force_rmtree(_state.nix_overlay_dir() / subdir)
 
     sys.exit(ret)
 
