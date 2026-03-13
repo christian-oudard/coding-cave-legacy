@@ -134,10 +134,16 @@
       (add-runtime ''
         CAVE_HOME="$HOME/.local/share/coding-cave/home"
         CLAUDE_DIR="$CAVE_HOME/.claude"
-        if [ ! -d "$CLAUDE_DIR" ]; then
-          mkdir -p "$CLAUDE_DIR"
+        mkdir -p "$CLAUDE_DIR"
+        # Merge default settings (base) with user's existing settings (overlay)
+        if [ -f "$CLAUDE_DIR/settings.json" ]; then
+          ${pkgs.jq}/bin/jq -s '.[0] * .[1]' ${defaultClaudeSettings} "$CLAUDE_DIR/settings.json" > "$CLAUDE_DIR/settings.json.tmp"
+          mv "$CLAUDE_DIR/settings.json.tmp" "$CLAUDE_DIR/settings.json"
+        else
           cp ${defaultClaudeSettings} "$CLAUDE_DIR/settings.json"
-          chmod 644 "$CLAUDE_DIR/settings.json"
+        fi
+        chmod 644 "$CLAUDE_DIR/settings.json"
+        if [ ! -f "$CAVE_HOME/.claude.json" ]; then
           printf '%s' '{"hasCompletedOnboarding":true,"theme":"dark","effortCalloutDismissed":true}' > "$CAVE_HOME/.claude.json"
         fi
         # Always update statusline script to match current version
