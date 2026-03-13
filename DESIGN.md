@@ -132,15 +132,21 @@ The result: shared gitdir has `initial -> A' -> B' -> C'`, which is a clean fast
 
 Pull brings committed cave work to the host. Uncommitted changes are not transferred — with multiple sessions per project, there is no single working tree to pull from. Agents must commit their work for it to be pullable.
 
-When the cave uses the host's git identity (the default when `user.name`/`user.email` are configured on the host), pull fetches from the cave's gitdir and rebases cave commits onto the host branch without re-authoring. Commit hashes are preserved, making sync a simple fast-forward. After rebasing, it syncs the gitdir back so both repos share the same commit hashes.
+Pull is branch-aware: it iterates all branches in the cave gitdir and pulls each one that has new commits to the corresponding host branch. Branches are never crossed — cave commits on `develop` go to host's `develop`, not to whatever branch the host has checked out.
 
-When the cave uses the throwaway identity (legacy mode), pull additionally re-authors commits to replace `coding-cave <coding-cave@noreply>` with the host user's git identity via `--reset-author`.
+For the host's currently checked-out branch, pull uses checkout-based rebase (with stash/unstash to preserve uncommitted changes). For other branches, pull uses git plumbing (merge-tree + commit-tree + update-ref) so it never touches the working tree.
 
-The rebase uses `--no-reapply-cherry-picks` to skip commits already present on the host. Conflicts pause the rebase and print instructions for manual resolution.
+When the cave uses the host's git identity (the default when `user.name`/`user.email` are configured on the host), pull preserves commit hashes — fast-forwards for the host identity case are true fast-forwards. After pulling, it syncs refs back to the cave gitdir so both repos share the same commit objects.
+
+When the cave uses the throwaway identity (legacy mode), pull additionally re-authors commits to replace `coding-cave <coding-cave@noreply>` with the host user's git identity.
+
+The rebase uses `--no-reapply-cherry-picks` to skip commits already present on the host. Conflicts on the current branch pause the rebase and print instructions for manual resolution. Conflicts on non-current branches are skipped with a warning.
 
 ### History rewrites require --force
 
-Pull must not silently rewrite the host's history. When the cave rewrites history (squash, amend, rebase), pull detects this via `refs/cave-sync` — a marker of the last commit both repos agreed on. If the host hasn't moved since the last sync but the merge-base is older, the cave rewrote history.
+Pull must not silently rewrite the host's history. When the cave rewrites history (squash, amend, rebase), pull detects this via `refs/remotes/host/<branch>` (falling back to `refs/cave-sync` for backward compatibility) — a marker of the last commit both repos agreed on. If the host hasn't moved since the last sync but the merge-base is older, the cave rewrote history.
+
+`--force` only applies to the currently checked-out branch. History rewrites on non-current branches always require checking out that branch first.
 
 Without `--force`, pull warns, shows what changed, and exits:
 

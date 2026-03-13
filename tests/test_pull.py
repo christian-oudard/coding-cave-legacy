@@ -608,3 +608,183 @@ class TestPullHostIdentity:
         assert _head(env.host) == cave_head
         assert (env.host / "host.txt").read_text() == "from host\n"
         assert (env.host / "file.txt").read_text() == "cave\n"
+
+
+class TestPullMultiBranch:
+    """Pull is branch-aware: each cave branch pulls to the matching host branch."""
+
+    def test_cave_branch_not_applied_to_wrong_host_branch(self, pull_env):
+        """Cave commits on develop must NOT land on host's main.
+
+        Regression: pull fetched gitdir HEAD regardless of branch, so cave
+        commits on develop were rebased onto whichever branch the host had
+        checked out.
+        """
+        env = pull_env
+
+        # Create develop on both host and cave (both at initial commit)
+        _run("git", "-C", str(env.host), "branch", "develop")
+        _run("git", "--git-dir", str(env.gitdir), "branch", "develop")
+        host_develop = _run("git", "-C", str(env.host),
+                            "rev-parse", "develop").stdout.strip()
+        wrapper.sync_refs(env.gitdir, env.host, host_develop, "develop")
+
+        # Cave commits on develop
+        _cave_git(env, "checkout", "develop")
+        cave_commit(env, "develop work", content="develop content\n")
+        _cave_git(env, "checkout", "main")
+
+        # Host is on main
+        main_head = _head(env.host)
+        wrapper.pull_project(env.slug)
+
+        # Main should be unchanged
+        assert _head(env.host) == main_head
+        assert (env.host / "file.txt").read_text() == "initial\n"
+
+        # Develop should have the cave commit
+        _run("git", "-C", str(env.host), "checkout", "develop")
+        assert (env.host / "file.txt").read_text() == "develop content\n"
+
+    def test_both_branches_pulled(self, pull_env):
+        """Commits on multiple cave branches are all pulled correctly."""
+        env = pull_env
+
+        # Create feature branch on both sides
+        _run("git", "-C", str(env.host), "branch", "feature")
+        _run("git", "--git-dir", str(env.gitdir), "branch", "feature")
+        host_feature = _run("git", "-C", str(env.host),
+                            "rev-parse", "feature").stdout.strip()
+        wrapper.sync_refs(env.gitdir, env.host, host_feature, "feature")
+
+        # Cave commits on main
+        cave_commit(env, "main work", content="main content\n")
+
+        # Cave commits on feature
+        _cave_git(env, "checkout", "feature")
+        cave_commit(env, "feature work", content="feature content\n",
+                    filename="feature.txt")
+        _cave_git(env, "checkout", "main")
+
+        wrapper.pull_project(env.slug)
+
+        # Main has its commit
+        assert (env.host / "file.txt").read_text() == "main content\n"
+
+        # Feature has its commit
+        _run("git", "-C", str(env.host), "checkout", "feature")
+        assert (env.host / "feature.txt").read_text() == "feature content\n"
+        # Feature should NOT have main's commit
+        assert (env.host / "file.txt").read_text() == "initial\n"
+
+    def test_noop_branch_not_affected(self, pull_env):
+        """Branches with no cave changes are not modified."""
+        env = pull_env
+
+        # Create develop on both sides
+        _run("git", "-C", str(env.host), "branch", "develop")
+        _run("git", "--git-dir", str(env.gitdir), "branch", "develop")
+
+        # Only commit on main
+        cave_commit(env, "main work", content="new\n")
+
+        host_develop = _head(env.host)  # main and develop at same commit
+        wrapper.pull_project(env.slug)
+
+        # Develop should still be at the original commit
+        develop_head = _run("git", "-C", str(env.host),
+                            "rev-parse", "develop").stdout.strip()
+        assert develop_head == host_develop
+
+    def test_reauthors_non_current_branch(self, pull_env):
+        """Commits on non-current branches are re-authored too."""
+        env = pull_env
+
+        _run("git", "-C", str(env.host), "branch", "develop")
+        _run("git", "--git-dir", str(env.gitdir), "branch", "develop")
+        host_develop = _run("git", "-C", str(env.host),
+                            "rev-parse", "develop").stdout.strip()
+        wrapper.sync_refs(env.gitdir, env.host, host_develop, "develop")
+
+        _cave_git(env, "checkout", "develop")
+        cave_commit(env, "develop work", content="work\n")
+        _cave_git(env, "checkout", "main")
+
+        wrapper.pull_project(env.slug)
+
+        _run("git", "-C", str(env.host), "checkout", "develop")
+        assert _last_author(env.host) == "Host User"
+
+    def test_host_identity_preserves_hash_non_current(self, tmp_path):
+        """Non-current branch with host identity preserves commit hash."""
+        slug = "test-project"
+
+        # Remove env vars BEFORE creating commits so the initial commit
+        # uses the repo-local config, not forwarded cave identity.
+        saved_env = {}
+        for var in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
+                    "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"):
+            saved_env[var] = os.environ.pop(var, None)
+
+        host = tmp_path / "host"
+        host.mkdir()
+        _run("git", "-C", str(host), "init", "-b", "main")
+        _run("git", "-C", str(host), "config", "user.email", "host@test.com")
+        _run("git", "-C", str(host), "config", "user.name", "Host User")
+        (host / "file.txt").write_text("initial\n")
+        _run("git", "-C", str(host), "add", ".")
+        _run("git", "-C", str(host), "commit", "-m", "initial")
+
+        tmpclone = tmp_path / "_tmpclone"
+        _run("git", "clone", "--no-checkout", "--local", str(host), str(tmpclone))
+        projects_dir = tmp_path / "projects"
+        proj_state = projects_dir / slug
+        proj_state.mkdir(parents=True)
+        gitdir = proj_state / "gitdir"
+        (tmpclone / ".git").rename(gitdir)
+        tmpclone.rmdir()
+        _run("git", "--git-dir", str(gitdir), "remote", "remove", "origin",
+             check=False)
+        # Cave uses HOST identity
+        _run("git", "--git-dir", str(gitdir), "config",
+             "user.email", "host@test.com")
+        _run("git", "--git-dir", str(gitdir), "config",
+             "user.name", "Host User")
+        _run("git", "--git-dir", str(gitdir), "read-tree", "HEAD")
+
+        cave = tmp_path / "cave"
+        cave.mkdir()
+        _run("git", "--git-dir", str(gitdir), "--work-tree", str(cave),
+             "checkout", "HEAD", "--", ".")
+
+        _state.set_cave_data(tmp_path)
+        write_projects(tmp_path, {slug: str(host)})
+
+        wrapper.ensure_cave_remote(host, gitdir)
+        host_head = _head(host)
+        wrapper.sync_refs(gitdir, host, host_head, "main")
+
+        # Create develop on both sides
+        _run("git", "-C", str(host), "branch", "develop")
+        _run("git", "--git-dir", str(gitdir), "branch", "develop")
+        wrapper.sync_refs(gitdir, host, host_head, "develop")
+
+        env = SimpleNamespace(host=host, gitdir=gitdir, cave=cave, slug=slug)
+
+        # Cave commits on develop
+        _cave_git(env, "checkout", "develop")
+        cave_commit(env, "develop work", content="work\n")
+        cave_head = _run("git", "--git-dir", str(gitdir),
+                         "rev-parse", "develop").stdout.strip()
+        _cave_git(env, "checkout", "main")
+
+        wrapper.pull_project(slug)
+
+        # Hash should be preserved (no re-authoring)
+        develop_host = _run("git", "-C", str(host),
+                            "rev-parse", "develop").stdout.strip()
+        assert develop_host == cave_head
+
+        for var, val in saved_env.items():
+            if val is not None:
+                os.environ[var] = val
