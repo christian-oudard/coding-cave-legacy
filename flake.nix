@@ -6,23 +6,11 @@
       url = "github:sadjow/claude-code-nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    claude-loop-src = {
-      url = "github:christian-oudard/claude-loop";
-      flake = false;
-    };
   };
 
-  outputs = { self, nixpkgs, jail-nix, claude-code, claude-loop-src, ... }: let
+  outputs = { self, nixpkgs, jail-nix, claude-code, ... }: let
     pkgs = import nixpkgs { system = "x86_64-linux"; };
     jail = jail-nix.lib.init pkgs;
-
-    claude-loop = pkgs.python3Packages.buildPythonApplication {
-      pname = "claude-loop";
-      version = "0.1.0";
-      src = claude-loop-src;
-      pyproject = true;
-      build-system = [ pkgs.python3Packages.hatchling ];
-    };
 
     defaultClaudeSettings = ./claude-settings.json;
     version = self.shortRev or self.dirtyShortRev or "dev";
@@ -109,7 +97,6 @@
         direnv
         uv
         glibc.bin
-        claude-loop
         util-linux
         fuse-overlayfs
         fuse3
@@ -156,19 +143,9 @@
           chmod 644 "$CLAUDE_DIR/settings.json"
           printf '%s' '{"hasCompletedOnboarding":true,"theme":"dark","effortCalloutDismissed":true}' > "$CAVE_HOME/.claude.json"
         fi
-        # Seed built-in skills (claude-loop)
+        # Seed per-user skills if missing
         SKILLS_DIR="$CLAUDE_DIR/skills"
         mkdir -p "$SKILLS_DIR"
-        for f in ${claude-loop.src}/commands/*.md; do
-          [ -f "$f" ] || continue
-          name="''${f##*/}"
-          name="''${name%.md}"
-          if [ ! -d "$SKILLS_DIR/$name" ]; then
-            mkdir -p "$SKILLS_DIR/$name"
-            cp "$f" "$SKILLS_DIR/$name/SKILL.md"
-          fi
-        done
-        # Seed per-user skills if missing
         if [ -n "''${CODING_CAVE_SKILLS_DIR:-}" ] && [ -d "''${CODING_CAVE_SKILLS_DIR}" ]; then
           for d in "''${CODING_CAVE_SKILLS_DIR}"/*/; do
             [ -d "$d" ] || continue

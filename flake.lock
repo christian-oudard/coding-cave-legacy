@@ -21,22 +21,6 @@
         "type": "github"
       }
     },
-    "claude-loop-src": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1772574600,
-        "narHash": "sha256-uCbzYCf1CB6c3b+TgBrzJzCR2PxmY3zoDZ7m4trOdDs=",
-        "owner": "christian-oudard",
-        "repo": "claude-loop",
-        "rev": "152904e95db68a44f88b1032e5678ac527f4275e",
-        "type": "github"
-      },
-      "original": {
-        "owner": "christian-oudard",
-        "repo": "claude-loop",
-        "type": "github"
-      }
-    },
     "flake-utils": {
       "inputs": {
         "systems": "systems"
@@ -89,7 +73,6 @@
     "root": {
       "inputs": {
         "claude-code": "claude-code",
-        "claude-loop-src": "claude-loop-src",
         "jail-nix": "jail-nix",
         "nixpkgs": "nixpkgs"
       }
