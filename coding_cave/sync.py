@@ -417,6 +417,7 @@ def _pull_branch_current(slug, project_dir, gitdir_path, branch, cave_sha,
             if result.stdout:
                 print(result.stdout.decode() if isinstance(result.stdout, bytes) else result.stdout, file=sys.stderr, end="")
             subprocess.run(host_git + ["rebase", "--abort"], capture_output=True)
+            subprocess.run(host_git + ["checkout", branch], capture_output=True)
             subprocess.run(host_git + ["branch", "-D", "_cave_pull"], capture_output=True)
             if stashed:
                 subprocess.run(host_git + ["stash", "pop"], capture_output=True)
@@ -637,6 +638,29 @@ def pull_project(slug, force=False):
         print(f"No commits in cave gitdir for {slug} -- nothing to pull.",
               file=sys.stderr)
         return
+
+    # Detached HEAD recovery: re-attach to a cave branch so pull works.
+    # Prefer main, fall back to any cave branch that matches HEAD.
+    if current_branch == "HEAD":
+        head_sha = subprocess.run(
+            host_git + ["rev-parse", "HEAD"],
+            capture_output=True, text=True,
+        ).stdout.strip()
+        # Pick a branch to attach to
+        attach = "main" if "main" in cave_branches else None
+        if not attach:
+            for b, sha in cave_branches.items():
+                if sha == head_sha:
+                    attach = b
+                    break
+        if not attach:
+            attach = next(iter(cave_branches))
+        # Create branch if it doesn't exist on host, then check it out
+        subprocess.run(
+            host_git + ["checkout", "-B", attach, head_sha],
+            capture_output=True,
+        )
+        current_branch = attach
 
     # Pull non-current branches first (plumbing, no working tree impact).
     # Sync each immediately so cave gitdir stays consistent even if the
