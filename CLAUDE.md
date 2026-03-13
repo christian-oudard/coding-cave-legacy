@@ -86,7 +86,7 @@ coding-cave cp <src>... <slug>:<path>  copy host files into a running session
 coding-cave cp <slug>:<path> <dest>    copy cave files out to host
 coding-cave move <slug> <new-path>     update a project's source path (and slug if dir name changed)
 coding-cave status [-a/--all]          show projects and running sessions
-coding-cave update-plugins             update cave.nix flake inputs
+coding-cave flake update [INPUT...]     update cave.nix flake inputs (all or specific)
 coding-cave help                       show usage help
 ```
 

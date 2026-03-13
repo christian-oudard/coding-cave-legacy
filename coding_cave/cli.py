@@ -45,7 +45,12 @@ def build_parser():
     p_cp.add_argument("-R", "-r", "--recursive", action="store_true", help="copy directories recursively")
     p_cp.add_argument("paths", nargs="+", help="source(s) and destination (use slug:path for cave)")
 
-    sub.add_parser("update-plugins", help="update cave.nix flake inputs")
+    sub.add_parser("update-plugins", help="(deprecated) alias for 'flake update'")
+
+    p_flake = sub.add_parser("flake", help="manage cave.nix flake")
+    flake_sub = p_flake.add_subparsers(dest="flake_command")
+    p_flake_update = flake_sub.add_parser("update", help="update flake inputs")
+    p_flake_update.add_argument("inputs", nargs="*", help="specific inputs to update (default: all)")
 
     p_move = sub.add_parser("move", help="update a project's source path")
     p_move.add_argument("old_slug", help="current project name")
@@ -100,6 +105,12 @@ def main():
             sys.exit(1)
         commands.cmd_cp(parsed.paths[:-1], parsed.paths[-1], recursive=parsed.recursive)
     elif parsed.command == "update-plugins":
-        commands.cmd_update_plugins([])
+        commands.cmd_flake_update([])
+    elif parsed.command == "flake":
+        if parsed.flake_command == "update":
+            commands.cmd_flake_update(parsed.inputs)
+        else:
+            print("Usage: coding-cave flake update [INPUT...]", file=sys.stderr)
+            sys.exit(1)
     elif parsed.command == "move":
         commands.cmd_move(parsed.old_slug, parsed.new_path)

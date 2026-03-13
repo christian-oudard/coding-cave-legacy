@@ -75,6 +75,11 @@ def start_session(project, command, gpu=False):
     _state.cave_data().mkdir(parents=True, exist_ok=True)
     sid = sessions.session_id()
 
+    # Build user environment from cave.nix BEFORE mounting the nix overlay.
+    # build_user_env() may produce new store paths (e.g. after flake update);
+    # these must exist in /nix/store before fuse-overlayfs snapshots it.
+    user_env = config.build_user_env()
+
     # Nix store overlay (shared across sessions, fuse-overlayfs).
     # Upper and db persist across sessions so nix packages survive.
     # When already inside a cave, /nix/store is the parent's overlay
@@ -125,9 +130,6 @@ def start_session(project, command, gpu=False):
                 pass
         if cave_nix_db.exists():
             os.environ["CODING_CAVE_NIX_DB_DIR"] = str(nix_db_dir)
-
-    # Build user environment from cave.nix (packages, settings, skills, env)
-    user_env = config.build_user_env()
     if user_env:
         os.environ["CODING_CAVE_USER_ENV"] = str(user_env)
         # Merge user settings into persistent home
@@ -480,7 +482,7 @@ def find_bwrap_child(bwrap_pid):
     return None
 
 
-def nsenter_shell_script(shell_bin, workdir, cave_env="/tmp/cave-env"):
+def nsenter_shell_script(shell_cmd, workdir, cave_env="/tmp/cave-env"):
     """Build the bash -c script for nsenter shell entry.
 
     Clears host direnv state (DIRENV_DIFF contains the host's original PATH;
@@ -491,7 +493,7 @@ def nsenter_shell_script(shell_bin, workdir, cave_env="/tmp/cave-env"):
         f'unset DIRENV_DIFF DIRENV_WATCHES DIRENV_DIR; '
         f'. {cave_env} 2>/dev/null; '
         f'cd {workdir} 2>/dev/null; '
-        f'exec {shell_bin} -l'
+        f'{shell_cmd}'
     )
 
 
@@ -516,7 +518,8 @@ def enter_session(session_info, shell_type, workdir=None):
     if inner_pid is not None:
         child_pid = inner_pid
 
-    shell_bin = "zsh" if shell_type == "zsh" else "/bin/bash"
+    from .commands import _shell_exec_cmd
+    shell_cmd = _shell_exec_cmd(shell_type)
 
     proc = subprocess.Popen([
         "nsenter",
@@ -524,7 +527,7 @@ def enter_session(session_info, shell_type, workdir=None):
         "--user", "--mount", "--net", "--pid", "--uts", "--ipc",
         "--preserve-credentials",
         "--", "/bin/bash", "-c",
-        nsenter_shell_script(shell_bin, workdir or "/projects"),
+        nsenter_shell_script(shell_cmd, workdir or "/projects"),
     ])
 
     sys.exit(wait_for_child(proc.pid))

@@ -10,6 +10,17 @@ from pathlib import Path
 from . import _state, config, projects, sessions, git as git_mod, overlay, lifecycle, sync
 
 
+def _shell_exec_cmd(preferred_shell):
+    """Return a shell command string with fallback to /bin/bash.
+
+    Since we can't check the cave's PATH from the host, the fallback
+    happens at runtime inside the cave via 'command -v'.
+    """
+    if preferred_shell == "bash":
+        return "exec /bin/bash -l"
+    return f'if command -v {preferred_shell} >/dev/null 2>&1; then exec {preferred_shell} -l; else exec /bin/bash -l; fi'
+
+
 def cmd_agent(args, gpu=False, continue_session=False, resume=None, claude_args=None):
     """Start a new agent session."""
     global_config = config.load_global_config()
@@ -45,7 +56,7 @@ def cmd_shell(args, gpu=False):
     global_config = config.load_global_config()
     config.setup_env(global_config)
 
-    shell_type = Path(os.environ.get("SHELL", "/bin/bash")).name
+    preferred_shell = Path(os.environ.get("SHELL", "/bin/bash")).name
 
     project_dir = projects.detect_project_from_cwd()
     if project_dir is None:
@@ -60,7 +71,7 @@ def cmd_shell(args, gpu=False):
     if active_sessions:
         if len(active_sessions) == 1:
             print(f"Joining session {active_sessions[0]['sid']} (PID {active_sessions[0]['bwrap_pid']}).", file=sys.stderr)
-            lifecycle.enter_session(active_sessions[0], shell_type, workdir=workdir)
+            lifecycle.enter_session(active_sessions[0], preferred_shell, workdir=workdir)
         else:
             print("Running sessions:", file=sys.stderr)
             by_index = {}
@@ -77,14 +88,13 @@ def cmd_shell(args, gpu=False):
             if choice == "n":
                 pass  # fall through to start new
             elif choice in by_index:
-                lifecycle.enter_session(by_index[choice], shell_type, workdir=workdir)
+                lifecycle.enter_session(by_index[choice], preferred_shell, workdir=workdir)
             else:
                 print("Invalid choice.", file=sys.stderr)
                 sys.exit(1)
 
     # Start new shell session
     workdir = projects.cave_workdir(project)
-    shell_bin = "zsh" if shell_type == "zsh" else "/bin/bash"
     if args:
         # Run a specific command (cav shell -- <cmd>)
         user_cmd = shlex.join(args)
@@ -93,9 +103,10 @@ def cmd_shell(args, gpu=False):
             f"cd {workdir} && exec {user_cmd}",
         ]
     else:
+        shell_cmd = _shell_exec_cmd(preferred_shell)
         command = [
             "--", "/bin/bash", "-c",
-            f"cd {workdir} && exec {shell_bin} -l",
+            f"cd {workdir} && {shell_cmd}",
         ]
 
     lifecycle.start_session(project, command, gpu=gpu)
@@ -401,25 +412,19 @@ def cmd_cp(srcs, dest, recursive=False):
         sys.exit(1)
 
 
-def cmd_update_plugins(args):
-    """Update flake inputs in user-env (cave.nix dependencies)."""
+def cmd_flake_update(inputs):
+    """Update flake inputs in user-env. Pass input names to update selectively."""
     user_env = config._user_env_dir()
     if not (user_env / "flake.nix").exists():
-        # Trigger a build first to generate the flake
         config.build_user_env()
     if not (user_env / "flake.nix").exists():
         print("No user environment to update.", file=sys.stderr)
         sys.exit(1)
-    r = subprocess.run(
-        ["nix", "flake", "update"],
-        cwd=str(user_env),
-    )
+    cmd = ["nix", "flake", "update"] + (inputs or [])
+    r = subprocess.run(cmd, cwd=str(user_env))
     if r.returncode != 0:
         sys.exit(r.returncode)
-    # Clear hash to force rebuild on next session
-    hash_file = user_env / ".cave-nix-hash"
-    hash_file.unlink(missing_ok=True)
-    print("Plugins updated. Changes take effect on next cave session.", file=sys.stderr)
+    print("Updated. Changes take effect on next cave session.", file=sys.stderr)
 
 
 def cmd_status(args):

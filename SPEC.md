@@ -257,7 +257,7 @@ The output derivation contains `packages/` (symlinks to nix packages), `claude/s
 
 If cave.nix doesn't exist, a minimal default is generated. If the build fails, the previous result is used.
 
-`coding-cave update-plugins` runs `nix flake update` in the user-env directory.
+`coding-cave flake update [INPUT...]` runs `nix flake update` in the user-env directory. Pass input names to update selectively (e.g., `coding-cave flake update persist`). `update-plugins` is a deprecated alias.
 
 ### Mirror config
 

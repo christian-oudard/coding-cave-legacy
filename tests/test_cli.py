@@ -52,6 +52,26 @@ class TestResumeArg:
         assert parsed.resume is True
 
 
+class TestFlakeSubcommand:
+    def test_flake_update_all(self):
+        parsed, _ = parse(["flake", "update"])
+        assert parsed.command == "flake"
+        assert parsed.flake_command == "update"
+        assert parsed.inputs == []
+
+    def test_flake_update_specific(self):
+        parsed, _ = parse(["flake", "update", "persist"])
+        assert parsed.inputs == ["persist"]
+
+    def test_flake_update_multiple(self):
+        parsed, _ = parse(["flake", "update", "persist", "nixpkgs"])
+        assert parsed.inputs == ["persist", "nixpkgs"]
+
+    def test_update_plugins_still_parses(self):
+        parsed, _ = parse(["update-plugins"])
+        assert parsed.command == "update-plugins"
+
+
 class TestClaudeParts:
     """Test the claude command construction logic extracted from cmd_agent."""
 
@@ -143,31 +163,73 @@ class TestDetectProjectFromCwd:
         assert wrapper.detect_project_from_cwd() is None
 
 
+class TestShellExecCmd:
+    """Test _shell_exec_cmd produces correct shell commands with fallback."""
+
+    def test_bash_is_direct(self):
+        cmd = wrapper._shell_exec_cmd("bash")
+        assert cmd == "exec /bin/bash -l"
+
+    def test_zsh_has_fallback(self):
+        cmd = wrapper._shell_exec_cmd("zsh")
+        assert "command -v zsh" in cmd
+        assert "exec zsh -l" in cmd
+        assert "exec /bin/bash -l" in cmd
+
+    def test_zsh_fallback_runs_bash_when_zsh_missing(self):
+        """When zsh isn't on PATH, the fallback command runs bash."""
+        cmd = wrapper._shell_exec_cmd("zsh")
+        result = subprocess.run(
+            ["/bin/bash", "-c", cmd],
+            capture_output=True, text=True,
+            env={"PATH": "/bin"},  # no zsh here
+        )
+        # bash -l will fail (no profile), but it should attempt bash not zsh
+        # The key test: it doesn't fail with "zsh: not found"
+        assert "zsh" not in result.stderr
+
+    def test_zsh_runs_zsh_when_available(self, tmp_path):
+        """When zsh is on PATH, the command runs zsh."""
+        # Create a fake zsh that just prints its name
+        fake_zsh = tmp_path / "zsh"
+        fake_zsh.write_text("#!/bin/bash\necho ran-zsh\n")
+        fake_zsh.chmod(0o755)
+        cmd = wrapper._shell_exec_cmd("zsh")
+        # Replace exec so we can capture output
+        cmd = cmd.replace("exec zsh -l", "echo ran-zsh")
+        result = subprocess.run(
+            ["/bin/bash", "-c", cmd],
+            capture_output=True, text=True,
+            env={"PATH": f"{tmp_path}:/bin"},
+        )
+        assert "ran-zsh" in result.stdout
+
+
 class TestNsenterShellScript:
     """Test nsenter_shell_script and that it clears host direnv state."""
 
     def test_unsets_direnv_state(self):
-        script = wrapper.nsenter_shell_script("/bin/zsh", "/projects/test")
+        script = wrapper.nsenter_shell_script("exec /bin/zsh -l", "/projects/test")
         assert "unset DIRENV_DIFF" in script
         assert "DIRENV_WATCHES" in script
         assert "DIRENV_DIR" in script
 
     def test_sources_cave_env(self):
-        script = wrapper.nsenter_shell_script("/bin/zsh", "/projects/test")
+        script = wrapper.nsenter_shell_script("exec /bin/zsh -l", "/projects/test")
         assert ". /tmp/cave-env" in script
 
     def test_direnv_unset_before_cave_env(self):
-        script = wrapper.nsenter_shell_script("/bin/zsh", "/projects/test")
+        script = wrapper.nsenter_shell_script("exec /bin/zsh -l", "/projects/test")
         assert script.index("unset DIRENV") < script.index(". /tmp/cave-env")
 
-    def test_execs_shell(self):
-        script = wrapper.nsenter_shell_script("/bin/zsh", "/projects/test")
+    def test_includes_shell_cmd(self):
+        script = wrapper.nsenter_shell_script("exec /bin/zsh -l", "/projects/test")
         assert "exec /bin/zsh -l" in script
-        script = wrapper.nsenter_shell_script("/bin/bash", "/projects/test")
+        script = wrapper.nsenter_shell_script("exec /bin/bash -l", "/projects/test")
         assert "exec /bin/bash -l" in script
 
     def test_cds_to_workdir(self):
-        script = wrapper.nsenter_shell_script("/bin/zsh", "/projects/my-proj")
+        script = wrapper.nsenter_shell_script("exec /bin/zsh -l", "/projects/my-proj")
         assert "cd /projects/my-proj" in script
 
     def test_host_direnv_state_does_not_survive(self, tmp_path):
@@ -177,9 +239,9 @@ class TestNsenterShellScript:
             'declare -x PATH="/nix/store/cave-bin:/bin"\n'
             'declare -x HOME="/home/cave-coder"\n'
         )
-        # Build the real script, substituting the cave-env path.
+        shell_cmd = wrapper._shell_exec_cmd("bash")
         script = wrapper.nsenter_shell_script(
-            "/bin/bash", str(tmp_path), cave_env=str(cave_env))
+            shell_cmd, str(tmp_path), cave_env=str(cave_env))
         # Replace the exec with env printout so we can inspect.
         script = script.replace(
             "exec /bin/bash -l",

@@ -36,5 +36,6 @@ from .sync import (  # noqa: F401
 from .commands import (  # noqa: F401
     cmd_agent, cmd_shell, cmd_add, cmd_remove, cmd_move,
     cmd_reset, cmd_pull, cmd_push, cmd_cp, cmd_status,
+    _shell_exec_cmd,
 )
 from .cli import build_parser, main  # noqa: F401

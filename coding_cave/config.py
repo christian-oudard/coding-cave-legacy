@@ -221,7 +221,11 @@ def build_user_env():
     dest_cave_nix.write_text(cave_nix_content)
 
     # Check if rebuild needed (hash cave.nix + flake.lock)
-    content_hash = hashlib.sha256(cave_nix_content.encode()).hexdigest()[:16]
+    h = hashlib.sha256(cave_nix_content.encode())
+    lock_file = user_env / "flake.lock"
+    if lock_file.exists():
+        h.update(lock_file.read_bytes())
+    content_hash = h.hexdigest()[:16]
     hash_file = user_env / ".cave-nix-hash"
     result_link = user_env / "result"
     if hash_file.exists() and hash_file.read_text() == content_hash and result_link.exists():
