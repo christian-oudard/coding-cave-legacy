@@ -1859,6 +1859,166 @@ class TestSessionGitdir:
             "Cleanup of synced session reverted re-authored commit"
         )
 
+    def test_live_sync_idle_sessions_during_amend_cycle(
+            self, shared_project, tmp_path):
+        """Live sync with 3 sessions: A amends repeatedly, B and C idle.
+
+        Simulates the production scenario where sync_live_sessions
+        iterates all running sessions.  Idle sessions must be skipped
+        even when the active session's ref diverges from shared.
+
+        Tests forward_session_refs (live sync path) specifically.
+        """
+        host, slug, projects_dir = shared_project
+        shared_gd = projects_dir / slug / "gitdir"
+
+        # All 3 sessions start at the same point
+        _, work_a, overlay_a = self._make_session(
+            tmp_path, slug, projects_dir, "a")
+        _, work_b, overlay_b = self._make_session(
+            tmp_path, slug, projects_dir, "b")
+        _, work_c, overlay_c = self._make_session(
+            tmp_path, slug, projects_dir, "c")
+        gd_a = overlay_a / f"gitdir-{slug}"
+        gd_b = overlay_b / f"gitdir-{slug}"
+        gd_c = overlay_c / f"gitdir-{slug}"
+
+        # Session A: commit, sync all sessions
+        (work_a / "f.txt").write_text("v1\n")
+        cave_git(work_a, "add", "f.txt")
+        cave_git(work_a, "commit", "-m", "add f")
+        sha_v1 = cave_git(work_a, "rev-parse", "HEAD").stdout.strip()
+
+        # Sync all (simulates sync_live_sessions iterating all)
+        wrapper.forward_session_refs(slug, gd_a, shared_gd)
+        wrapper.forward_session_refs(slug, gd_b, shared_gd)
+        wrapper.forward_session_refs(slug, gd_c, shared_gd)
+        assert git_head(shared_gd, gitdir=True) == sha_v1
+
+        # Session A: amend, sync all
+        (work_a / "f.txt").write_text("v2\n")
+        cave_git(work_a, "add", "f.txt")
+        cave_git(work_a, "commit", "--amend", "-m", "add f v2")
+        sha_v2 = cave_git(work_a, "rev-parse", "HEAD").stdout.strip()
+
+        wrapper.forward_session_refs(slug, gd_b, shared_gd)
+        wrapper.forward_session_refs(slug, gd_c, shared_gd)
+        wrapper.forward_session_refs(slug, gd_a, shared_gd)
+        assert git_head(shared_gd, gitdir=True) == sha_v2, \
+            "Idle sessions reverted amend during live sync"
+
+        # Session A: amend again, sync all (different order)
+        (work_a / "f.txt").write_text("v3\n")
+        cave_git(work_a, "add", "f.txt")
+        cave_git(work_a, "commit", "--amend", "-m", "add f v3")
+        sha_v3 = cave_git(work_a, "rev-parse", "HEAD").stdout.strip()
+
+        wrapper.forward_session_refs(slug, gd_c, shared_gd)
+        wrapper.forward_session_refs(slug, gd_a, shared_gd)
+        wrapper.forward_session_refs(slug, gd_b, shared_gd)
+        assert git_head(shared_gd, gitdir=True) == sha_v3, \
+            "Idle sessions reverted amend during live sync (round 2)"
+
+    def test_pull_push_cycle_does_not_duplicate_with_idle_sessions(
+            self, shared_project, tmp_path):
+        """Full pull→push cycle with idle sessions must not create
+        duplicate commits in the shared gitdir.
+
+        This simulates what happens when cav pull runs: it calls
+        sync_live_sessions (forwarding all session refs), then pulls
+        from the shared gitdir, then _sync_branch updates the shared
+        gitdir with the new host SHA.
+
+        After this cycle, the shared gitdir's log should have no
+        duplicate commit messages.
+        """
+        host, slug, projects_dir = shared_project
+        shared_gd = projects_dir / slug / "gitdir"
+
+        # Start 3 sessions
+        _, work_a, overlay_a = self._make_session(
+            tmp_path, slug, projects_dir, "worker")
+        _, _, overlay_b = self._make_session(
+            tmp_path, slug, projects_dir, "idle1")
+        _, _, overlay_c = self._make_session(
+            tmp_path, slug, projects_dir, "idle2")
+        gd_a = overlay_a / f"gitdir-{slug}"
+        gd_b = overlay_b / f"gitdir-{slug}"
+        gd_c = overlay_c / f"gitdir-{slug}"
+
+        # Session A commits
+        (work_a / "x.txt").write_text("work\n")
+        cave_git(work_a, "add", "x.txt")
+        cave_git(work_a, "commit", "-m", "unique commit message")
+
+        # Simulate sync_live_sessions (all sessions)
+        wrapper.forward_session_refs(slug, gd_a, shared_gd)
+        wrapper.forward_session_refs(slug, gd_b, shared_gd)
+        wrapper.forward_session_refs(slug, gd_c, shared_gd)
+
+        # Session A amends
+        (work_a / "x.txt").write_text("amended work\n")
+        cave_git(work_a, "add", "x.txt")
+        cave_git(work_a, "commit", "--amend", "-m", "unique commit message")
+
+        # Another round of sync_live_sessions
+        wrapper.forward_session_refs(slug, gd_a, shared_gd)
+        wrapper.forward_session_refs(slug, gd_b, shared_gd)
+        wrapper.forward_session_refs(slug, gd_c, shared_gd)
+
+        # Check: only one commit with this message in shared history
+        log = git_run("git", "--git-dir", str(shared_gd),
+                      "log", "--oneline", "--all")
+        matches = [l for l in log.stdout.splitlines()
+                   if "unique commit message" in l]
+        assert len(matches) == 1, (
+            f"Expected 1 commit with message, got {len(matches)}: {matches}"
+        )
+
+    def test_idle_session_after_push_does_not_revert(
+            self, shared_project, tmp_path):
+        """After a push updates shared gitdir, idle sessions whose
+        refs/heads/main now differs from shared must not revert
+        on next live sync.
+
+        Scenario:
+        1. Session A and B start (both at commit I).
+        2. Host makes commit H, push updates shared to H.
+        3. Session A and B still have refs/heads/main = I.
+        4. Live sync of A and B must not revert shared from H to I.
+        """
+        host, slug, projects_dir = shared_project
+        shared_gd = projects_dir / slug / "gitdir"
+        init_sha = git_head(shared_gd, gitdir=True)
+
+        # Start sessions at initial state
+        _, _, overlay_a = self._make_session(
+            tmp_path, slug, projects_dir, "sa")
+        _, _, overlay_b = self._make_session(
+            tmp_path, slug, projects_dir, "sb")
+        gd_a = overlay_a / f"gitdir-{slug}"
+        gd_b = overlay_b / f"gitdir-{slug}"
+
+        # Host makes a commit and push updates shared gitdir
+        (host / "pushed.txt").write_text("from host\n")
+        git_run("git", "-C", str(host), "add", "pushed.txt")
+        git_run("git", "-C", str(host), "commit", "-m", "host push")
+        host_sha = git_head(host)
+        # Simulate push: update shared gitdir refs
+        git_run("git", "--git-dir", str(shared_gd), "fetch",
+                str(host), "HEAD")
+        git_run("git", "--git-dir", str(shared_gd),
+                "update-ref", "refs/heads/main", host_sha)
+        assert git_head(shared_gd, gitdir=True) == host_sha
+
+        # Live sync of idle sessions — must not revert
+        wrapper.forward_session_refs(slug, gd_a, shared_gd)
+        assert git_head(shared_gd, gitdir=True) == host_sha, \
+            "Session A live sync reverted push"
+        wrapper.forward_session_refs(slug, gd_b, shared_gd)
+        assert git_head(shared_gd, gitdir=True) == host_sha, \
+            "Session B live sync reverted push"
+
     def test_session_reset_hard_back_cleanup_keeps_shared(
             self, shared_project, tmp_path):
         """Cleanup keeps shared at most-advanced commit when session reset behind.
