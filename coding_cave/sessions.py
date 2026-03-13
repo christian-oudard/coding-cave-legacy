@@ -13,14 +13,26 @@ def session_id():
     return f"{int(time.time())}-{os.getpid()}"
 
 
-def register_session(sid, project, bwrap_pid):
+def _next_session_index(project):
+    """Find the next unused session index for a project."""
+    used = {s.get("index", 0) for s in list_sessions(project=project)}
+    i = 1
+    while i in used:
+        i += 1
+    return i
+
+
+def register_session(sid, project, bwrap_pid, index=None):
     """Register a running session."""
     _state.sessions_dir().mkdir(parents=True, exist_ok=True)
+    if index is None:
+        index = _next_session_index(project)
     info = {
         "sid": sid,
         "project": project,
         "bwrap_pid": bwrap_pid,
         "started": int(time.time()),
+        "index": index,
     }
     tmux_pane = os.environ.get("TMUX_PANE")
     if tmux_pane:
@@ -60,15 +72,16 @@ def cleanup_session(sid):
 
 
 def update_pane_titles(project):
-    """Update terminal/tmux pane titles for all sessions of a project.
+    """Update tmux pane titles for all sessions of a project.
 
-    Assigns sequential indices matching cav shell/status display order.
+    Uses the stable index stored in session metadata.
     Uses tmux select-pane -T if in tmux, otherwise terminal title escape.
     """
     active = list_sessions(project=project)
     has_tmux = shutil.which("tmux") is not None
-    for i, s in enumerate(active):
-        title = f"cave:{project} #{i}"
+    for s in active:
+        idx = s.get("index", "?")
+        title = f"cave:{project} #{idx}"
         pane = s.get("tmux_pane")
         if pane and has_tmux:
             subprocess.run(
@@ -76,8 +89,6 @@ def update_pane_titles(project):
                 capture_output=True,
             )
         elif s.get("bwrap_pid"):
-            # Write terminal title escape to bwrap's stdin fd via /proc.
-            # This works for non-tmux terminals.
             try:
                 fd_path = f"/proc/{s['bwrap_pid']}/fd/0"
                 with open(fd_path, "w") as fd:

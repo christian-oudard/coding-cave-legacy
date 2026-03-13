@@ -12,7 +12,8 @@
     pkgs = import nixpkgs { system = "x86_64-linux"; };
     jail = jail-nix.lib.init pkgs;
 
-    defaultClaudeSettings = ./claude-settings.json;
+    defaultClaudeSettings = ./defaults/claude-settings.json;
+    defaultStatusline = ./defaults/statusline.sh;
     version = self.shortRev or self.dirtyShortRev or "dev";
 
     jailHome = "/home/cave-coder";
@@ -127,6 +128,7 @@
       # Session identity
       (try-fwd-env "CODING_CAVE_SESSION_ID")
       (try-fwd-env "CODING_CAVE_PROJECT")
+      (try-fwd-env "CODING_CAVE_SESSION_INDEX")
 
       # Extra bwrap args file from wrapper.py
       (try-fwd-env "CODING_CAVE_BWRAP_ARGS")
@@ -146,6 +148,11 @@
           fi
           chmod 644 "$CLAUDE_DIR/settings.json"
           printf '%s' '{"hasCompletedOnboarding":true,"theme":"dark","effortCalloutDismissed":true}' > "$CAVE_HOME/.claude.json"
+        fi
+        # Seed statusline script if missing
+        if [ ! -f "$CLAUDE_DIR/statusline.sh" ]; then
+          cp ${defaultStatusline} "$CLAUDE_DIR/statusline.sh"
+          chmod +x "$CLAUDE_DIR/statusline.sh"
         fi
         # Seed per-user skills if missing
         SKILLS_DIR="$CLAUDE_DIR/skills"

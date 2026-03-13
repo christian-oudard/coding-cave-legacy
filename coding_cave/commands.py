@@ -63,9 +63,12 @@ def cmd_shell(args, gpu=False):
             lifecycle.enter_session(active_sessions[0], shell_type, workdir=workdir)
         else:
             print("Running sessions:", file=sys.stderr)
-            for i, s in enumerate(active_sessions):
+            by_index = {}
+            for s in active_sessions:
                 started = time.strftime("%H:%M", time.localtime(s["started"]))
-                print(f"  [{i}] [{started}] {s['sid']}  {s.get('project', '?')} (PID {s['bwrap_pid']})", file=sys.stderr)
+                idx = s.get("index", "?")
+                by_index[str(idx)] = s
+                print(f"  [{idx}] [{started}] {s['sid']}  {s.get('project', '?')} (PID {s['bwrap_pid']})", file=sys.stderr)
             print(f"  [n] Start new session", file=sys.stderr)
             try:
                 choice = input("Join session: ").strip()
@@ -73,13 +76,11 @@ def cmd_shell(args, gpu=False):
                 return
             if choice == "n":
                 pass  # fall through to start new
+            elif choice in by_index:
+                lifecycle.enter_session(by_index[choice], shell_type, workdir=workdir)
             else:
-                try:
-                    idx = int(choice)
-                    lifecycle.enter_session(active_sessions[idx], shell_type, workdir=workdir)
-                except (ValueError, IndexError):
-                    print("Invalid choice.", file=sys.stderr)
-                    sys.exit(1)
+                print("Invalid choice.", file=sys.stderr)
+                sys.exit(1)
 
     # Start new shell session
     workdir = projects.cave_workdir(project)
@@ -329,13 +330,16 @@ def cmd_cp(srcs, dest, recursive=False):
             sys.exit(1)
         if len(active_sessions) > 1:
             print("Multiple sessions running:", file=sys.stderr)
-            for i, s in enumerate(active_sessions):
+            by_index = {}
+            for s in active_sessions:
                 started = time.strftime("%H:%M", time.localtime(s["started"]))
-                print(f"  [{i}] [{started}] {s['sid']}  PID {s['bwrap_pid']}", file=sys.stderr)
+                idx = s.get("index", "?")
+                by_index[str(idx)] = s
+                print(f"  [{idx}] [{started}] {s['sid']}  PID {s['bwrap_pid']}", file=sys.stderr)
             try:
-                choice = int(input("Session: ").strip())
-                sid = active_sessions[choice]["sid"]
-            except (ValueError, IndexError, EOFError):
+                choice = input("Session: ").strip()
+                sid = by_index[choice]["sid"]
+            except (KeyError, EOFError):
                 print("Invalid choice.", file=sys.stderr)
                 sys.exit(1)
         else:
@@ -428,4 +432,5 @@ def cmd_status(args):
         active_sessions = sessions.list_sessions(project=slug)
         for s in active_sessions:
             started = time.strftime("%H:%M", time.localtime(s["started"]))
-            print(f"    [{started}] {s['sid']}  PID {s['bwrap_pid']}", file=sys.stderr)
+            idx = s.get("index", "?")
+            print(f"    #{idx} [{started}] {s['sid']}  PID {s['bwrap_pid']}", file=sys.stderr)

@@ -247,6 +247,9 @@ def start_session(project, command, gpu=False):
     os.environ["CODING_CAVE_BWRAP_ARGS"] = str(args_file)
     os.environ["CODING_CAVE_SESSION_ID"] = sid
     os.environ["CODING_CAVE_PROJECT"] = project
+    # Stable session index: find next unused slot for this project.
+    session_index = sessions._next_session_index(project)
+    os.environ["CODING_CAVE_SESSION_INDEX"] = str(session_index)
 
     binary = _state.SANDBOX_GPU_BIN if gpu else _state.SANDBOX_BIN
 
@@ -267,6 +270,7 @@ def start_session(project, command, gpu=False):
         "CODING_CAVE_NIX_MERGED", "CODING_CAVE_NIX_DB_DIR",
         "CODING_CAVE_BWRAP_ARGS",
         "CODING_CAVE_SESSION_ID", "CODING_CAVE_PROJECT",
+        "CODING_CAVE_SESSION_INDEX",
     }
     bwrap_env = {k: v for k, v in os.environ.items() if k in BWRAP_ENV_ALLOWLIST}
 
@@ -292,7 +296,7 @@ def start_session(project, command, gpu=False):
             env=bwrap_env,
         )
 
-    sessions.register_session(sid, project, proc.pid)
+    sessions.register_session(sid, project, proc.pid, session_index)
     sessions.update_pane_titles(project)
     print("Started coding-cave.", file=sys.stderr)
 

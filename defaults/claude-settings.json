@@ -4,5 +4,9 @@
   "skipDangerousModePermissionPrompt": true,
   "sandbox": {
     "enabled": false
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "~/.claude/statusline.sh"
   }
 }
