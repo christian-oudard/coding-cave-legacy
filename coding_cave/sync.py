@@ -767,6 +767,8 @@ def push_project(slug, force=False):
         if not host_sha:
             return
         _sync_branch(gitdir_path, project_dir, host_sha, current_branch)
+        git_mod.git(gitdir_path, "symbolic-ref", "HEAD",
+            f"refs/heads/{current_branch}", capture_output=True)
         git_mod.finalize_sync(gitdir_path, project_dir)
         print(f"Force-pushed to {slug}/{current_branch} ({host_sha[:8]}).",
               file=sys.stderr)
@@ -800,6 +802,11 @@ def push_project(slug, force=False):
 
         _sync_branch(gitdir_path, project_dir, host_sha, branch)
         any_pushed = True
+
+    # Keep shared gitdir HEAD in sync with host's current branch so new
+    # sessions start on the right branch (gitdir.py copies HEAD on creation).
+    git_mod.git(gitdir_path, "symbolic-ref", "HEAD",
+        f"refs/heads/{current_branch}", capture_output=True)
 
     # Final bookkeeping
     git_mod.finalize_sync(gitdir_path, project_dir)

@@ -367,3 +367,43 @@ class TestPushMultiBranch:
         host_main = _run("git", "-C", str(env.host),
                          "rev-parse", "main").stdout.strip()
         assert cave_main == host_main
+
+
+class TestPushUpdatesHead:
+    def test_push_updates_shared_gitdir_head(self, push_env):
+        """Push updates shared gitdir HEAD to match host's current branch."""
+        env = push_env
+
+        # Create develop branch on host
+        _run("git", "-C", str(env.host), "checkout", "-b", "develop")
+        (env.host / "dev.txt").write_text("develop\n")
+        _run("git", "-C", str(env.host), "add", ".")
+        _run("git", "-C", str(env.host), "commit", "-m", "develop work")
+
+        # Gitdir HEAD should point to main before push
+        head_before = _run("git", "--git-dir", str(env.gitdir),
+                           "symbolic-ref", "HEAD").stdout.strip()
+        assert head_before == "refs/heads/main"
+
+        # Push while host is on develop
+        wrapper.push_project(env.slug)
+
+        # Gitdir HEAD should now point to develop
+        head_after = _run("git", "--git-dir", str(env.gitdir),
+                          "symbolic-ref", "HEAD").stdout.strip()
+        assert head_after == "refs/heads/develop"
+
+    def test_force_push_updates_shared_gitdir_head(self, push_env):
+        """Force push also updates shared gitdir HEAD."""
+        env = push_env
+
+        _run("git", "-C", str(env.host), "checkout", "-b", "develop")
+        (env.host / "dev.txt").write_text("develop\n")
+        _run("git", "-C", str(env.host), "add", ".")
+        _run("git", "-C", str(env.host), "commit", "-m", "develop work")
+
+        wrapper.push_project(env.slug, force=True)
+
+        head_after = _run("git", "--git-dir", str(env.gitdir),
+                          "symbolic-ref", "HEAD").stdout.strip()
+        assert head_after == "refs/heads/develop"
