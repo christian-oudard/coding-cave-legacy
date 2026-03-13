@@ -8,6 +8,68 @@ from pathlib import Path
 from . import _state, config, projects, sessions, git as git_mod, gitdir, overlay
 
 
+def _build_mirror_args():
+    """Build bwrap args for dotfile and binary mirroring.
+
+    IMPORTANT: All bind-mount destinations must be outside /nix/store.
+    These args are appended after the sandbox runtime args, but bwrap
+    processes them before the nix store overlay is fully set up.
+    """
+    args = []
+
+    # Zsh dotfiles
+    zdotdir = os.environ.get("CODING_CAVE_ZDOTDIR", "")
+    if zdotdir and Path(zdotdir).is_dir():
+        zsh_cave = f"{_state.JAIL_HOME}/.config/zsh"
+        persistent_zdotdir = _state.cave_data() / "zdotdir"
+        persistent_zdotdir.mkdir(parents=True, exist_ok=True)
+        args += ["--bind", str(persistent_zdotdir), zsh_cave]
+        for f in sorted(Path(zdotdir).glob(".z*")):
+            if not f.is_file():
+                continue
+            if "private" in f.name or "secret" in f.name:
+                continue
+            if f.name.startswith(".zhistory") or f.name.startswith(".zcompdump"):
+                # Don't copy host history -- keep cave history separate
+                dest = persistent_zdotdir / f.name
+                if not dest.exists():
+                    dest.touch()
+            else:
+                args += ["--ro-bind", str(f), f"{zsh_cave}/{f.name}"]
+        for f in sorted(Path(zdotdir).iterdir()):
+            if not f.is_file() or f.name.startswith("."):
+                continue
+            if "private" in f.name or "secret" in f.name:
+                continue
+            args += ["--ro-bind", str(f), f"{zsh_cave}/{f.name}"]
+        args += ["--setenv", "ZDOTDIR", zsh_cave]
+
+    # Bash dotfiles
+    bashrc = os.environ.get("CODING_CAVE_BASHRC", "")
+    if bashrc and Path(bashrc).is_file():
+        args += ["--ro-bind", bashrc, f"{_state.JAIL_HOME}/.bashrc"]
+    bash_profile = os.environ.get("CODING_CAVE_BASH_PROFILE", "")
+    if bash_profile and Path(bash_profile).is_file():
+        args += ["--ro-bind", bash_profile, f"{_state.JAIL_HOME}/.bash_profile"]
+
+    # Neovim config
+    nvim_config = os.environ.get("CODING_CAVE_NVIM_CONFIG", "")
+    if nvim_config and Path(nvim_config).is_dir():
+        args += ["--ro-bind", nvim_config, f"{_state.JAIL_HOME}/.config/nvim"]
+    # Use host nvim binary (with its plugins, LUA_PATH, etc.) instead of
+    # the bare cave neovim.  Bind into ~/.local/bin which is early in PATH,
+    # so it shadows the cave's nix neovim.  (Binding over a path inside
+    # /nix/store fails because bwrap processes --ro-bind before the nix
+    # store overlay is fully set up.)
+    nvim_host_bin = os.environ.get("CODING_CAVE_NVIM_HOST_BIN", "")
+    if nvim_host_bin:
+        local_bin = _state.cave_home() / ".local" / "bin"
+        local_bin.mkdir(parents=True, exist_ok=True)
+        args += ["--ro-bind", nvim_host_bin, f"{_state.JAIL_HOME}/.local/bin/nvim"]
+
+    return args
+
+
 def start_session(project, command, gpu=False):
     """Start a new bwrap session with per-session overlays."""
     _state.cave_data().mkdir(parents=True, exist_ok=True)
@@ -100,55 +162,7 @@ def start_session(project, command, gpu=False):
     loaded_projects = projects.load_projects()
 
     # Build extra bwrap args (project mounts, dotfiles, passwd)
-    bwrap_args = []
-
-    # Zsh dotfiles
-    zdotdir = os.environ.get("CODING_CAVE_ZDOTDIR", "")
-    if zdotdir and Path(zdotdir).is_dir():
-        zsh_cave = f"{_state.JAIL_HOME}/.config/zsh"
-        persistent_zdotdir = _state.cave_data() / "zdotdir"
-        persistent_zdotdir.mkdir(parents=True, exist_ok=True)
-        bwrap_args += ["--bind", str(persistent_zdotdir), zsh_cave]
-        for f in sorted(Path(zdotdir).glob(".z*")):
-            if not f.is_file():
-                continue
-            if "private" in f.name or "secret" in f.name:
-                continue
-            if f.name.startswith(".zhistory") or f.name.startswith(".zcompdump"):
-                # Don't copy host history -- keep cave history separate
-                dest = persistent_zdotdir / f.name
-                if not dest.exists():
-                    dest.touch()
-            else:
-                bwrap_args += ["--ro-bind", str(f), f"{zsh_cave}/{f.name}"]
-        for f in sorted(Path(zdotdir).iterdir()):
-            if not f.is_file() or f.name.startswith("."):
-                continue
-            if "private" in f.name or "secret" in f.name:
-                continue
-            bwrap_args += ["--ro-bind", str(f), f"{zsh_cave}/{f.name}"]
-        bwrap_args += ["--setenv", "ZDOTDIR", zsh_cave]
-
-    # Bash dotfiles
-    bashrc = os.environ.get("CODING_CAVE_BASHRC", "")
-    if bashrc and Path(bashrc).is_file():
-        bwrap_args += ["--ro-bind", bashrc, f"{_state.JAIL_HOME}/.bashrc"]
-    bash_profile = os.environ.get("CODING_CAVE_BASH_PROFILE", "")
-    if bash_profile and Path(bash_profile).is_file():
-        bwrap_args += ["--ro-bind", bash_profile, f"{_state.JAIL_HOME}/.bash_profile"]
-
-    # Neovim config
-    nvim_config = os.environ.get("CODING_CAVE_NVIM_CONFIG", "")
-    if nvim_config and Path(nvim_config).is_dir():
-        bwrap_args += ["--ro-bind", nvim_config, f"{_state.JAIL_HOME}/.config/nvim"]
-    # Use host nvim binary (with its plugins, LUA_PATH, etc.) instead of
-    # the bare cave neovim.  Bind the host wrapper over the cave-user-env
-    # neovim so it takes the same PATH slot.
-    nvim_host_bin = os.environ.get("CODING_CAVE_NVIM_HOST_BIN", "")
-    if nvim_host_bin and user_env:
-        cave_nvim = user_env / "packages" / "neovim" / "bin" / "nvim"
-        if cave_nvim.exists():
-            bwrap_args += ["--ro-bind", nvim_host_bin, str(cave_nvim)]
+    bwrap_args = _build_mirror_args()
 
     # Project overlays via fuse-overlayfs.
     # Kernel overlayfs in user namespaces has two problems:

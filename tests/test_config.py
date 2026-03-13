@@ -314,6 +314,61 @@ class TestGpgLifecycleSafety:
         assert "CODING_CAVE_GNUPGHOME" in src
 
 
+class TestBwrapArgsSafety:
+    """Verify bwrap args from lifecycle.py never bind into /nix/store.
+
+    bwrap processes args in order: the nix store overlay (--bind nix_merged
+    /nix/store) is set up by the sandbox runtime, but lifecycle.py's extra
+    args are appended after.  A --ro-bind targeting a destination inside
+    /nix/store will fail because bwrap tries to mkdir parents before the
+    overlay is mounted.
+    """
+
+    @staticmethod
+    def _extract_bind_destinations(args):
+        """Extract destination paths from bwrap --bind/--ro-bind args."""
+        bind_ops = {"--bind", "--ro-bind", "--dev-bind"}
+        dests = []
+        i = 0
+        while i < len(args):
+            if args[i] in bind_ops and i + 2 < len(args):
+                dests.append(args[i + 2])
+                i += 3
+            else:
+                i += 1
+        return dests
+
+    def test_no_bind_destinations_in_nix_store(self, cave_env):
+        """No mirror bind mount should target a path inside /nix/store.
+
+        Calls _build_mirror_args() with CODING_CAVE_NVIM_HOST_BIN set to a
+        nix store path, verifying no destination lands inside /nix/store.
+        """
+        from coding_cave.lifecycle import _build_mirror_args
+
+        fake_nvim = cave_env.tmp_path / "fake-nvim"
+        fake_nvim.write_text("#!/bin/sh\n")
+        fake_nvim.chmod(0o755)
+
+        env_patch = {
+            "CODING_CAVE_NVIM_HOST_BIN": str(fake_nvim),
+            "CODING_CAVE_ZDOTDIR": "",
+            "CODING_CAVE_BASHRC": "",
+            "CODING_CAVE_BASH_PROFILE": "",
+            "CODING_CAVE_NVIM_CONFIG": "",
+        }
+        with patch.dict(os.environ, env_patch):
+            args = _build_mirror_args()
+
+        dests = self._extract_bind_destinations(args)
+        assert len(dests) > 0, "expected at least one bind mount for nvim"
+        for dest in dests:
+            assert not dest.startswith("/nix/store"), (
+                f"bwrap bind destination must not be inside /nix/store "
+                f"(overlay not set up yet): {dest}"
+            )
+
+
 def _sync_nix_db():
     """Register unregistered nix store paths so nix build works on overlayfs.
 
