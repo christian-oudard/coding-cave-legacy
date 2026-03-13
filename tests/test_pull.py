@@ -788,3 +788,47 @@ class TestPullMultiBranch:
         for var, val in saved_env.items():
             if val is not None:
                 os.environ[var] = val
+
+
+class TestPullUpdatesHead:
+    def test_pull_updates_shared_gitdir_head(self, pull_env):
+        """Pull updates shared gitdir HEAD to match host's current branch."""
+        env = pull_env
+
+        # Create develop branch in cave with a commit
+        _cave_git(env, "checkout", "-b", "develop")
+        cave_commit(env, "develop work", "dev.txt", "develop\n")
+
+        # Host is on main, gitdir HEAD should point to main after pull
+        wrapper.pull_project(env.slug)
+
+        head_after = _run("git", "--git-dir", str(env.gitdir),
+                          "symbolic-ref", "HEAD").stdout.strip()
+        assert head_after == "refs/heads/main"
+
+    def test_pull_updates_head_when_host_on_different_branch(self, pull_env):
+        """Pull sets gitdir HEAD to host's current branch, not cave's."""
+        env = pull_env
+
+        # Create develop on both sides
+        _run("git", "-C", str(env.host), "checkout", "-b", "develop")
+        (env.host / "host.txt").write_text("host\n")
+        _run("git", "-C", str(env.host), "add", ".")
+        _run("git", "-C", str(env.host), "commit", "-m", "host on develop")
+        _run("git", "-C", str(env.host), "checkout", "main")
+
+        # Push develop to cave so it exists there
+        wrapper.push_project(env.slug)
+
+        # Make a cave commit on develop
+        _cave_git(env, "fetch", str(env.gitdir))
+        _cave_git(env, "checkout", "develop")
+        cave_commit(env, "cave develop", "cave.txt", "cave\n")
+
+        # Switch host to develop before pulling
+        _run("git", "-C", str(env.host), "checkout", "develop")
+        wrapper.pull_project(env.slug)
+
+        head_after = _run("git", "--git-dir", str(env.gitdir),
+                          "symbolic-ref", "HEAD").stdout.strip()
+        assert head_after == "refs/heads/develop"

@@ -689,6 +689,11 @@ def pull_project(slug, force=False):
                          current_pulled, current_branch)
             any_pulled = True
 
+    # Keep shared gitdir HEAD in sync with host's current branch so new
+    # sessions start on the right branch (gitdir.py copies HEAD on creation).
+    git_mod.git(gitdir_path, "symbolic-ref", "HEAD",
+        f"refs/heads/{current_branch}", capture_output=True)
+
     # Final bookkeeping
     current_head = subprocess.run(
         host_git + ["rev-parse", "HEAD"],
