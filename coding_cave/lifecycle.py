@@ -145,9 +145,8 @@ def start_session(project, command, gpu=False):
     # the bare cave neovim.  Bind the host wrapper over the cave-user-env
     # neovim so it takes the same PATH slot.
     nvim_host_bin = os.environ.get("CODING_CAVE_NVIM_HOST_BIN", "")
-    user_env = os.environ.get("CODING_CAVE_USER_ENV", "")
     if nvim_host_bin and user_env:
-        cave_nvim = Path(user_env) / "packages" / "neovim" / "bin" / "nvim"
+        cave_nvim = user_env / "packages" / "neovim" / "bin" / "nvim"
         if cave_nvim.exists():
             bwrap_args += ["--ro-bind", nvim_host_bin, str(cave_nvim)]
 

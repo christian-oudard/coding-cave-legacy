@@ -469,10 +469,11 @@ def forward_session_refs(slug, session_gitdir, shared_gitdir):
 
 
 def ff_session_branches(shared_gitdir):
-    """Fast-forward main from session branches in the shared gitdir.
+    """Merge session branches into main in the shared gitdir.
 
     Called by sync_live_sessions so pull/push can see session commits.
-    Only does FF merges — never force-updates or rebases main.
+    Tries FF first, then rebase for diverged branches.  Deletes session
+    branches that are successfully merged or already behind main.
     """
     result = git_mod.git(shared_gitdir, "for-each-ref",
                  "--format=%(refname) %(objectname)", "refs/heads/session/",
@@ -490,10 +491,30 @@ def ff_session_branches(shared_gitdir):
         ref, sha = line.split()
         mb = git_mod.git(shared_gitdir, "merge-base", main_sha, sha,
             capture_output=True, text=True)
-        if mb.returncode == 0 and mb.stdout.strip() == main_sha:
+        if mb.returncode != 0:
+            continue
+        merge_base = mb.stdout.strip()
+        if merge_base == main_sha:
+            # Session is ahead of main — FF merge
             git_mod.git(shared_gitdir, "update-ref",
                 "refs/heads/main", sha, capture_output=True)
-            main_sha = sha  # update for next iteration
+            main_sha = sha
+            git_mod.git(shared_gitdir, "update-ref", "-d", ref,
+                capture_output=True)
+        elif merge_base == sha:
+            # Session is behind main — already merged
+            git_mod.git(shared_gitdir, "update-ref", "-d", ref,
+                capture_output=True)
+        else:
+            # Diverged — try rebase
+            rebased = _rebase_commits(shared_gitdir, main_sha,
+                sha, merge_base)
+            if rebased:
+                git_mod.git(shared_gitdir, "update-ref",
+                    "refs/heads/main", rebased, capture_output=True)
+                main_sha = rebased
+                git_mod.git(shared_gitdir, "update-ref", "-d", ref,
+                    capture_output=True)
 
 
 def _save_session_index(session_gitdir, shared_gitdir, slug):
