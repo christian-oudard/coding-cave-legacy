@@ -141,6 +141,15 @@ def start_session(project, command, gpu=False):
     nvim_config = os.environ.get("CODING_CAVE_NVIM_CONFIG", "")
     if nvim_config and Path(nvim_config).is_dir():
         bwrap_args += ["--ro-bind", nvim_config, f"{_state.JAIL_HOME}/.config/nvim"]
+    # Use host nvim binary (with its plugins, LUA_PATH, etc.) instead of
+    # the bare cave neovim.  Bind the host wrapper over the cave-user-env
+    # neovim so it takes the same PATH slot.
+    nvim_host_bin = os.environ.get("CODING_CAVE_NVIM_HOST_BIN", "")
+    user_env = os.environ.get("CODING_CAVE_USER_ENV", "")
+    if nvim_host_bin and user_env:
+        cave_nvim = Path(user_env) / "packages" / "neovim" / "bin" / "nvim"
+        if cave_nvim.exists():
+            bwrap_args += ["--ro-bind", nvim_host_bin, str(cave_nvim)]
 
     # Project overlays via fuse-overlayfs.
     # Kernel overlayfs in user namespaces has two problems:

@@ -105,6 +105,15 @@ def setup_env(global_config):
         nvim_config = Path(xdg_config) / "nvim"
         if nvim_config.is_dir():
             os.environ["CODING_CAVE_NVIM_CONFIG"] = str(nvim_config)
+        # Discover host nvim wrapper's nix store path so the cave uses the
+        # same binary (with its plugins, LUA_PATH, etc.) instead of the bare
+        # cave neovim.  The nix store is available in the cave via overlay.
+        import shutil
+        host_nvim = shutil.which("nvim")
+        if host_nvim:
+            resolved = str(Path(host_nvim).resolve())
+            if resolved.startswith("/nix/store/"):
+                os.environ["CODING_CAVE_NVIM_HOST_BIN"] = resolved
 
 
 _DEFAULT_CAVE_NIX = """\
