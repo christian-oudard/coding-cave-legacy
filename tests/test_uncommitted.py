@@ -73,7 +73,7 @@ def env(tmp_path):
             "checkout", "HEAD", "--", ".")
     (cave / ".git").write_text(f"gitdir: {session_gd}\n")
 
-    # Set up cave-sync and cave remote for pull
+    # Set up cave remote and host tracking refs for pull
     wrapper.ensure_cave_remote(host, shared_gd)
     host_head = git_head(host)
     wrapper.sync_refs(shared_gd, host, host_head, "main")

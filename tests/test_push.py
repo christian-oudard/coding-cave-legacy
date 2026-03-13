@@ -94,15 +94,15 @@ class TestPushNormal:
         wrapper.push_project(env.slug)
         assert _head(env.gitdir, gitdir=True) == head_before
 
-    def test_push_updates_cave_sync(self, push_env):
+    def test_push_updates_host_ref(self, push_env):
         env = push_env
         (env.host / "file.txt").write_text("new\n")
         _run("git", "-C", str(env.host), "add", ".")
         _run("git", "-C", str(env.host), "commit", "-m", "host work")
         wrapper.push_project(env.slug)
-        cave_sync = _run("git", "--git-dir", str(env.gitdir),
-                         "rev-parse", "refs/cave-sync").stdout.strip()
-        assert cave_sync == _head(env.host)
+        host_ref = _run("git", "--git-dir", str(env.gitdir),
+                        "rev-parse", "refs/remotes/host/main").stdout.strip()
+        assert host_ref == _head(env.host)
 
 
 class TestPushRefuse:
@@ -219,3 +219,151 @@ class TestPushNotFound:
     def test_unknown_project_exits(self, push_env):
         with pytest.raises(SystemExit):
             wrapper.push_project("nonexistent")
+
+
+class TestPushMultiBranch:
+    """Push is branch-aware: each host branch pushes to the matching cave branch."""
+
+    def test_push_multiple_branches(self, push_env):
+        """Commits on multiple host branches all push to correct cave branches."""
+        env = push_env
+
+        # Create develop on both sides
+        _run("git", "-C", str(env.host), "branch", "develop")
+        _run("git", "--git-dir", str(env.gitdir), "branch", "develop")
+        wrapper.sync_refs(env.gitdir, env.host, _head(env.host), "develop")
+
+        # Commit on main
+        (env.host / "file.txt").write_text("main update\n")
+        _run("git", "-C", str(env.host), "add", ".")
+        _run("git", "-C", str(env.host), "commit", "-m", "main work")
+        main_head = _head(env.host)
+
+        # Commit on develop
+        _run("git", "-C", str(env.host), "checkout", "develop")
+        (env.host / "dev.txt").write_text("develop work\n")
+        _run("git", "-C", str(env.host), "add", ".")
+        _run("git", "-C", str(env.host), "commit", "-m", "develop work")
+        develop_head = _head(env.host)
+
+        _run("git", "-C", str(env.host), "checkout", "main")
+
+        wrapper.push_project(env.slug)
+
+        # Both branches should be updated in the cave gitdir
+        cave_main = _run("git", "--git-dir", str(env.gitdir),
+                         "rev-parse", "main").stdout.strip()
+        cave_develop = _run("git", "--git-dir", str(env.gitdir),
+                            "rev-parse", "develop").stdout.strip()
+        assert cave_main == main_head
+        assert cave_develop == develop_head
+
+    def test_push_does_not_cross_branches(self, push_env):
+        """Host commit on develop does NOT affect cave's main."""
+        env = push_env
+
+        _run("git", "-C", str(env.host), "branch", "develop")
+        _run("git", "--git-dir", str(env.gitdir), "branch", "develop")
+
+        main_before = _run("git", "--git-dir", str(env.gitdir),
+                           "rev-parse", "main").stdout.strip()
+
+        # Only commit on develop
+        _run("git", "-C", str(env.host), "checkout", "develop")
+        (env.host / "dev.txt").write_text("develop\n")
+        _run("git", "-C", str(env.host), "add", ".")
+        _run("git", "-C", str(env.host), "commit", "-m", "develop work")
+        _run("git", "-C", str(env.host), "checkout", "main")
+
+        wrapper.push_project(env.slug)
+
+        # Main should be unchanged
+        cave_main = _run("git", "--git-dir", str(env.gitdir),
+                         "rev-parse", "main").stdout.strip()
+        assert cave_main == main_before
+
+    def test_force_only_pushes_current_branch(self, push_env):
+        """--force only pushes the current branch, not others."""
+        env = push_env
+
+        _run("git", "-C", str(env.host), "branch", "develop")
+        _run("git", "--git-dir", str(env.gitdir), "branch", "develop")
+        wrapper.sync_refs(env.gitdir, env.host, _head(env.host), "develop")
+
+        # Make cave commit on main (creates unpulled state)
+        cave_work = push_env.host.parent / "cave-work"
+        cave_work.mkdir()
+        _run("git", "--git-dir", str(env.gitdir), "--work-tree",
+             str(cave_work), "checkout", "HEAD", "--", ".")
+        (cave_work / "cave.txt").write_text("cave\n")
+        _run("git", "--git-dir", str(env.gitdir), "--work-tree",
+             str(cave_work), "add", "cave.txt")
+        _run("git", "--git-dir", str(env.gitdir), "--work-tree",
+             str(cave_work), "commit", "-m", "cave commit on main")
+        cave_main = _run("git", "--git-dir", str(env.gitdir),
+                         "rev-parse", "main").stdout.strip()
+
+        # Host commits on both branches
+        (env.host / "file.txt").write_text("host main\n")
+        _run("git", "-C", str(env.host), "add", ".")
+        _run("git", "-C", str(env.host), "commit", "-m", "host main")
+
+        _run("git", "-C", str(env.host), "checkout", "develop")
+        (env.host / "dev.txt").write_text("host develop\n")
+        _run("git", "-C", str(env.host), "add", ".")
+        _run("git", "-C", str(env.host), "commit", "-m", "host develop")
+
+        # Force push from develop — should only push develop
+        wrapper.push_project(env.slug, force=True)
+
+        # Develop should be updated
+        cave_develop = _run("git", "--git-dir", str(env.gitdir),
+                            "rev-parse", "develop").stdout.strip()
+        assert cave_develop == _head(env.host)
+
+        # Main should still have the cave commit (NOT overwritten)
+        cave_main_after = _run("git", "--git-dir", str(env.gitdir),
+                               "rev-parse", "main").stdout.strip()
+        assert cave_main_after == cave_main
+
+    def test_unpulled_on_one_branch_blocks_only_that_branch(self, push_env):
+        """Unpulled commits on develop don't block pushing main."""
+        env = push_env
+
+        _run("git", "-C", str(env.host), "branch", "develop")
+        _run("git", "--git-dir", str(env.gitdir), "branch", "develop")
+        wrapper.sync_refs(env.gitdir, env.host, _head(env.host), "develop")
+
+        # Make cave commit on develop (creates unpulled state)
+        cave_work = push_env.host.parent / "cave-work"
+        cave_work.mkdir()
+        _run("git", "--git-dir", str(env.gitdir), "--work-tree",
+             str(cave_work), "checkout", "develop")
+        (cave_work / "cave.txt").write_text("cave develop\n")
+        _run("git", "--git-dir", str(env.gitdir), "--work-tree",
+             str(cave_work), "add", "cave.txt")
+        _run("git", "--git-dir", str(env.gitdir), "--work-tree",
+             str(cave_work), "commit", "-m", "cave commit on develop")
+        _run("git", "--git-dir", str(env.gitdir), "--work-tree",
+             str(cave_work), "checkout", "main")
+
+        # Host commits on both branches
+        (env.host / "file.txt").write_text("host main\n")
+        _run("git", "-C", str(env.host), "add", ".")
+        _run("git", "-C", str(env.host), "commit", "-m", "host main")
+
+        _run("git", "-C", str(env.host), "checkout", "develop")
+        (env.host / "dev.txt").write_text("host develop\n")
+        _run("git", "-C", str(env.host), "add", ".")
+        _run("git", "-C", str(env.host), "commit", "-m", "host develop")
+        _run("git", "-C", str(env.host), "checkout", "main")
+
+        # Push — develop is blocked, main should still push
+        wrapper.push_project(env.slug)
+
+        # Main should be updated
+        cave_main = _run("git", "--git-dir", str(env.gitdir),
+                         "rev-parse", "main").stdout.strip()
+        host_main = _run("git", "-C", str(env.host),
+                         "rev-parse", "main").stdout.strip()
+        assert cave_main == host_main

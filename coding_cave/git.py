@@ -54,8 +54,6 @@ def initialize_gitdir(slug, project_dir):
     head = git(gitdir, "rev-parse", "HEAD",
         capture_output=True, text=True)
     if head.returncode == 0:
-        git(gitdir, "update-ref",
-             "refs/cave-sync", head.stdout.strip())
         branch = subprocess.run(
             ["git", "-C", str(project_dir), "rev-parse", "--abbrev-ref", "HEAD"],
             capture_output=True, text=True,
@@ -97,12 +95,9 @@ def mirror_origin_refs(gitdir, project_dir):
             capture_output=True)
 
 
-def update_cave_sync(gitdir, project_dir, commit, branch=None):
-    git(gitdir, "update-ref", "refs/cave-sync", commit)
+def finalize_sync(gitdir, project_dir):
+    """Refresh host's cave remote refs and mirror origin refs into gitdir."""
     subprocess.run(["git", "-C", str(project_dir), "fetch", "cave"], capture_output=True)
-    if branch:
-        git(gitdir, "update-ref",
-             f"refs/remotes/host/{branch}", commit)
     mirror_origin_refs(gitdir, project_dir)
 
 
@@ -112,7 +107,9 @@ def sync_refs(gitdir, project_dir, host_head, branch):
     git(gitdir, "update-ref",
          f"refs/heads/{branch}", host_head,
         check=True)
-    update_cave_sync(gitdir, project_dir, host_head, branch=branch)
+    git(gitdir, "update-ref",
+         f"refs/remotes/host/{branch}", host_head)
+    finalize_sync(gitdir, project_dir)
 
 
 def find_tree_merge_base(git_cmd, host_tree):

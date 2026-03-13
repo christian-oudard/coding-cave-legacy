@@ -93,11 +93,21 @@ def _print_rewrite_summary(old_entries, new_entries):
             print(f"  + {h} {subj}", file=sys.stderr)
 
 
-def _get_cave_branches(gitdir_path):
-    """Return {branch_name: sha} for all branches in cave gitdir."""
-    result = git_mod.git(gitdir_path, "for-each-ref",
-                 "--format=%(refname:short) %(objectname)", "refs/heads/",
-                 capture_output=True, text=True)
+def _get_branches(gitdir_path, *, bare=False):
+    """Return {branch_name: sha} for all branches in a git repo.
+
+    If bare=True, uses --git-dir; otherwise uses -C.
+    """
+    if bare:
+        result = git_mod.git(gitdir_path, "for-each-ref",
+                     "--format=%(refname:short) %(objectname)", "refs/heads/",
+                     capture_output=True, text=True)
+    else:
+        result = subprocess.run(
+            ["git", "-C", str(gitdir_path), "for-each-ref",
+             "--format=%(refname:short) %(objectname)", "refs/heads/"],
+            capture_output=True, text=True,
+        )
     if result.returncode != 0:
         return {}
     branches = {}
@@ -106,6 +116,11 @@ def _get_cave_branches(gitdir_path):
             name, sha = line.split()
             branches[name] = sha
     return branches
+
+
+def _get_cave_branches(gitdir_path):
+    """Return {branch_name: sha} for all branches in cave gitdir."""
+    return _get_branches(gitdir_path, bare=True)
 
 
 def _rebase_plumbing(host_git, onto_sha, merge_base, cave_sha,
@@ -212,11 +227,6 @@ def _last_synced_sha(gitdir_path, branch):
     """Get the last-synced host SHA for a branch."""
     result = git_mod.git(gitdir_path, "rev-parse",
         f"refs/remotes/host/{branch}",
-        capture_output=True, text=True)
-    if result.returncode == 0:
-        return result.stdout.strip()
-    # Fall back to refs/cave-sync for backward compat
-    result = git_mod.git(gitdir_path, "rev-parse", "refs/cave-sync",
         capture_output=True, text=True)
     return result.stdout.strip() if result.returncode == 0 else None
 
@@ -642,15 +652,38 @@ def pull_project(slug, force=False):
         host_git + ["rev-parse", "HEAD"],
         capture_output=True, text=True, check=True,
     ).stdout.strip()
-    git_mod.update_cave_sync(gitdir_path, project_dir, current_head,
-                              branch=current_branch)
+    git_mod.finalize_sync(gitdir_path, project_dir)
 
     if not any_pulled:
         print(f"No new commits to pull from {slug}.", file=sys.stderr)
 
 
+def _check_unpulled(gitdir_path, project_dir, cave_sha, host_sha, branch):
+    """Check if a cave branch has unpulled commits that a push would lose.
+
+    Returns the count (str) of unpulled commits, or None if clean.
+    """
+    git_mod.git(gitdir_path, "fetch", str(project_dir), host_sha,
+        capture_output=True)
+    merge_base = git_mod.git(gitdir_path, "merge-base",
+         cave_sha, host_sha,
+        capture_output=True, text=True)
+    if merge_base.returncode != 0:
+        return None
+    unpulled = git_mod.git(gitdir_path, "rev-list", "--count",
+         f"{merge_base.stdout.strip()}..{cave_sha}",
+        capture_output=True, text=True)
+    if unpulled.returncode == 0 and unpulled.stdout.strip() != "0":
+        return unpulled.stdout.strip()
+    return None
+
+
 def push_project(slug, force=False):
-    """Push host commits into the cave gitdir."""
+    """Push host commits into the cave gitdir.
+
+    Iterates all host branches and pushes each to the corresponding
+    cave gitdir branch.  --force only applies to the current branch.
+    """
     loaded_projects = projects.load_projects()
     if slug not in loaded_projects:
         print(f"Project not found: {slug}", file=sys.stderr)
@@ -661,7 +694,8 @@ def push_project(slug, force=False):
     gitdir_path = proj_state / "gitdir"
 
     if not gitdir_path.exists():
-        print(f"No gitdir for {slug} -- run 'coding-cave reset' first.", file=sys.stderr)
+        print(f"No gitdir for {slug} -- run 'coding-cave reset' first.",
+              file=sys.stderr)
         sys.exit(1)
 
     sync_live_sessions(slug)
@@ -671,46 +705,73 @@ def push_project(slug, force=False):
         ["git", "-C", str(project_dir), "rev-parse", "--abbrev-ref", "HEAD"],
         capture_output=True, text=True,
     )
-    branch = branch_result.stdout.strip() if branch_result.returncode == 0 else "main"
-
-    host_head_result = subprocess.run(
-        ["git", "-C", str(project_dir), "rev-parse", "HEAD"],
-        capture_output=True, text=True,
-    )
-    if host_head_result.returncode != 0:
-        print(f"Host repo has no commits for {slug} -- nothing to push.", file=sys.stderr)
+    if branch_result.returncode != 0:
+        print(f"Host repo has no commits for {slug} -- nothing to push.",
+              file=sys.stderr)
         return
-    host_head = host_head_result.stdout.strip()
+    current_branch = branch_result.stdout.strip()
 
-    cave_head = git_mod.git(gitdir_path, "rev-parse", "HEAD",
-        capture_output=True, text=True)
-    if cave_head.returncode == 0 and cave_head.stdout.strip() == host_head:
+    host_branches = _get_branches(project_dir)
+    if not host_branches:
+        print(f"Host repo has no commits for {slug} -- nothing to push.",
+              file=sys.stderr)
+        return
+
+    cave_branches = _get_cave_branches(gitdir_path)
+
+    if force:
+        # --force: only push the current branch, skip unpulled check
+        host_sha = host_branches.get(current_branch)
+        if not host_sha:
+            return
+        _sync_branch(gitdir_path, project_dir, host_sha, current_branch)
+        git_mod.finalize_sync(gitdir_path, project_dir)
+        print(f"Force-pushed to {slug}/{current_branch} ({host_sha[:8]}).",
+              file=sys.stderr)
+        return
+
+    # Push all branches, checking each for unpulled cave commits
+    any_pushed = False
+    any_blocked = False
+    for branch in sorted(host_branches):
+        host_sha = host_branches[branch]
+        cave_sha = cave_branches.get(branch)
+
+        if cave_sha == host_sha:
+            continue  # already synced
+
+        # Check for unpulled cave commits
+        if cave_sha:
+            count = _check_unpulled(
+                gitdir_path, project_dir, cave_sha, host_sha, branch)
+            if count:
+                print(f"Cave has {count} unpulled commit(s) on {branch}:",
+                      file=sys.stderr)
+                mb = git_mod.git(gitdir_path, "merge-base",
+                     cave_sha, host_sha,
+                    capture_output=True, text=True)
+                if mb.returncode == 0:
+                    git_mod.git(gitdir_path, "log", "--oneline",
+                         f"{mb.stdout.strip()}..{cave_sha}")
+                any_blocked = True
+                continue
+
+        _sync_branch(gitdir_path, project_dir, host_sha, branch)
+        any_pushed = True
+
+    # Final bookkeeping
+    git_mod.finalize_sync(gitdir_path, project_dir)
+
+    if any_pushed:
+        print(f"Pushed to {slug}.", file=sys.stderr)
+    elif not any_blocked:
         print(f"No commits to push to {slug}.", file=sys.stderr)
-        git_mod.update_cave_sync(gitdir_path, project_dir, host_head, branch=branch)
-        return
 
-    # Check for unpulled cave commits
-    if not force and cave_head.returncode == 0:
-        cave_head_hash = cave_head.stdout.strip()
-        git_mod.git(gitdir_path, "fetch", str(project_dir), "HEAD",
-            capture_output=True)
-        merge_base = git_mod.git(gitdir_path, "merge-base",
-             cave_head_hash, host_head,
-            capture_output=True, text=True)
-        if merge_base.returncode == 0:
-            unpulled = git_mod.git(gitdir_path, "rev-list", "--count",
-                 f"{merge_base.stdout.strip()}..{cave_head_hash}",
-                capture_output=True, text=True)
-            if unpulled.returncode == 0 and unpulled.stdout.strip() != "0":
-                count = unpulled.stdout.strip()
-                print(f"Cave has {count} unpulled commit(s) that would be lost:", file=sys.stderr)
-                git_mod.git(gitdir_path, "log", "--oneline",
-                     f"{merge_base.stdout.strip()}..{cave_head_hash}")
-                print(f"Run 'coding-cave pull' first, or use 'coding-cave push --force'.", file=sys.stderr)
-                sys.exit(1)
-
-    git_mod.sync_refs(gitdir_path, project_dir, host_head, branch)
-    print(f"Pushed to {slug} ({host_head[:8]}).", file=sys.stderr)
+    if any_blocked:
+        print(f"Run 'coding-cave pull' first, or check out the branch "
+              f"and use 'coding-cave push --force'.", file=sys.stderr)
+        if not any_pushed:
+            sys.exit(1)
 
 
 def find_unsynced_project(slug):
@@ -770,44 +831,51 @@ def project_sync_status(slug, source):
 
     sync_live_sessions(slug)
 
-    host_head = subprocess.run(
-        ["git", "-C", str(project_dir), "rev-parse", "HEAD"],
-        capture_output=True, text=True,
-    )
-    cave_head = git_mod.git(gitdir_path, "rev-parse", "HEAD",
-        capture_output=True, text=True)
-    if host_head.returncode != 0 and cave_head.returncode != 0:
+    host_branches = _get_branches(project_dir)
+    cave_branches = _get_cave_branches(gitdir_path)
+
+    if not host_branches and not cave_branches:
         return None  # both empty, nothing to compare
-    if host_head.returncode != 0 or cave_head.returncode != 0:
+    if not host_branches or not cave_branches:
         return "?"
 
-    host_h = host_head.stdout.strip()
-    cave_h = cave_head.stdout.strip()
+    total_pull = 0
+    total_push = 0
+    diverged = []
 
-    tags = []
-
-    if host_h != cave_h:
-        git_mod.git(gitdir_path, "fetch", str(project_dir), "HEAD",
+    all_branches = set(host_branches) | set(cave_branches)
+    for branch in sorted(all_branches):
+        host_sha = host_branches.get(branch)
+        cave_sha = cave_branches.get(branch)
+        if not host_sha or not cave_sha or host_sha == cave_sha:
+            continue
+        git_mod.git(gitdir_path, "fetch", str(project_dir), host_sha,
             capture_output=True)
-        mb = git_mod.git(gitdir_path, "merge-base", cave_h, host_h,
+        mb = git_mod.git(gitdir_path, "merge-base", cave_sha, host_sha,
             capture_output=True, text=True)
         if mb.returncode != 0:
-            tags.append("diverged")
-        else:
-            base = mb.stdout.strip()
-            to_pull = git_mod.git(gitdir_path, "rev-list", "--count",
-                 f"{base}..{cave_h}",
-                capture_output=True, text=True)
-            to_push = git_mod.git(gitdir_path, "rev-list", "--count",
-                 f"{base}..{host_h}",
-                capture_output=True, text=True)
-            n_pull = to_pull.stdout.strip() if to_pull.returncode == 0 else "0"
-            n_push = to_push.stdout.strip() if to_push.returncode == 0 else "0"
-            if n_pull != "0" and n_push != "0":
-                tags.append(f"{n_pull} to pull, {n_push} to push")
-            elif n_pull != "0":
-                tags.append(f"{n_pull} to pull")
-            elif n_push != "0":
-                tags.append(f"{n_push} to push")
+            diverged.append(branch)
+            continue
+        base = mb.stdout.strip()
+        to_pull = git_mod.git(gitdir_path, "rev-list", "--count",
+             f"{base}..{cave_sha}",
+            capture_output=True, text=True)
+        to_push = git_mod.git(gitdir_path, "rev-list", "--count",
+             f"{base}..{host_sha}",
+            capture_output=True, text=True)
+        n_pull = int(to_pull.stdout.strip()) if to_pull.returncode == 0 else 0
+        n_push = int(to_push.stdout.strip()) if to_push.returncode == 0 else 0
+        total_pull += n_pull
+        total_push += n_push
+
+    tags = []
+    if total_pull and total_push:
+        tags.append(f"{total_pull} to pull, {total_push} to push")
+    elif total_pull:
+        tags.append(f"{total_pull} to pull")
+    elif total_push:
+        tags.append(f"{total_push} to push")
+    if diverged:
+        tags.append(f"diverged: {', '.join(diverged)}")
 
     return ", ".join(tags) if tags else ""

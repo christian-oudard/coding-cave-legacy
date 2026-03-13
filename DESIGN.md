@@ -144,7 +144,7 @@ The rebase uses `--no-reapply-cherry-picks` to skip commits already present on t
 
 ### History rewrites require --force
 
-Pull must not silently rewrite the host's history. When the cave rewrites history (squash, amend, rebase), pull detects this via `refs/remotes/host/<branch>` (falling back to `refs/cave-sync` for backward compatibility) — a marker of the last commit both repos agreed on. If the host hasn't moved since the last sync but the merge-base is older, the cave rewrote history.
+Pull must not silently rewrite the host's history. When the cave rewrites history (squash, amend, rebase), pull detects this via `refs/remotes/host/<branch>` — a per-branch marker of the last commit both repos agreed on. If the host hasn't moved since the last sync but the merge-base is older, the cave rewrote history.
 
 `--force` only applies to the currently checked-out branch. History rewrites on non-current branches always require checking out that branch first.
 
@@ -172,7 +172,11 @@ This is why the force path uses `reset --hard` (adopting exact commit objects) r
 
 Push brings host commits to the cave. It updates the shared gitdir's refs and objects to match the host. Uncommitted host changes are not transferred.
 
-Push first syncs refs from any running sessions into the shared gitdir (same as pull), so it can detect unpulled commits even when they exist only in a session gitdir. It refuses if the cave has commits that haven't been pulled yet, since updating the gitdir would lose them. It shows the unpulled commits and suggests `coding-cave pull` first, or `--force` to override.
+Push is branch-aware: it iterates all host branches and pushes each one to the corresponding cave gitdir branch. Branches are never crossed — host commits on `develop` go to cave's `develop`, not to whatever the cave gitdir HEAD points to.
+
+Push first syncs refs from any running sessions into the shared gitdir (same as pull), so it can detect unpulled commits even when they exist only in a session gitdir. For each branch, push checks whether the cave has unpulled commits. Branches with unpulled commits are skipped with a warning suggesting `coding-cave pull` first. Clean branches are pushed regardless. This means a partial push can succeed — some branches update while others are blocked.
+
+`--force` only applies to the currently checked-out host branch. It skips the unpulled check for that branch and force-updates it in the cave gitdir. Other branches are not touched.
 
 The gitdir is bind-mounted into the cave, so push updates are immediately visible to running agents. No cave restart needed.
 

@@ -93,11 +93,11 @@ def git_head(path, gitdir=False):
 
 
 class TestSyncRefs:
-    def test_updates_branch_and_cave_sync(self, two_repos):
-        """sync_refs updates gitdir branch ref and cave-sync marker."""
+    def test_updates_branch_and_host_ref(self, two_repos):
+        """sync_refs updates gitdir branch ref and host tracking ref."""
         host, gitdir, cave = two_repos
 
-        # Add 'cave' remote to host so update_cave_sync's fetch works
+        # Add 'cave' remote to host so finalize_sync's fetch works
         subprocess.run(
             ["git", "-C", str(host), "remote", "add", "cave", str(gitdir)],
             capture_output=True,
@@ -117,13 +117,6 @@ class TestSyncRefs:
         # gitdir branch should match host
         assert git_head(gitdir, gitdir=True) == new_head
 
-        # cave-sync ref should be set
-        cave_sync = subprocess.run(
-            ["git", "--git-dir", str(gitdir), "rev-parse", "refs/cave-sync"],
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
-        assert cave_sync == new_head
-
         # host remote ref in gitdir should be updated
         host_ref = subprocess.run(
             ["git", "--git-dir", str(gitdir), "rev-parse", "refs/remotes/host/main"],
@@ -133,15 +126,15 @@ class TestSyncRefs:
 
 
 class TestHistoryRewriteDetection:
-    def test_detects_rewrite_when_cave_sync_matches_host(self, two_repos):
-        """When cave-sync == host HEAD but merge-base is older, it's a rewrite."""
+    def test_detects_rewrite_when_host_ref_matches_host(self, two_repos):
+        """When refs/remotes/host/<branch> == host HEAD but merge-base is older, it's a rewrite."""
         host, gitdir, cave = two_repos
         host_head = git_head(host)
 
-        # Set cave-sync to current host HEAD
+        # Set host tracking ref to current host HEAD
         subprocess.run(
             ["git", "--git-dir", str(gitdir), "update-ref",
-             "refs/cave-sync", host_head],
+             "refs/remotes/host/main", host_head],
             check=True,
         )
 
@@ -169,13 +162,13 @@ class TestHistoryRewriteDetection:
         )
         # After amend, the commit is rewritten so there's no common ancestor
         # (OR the merge-base is older). Either way, the detection logic in
-        # pull_project checks: cave_sync == host_head AND merge_base != host_head
-        cave_sync = subprocess.run(
-            ["git", "--git-dir", str(gitdir), "rev-parse", "refs/cave-sync"],
+        # pull_project checks: host_ref == host_head AND merge_base != host_head
+        host_ref = subprocess.run(
+            ["git", "--git-dir", str(gitdir), "rev-parse", "refs/remotes/host/main"],
             capture_output=True, text=True, check=True,
         ).stdout.strip()
 
-        assert cave_sync == host_head, "cave-sync should still point to old host HEAD"
+        assert host_ref == host_head, "host ref should still point to old host HEAD"
         # The rewrite detection condition
         if merge_base.returncode == 0:
             assert merge_base.stdout.strip() != host_head
@@ -235,7 +228,7 @@ class TestInitializeGitdir:
         assert gitdir.is_dir()
 
     def test_normal_repo(self, tmp_path):
-        """initialize_gitdir creates gitdir with cave-sync and host ref."""
+        """initialize_gitdir creates gitdir with host tracking ref."""
         slug = "test-project"
         _state.set_cave_data(tmp_path)
         proj_state = _state.projects_dir() / slug
@@ -286,13 +279,6 @@ class TestInitializeGitdir:
             assert host_ino == gitdir_ino, (
                 "Pack files should be hardlinked (same inode) on same filesystem"
             )
-
-        # cave-sync should be set
-        cave_sync = subprocess.run(
-            ["git", "--git-dir", str(gitdir), "rev-parse", "refs/cave-sync"],
-            capture_output=True, text=True,
-        )
-        assert cave_sync.returncode == 0
 
         # hooks dir should be removed
         assert not (gitdir / "hooks").exists()
