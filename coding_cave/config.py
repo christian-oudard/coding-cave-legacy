@@ -267,6 +267,7 @@ def build_user_env():
     (user_env / "flake.nix").write_text(flake_content)
 
     # Build
+    print("Building user environment from cave.nix...", file=sys.stderr, flush=True)
     r = subprocess.run(
         ["nix", "build", "--no-link", "--print-out-paths"],
         capture_output=True, text=True,
