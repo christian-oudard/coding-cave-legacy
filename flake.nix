@@ -140,11 +140,9 @@
           chmod 644 "$CLAUDE_DIR/settings.json"
           printf '%s' '{"hasCompletedOnboarding":true,"theme":"dark","effortCalloutDismissed":true}' > "$CAVE_HOME/.claude.json"
         fi
-        # Seed statusline script if missing
-        if [ ! -f "$CLAUDE_DIR/statusline.sh" ]; then
-          cp ${defaultStatusline} "$CLAUDE_DIR/statusline.sh"
-          chmod +x "$CLAUDE_DIR/statusline.sh"
-        fi
+        # Always update statusline script to match current version
+        cp ${defaultStatusline} "$CLAUDE_DIR/statusline.sh"
+        chmod +x "$CLAUDE_DIR/statusline.sh"
         # Concatenate system + user CLAUDE.md
         {
           cat ${systemClaudeMd}
