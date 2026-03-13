@@ -53,6 +53,8 @@ def sync_live_sessions(slug):
         session_gitdir = overlay_base / f"gitdir-{slug}"
         if session_gitdir.is_dir():
             gitdir.forward_session_refs(slug, session_gitdir, shared_gitdir)
+    # FF-merge session branches to main so pull/push can see them
+    gitdir.ff_session_branches(shared_gitdir)
 
 
 def _parse_log(git_cmd, range_spec):

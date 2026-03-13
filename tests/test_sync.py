@@ -8,7 +8,7 @@ import pytest
 
 import wrapper
 from coding_cave import _state
-from coding_cave.gitdir import _save_session_index
+from coding_cave.gitdir import _save_session_index, forward_session_refs
 from tests.conftest import write_projects, write_session
 
 
@@ -706,106 +706,39 @@ class TestSessionGitdir:
                          "rev-parse", "refs/heads/feature-x")
         assert branch.returncode == 0
 
-    def test_two_sessions_both_commit_on_main(self, shared_project, tmp_path):
-        """Two sessions both commit on main (different files): both rebased."""
-        host, slug, projects_dir = shared_project
-        shared_gd = projects_dir / slug / "gitdir"
-
-        _, work_a, overlay_a = self._make_session(tmp_path, slug, projects_dir, "a")
-        _, work_b, overlay_b = self._make_session(tmp_path, slug, projects_dir, "b")
-
-        # Both commit on main (touching different files — no conflict)
-        (work_a / "a.txt").write_text("from A\n")
-        cave_git(work_a, "add", "a.txt")
-        cave_git(work_a, "commit", "-m", "commit A")
-
-        (work_b / "b.txt").write_text("from B\n")
-        cave_git(work_b, "add", "b.txt")
-        cave_git(work_b, "commit", "-m", "commit B")
-
-        # Session A ends first — its main fast-forwards
-        wrapper.merge_session_gitdirs("sid-a", overlay_a)
-        log = git_run("git", "--git-dir", str(shared_gd), "log", "--oneline")
-        assert "commit A" in log.stdout
-
-        # Session B ends — diverged but no conflict, B rebases onto A
-        wrapper.merge_session_gitdirs("sid-b", overlay_b)
-
-        # Both commits should be in main (B rebased on top of A)
-        log = git_run("git", "--git-dir", str(shared_gd),
-                      "log", "--oneline", "refs/heads/main")
-        assert "commit A" in log.stdout
-        assert "commit B" in log.stdout
-
-    def test_two_sessions_conflict_falls_back(self, shared_project, tmp_path):
-        """Two sessions editing the same file: rebase fails, falls back to force-update."""
-        host, slug, projects_dir = shared_project
-        shared_gd = projects_dir / slug / "gitdir"
-
-        _, work_a, overlay_a = self._make_session(tmp_path, slug, projects_dir, "a")
-        _, work_b, overlay_b = self._make_session(tmp_path, slug, projects_dir, "b")
-
-        # Both commit changes to the same file
-        (work_a / "file.txt").write_text("version A\n")
-        cave_git(work_a, "add", "file.txt")
-        cave_git(work_a, "commit", "-m", "commit A")
-        sha_a = cave_git(work_a, "rev-parse", "HEAD").stdout.strip()
-
-        (work_b / "file.txt").write_text("version B\n")
-        cave_git(work_b, "add", "file.txt")
-        cave_git(work_b, "commit", "-m", "commit B")
-
-        # Session A ends first
-        wrapper.merge_session_gitdirs("sid-a", overlay_a)
-
-        # Session B ends — rebase conflicts, falls back to force-update
-        wrapper.merge_session_gitdirs("sid-b", overlay_b)
-
-        # B wins (force-update fallback), A backed up
-        log = git_run("git", "--git-dir", str(shared_gd),
-                      "log", "--oneline", "refs/heads/main")
-        assert "commit B" in log.stdout
-
-        backup = git_run("git", "--git-dir", str(shared_gd),
-                         "rev-parse", "refs/sessions/sid-b/main")
-        assert backup.returncode == 0
-        assert backup.stdout.strip() == sha_a
-
     def test_amended_commit_updates_shared(self, shared_project, tmp_path):
         """Amending a commit after mid-session sync must still update shared.
 
-        Reproduces: session makes commit B, mid-session sync (pull) advances
-        shared main to B, session amends B to B', session exits.
-        merge_session_gitdirs must update shared main to B' (not leave it at B).
-
-        Root cause of the pull failure: merge_session_gitdirs treated the amend
-        as divergence (merge-base of B and B' is A, not B) and saved B' under
-        refs/sessions/ instead of updating refs/heads/main.  Next pull saw
-        host_head == gitdir_head (both B) and reported "No new commits."
+        Scenario: session commits B on session branch, pull triggers
+        forward_session_refs (creating session branch in shared), session
+        amends B to B', session exits.  Cleanup must FF main to B'.
         """
         host, slug, projects_dir = shared_project
         shared_gd = projects_dir / slug / "gitdir"
 
-        _, work_a, overlay_a = self._make_session(tmp_path, slug, projects_dir, "a")
+        gd_a, work_a, overlay_a = self._make_session(tmp_path, slug, projects_dir, "a")
 
-        # Session creates commit B
+        # Session creates commit B on session branch
         (work_a / "new.txt").write_text("v1\n")
         cave_git(work_a, "add", "new.txt")
         cave_git(work_a, "commit", "-m", "commit B")
         sha_b = cave_git(work_a, "rev-parse", "HEAD").stdout.strip()
 
-        # Mid-session sync (simulates pull -> sync_live_sessions) advances shared
-        wrapper.merge_session_gitdirs("sid-a", overlay_a)
-        assert git_head(shared_gd, gitdir=True) == sha_b
+        # Mid-session sync (pull -> forward_session_refs) pushes session branch
+        forward_session_refs(slug, gd_a, shared_gd)
+        session_ref = git_run("git", "--git-dir", str(shared_gd),
+                              "rev-parse", "refs/heads/session/sid-a")
+        assert session_ref.returncode == 0
+        assert session_ref.stdout.strip() == sha_b
 
-        # Session amends B to B'
+        # Session amends B to B' (force-push in real scenario via hook)
         (work_a / "new.txt").write_text("v2\n")
         cave_git(work_a, "add", "new.txt")
         cave_git(work_a, "commit", "--amend", "-m", "commit B amended")
         sha_b_prime = cave_git(work_a, "rev-parse", "HEAD").stdout.strip()
         assert sha_b_prime != sha_b
 
-        # Session exits — merge should update shared to B'
+        # Session exits — merge should update shared main to B'
         wrapper.merge_session_gitdirs("sid-a", overlay_a)
         assert git_head(shared_gd, gitdir=True) == sha_b_prime
 
@@ -820,24 +753,23 @@ class TestSessionGitdir:
         host, slug, projects_dir = shared_project
         shared_gd = projects_dir / slug / "gitdir"
 
-        _, work_a, overlay_a = self._make_session(tmp_path, slug, projects_dir, "a")
+        gd_a, work_a, overlay_a = self._make_session(tmp_path, slug, projects_dir, "a")
 
-        # Session creates commit B
+        # Session creates commit B on session branch
         (work_a / "new.txt").write_text("content\n")
         cave_git(work_a, "add", "new.txt")
         cave_git(work_a, "commit", "-m", "commit B")
         session_sha = cave_git(work_a, "rev-parse", "HEAD").stdout.strip()
 
-        # Mid-session sync advances shared to session's commit
-        wrapper.merge_session_gitdirs("sid-a", overlay_a)
-        assert git_head(shared_gd, gitdir=True) == session_sha
+        # Mid-session sync pushes session branch to shared
+        forward_session_refs(slug, gd_a, shared_gd)
 
-        # Simulate pull re-authoring: create a new commit with same tree
-        # but different author (like --reset-author does)
+        # Simulate pull re-authoring: update main to a re-authored commit
+        # with same tree but different author (like --reset-author does)
         tree = git_run("git", "--git-dir", str(shared_gd),
-                        "rev-parse", "HEAD^{tree}").stdout.strip()
+                        "rev-parse", f"{session_sha}^{{tree}}").stdout.strip()
         parent = git_run("git", "--git-dir", str(shared_gd),
-                          "rev-parse", "HEAD^").stdout.strip()
+                          "rev-parse", f"{session_sha}^").stdout.strip()
         env = {**os.environ, **GIT_ENV,
                "GIT_AUTHOR_NAME": "Host User",
                "GIT_AUTHOR_EMAIL": "host@test.com"}
@@ -851,7 +783,9 @@ class TestSessionGitdir:
         assert reauthored != session_sha
 
         # Session still has the original commit.
-        # merge_session_gitdirs should NOT overwrite the re-authored ref.
+        # Cleanup: session branch should rebase onto re-authored main.
+        # The re-authored main has the same tree, so the session commit
+        # should be detected as duplicate and main preserved.
         wrapper.merge_session_gitdirs("sid-a", overlay_a)
         assert git_head(shared_gd, gitdir=True) == reauthored
 
@@ -1048,68 +982,6 @@ class TestSessionGitdir:
                          "rev-parse", "refs/sessions/sid-b/main")
         assert backup.returncode != 0
 
-    def test_forward_refs_rebases_onto_newer_shared(
-            self, shared_project, tmp_path):
-        """Session commits rebase onto shared HEAD when shared moved forward.
-
-        Scenario: session starts at commit A, host pushes commit B to shared
-        gitdir, session commits C on top of A.  forward_session_refs should
-        rebase C onto B, producing B -> C'.
-
-        Regression: forward_session_refs skipped diverged refs entirely,
-        so session commits were invisible to pull when the shared gitdir
-        had advanced via push.
-        """
-        host, slug, projects_dir = shared_project
-        shared_gd = projects_dir / slug / "gitdir"
-
-        _, work_a, overlay_a = self._make_session(tmp_path, slug, projects_dir, "a")
-
-        # Simulate host pushing a new commit to shared gitdir (e.g. cav push)
-        # Create a commit directly in the shared gitdir
-        shared_work = tmp_path / "shared-work"
-        shared_work.mkdir()
-        git_run("git", "--git-dir", str(shared_gd), "--work-tree", str(shared_work),
-                "checkout", "HEAD", "--", ".")
-        (shared_work / "host-file.txt").write_text("from host\n")
-        env = {**os.environ, **GIT_ENV}
-        subprocess.run(
-            ["git", "--git-dir", str(shared_gd), "--work-tree", str(shared_work),
-             "add", "host-file.txt"],
-            capture_output=True, check=True, env=env,
-        )
-        subprocess.run(
-            ["git", "--git-dir", str(shared_gd), "--work-tree", str(shared_work),
-             "commit", "-m", "host commit"],
-            capture_output=True, check=True, env=env,
-        )
-        shared_after_push = git_head(shared_gd, gitdir=True)
-
-        # Session commits on top of original HEAD (doesn't know about host commit)
-        (work_a / "session-file.txt").write_text("from session\n")
-        cave_git(work_a, "add", "session-file.txt")
-        cave_git(work_a, "commit", "-m", "session commit")
-
-        # Live sync should rebase session commit onto shared HEAD
-        session_gd = overlay_a / f"gitdir-{slug}"
-        wrapper.forward_session_refs(slug, session_gd, shared_gd)
-
-        # Shared HEAD should have moved (rebase succeeded)
-        new_shared = git_head(shared_gd, gitdir=True)
-        assert new_shared != shared_after_push, "shared HEAD should advance"
-
-        # Both commits should be in the log
-        log = git_run("git", "--git-dir", str(shared_gd),
-                      "log", "--oneline", "refs/heads/main")
-        assert "host commit" in log.stdout
-        assert "session commit" in log.stdout
-
-        # Host commit should be an ancestor (not lost)
-        is_ancestor = git_run("git", "--git-dir", str(shared_gd),
-                              "merge-base", "--is-ancestor",
-                              shared_after_push, new_shared)
-        assert is_ancestor.returncode == 0
-
     def test_forward_refs_skips_conflicting_diverge(
             self, shared_project, tmp_path):
         """Conflicting diverge is skipped during live sync.
@@ -1155,32 +1027,29 @@ class TestSessionGitdir:
 
     def test_forward_refs_live_sync_handles_amendment(
             self, shared_project, tmp_path):
-        """Live sync updates shared when session amends a commit.
+        """Live sync updates session branch in shared when session amends.
 
-        Scenario: session creates commit B, mid-session sync advances shared
-        to B, session amends B to B'.  forward_session_refs (live sync,
-        force=False) must detect the single-commit amendment and update
-        shared to B'.
-
-        Regression: forward_session_refs skipped the diverged ref, leaving
-        shared at B.  cav pull then saw host_head == gitdir_head and reported
-        "No new commits."
+        With branch-per-session, sessions commit on session/<sid>.
+        forward_session_refs creates the session branch in shared, then
+        on amend, detects the single-commit amendment and updates it.
         """
         host, slug, projects_dir = shared_project
         shared_gd = projects_dir / slug / "gitdir"
 
         _, work_a, overlay_a = self._make_session(tmp_path, slug, projects_dir, "a")
 
-        # Session creates commit B
+        # Session creates commit B on session branch
         (work_a / "new.txt").write_text("v1\n")
         cave_git(work_a, "add", "new.txt")
         cave_git(work_a, "commit", "-m", "commit B")
         sha_b = cave_git(work_a, "rev-parse", "HEAD").stdout.strip()
 
-        # Mid-session sync advances shared to B
+        # Mid-session sync pushes session branch to shared
         session_gd = overlay_a / f"gitdir-{slug}"
         wrapper.forward_session_refs(slug, session_gd, shared_gd)
-        assert git_head(shared_gd, gitdir=True) == sha_b
+        ref = git_run("git", "--git-dir", str(shared_gd),
+                      "rev-parse", "refs/heads/session/sid-a")
+        assert ref.stdout.strip() == sha_b
 
         # Session amends B to B' (different tree)
         (work_a / "new.txt").write_text("v2\n")
@@ -1189,9 +1058,11 @@ class TestSessionGitdir:
         sha_b_prime = cave_git(work_a, "rev-parse", "HEAD").stdout.strip()
         assert sha_b_prime != sha_b
 
-        # Live sync should detect amendment and update shared to B'
+        # Live sync should detect amendment and update session branch
         wrapper.forward_session_refs(slug, session_gd, shared_gd)
-        assert git_head(shared_gd, gitdir=True) == sha_b_prime
+        ref = git_run("git", "--git-dir", str(shared_gd),
+                      "rev-parse", "refs/heads/session/sid-a")
+        assert ref.stdout.strip() == sha_b_prime
 
     def test_sync_live_sessions_restores_alternates(
             self, shared_project, tmp_path):
@@ -1210,52 +1081,6 @@ class TestSessionGitdir:
         wrapper.sync_live_sessions(slug)
 
         assert alt_file.read_text().strip() == cave_path
-
-    def test_sync_live_stale_session_preserves_active(
-            self, shared_project, tmp_path):
-        """sync_live_sessions with active + stale sessions preserves active commits.
-
-        Full integration scenario from today: two sessions exist, one active
-        (with new commits) and one stale (no commits, behind shared).
-        sync_live_sessions must push active session's commits and NOT let
-        the stale session overwrite them.
-        """
-        host, slug, projects_dir = shared_project
-        shared_gd = projects_dir / slug / "gitdir"
-
-        # Create two sessions at standard overlay locations
-        ov_active = _state.cave_data() / "session-overlays" / "sid-active"
-        ov_active.mkdir(parents=True)
-        gd_active = wrapper.create_session_gitdir(slug, "sid-active", ov_active)
-        ov_stale = _state.cave_data() / "session-overlays" / "sid-stale"
-        ov_stale.mkdir(parents=True)
-        wrapper.create_session_gitdir(slug, "sid-stale", ov_stale)
-
-        # Active session commits
-        work = tmp_path / "work"
-        work.mkdir()
-        git_run("git", "--git-dir", str(gd_active), "--work-tree", str(work),
-                "checkout", "HEAD", "--", ".")
-        make_cave_session(gd_active, work)
-        (work / "active.txt").write_text("active work\n")
-        cave_git(work, "add", "active.txt")
-        cave_git(work, "commit", "-m", "active commit")
-        active_head = cave_git(work, "rev-parse", "HEAD").stdout.strip()
-
-        # Register both sessions
-        write_session(_state.cave_data(), "sid-active", slug)
-        write_session(_state.cave_data(), "sid-stale", slug)
-
-        wrapper.sync_live_sessions(slug)
-
-        # Shared must have active session's commit, not be overwritten by stale
-        shared_head = git_run("git", "--git-dir", str(shared_gd),
-                              "rev-parse", "HEAD").stdout.strip()
-        log = git_run("git", "--git-dir", str(shared_gd),
-                      "log", "--oneline", "refs/heads/main")
-        assert "active commit" in log.stdout, (
-            f"Active session's commit missing from shared. HEAD={shared_head[:8]}"
-        )
 
     def test_sync_live_does_not_touch_other_projects(
             self, shared_project, tmp_path):
@@ -1299,160 +1124,69 @@ class TestSessionGitdir:
         # Other project's alternates should be untouched (never modified)
         assert alt2.read_text().strip() == cave_path2
 
-    def test_sync_live_stale_session_does_not_revert_amend(
-            self, shared_project, tmp_path):
-        """A stale session whose ref was set by sync_refs must not revert
-        another session's amended commit.
-
-        Scenario (the actual bug):
-        1. Session A creates commit B, mid-sync forwards B to shared.
-        2. Host pull re-authors B to B', sync_refs updates shared to B'.
-        3. Session C starts, copies shared main (B') as its init ref.
-        4. Session A amends B to B'' (different tree).
-        5. sync_live_sessions must end with shared at B'', not reverted to B'.
-
-        Without refs/init tracking, step 5 would process session C last,
-        see a 1-commit amend (B' vs B''), and "let session C win" — reverting
-        the active session's work.
-        """
-        host, slug, projects_dir = shared_project
-        shared_gd = projects_dir / slug / "gitdir"
-
-        # Session A creates commit B
-        _, work_a, overlay_a = self._make_session(
-            tmp_path, slug, projects_dir, "active")
-        (work_a / "new.txt").write_text("v1\n")
-        cave_git(work_a, "add", "new.txt")
-        cave_git(work_a, "commit", "-m", "commit B")
-        sha_b = cave_git(work_a, "rev-parse", "HEAD").stdout.strip()
-
-        # Mid-session sync forwards B to shared
-        gd_active = overlay_a / f"gitdir-{slug}"
-        wrapper.forward_session_refs(slug, gd_active, shared_gd)
-        assert git_head(shared_gd, gitdir=True) == sha_b
-
-        # Simulate pull re-authoring: create B' (same tree, different author)
-        tree = git_run("git", "--git-dir", str(shared_gd),
-                       "rev-parse", f"{sha_b}^{{tree}}").stdout.strip()
-        parent = git_run("git", "--git-dir", str(shared_gd),
-                         "rev-parse", f"{sha_b}^").stdout.strip()
-        b_prime = git_run(
-            "git", "--git-dir", str(shared_gd), "commit-tree", tree,
-            "-p", parent, "-m", "commit B re-authored",
-        ).stdout.strip()
-        # sync_refs updates shared main to B'
-        git_run("git", "--git-dir", str(shared_gd),
-                "update-ref", "refs/heads/main", b_prime)
-
-        # Session C starts now (copies shared main = B')
-        ov_stale = _state.cave_data() / "session-overlays" / "sid-stale"
-        ov_stale.mkdir(parents=True)
-        wrapper.create_session_gitdir(slug, "sid-stale", ov_stale)
-
-        # Session A amends B to B'' (different tree)
-        (work_a / "new.txt").write_text("v2 amended\n")
-        cave_git(work_a, "add", "new.txt")
-        cave_git(work_a, "commit", "--amend", "-m", "commit B amended")
-        sha_b_double_prime = cave_git(
-            work_a, "rev-parse", "HEAD").stdout.strip()
-        assert sha_b_double_prime != sha_b
-        assert sha_b_double_prime != b_prime
-
-        # Register both sessions and symlink active overlay
-        write_session(_state.cave_data(), "sid-active", slug)
-        write_session(_state.cave_data(), "sid-stale", slug)
-        active_session_dir = _state.cave_data() / "session-overlays" / "sid-active"
-        active_session_dir.mkdir(parents=True, exist_ok=True)
-        active_gitdir_link = active_session_dir / f"gitdir-{slug}"
-        if not active_gitdir_link.exists():
-            active_gitdir_link.symlink_to(overlay_a / f"gitdir-{slug}")
-
-        wrapper.sync_live_sessions(slug)
-
-        # Shared must have the amended commit, not the re-authored one
-        final = git_head(shared_gd, gitdir=True)
-        assert final == sha_b_double_prime, (
-            f"Stale session reverted amend: shared={final[:8]}, "
-            f"expected={sha_b_double_prime[:8]}"
-        )
-
     def test_first_sync_after_amend_detects_amend(
             self, shared_project, tmp_path):
-        """When a session amends a commit and syncs for the first time
-        (no refs/synced yet), the amend should still be detected via
-        refs/init matching the shared ref.
+        """Session commits on its branch, syncs, amends, syncs again.
+        The second sync should detect the amend and update the session
+        branch in shared.
 
-        Without this, _rebase_commits tries a three-way merge that
-        conflicts (both sides modify the same files from the same parent),
-        and the diverged ref is silently skipped.
+        With branch-per-session, the session branch doesn't exist in
+        shared until first sync.  The amend detection uses refs/synced.
         """
         host, slug, projects_dir = shared_project
         shared_gd = projects_dir / slug / "gitdir"
 
-        # Add a second commit so the amend isn't of a root commit
-        # (git merge-base fails for root commits).
-        (host / "base.txt").write_text("base\n")
-        git_run("git", "-C", str(host), "add", ".")
-        git_run("git", "-C", str(host), "commit", "-m", "base commit")
-        # Sync the new commit into shared gitdir (fetch objects, then
-        # update-ref since main is checked out and git refuses to
-        # fetch directly into the checked-out branch).
-        git_run("git", "--git-dir", str(shared_gd),
-                "fetch", str(host), "main")
-        new_head = git_run("git", "-C", str(host),
-                           "rev-parse", "HEAD").stdout.strip()
-        git_run("git", "--git-dir", str(shared_gd),
-                "update-ref", "refs/heads/main", new_head)
-        shared_before = git_head(shared_gd, gitdir=True)
-
-        # Create session (refs/init/main = shared_before)
+        # Create session
         _, work, overlay = self._make_session(
             tmp_path, slug, projects_dir, "sess")
+        gd = overlay / f"gitdir-{slug}"
 
-        # Amend the latest commit (same parent, different tree)
+        # Session commits on session/sid-sess
+        (work / "base.txt").write_text("original\n")
+        cave_git(work, "add", "base.txt")
+        cave_git(work, "commit", "-m", "add base")
+        original_sha = cave_git(work, "rev-parse", "HEAD").stdout.strip()
+
+        # First sync — creates session branch in shared
+        wrapper.forward_session_refs(slug, gd, shared_gd)
+        ref = git_run("git", "--git-dir", str(shared_gd),
+                      "rev-parse", "refs/heads/session/sid-sess")
+        assert ref.returncode == 0
+        assert ref.stdout.strip() == original_sha
+
+        # Session amends (same parent, different tree)
         (work / "base.txt").write_text("amended content\n")
         cave_git(work, "add", "base.txt")
         cave_git(work, "commit", "--amend", "-m", "amended commit")
         amended_sha = cave_git(work, "rev-parse", "HEAD").stdout.strip()
-        assert amended_sha != shared_before
+        assert amended_sha != original_sha
 
-        # First sync — no refs/synced exists yet
-        gd = overlay / f"gitdir-{slug}"
-        synced = git_run("git", "--git-dir", str(gd),
-                         "rev-parse", "refs/synced/main")
-        assert synced.returncode != 0, "refs/synced should not exist yet"
-
+        # Second sync — should detect amend and update session branch
         wrapper.forward_session_refs(slug, gd, shared_gd)
-
-        # Shared should have the amended commit
-        final = git_head(shared_gd, gitdir=True)
-        assert final == amended_sha, (
-            f"First sync after amend failed: shared={final[:8]}, "
+        ref = git_run("git", "--git-dir", str(shared_gd),
+                      "rev-parse", "refs/heads/session/sid-sess")
+        assert ref.stdout.strip() == amended_sha, (
+            f"Amend not detected: shared session branch={ref.stdout.strip()[:8]}, "
             f"expected={amended_sha[:8]}"
         )
 
     def test_live_sync_squash_after_pull_updates_shared(
             self, shared_project, tmp_path):
-        """Live sync detects squash of previously-synced commits.
+        """Live sync detects squash of previously-synced session branch.
 
-        Reproduces: session makes 2 commits, synced to shared, pull
-        re-authors them (sync_refs updates shared to re-authored tip),
-        session squashes to 1 commit.  forward_session_refs must update
-        shared to the squashed commit so pull can detect the rewrite.
-
-        Without the fix, the same-tree check treats squash as re-authoring
-        metadata and skips it, leaving shared at the re-authored tip.
-        pull then sees host_head == gitdir_head and reports "no new commits."
+        Session makes 2 commits on session/sid-squash, syncs (session
+        branch created in shared), then squashes to 1 commit.
+        forward_session_refs must update the session branch in shared.
+        Main is untouched by live sync.
         """
         host, slug, projects_dir = shared_project
         shared_gd = projects_dir / slug / "gitdir"
-        init_head = git_head(shared_gd, gitdir=True)
 
         _, work, overlay = self._make_session(
             tmp_path, slug, projects_dir, "squash")
         session_gd = overlay / f"gitdir-{slug}"
 
-        # Session creates 2 commits
+        # Session creates 2 commits on session/sid-squash
         (work / "a.txt").write_text("a\n")
         cave_git(work, "add", "a.txt")
         cave_git(work, "commit", "-m", "add a")
@@ -1461,44 +1195,24 @@ class TestSessionGitdir:
         cave_git(work, "commit", "-m", "add b")
         sha_b = cave_git(work, "rev-parse", "HEAD").stdout.strip()
 
-        # Mid-session sync advances shared
+        # Mid-session sync creates session branch in shared
         wrapper.forward_session_refs(slug, session_gd, shared_gd)
-        assert git_head(shared_gd, gitdir=True) == sha_b
-
-        # Simulate pull re-authoring: recreate chain with different author
-        tree_a = git_run("git", "--git-dir", str(shared_gd),
-                         "log", "--format=%T", "-1", f"{sha_b}^").stdout.strip()
-        tree_b = git_run("git", "--git-dir", str(shared_gd),
-                         "rev-parse", f"{sha_b}^{{tree}}").stdout.strip()
-        env = {**os.environ, **GIT_ENV,
-               "GIT_AUTHOR_NAME": "Host User",
-               "GIT_AUTHOR_EMAIL": "host@test.com"}
-        a_prime = subprocess.run(
-            ["git", "--git-dir", str(shared_gd),
-             "commit-tree", tree_a, "-p", init_head, "-m", "add a"],
-            capture_output=True, text=True, check=True, env=env,
-        ).stdout.strip()
-        b_prime = subprocess.run(
-            ["git", "--git-dir", str(shared_gd),
-             "commit-tree", tree_b, "-p", a_prime, "-m", "add b"],
-            capture_output=True, text=True, check=True, env=env,
-        ).stdout.strip()
-        # sync_refs updates shared to re-authored tip
-        git_run("git", "--git-dir", str(shared_gd),
-                "update-ref", "refs/heads/main", b_prime)
+        ref = git_run("git", "--git-dir", str(shared_gd),
+                      "rev-parse", "refs/heads/session/sid-squash")
+        assert ref.stdout.strip() == sha_b
 
         # Session squashes both commits into one
-        cave_git(work, "reset", "--soft", f"HEAD~2")
+        cave_git(work, "reset", "--soft", "HEAD~2")
         cave_git(work, "commit", "-m", "add a and b")
         squashed = cave_git(work, "rev-parse", "HEAD").stdout.strip()
         assert squashed != sha_b
-        assert squashed != b_prime
 
-        # Live sync must update shared to squashed commit
+        # Live sync must update session branch to squashed commit
         wrapper.forward_session_refs(slug, session_gd, shared_gd)
-        final = git_head(shared_gd, gitdir=True)
-        assert final == squashed, (
-            f"Squash not forwarded: shared={final[:8]}, "
+        ref = git_run("git", "--git-dir", str(shared_gd),
+                      "rev-parse", "refs/heads/session/sid-squash")
+        assert ref.stdout.strip() == squashed, (
+            f"Squash not forwarded: session branch={ref.stdout.strip()[:8]}, "
             f"expected={squashed[:8]}"
         )
 
@@ -1610,7 +1324,7 @@ class TestSessionGitdir:
         """Multiple rounds of amend + sync all work correctly.
 
         Session: commit A -> sync -> amend to A' -> sync -> amend to A'' -> sync.
-        Each sync must update shared to the latest amend.
+        Each sync must update session branch in shared to the latest amend.
         """
         host, slug, projects_dir = shared_project
         shared_gd = projects_dir / slug / "gitdir"
@@ -1618,6 +1332,7 @@ class TestSessionGitdir:
         _, work, overlay = self._make_session(
             tmp_path, slug, projects_dir, "multi")
         session_gd = overlay / f"gitdir-{slug}"
+        session_ref = "refs/heads/session/sid-multi"
 
         # Commit A
         (work / "x.txt").write_text("v1\n")
@@ -1626,7 +1341,8 @@ class TestSessionGitdir:
 
         # Sync 1
         wrapper.forward_session_refs(slug, session_gd, shared_gd)
-        sha1 = git_head(shared_gd, gitdir=True)
+        sha1 = git_run("git", "--git-dir", str(shared_gd),
+                        "rev-parse", session_ref).stdout.strip()
 
         # Amend to A'
         (work / "x.txt").write_text("v2\n")
@@ -1635,7 +1351,8 @@ class TestSessionGitdir:
 
         # Sync 2
         wrapper.forward_session_refs(slug, session_gd, shared_gd)
-        sha2 = git_head(shared_gd, gitdir=True)
+        sha2 = git_run("git", "--git-dir", str(shared_gd),
+                        "rev-parse", session_ref).stdout.strip()
         assert sha2 != sha1
 
         # Amend to A''
@@ -1645,22 +1362,22 @@ class TestSessionGitdir:
 
         # Sync 3
         wrapper.forward_session_refs(slug, session_gd, shared_gd)
-        sha3 = git_head(shared_gd, gitdir=True)
+        sha3 = git_run("git", "--git-dir", str(shared_gd),
+                        "rev-parse", session_ref).stdout.strip()
         assert sha3 != sha2
 
         # Content should be latest version
         tree_content = git_run("git", "--git-dir", str(shared_gd),
-                               "show", f"HEAD:x.txt").stdout
+                               "show", f"{session_ref}:x.txt").stdout
         assert tree_content.strip() == "v3"
 
     def test_session_reset_hard_back_live_sync_skips(
             self, shared_project, tmp_path):
         """Live sync skips when session resets behind shared.
 
-        Session makes A, B, C. Live-syncs (shared at C). Then resets to A.
-        Live sync (force=False) correctly skips — session is behind shared,
-        moving shared backward during live sync would lose other sessions'
-        work.  The reset is handled at cleanup (force=True).
+        Session makes A, B, C on session/sid-reset. Live-syncs (session
+        branch at C in shared). Then resets to A.  Live sync skips
+        because session is behind shared's session branch.
         """
         host, slug, projects_dir = shared_project
         shared_gd = projects_dir / slug / "gitdir"
@@ -1668,6 +1385,7 @@ class TestSessionGitdir:
         _, work, overlay = self._make_session(
             tmp_path, slug, projects_dir, "reset")
         session_gd = overlay / f"gitdir-{slug}"
+        session_ref = "refs/heads/session/sid-reset"
 
         # Make 3 commits
         (work / "a.txt").write_text("a\n")
@@ -1684,348 +1402,26 @@ class TestSessionGitdir:
         cave_git(work, "commit", "-m", "add c")
         sha_c = cave_git(work, "rev-parse", "HEAD").stdout.strip()
 
-        # Live sync — shared at C
+        # Live sync — session branch at C
         wrapper.forward_session_refs(slug, session_gd, shared_gd)
-        assert git_head(shared_gd, gitdir=True) == sha_c
+        ref = git_run("git", "--git-dir", str(shared_gd),
+                      "rev-parse", session_ref)
+        assert ref.stdout.strip() == sha_c
 
         # Reset to commit A
         cave_git(work, "reset", "--hard", sha_a)
 
         # Live sync — session behind shared, skipped
         wrapper.forward_session_refs(slug, session_gd, shared_gd)
-        assert git_head(shared_gd, gitdir=True) == sha_c, \
-            "live sync must not move shared backward"
-
-    def test_cleanup_unmodified_session_does_not_revert_amend(
-            self, shared_project, tmp_path):
-        """Cleanup of a session that never committed must not revert
-        another session's amended commit.
-
-        This reproduces the exact bug that caused duplicate commits:
-
-        1. Session A commits X, live-syncs (shared at X).
-        2. Session A amends X to X', live-syncs (shared at X').
-        3. Session B started before the amend, has refs/heads/main = X
-           and refs/init/main = X.  Session B never commits.
-        4. Session B exits (cleanup, force=True).
-        5. BUG: cleanup bypasses the init check, force-forwards B's
-           stale main (X) into shared, overwriting X'.
-        6. Pull sees both X and X' in history → duplicate commits.
-
-        Fix: always skip refs that match refs/init, even on cleanup.
-        """
-        host, slug, projects_dir = shared_project
-        shared_gd = projects_dir / slug / "gitdir"
-        init_head = git_head(shared_gd, gitdir=True)
-
-        # Session A: commit and sync
-        _, work_a, overlay_a = self._make_session(
-            tmp_path, slug, projects_dir, "active")
-        (work_a / "feature.txt").write_text("v1\n")
-        cave_git(work_a, "add", "feature.txt")
-        cave_git(work_a, "commit", "-m", "add feature")
-        sha_x = cave_git(work_a, "rev-parse", "HEAD").stdout.strip()
-
-        gd_a = overlay_a / f"gitdir-{slug}"
-        wrapper.forward_session_refs(slug, gd_a, shared_gd)
-        assert git_head(shared_gd, gitdir=True) == sha_x
-
-        # Session B starts now — copies shared main = X as init
-        _, work_b, overlay_b = self._make_session(
-            tmp_path, slug, projects_dir, "idle")
-        gd_b = overlay_b / f"gitdir-{slug}"
-
-        # Verify session B's init matches X
-        b_init = git_run("git", "--git-dir", str(gd_b),
-                         "rev-parse", "refs/init/main").stdout.strip()
-        assert b_init == sha_x
-
-        # Session A amends and syncs
-        (work_a / "feature.txt").write_text("v2 amended\n")
-        cave_git(work_a, "add", "feature.txt")
-        cave_git(work_a, "commit", "--amend", "-m", "add feature amended")
-        sha_x_prime = cave_git(work_a, "rev-parse", "HEAD").stdout.strip()
-        assert sha_x_prime != sha_x
-
-        wrapper.forward_session_refs(slug, gd_a, shared_gd)
-        assert git_head(shared_gd, gitdir=True) == sha_x_prime
-
-        # Session B exits (cleanup, force=True) — never committed anything
-        wrapper.merge_session_gitdirs("sid-idle", overlay_b)
-
-        # Shared must still be at X' (the amended commit), not reverted to X
-        assert git_head(shared_gd, gitdir=True) == sha_x_prime, (
-            "Cleanup of idle session reverted amended commit! "
-            f"Expected {sha_x_prime[:8]}, got {git_head(shared_gd, gitdir=True)[:8]}"
-        )
-
-    def test_cleanup_unmodified_session_three_sessions(
-            self, shared_project, tmp_path):
-        """Three concurrent sessions: A amends, B and C are idle.
-        Both B and C exit — shared must not revert.
-
-        This is the full scenario that caused the production bug with
-        4 duplicate commits.
-        """
-        host, slug, projects_dir = shared_project
-        shared_gd = projects_dir / slug / "gitdir"
-
-        # Session A: commit, sync, amend, sync
-        _, work_a, overlay_a = self._make_session(
-            tmp_path, slug, projects_dir, "worker")
-        (work_a / "f.txt").write_text("v1\n")
-        cave_git(work_a, "add", "f.txt")
-        cave_git(work_a, "commit", "-m", "initial work")
-        sha_v1 = cave_git(work_a, "rev-parse", "HEAD").stdout.strip()
-
-        gd_a = overlay_a / f"gitdir-{slug}"
-        wrapper.forward_session_refs(slug, gd_a, shared_gd)
-
-        # Sessions B and C start (both get init = sha_v1)
-        _, work_b, overlay_b = self._make_session(
-            tmp_path, slug, projects_dir, "idle-b")
-        _, work_c, overlay_c = self._make_session(
-            tmp_path, slug, projects_dir, "idle-c")
-
-        # Session A amends multiple times
-        (work_a / "f.txt").write_text("v2\n")
-        cave_git(work_a, "add", "f.txt")
-        cave_git(work_a, "commit", "--amend", "-m", "work v2")
-        wrapper.forward_session_refs(slug, gd_a, shared_gd)
-
-        (work_a / "f.txt").write_text("v3\n")
-        cave_git(work_a, "add", "f.txt")
-        cave_git(work_a, "commit", "--amend", "-m", "work v3")
-        wrapper.forward_session_refs(slug, gd_a, shared_gd)
-        sha_v3 = cave_git(work_a, "rev-parse", "HEAD").stdout.strip()
-
-        assert git_head(shared_gd, gitdir=True) == sha_v3
-
-        # Session B exits
-        wrapper.merge_session_gitdirs("sid-idle-b", overlay_b)
-        assert git_head(shared_gd, gitdir=True) == sha_v3, \
-            "Session B cleanup reverted amend"
-
-        # Session C exits
-        wrapper.merge_session_gitdirs("sid-idle-c", overlay_c)
-        assert git_head(shared_gd, gitdir=True) == sha_v3, \
-            "Session C cleanup reverted amend"
-
-        # Session A exits last — should still be fine
-        wrapper.merge_session_gitdirs("sid-worker", overlay_a)
-        assert git_head(shared_gd, gitdir=True) == sha_v3, \
-            "Session A cleanup changed shared unexpectedly"
-
-    def test_cleanup_synced_session_does_not_revert(
-            self, shared_project, tmp_path):
-        """A session that was live-synced but has no new work since
-        should not forward its stale ref on cleanup.
-
-        1. Session A commits X, live-syncs (shared = X, synced = X).
-        2. Another session's cleanup moves shared to X' (rebase/re-author).
-        3. Session A exits — its main still equals synced (X).
-        4. Cleanup must skip, not overwrite shared with stale X.
-        """
-        host, slug, projects_dir = shared_project
-        shared_gd = projects_dir / slug / "gitdir"
-
-        _, work_a, overlay_a = self._make_session(
-            tmp_path, slug, projects_dir, "synced")
-        (work_a / "g.txt").write_text("content\n")
-        cave_git(work_a, "add", "g.txt")
-        cave_git(work_a, "commit", "-m", "add g")
-        sha_x = cave_git(work_a, "rev-parse", "HEAD").stdout.strip()
-
-        gd_a = overlay_a / f"gitdir-{slug}"
-        wrapper.forward_session_refs(slug, gd_a, shared_gd)
-        assert git_head(shared_gd, gitdir=True) == sha_x
-
-        # Simulate another session moving shared to X' (re-authored)
-        tree = git_run("git", "--git-dir", str(shared_gd),
-                       "rev-parse", f"{sha_x}^{{tree}}").stdout.strip()
-        parent = git_run("git", "--git-dir", str(shared_gd),
-                         "rev-parse", f"{sha_x}^").stdout.strip()
-        x_prime = git_run(
-            "git", "--git-dir", str(shared_gd), "commit-tree", tree,
-            "-p", parent, "-m", "add g re-authored",
-        ).stdout.strip()
-        git_run("git", "--git-dir", str(shared_gd),
-                "update-ref", "refs/heads/main", x_prime)
-
-        # Session A exits — its main (sha_x) == refs/synced/main (sha_x)
-        # Should skip, not overwrite shared with stale sha_x
-        wrapper.merge_session_gitdirs("sid-synced", overlay_a)
-        assert git_head(shared_gd, gitdir=True) == x_prime, (
-            "Cleanup of synced session reverted re-authored commit"
-        )
-
-    def test_live_sync_idle_sessions_during_amend_cycle(
-            self, shared_project, tmp_path):
-        """Live sync with 3 sessions: A amends repeatedly, B and C idle.
-
-        Simulates the production scenario where sync_live_sessions
-        iterates all running sessions.  Idle sessions must be skipped
-        even when the active session's ref diverges from shared.
-
-        Tests forward_session_refs (live sync path) specifically.
-        """
-        host, slug, projects_dir = shared_project
-        shared_gd = projects_dir / slug / "gitdir"
-
-        # All 3 sessions start at the same point
-        _, work_a, overlay_a = self._make_session(
-            tmp_path, slug, projects_dir, "a")
-        _, work_b, overlay_b = self._make_session(
-            tmp_path, slug, projects_dir, "b")
-        _, work_c, overlay_c = self._make_session(
-            tmp_path, slug, projects_dir, "c")
-        gd_a = overlay_a / f"gitdir-{slug}"
-        gd_b = overlay_b / f"gitdir-{slug}"
-        gd_c = overlay_c / f"gitdir-{slug}"
-
-        # Session A: commit, sync all sessions
-        (work_a / "f.txt").write_text("v1\n")
-        cave_git(work_a, "add", "f.txt")
-        cave_git(work_a, "commit", "-m", "add f")
-        sha_v1 = cave_git(work_a, "rev-parse", "HEAD").stdout.strip()
-
-        # Sync all (simulates sync_live_sessions iterating all)
-        wrapper.forward_session_refs(slug, gd_a, shared_gd)
-        wrapper.forward_session_refs(slug, gd_b, shared_gd)
-        wrapper.forward_session_refs(slug, gd_c, shared_gd)
-        assert git_head(shared_gd, gitdir=True) == sha_v1
-
-        # Session A: amend, sync all
-        (work_a / "f.txt").write_text("v2\n")
-        cave_git(work_a, "add", "f.txt")
-        cave_git(work_a, "commit", "--amend", "-m", "add f v2")
-        sha_v2 = cave_git(work_a, "rev-parse", "HEAD").stdout.strip()
-
-        wrapper.forward_session_refs(slug, gd_b, shared_gd)
-        wrapper.forward_session_refs(slug, gd_c, shared_gd)
-        wrapper.forward_session_refs(slug, gd_a, shared_gd)
-        assert git_head(shared_gd, gitdir=True) == sha_v2, \
-            "Idle sessions reverted amend during live sync"
-
-        # Session A: amend again, sync all (different order)
-        (work_a / "f.txt").write_text("v3\n")
-        cave_git(work_a, "add", "f.txt")
-        cave_git(work_a, "commit", "--amend", "-m", "add f v3")
-        sha_v3 = cave_git(work_a, "rev-parse", "HEAD").stdout.strip()
-
-        wrapper.forward_session_refs(slug, gd_c, shared_gd)
-        wrapper.forward_session_refs(slug, gd_a, shared_gd)
-        wrapper.forward_session_refs(slug, gd_b, shared_gd)
-        assert git_head(shared_gd, gitdir=True) == sha_v3, \
-            "Idle sessions reverted amend during live sync (round 2)"
-
-    def test_pull_push_cycle_does_not_duplicate_with_idle_sessions(
-            self, shared_project, tmp_path):
-        """Full pull→push cycle with idle sessions must not create
-        duplicate commits in the shared gitdir.
-
-        This simulates what happens when cav pull runs: it calls
-        sync_live_sessions (forwarding all session refs), then pulls
-        from the shared gitdir, then _sync_branch updates the shared
-        gitdir with the new host SHA.
-
-        After this cycle, the shared gitdir's log should have no
-        duplicate commit messages.
-        """
-        host, slug, projects_dir = shared_project
-        shared_gd = projects_dir / slug / "gitdir"
-
-        # Start 3 sessions
-        _, work_a, overlay_a = self._make_session(
-            tmp_path, slug, projects_dir, "worker")
-        _, _, overlay_b = self._make_session(
-            tmp_path, slug, projects_dir, "idle1")
-        _, _, overlay_c = self._make_session(
-            tmp_path, slug, projects_dir, "idle2")
-        gd_a = overlay_a / f"gitdir-{slug}"
-        gd_b = overlay_b / f"gitdir-{slug}"
-        gd_c = overlay_c / f"gitdir-{slug}"
-
-        # Session A commits
-        (work_a / "x.txt").write_text("work\n")
-        cave_git(work_a, "add", "x.txt")
-        cave_git(work_a, "commit", "-m", "unique commit message")
-
-        # Simulate sync_live_sessions (all sessions)
-        wrapper.forward_session_refs(slug, gd_a, shared_gd)
-        wrapper.forward_session_refs(slug, gd_b, shared_gd)
-        wrapper.forward_session_refs(slug, gd_c, shared_gd)
-
-        # Session A amends
-        (work_a / "x.txt").write_text("amended work\n")
-        cave_git(work_a, "add", "x.txt")
-        cave_git(work_a, "commit", "--amend", "-m", "unique commit message")
-
-        # Another round of sync_live_sessions
-        wrapper.forward_session_refs(slug, gd_a, shared_gd)
-        wrapper.forward_session_refs(slug, gd_b, shared_gd)
-        wrapper.forward_session_refs(slug, gd_c, shared_gd)
-
-        # Check: only one commit with this message in shared history
-        log = git_run("git", "--git-dir", str(shared_gd),
-                      "log", "--oneline", "--all")
-        matches = [l for l in log.stdout.splitlines()
-                   if "unique commit message" in l]
-        assert len(matches) == 1, (
-            f"Expected 1 commit with message, got {len(matches)}: {matches}"
-        )
-
-    def test_idle_session_after_push_does_not_revert(
-            self, shared_project, tmp_path):
-        """After a push updates shared gitdir, idle sessions whose
-        refs/heads/main now differs from shared must not revert
-        on next live sync.
-
-        Scenario:
-        1. Session A and B start (both at commit I).
-        2. Host makes commit H, push updates shared to H.
-        3. Session A and B still have refs/heads/main = I.
-        4. Live sync of A and B must not revert shared from H to I.
-        """
-        host, slug, projects_dir = shared_project
-        shared_gd = projects_dir / slug / "gitdir"
-        init_sha = git_head(shared_gd, gitdir=True)
-
-        # Start sessions at initial state
-        _, _, overlay_a = self._make_session(
-            tmp_path, slug, projects_dir, "sa")
-        _, _, overlay_b = self._make_session(
-            tmp_path, slug, projects_dir, "sb")
-        gd_a = overlay_a / f"gitdir-{slug}"
-        gd_b = overlay_b / f"gitdir-{slug}"
-
-        # Host makes a commit and push updates shared gitdir
-        (host / "pushed.txt").write_text("from host\n")
-        git_run("git", "-C", str(host), "add", "pushed.txt")
-        git_run("git", "-C", str(host), "commit", "-m", "host push")
-        host_sha = git_head(host)
-        # Simulate push: update shared gitdir refs
-        git_run("git", "--git-dir", str(shared_gd), "fetch",
-                str(host), "HEAD")
-        git_run("git", "--git-dir", str(shared_gd),
-                "update-ref", "refs/heads/main", host_sha)
-        assert git_head(shared_gd, gitdir=True) == host_sha
-
-        # Live sync of idle sessions — must not revert
-        wrapper.forward_session_refs(slug, gd_a, shared_gd)
-        assert git_head(shared_gd, gitdir=True) == host_sha, \
-            "Session A live sync reverted push"
-        wrapper.forward_session_refs(slug, gd_b, shared_gd)
-        assert git_head(shared_gd, gitdir=True) == host_sha, \
-            "Session B live sync reverted push"
+        ref = git_run("git", "--git-dir", str(shared_gd),
+                      "rev-parse", session_ref)
+        assert ref.stdout.strip() == sha_c, \
+            "live sync must not move session branch backward"
 
     def test_session_reset_hard_back_cleanup_keeps_shared(
             self, shared_project, tmp_path):
-        """Cleanup keeps shared at most-advanced commit when session reset behind.
-
-        Session makes A, B, C. Live-syncs (shared at C). Resets to A.
-        Cleanup (force=True) sees session behind shared — skips.  Shared
-        stays at C because moving backward would lose committed work.
+        """Session commits A,B,C, syncs, resets to A. Cleanup should
+        still FF main to C (the synced session branch in shared).
         """
         host, slug, projects_dir = shared_project
         shared_gd = projects_dir / slug / "gitdir"
@@ -2047,19 +1443,22 @@ class TestSessionGitdir:
         cave_git(work, "commit", "-m", "add c")
         sha_c = cave_git(work, "rev-parse", "HEAD").stdout.strip()
 
-        # Live sync first so shared advances to C
+        # Live sync pushes session branch to shared at C
         session_gd = overlay / f"gitdir-{slug}"
         wrapper.forward_session_refs(slug, session_gd, shared_gd)
-        assert git_head(shared_gd, gitdir=True) == sha_c
+        ref = git_run("git", "--git-dir", str(shared_gd),
+                      "rev-parse", "refs/heads/session/sid-reset")
+        assert ref.stdout.strip() == sha_c
 
-        # Reset to A
+        # Reset to A (session branch now behind shared's session branch)
         cave_git(work, "reset", "--hard",
                  cave_git(work, "rev-parse", "HEAD~2").stdout.strip())
 
-        # Cleanup — session behind shared, skip (don't move backward)
+        # Cleanup — _forward_refs sees session behind shared, skips.
+        # Cleanup FF merges the shared session branch (still at C) to main.
         wrapper.merge_session_gitdirs("sid-reset", overlay)
         assert git_head(shared_gd, gitdir=True) == sha_c, \
-            "cleanup must not move shared backward"
+            "cleanup should FF main to the synced session branch tip"
 
     def test_force_cleanup_same_tree_no_prior_sync(
             self, shared_project, tmp_path):
@@ -2126,42 +1525,6 @@ class TestSessionGitdir:
         final = git_head(shared_gd, gitdir=True)
         assert final == b_prime, \
             "same-tree divergence should keep shared's version"
-
-    def test_two_sessions_sequential_sync(self, shared_project, tmp_path):
-        """Two sessions both making new commits, sequential live syncs.
-
-        Session A adds file_a, session B adds file_b (no conflicts).
-        After both sync, shared should have both files.
-        """
-        host, slug, projects_dir = shared_project
-        shared_gd = projects_dir / slug / "gitdir"
-
-        _, work_a, overlay_a = self._make_session(
-            tmp_path, slug, projects_dir, "seq-a")
-        _, work_b, overlay_b = self._make_session(
-            tmp_path, slug, projects_dir, "seq-b")
-        gd_a = overlay_a / f"gitdir-{slug}"
-        gd_b = overlay_b / f"gitdir-{slug}"
-
-        # Both sessions commit (different files)
-        (work_a / "file_a.txt").write_text("from A\n")
-        cave_git(work_a, "add", "file_a.txt")
-        cave_git(work_a, "commit", "-m", "add file_a")
-
-        (work_b / "file_b.txt").write_text("from B\n")
-        cave_git(work_b, "add", "file_b.txt")
-        cave_git(work_b, "commit", "-m", "add file_b")
-
-        # A syncs first (fast-forward)
-        wrapper.forward_session_refs(slug, gd_a, shared_gd)
-        # B syncs (diverged from A, should rebase)
-        wrapper.forward_session_refs(slug, gd_b, shared_gd)
-
-        # Both files should be in shared
-        log = git_run("git", "--git-dir", str(shared_gd),
-                      "log", "--oneline", "refs/heads/main")
-        assert "add file_a" in log.stdout, "Session A's commit missing"
-        assert "add file_b" in log.stdout, "Session B's commit missing"
 
     def test_no_gitdir_returns_none(self, tmp_path):
         """create_session_gitdir returns None when no shared gitdir exists."""
@@ -2240,6 +1603,144 @@ class TestSessionGitdir:
         result = cave_git(work_b, "stash", "apply")
         assert result.returncode == 0
         assert (work_b / "file.txt").read_text() == "stashed\n"
+
+
+class TestBranchPerSession:
+    """Test branch-per-session: each session works on session/<sid>."""
+
+    @pytest.fixture
+    def shared_project(self, tmp_path):
+        slug = "test-project"
+        _state.set_cave_data(tmp_path)
+        projects_dir = _state.projects_dir()
+        (projects_dir / slug).mkdir(parents=True)
+        host = tmp_path / "host"
+        host.mkdir()
+        git_run("git", "init", "-b", "main", str(host))
+        (host / "file.txt").write_text("initial\n")
+        git_run("git", "-C", str(host), "add", ".")
+        git_run("git", "-C", str(host), "commit", "-m", "initial")
+        wrapper.initialize_gitdir(slug, host)
+        return host, slug, projects_dir
+
+    def _make_session(self, tmp_path, slug, projects_dir, name):
+        overlay_base = tmp_path / f"overlay-{name}"
+        overlay_base.mkdir()
+        session_gitdir = wrapper.create_session_gitdir(slug, f"sid-{name}", overlay_base)
+        workdir = tmp_path / f"work-{name}"
+        workdir.mkdir()
+        git_run("git", "--git-dir", str(session_gitdir), "--work-tree", str(workdir),
+                "checkout", "HEAD", "--", ".")
+        make_cave_session(session_gitdir, workdir)
+        return session_gitdir, workdir, overlay_base
+
+    def test_session_starts_on_session_branch(self, shared_project, tmp_path):
+        """HEAD is refs/heads/session/<sid> after session creation."""
+        _, slug, projects_dir = shared_project
+        gd, work, _ = self._make_session(tmp_path, slug, projects_dir, "test")
+        head_ref = git_run("git", "--git-dir", str(gd),
+                           "symbolic-ref", "HEAD").stdout.strip()
+        assert head_ref == "refs/heads/session/sid-test"
+
+    def test_post_commit_hook_exists(self, shared_project, tmp_path):
+        """Session gitdir has an executable post-commit hook."""
+        _, slug, projects_dir = shared_project
+        gd, _, _ = self._make_session(tmp_path, slug, projects_dir, "hook")
+        hook = gd / "hooks" / "post-commit"
+        assert hook.is_file()
+        assert os.access(hook, os.X_OK)
+
+    def test_shared_remote_configured(self, shared_project, tmp_path):
+        """Session gitdir has a 'shared' remote pointing to cave path."""
+        _, slug, projects_dir = shared_project
+        gd, _, _ = self._make_session(tmp_path, slug, projects_dir, "remote")
+        url = git_run("git", "--git-dir", str(gd),
+                      "remote", "get-url", "shared").stdout.strip()
+        assert url == f"/projects/.shared-gitdirs/{slug}"
+
+    def test_cleanup_ff_merges_session_to_main(self, shared_project, tmp_path):
+        """Commit on session branch, cleanup FF-merges to main."""
+        _, slug, projects_dir = shared_project
+        shared_gd = projects_dir / slug / "gitdir"
+        _, work, overlay = self._make_session(tmp_path, slug, projects_dir, "ff")
+
+        (work / "new.txt").write_text("content\n")
+        cave_git(work, "add", "new.txt")
+        cave_git(work, "commit", "-m", "session work")
+        sha = cave_git(work, "rev-parse", "HEAD").stdout.strip()
+
+        wrapper.merge_session_gitdirs("sid-ff", overlay)
+        assert git_head(shared_gd, gitdir=True) == sha
+        # Session branch should be cleaned up
+        ref = git_run("git", "--git-dir", str(shared_gd),
+                      "rev-parse", "refs/heads/session/sid-ff")
+        assert ref.returncode != 0
+
+    def test_cleanup_diverged_preserves_session_branch(self, shared_project, tmp_path):
+        """Two sessions with conflicting changes: second leaves session branch."""
+        _, slug, projects_dir = shared_project
+        shared_gd = projects_dir / slug / "gitdir"
+
+        _, work_a, overlay_a = self._make_session(tmp_path, slug, projects_dir, "a")
+        _, work_b, overlay_b = self._make_session(tmp_path, slug, projects_dir, "b")
+
+        (work_a / "file.txt").write_text("version A\n")
+        cave_git(work_a, "add", "file.txt")
+        cave_git(work_a, "commit", "-m", "A's edit")
+
+        (work_b / "file.txt").write_text("version B\n")
+        cave_git(work_b, "add", "file.txt")
+        cave_git(work_b, "commit", "-m", "B's edit")
+
+        wrapper.merge_session_gitdirs("sid-a", overlay_a)
+        wrapper.merge_session_gitdirs("sid-b", overlay_b)
+
+        # B's session branch preserved (conflict prevented rebase)
+        ref = git_run("git", "--git-dir", str(shared_gd),
+                      "rev-parse", "refs/heads/session/sid-b")
+        assert ref.returncode == 0
+
+    def test_push_session_branch_to_shared(self, shared_project, tmp_path):
+        """forward_session_refs creates session branch in shared."""
+        _, slug, projects_dir = shared_project
+        shared_gd = projects_dir / slug / "gitdir"
+
+        gd, work, overlay = self._make_session(tmp_path, slug, projects_dir, "push")
+        (work / "x.txt").write_text("x\n")
+        cave_git(work, "add", "x.txt")
+        cave_git(work, "commit", "-m", "push test")
+        sha = cave_git(work, "rev-parse", "HEAD").stdout.strip()
+
+        wrapper.forward_session_refs(slug, gd, shared_gd)
+
+        ref = git_run("git", "--git-dir", str(shared_gd),
+                      "rev-parse", "refs/heads/session/sid-push")
+        assert ref.returncode == 0
+        assert ref.stdout.strip() == sha
+
+    def test_concurrent_merge_to_main(self, shared_project, tmp_path):
+        """Two sessions merge sequentially; second rebases onto first."""
+        _, slug, projects_dir = shared_project
+        shared_gd = projects_dir / slug / "gitdir"
+
+        _, work_a, overlay_a = self._make_session(tmp_path, slug, projects_dir, "c1")
+        _, work_b, overlay_b = self._make_session(tmp_path, slug, projects_dir, "c2")
+
+        (work_a / "a.txt").write_text("a\n")
+        cave_git(work_a, "add", "a.txt")
+        cave_git(work_a, "commit", "-m", "add a")
+
+        (work_b / "b.txt").write_text("b\n")
+        cave_git(work_b, "add", "b.txt")
+        cave_git(work_b, "commit", "-m", "add b")
+
+        wrapper.merge_session_gitdirs("sid-c1", overlay_a)
+        wrapper.merge_session_gitdirs("sid-c2", overlay_b)
+
+        log = git_run("git", "--git-dir", str(shared_gd),
+                      "log", "--oneline", "refs/heads/main")
+        assert "add a" in log.stdout
+        assert "add b" in log.stdout
 
 
 class TestWorktreeSync:
@@ -2870,10 +2371,11 @@ class TestHostIdentitySync:
             capture_output=True, text=True,
         ).stdout.strip()
 
-        # Sync session refs to shared
-        wrapper.forward_session_refs(slug, session_gd, shared_gd)
+        # Sync session refs to shared, then merge to main via cleanup
+        overlay = session_gd.parent
+        wrapper.merge_session_gitdirs("sid-s1", overlay)
 
-        # Shared should have the exact same hash
+        # Shared main should have the exact same hash
         shared_head = subprocess.run(
             ["git", "--git-dir", str(shared_gd), "rev-parse", "HEAD"],
             capture_output=True, text=True,
@@ -2894,9 +2396,8 @@ class TestHostIdentitySync:
     def test_push_pull_cycle_no_reauthoring_divergence(self, host_id_project, tmp_path):
         """Push + pull cycle doesn't create re-authoring divergence.
 
-        The classic bug: cave commit → pull (re-authors) → push (writes
-        re-authored hash) → session has old hash → divergence. With host
-        identity forwarding, no re-authoring happens, so no divergence.
+        With host identity forwarding, no re-authoring happens.
+        Session commit → cleanup (merge to main) → pull → push → verify.
         """
         host, slug, shared_gd, projects_dir = host_id_project
 
@@ -2907,25 +2408,18 @@ class TestHostIdentitySync:
             capture_output=True, text=True,
         ).stdout.strip()
 
-        # Sync + pull
-        wrapper.forward_session_refs(slug, session_gd, shared_gd)
+        # Merge session branch to main via cleanup, then pull
+        overlay = session_gd.parent
+        wrapper.merge_session_gitdirs("sid-s1", overlay)
         from coding_cave.sync import pull_project, push_project
         pull_project(slug)
 
         # Push back
         push_project(slug)
 
-        # Session should NOT be diverged from shared — same hashes
+        # Shared should have the exact same hash — no re-authoring
         shared_head = subprocess.run(
             ["git", "--git-dir", str(shared_gd), "rev-parse", "HEAD"],
             capture_output=True, text=True,
         ).stdout.strip()
         assert shared_head == session_head
-
-        # Session can still fast-forward (not diverged)
-        merge_base = subprocess.run(
-            ["git", "--git-dir", str(session_gd), "merge-base",
-             session_head, shared_head],
-            capture_output=True, text=True,
-        ).stdout.strip()
-        assert merge_base == session_head

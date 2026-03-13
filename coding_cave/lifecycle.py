@@ -164,6 +164,13 @@ def start_session(project, command, gpu=False):
                     # Shared objects accessible via alternates inside the cave
                     bwrap_args += ["--ro-bind", str(shared_gitdir / "objects"),
                                    f"/projects/.shared-objects/{slug}"]
+                    # Shared gitdir rw for post-commit hook push/fetch
+                    bwrap_args += ["--bind", str(shared_gitdir),
+                                   f"/projects/.shared-gitdirs/{slug}"]
+                    # Allow pushes to shared gitdir's current branch
+                    git_mod.git(shared_gitdir, "config",
+                        "receive.denyCurrentBranch", "ignore",
+                        capture_output=True)
             uid, gid = os.getuid(), os.getgid()
             subprocess.run(
                 ["fuse-overlayfs",
@@ -247,9 +254,10 @@ def start_session(project, command, gpu=False):
     os.environ["CODING_CAVE_BWRAP_ARGS"] = str(args_file)
     os.environ["CODING_CAVE_SESSION_ID"] = sid
     os.environ["CODING_CAVE_PROJECT"] = project
-    # Stable session index: find next unused slot for this project.
-    session_index = sessions._next_session_index(project)
-    os.environ["CODING_CAVE_SESSION_INDEX"] = str(session_index)
+    # Session index: count of existing sessions for this project.
+    # Matches the display order in `cav shell` and `cav status`.
+    existing = sessions.list_sessions(project=project)
+    os.environ["CODING_CAVE_SESSION_INDEX"] = str(len(existing))
 
     binary = _state.SANDBOX_GPU_BIN if gpu else _state.SANDBOX_BIN
 
@@ -296,7 +304,7 @@ def start_session(project, command, gpu=False):
             env=bwrap_env,
         )
 
-    sessions.register_session(sid, project, proc.pid, session_index)
+    sessions.register_session(sid, project, proc.pid)
     sessions.update_pane_titles(project)
     print("Started coding-cave.", file=sys.stderr)
 
