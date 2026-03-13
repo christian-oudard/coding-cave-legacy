@@ -346,10 +346,8 @@ def start_session(project, command, gpu=False):
     os.environ["CODING_CAVE_SESSION_ID"] = sid
     os.environ["CODING_CAVE_PROJECT"] = project
     os.environ["CODING_CAVE_PROJECT_PATH"] = loaded_projects.get(project, "")
-    # Session index: count of existing sessions for this project.
-    # Matches the display order in `cav shell` and `cav status`.
-    existing = sessions.list_sessions(project=project)
-    os.environ["CODING_CAVE_SESSION_INDEX"] = str(len(existing) + 1)
+    session_index = sessions._next_session_index(project)
+    os.environ["CODING_CAVE_SESSION_INDEX"] = str(session_index)
 
     binary = _state.SANDBOX_GPU_BIN if gpu else _state.SANDBOX_BIN
 
@@ -398,7 +396,7 @@ def start_session(project, command, gpu=False):
             env=bwrap_env,
         )
 
-    sessions.register_session(sid, project, proc.pid)
+    sessions.register_session(sid, project, proc.pid, index=session_index)
     sessions.update_pane_titles(project)
     print("Started coding-cave.", file=sys.stderr)
 
