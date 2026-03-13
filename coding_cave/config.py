@@ -266,7 +266,10 @@ def build_user_env():
     )
     (user_env / "flake.nix").write_text(flake_content)
 
-    # Build
+    # Build and register a GC root so nix-collect-garbage on the host
+    # can't delete the cave-user-env or its closure.  nix build --out-link
+    # does NOT register GC roots (unlike nix-build), so we use
+    # nix-store --add-root explicitly.
     print("Building user environment from cave.nix...", file=sys.stderr, flush=True)
     r = subprocess.run(
         ["nix", "build", "--no-link", "--print-out-paths"],
@@ -278,9 +281,18 @@ def build_user_env():
         return _try_existing_result(result_link)
 
     out_path = r.stdout.strip().split("\n")[0]
-    # Create/update result symlink
+
+    # Create result symlink as a GC root.
+    # nix-store --add-root creates an indirect root: a symlink in
+    # /nix/var/nix/gcroots/auto/ points to result_link, which points
+    # to the store path.  This protects the entire closure from GC.
     result_link.unlink(missing_ok=True)
-    result_link.symlink_to(out_path)
+    subprocess.run(
+        ["nix-store", "--add-root", str(result_link), "--indirect",
+         "-r", out_path],
+        capture_output=True, check=True,
+    )
+
     hash_file.write_text(content_hash)
     return Path(out_path)
 

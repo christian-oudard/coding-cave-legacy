@@ -8,6 +8,75 @@ from pathlib import Path
 from . import _state, config, projects, sessions, git as git_mod, gitdir, overlay
 
 
+def _merge_nix_db(host_db_path, cave_db_path):
+    """Incrementally add new host nix DB entries into the cave DB.
+
+    Copies ValidPaths rows (and their Refs) that exist in the host DB
+    but not in the cave DB. Preserves cave-only paths (packages installed
+    inside the cave via nix shell).
+    """
+    import sqlite3
+    src = sqlite3.connect(f"file:{host_db_path}?mode=ro", uri=True)
+    dst = sqlite3.connect(str(cave_db_path))
+    try:
+        # Find paths in host but not in cave
+        cave_paths = {r[0] for r in dst.execute("SELECT path FROM ValidPaths")}
+        host_rows = src.execute(
+            "SELECT id, path, hash, registrationTime, deriver, narSize, "
+            "ultimate, sigs, ca FROM ValidPaths"
+        ).fetchall()
+        new_rows = [r for r in host_rows if r[1] not in cave_paths]
+        if not new_rows:
+            return
+
+        # Insert new paths, track host_id -> cave_id mapping
+        id_map = {}
+        for host_id, path, h, reg_time, deriver, nar_size, ult, sigs, ca in new_rows:
+            dst.execute(
+                "INSERT OR IGNORE INTO ValidPaths "
+                "(path, hash, registrationTime, deriver, narSize, ultimate, sigs, ca) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (path, h, reg_time, deriver, nar_size, ult, sigs, ca),
+            )
+            cave_id = dst.execute(
+                "SELECT id FROM ValidPaths WHERE path = ?", (path,)
+            ).fetchone()
+            if cave_id:
+                id_map[host_id] = cave_id[0]
+
+        # Build full host_id -> cave_id map (including pre-existing paths)
+        for r in host_rows:
+            if r[0] not in id_map:
+                cave_id = dst.execute(
+                    "SELECT id FROM ValidPaths WHERE path = ?", (r[1],)
+                ).fetchone()
+                if cave_id:
+                    id_map[r[0]] = cave_id[0]
+
+        # Copy Refs for newly inserted paths
+        new_host_ids = [h_id for h_id in id_map if h_id in {r[0] for r in new_rows}]
+        if new_host_ids:
+            placeholders = ",".join("?" * len(new_host_ids))
+            refs = src.execute(
+                f"SELECT referrer, reference FROM Refs WHERE referrer IN ({placeholders})",
+                new_host_ids,
+            ).fetchall()
+            for referrer, reference in refs:
+                cave_referrer = id_map.get(referrer)
+                cave_reference = id_map.get(reference)
+                if cave_referrer and cave_reference:
+                    dst.execute(
+                        "INSERT OR IGNORE INTO Refs (referrer, reference) VALUES (?, ?)",
+                        (cave_referrer, cave_reference),
+                    )
+
+        dst.commit()
+    finally:
+        src.close()
+        dst.close()
+
+
+
 def _build_mirror_args():
     """Build bwrap args for dotfile and binary mirroring.
 
@@ -109,23 +178,29 @@ def start_session(project, command, gpu=False):
 
     # Seed nix DB from host/parent so nix doesn't try to re-register
     # (chmod) existing store paths, which fails on overlayfs.
-    # Only seed if no existing cave DB (to preserve cave-installed pkgs).
-    # Use sqlite3 backup API for a consistent copy (handles WAL mode).
+    # Initial seed: full copy. Subsequent sessions: incremental merge of
+    # new host paths (e.g. rebuilt cave-user-env) into the cave DB,
+    # preserving cave-installed packages.
     if not inside_cave:
         host_nix_db = Path("/nix/var/nix/db/db.sqlite")
         nix_db_dir = _state.nix_overlay_dir() / "db"
         nix_db_dir.mkdir(parents=True, exist_ok=True)
         cave_nix_db = nix_db_dir / "db.sqlite"
-        if host_nix_db.exists() and not cave_nix_db.exists():
+        if host_nix_db.exists():
             import sqlite3
             try:
-                for wal in nix_db_dir.glob("db.sqlite-*"):
-                    wal.unlink()
-                src = sqlite3.connect(f"file:{host_nix_db}?mode=ro", uri=True)
-                dst = sqlite3.connect(str(cave_nix_db))
-                src.backup(dst)
-                dst.close()
-                src.close()
+                if not cave_nix_db.exists():
+                    # First seed: full copy
+                    for wal in nix_db_dir.glob("db.sqlite-*"):
+                        wal.unlink()
+                    src = sqlite3.connect(f"file:{host_nix_db}?mode=ro", uri=True)
+                    dst = sqlite3.connect(str(cave_nix_db))
+                    src.backup(dst)
+                    dst.close()
+                    src.close()
+                else:
+                    # Incremental: add host paths missing from cave DB
+                    _merge_nix_db(host_nix_db, cave_nix_db)
             except sqlite3.Error:
                 pass
         if cave_nix_db.exists():
@@ -281,11 +356,21 @@ def start_session(project, command, gpu=False):
     # User environment: extra packages, skills, env from cave.nix
     if user_env:
         import json
+        # Bind-mount user-env and its package targets directly, bypassing
+        # the nix store overlay.  fuse-overlayfs can have stale negative
+        # dentry cache entries for newly-built store paths, making them
+        # invisible at startup.
+        bwrap_args += ["--ro-bind", str(user_env), str(user_env)]
         # Extra PATH entries from user packages
         packages_dir = user_env / "packages"
         if packages_dir.is_dir():
             extra_paths = []
             for pkg in sorted(packages_dir.iterdir()):
+                # Bind-mount the symlink target (the actual package store path)
+                if pkg.is_symlink():
+                    target = pkg.resolve()
+                    if str(target).startswith("/nix/store/"):
+                        bwrap_args += ["--ro-bind", str(target), str(target)]
                 bin_dir = pkg / "bin"
                 if bin_dir.is_dir():
                     extra_paths.append(str(bin_dir))

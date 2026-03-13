@@ -7,6 +7,7 @@ import pytest
 
 import wrapper
 from coding_cave import _state
+from coding_cave.commands import _shell_exec_cmd
 from tests.conftest import write_projects
 
 
@@ -167,26 +168,25 @@ class TestShellExecCmd:
     """Test _shell_exec_cmd produces correct shell commands with fallback."""
 
     def test_bash_is_direct(self):
-        cmd = wrapper._shell_exec_cmd("bash")
+        cmd = _shell_exec_cmd("bash")
         assert cmd == "exec /bin/bash -l"
 
-    def test_zsh_has_fallback(self):
-        cmd = wrapper._shell_exec_cmd("zsh")
+    def test_zsh_has_check(self):
+        cmd = _shell_exec_cmd("zsh")
         assert "command -v zsh" in cmd
         assert "exec zsh -l" in cmd
-        assert "exec /bin/bash -l" in cmd
+        assert "exit 1" in cmd
 
-    def test_zsh_fallback_runs_bash_when_zsh_missing(self):
-        """When zsh isn't on PATH, the fallback command runs bash."""
-        cmd = wrapper._shell_exec_cmd("zsh")
+    def test_zsh_exits_when_zsh_missing(self):
+        """When zsh isn't on PATH, the command exits with an error."""
+        cmd = _shell_exec_cmd("zsh")
         result = subprocess.run(
             ["/bin/bash", "-c", cmd],
             capture_output=True, text=True,
             env={"PATH": "/bin"},  # no zsh here
         )
-        # bash -l will fail (no profile), but it should attempt bash not zsh
-        # The key test: it doesn't fail with "zsh: not found"
-        assert "zsh" not in result.stderr
+        assert result.returncode != 0
+        assert "zsh not found" in result.stderr
 
     def test_zsh_runs_zsh_when_available(self, tmp_path):
         """When zsh is on PATH, the command runs zsh."""
@@ -194,7 +194,7 @@ class TestShellExecCmd:
         fake_zsh = tmp_path / "zsh"
         fake_zsh.write_text("#!/bin/bash\necho ran-zsh\n")
         fake_zsh.chmod(0o755)
-        cmd = wrapper._shell_exec_cmd("zsh")
+        cmd = _shell_exec_cmd("zsh")
         # Replace exec so we can capture output
         cmd = cmd.replace("exec zsh -l", "echo ran-zsh")
         result = subprocess.run(
@@ -239,7 +239,7 @@ class TestNsenterShellScript:
             'declare -x PATH="/nix/store/cave-bin:/bin"\n'
             'declare -x HOME="/home/cave-coder"\n'
         )
-        shell_cmd = wrapper._shell_exec_cmd("bash")
+        shell_cmd = _shell_exec_cmd("bash")
         script = wrapper.nsenter_shell_script(
             shell_cmd, str(tmp_path), cave_env=str(cave_env))
         # Replace the exec with env printout so we can inspect.

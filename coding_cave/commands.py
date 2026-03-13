@@ -11,14 +11,17 @@ from . import _state, config, projects, sessions, git as git_mod, overlay, lifec
 
 
 def _shell_exec_cmd(preferred_shell):
-    """Return a shell command string with fallback to /bin/bash.
+    """Return a shell command string that execs the preferred shell.
 
-    Since we can't check the cave's PATH from the host, the fallback
+    Since we can't check the cave's PATH from the host, the check
     happens at runtime inside the cave via 'command -v'.
     """
     if preferred_shell == "bash":
         return "exec /bin/bash -l"
-    return f'if command -v {preferred_shell} >/dev/null 2>&1; then exec {preferred_shell} -l; else exec /bin/bash -l; fi'
+    return (
+        f'if command -v {preferred_shell} >/dev/null 2>&1; then exec {preferred_shell} -l; '
+        f'else echo "{preferred_shell} not found (check cave.nix packages)" >&2; exit 1; fi'
+    )
 
 
 def cmd_agent(args, gpu=False, continue_session=False, resume=None, claude_args=None):

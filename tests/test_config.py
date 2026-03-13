@@ -260,6 +260,127 @@ class TestBwrapArgsSafety:
             )
 
 
+class TestMergeNixDb:
+    """Test incremental nix DB merge for new host paths."""
+
+    def _create_db(self, path):
+        import sqlite3
+        db = sqlite3.connect(str(path))
+        db.executescript("""
+            CREATE TABLE ValidPaths (
+                id integer primary key autoincrement not null,
+                path text unique not null,
+                hash text not null,
+                registrationTime integer not null,
+                deriver text,
+                narSize integer,
+                ultimate integer,
+                sigs text,
+                ca text
+            );
+            CREATE TABLE Refs (
+                referrer integer not null,
+                reference integer not null,
+                primary key (referrer, reference),
+                foreign key (referrer) references ValidPaths(id) on delete cascade,
+                foreign key (reference) references ValidPaths(id) on delete restrict
+            );
+        """)
+        return db
+
+    def test_new_paths_copied(self, tmp_path):
+        from coding_cave.lifecycle import _merge_nix_db
+        host_db = tmp_path / "host.sqlite"
+        cave_db = tmp_path / "cave.sqlite"
+        h = self._create_db(host_db)
+        c = self._create_db(cave_db)
+        # Both have path A, only host has path B
+        h.execute("INSERT INTO ValidPaths (path,hash,registrationTime,narSize) "
+                  "VALUES ('/nix/store/aaa','sha256:aaa',1,100)")
+        h.execute("INSERT INTO ValidPaths (path,hash,registrationTime,narSize) "
+                  "VALUES ('/nix/store/bbb','sha256:bbb',2,200)")
+        h.commit(); h.close()
+        c.execute("INSERT INTO ValidPaths (path,hash,registrationTime,narSize) "
+                  "VALUES ('/nix/store/aaa','sha256:aaa',1,100)")
+        c.commit(); c.close()
+
+        _merge_nix_db(host_db, cave_db)
+
+        import sqlite3
+        db = sqlite3.connect(str(cave_db))
+        paths = {r[0] for r in db.execute("SELECT path FROM ValidPaths")}
+        assert paths == {"/nix/store/aaa", "/nix/store/bbb"}
+        db.close()
+
+    def test_cave_only_paths_preserved(self, tmp_path):
+        from coding_cave.lifecycle import _merge_nix_db
+        host_db = tmp_path / "host.sqlite"
+        cave_db = tmp_path / "cave.sqlite"
+        h = self._create_db(host_db)
+        c = self._create_db(cave_db)
+        h.execute("INSERT INTO ValidPaths (path,hash,registrationTime,narSize) "
+                  "VALUES ('/nix/store/aaa','sha256:aaa',1,100)")
+        h.commit(); h.close()
+        # Cave has aaa + cave-only ccc
+        c.execute("INSERT INTO ValidPaths (path,hash,registrationTime,narSize) "
+                  "VALUES ('/nix/store/aaa','sha256:aaa',1,100)")
+        c.execute("INSERT INTO ValidPaths (path,hash,registrationTime,narSize) "
+                  "VALUES ('/nix/store/ccc','sha256:ccc',3,300)")
+        c.commit(); c.close()
+
+        _merge_nix_db(host_db, cave_db)
+
+        import sqlite3
+        db = sqlite3.connect(str(cave_db))
+        paths = {r[0] for r in db.execute("SELECT path FROM ValidPaths")}
+        assert "/nix/store/ccc" in paths
+        db.close()
+
+    def test_refs_copied_with_id_remapping(self, tmp_path):
+        from coding_cave.lifecycle import _merge_nix_db
+        host_db = tmp_path / "host.sqlite"
+        cave_db = tmp_path / "cave.sqlite"
+        h = self._create_db(host_db)
+        c = self._create_db(cave_db)
+        # Host: A(id=1) -> B(id=2), B is new
+        h.execute("INSERT INTO ValidPaths (path,hash,registrationTime,narSize) "
+                  "VALUES ('/nix/store/aaa','sha256:aaa',1,100)")
+        h.execute("INSERT INTO ValidPaths (path,hash,registrationTime,narSize) "
+                  "VALUES ('/nix/store/bbb','sha256:bbb',2,200)")
+        h.execute("INSERT INTO Refs (referrer,reference) VALUES (2,1)")
+        h.commit(); h.close()
+        # Cave already has A with different id
+        c.execute("INSERT INTO ValidPaths (path,hash,registrationTime,narSize) "
+                  "VALUES ('/nix/store/aaa','sha256:aaa',1,100)")
+        c.commit(); c.close()
+
+        _merge_nix_db(host_db, cave_db)
+
+        import sqlite3
+        db = sqlite3.connect(str(cave_db))
+        # B should reference A, with cave-local ids
+        cave_a_id = db.execute("SELECT id FROM ValidPaths WHERE path='/nix/store/aaa'").fetchone()[0]
+        cave_b_id = db.execute("SELECT id FROM ValidPaths WHERE path='/nix/store/bbb'").fetchone()[0]
+        refs = db.execute("SELECT referrer,reference FROM Refs").fetchall()
+        assert (cave_b_id, cave_a_id) in refs
+        db.close()
+
+    def test_noop_when_no_new_paths(self, tmp_path):
+        from coding_cave.lifecycle import _merge_nix_db
+        host_db = tmp_path / "host.sqlite"
+        cave_db = tmp_path / "cave.sqlite"
+        h = self._create_db(host_db)
+        c = self._create_db(cave_db)
+        h.execute("INSERT INTO ValidPaths (path,hash,registrationTime,narSize) "
+                  "VALUES ('/nix/store/aaa','sha256:aaa',1,100)")
+        h.commit(); h.close()
+        c.execute("INSERT INTO ValidPaths (path,hash,registrationTime,narSize) "
+                  "VALUES ('/nix/store/aaa','sha256:aaa',1,100)")
+        c.commit(); c.close()
+
+        _merge_nix_db(host_db, cave_db)  # should not raise
+
+
 def _sync_nix_db():
     """Register unregistered nix store paths so nix build works on overlayfs.
 
