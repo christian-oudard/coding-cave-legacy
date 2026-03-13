@@ -1,3 +1,3 @@
 #!/bin/bash
 read -r input
-echo "coding-cave #${CODING_CAVE_SESSION_INDEX:-?}"
+echo "coding-cave ${CODING_CAVE_PROJECT_PATH:-${CODING_CAVE_PROJECT:-?}}/ #${CODING_CAVE_SESSION_INDEX:-?}"

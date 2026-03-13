@@ -119,6 +119,7 @@
       # Session identity
       (try-fwd-env "CODING_CAVE_SESSION_ID")
       (try-fwd-env "CODING_CAVE_PROJECT")
+      (try-fwd-env "CODING_CAVE_PROJECT_PATH")
       (try-fwd-env "CODING_CAVE_SESSION_INDEX")
 
       # Extra bwrap args file from wrapper.py
