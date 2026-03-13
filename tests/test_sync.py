@@ -8,7 +8,9 @@ import pytest
 
 import wrapper
 from coding_cave import _state
-from coding_cave.gitdir import _save_session_index, forward_session_refs
+from coding_cave.gitdir import (
+    _save_session_index, forward_session_refs, ff_session_branches,
+)
 from tests.conftest import write_projects, write_session
 
 
@@ -1603,6 +1605,203 @@ class TestSessionGitdir:
         result = cave_git(work_b, "stash", "apply")
         assert result.returncode == 0
         assert (work_b / "file.txt").read_text() == "stashed\n"
+
+    def test_ff_session_branches_amend_no_duplicate(
+            self, shared_project, tmp_path):
+        """Amending a commit after ff_session_branches merged it must not
+        create a duplicate on main.
+
+        Scenario (the user's bug):
+        1. Agent 2 commits C2a on session/s2
+        2. ff_session_branches FF-merges session/s2 into main, deletes branch
+        3. Agent 1 commits C1a on session/s1
+        4. ff_session_branches rebases session/s1 onto main
+        5. Agent 2 amends C2a -> C2a' and re-pushes session/s2
+        6. ff_session_branches runs again — should NOT duplicate C2a content
+        """
+        host, slug, projects_dir = shared_project
+        shared_gd = projects_dir / slug / "gitdir"
+
+        # Create both sessions
+        gd_s1, work_s1, _ = self._make_session(
+            tmp_path, slug, projects_dir, "s1")
+        gd_s2, work_s2, _ = self._make_session(
+            tmp_path, slug, projects_dir, "s2")
+
+        # Step 1: Agent 2 commits
+        (work_s2 / "feature.txt").write_text("version 1\n")
+        cave_git(work_s2, "add", "feature.txt")
+        cave_git(work_s2, "commit", "-m", "Add feature")
+        s2_sha = cave_git(work_s2, "rev-parse", "HEAD").stdout.strip()
+        s2_branch = cave_git(work_s2, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+
+        # Simulate post-commit hook: push session branch to shared
+        git_run("git", "--git-dir", str(shared_gd), "fetch",
+                str(gd_s2), s2_sha)
+        git_run("git", "--git-dir", str(shared_gd), "update-ref",
+                f"refs/heads/{s2_branch}", s2_sha)
+
+        # Step 2: ff_session_branches merges s2 into main
+        ff_session_branches(shared_gd)
+        main_after_s2 = git_run("git", "--git-dir", str(shared_gd),
+                                "rev-parse", "refs/heads/main").stdout.strip()
+        assert main_after_s2 == s2_sha  # FF merge
+
+        # Step 3: Agent 1 commits
+        (work_s1 / "other.txt").write_text("from agent 1\n")
+        cave_git(work_s1, "add", "other.txt")
+        cave_git(work_s1, "commit", "-m", "Agent 1 work")
+        s1_sha = cave_git(work_s1, "rev-parse", "HEAD").stdout.strip()
+        s1_branch = cave_git(work_s1, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+
+        # Simulate post-commit hook: push session/s1 to shared
+        git_run("git", "--git-dir", str(shared_gd), "fetch",
+                str(gd_s1), s1_sha)
+        git_run("git", "--git-dir", str(shared_gd), "update-ref",
+                f"refs/heads/{s1_branch}", s1_sha)
+
+        # Step 4: ff_session_branches merges s1 into main (rebase)
+        ff_session_branches(shared_gd)
+
+        # Step 5: Agent 2 amends its commit (metadata-only: same content)
+        cave_git(work_s2, "commit", "--amend", "-m", "Add feature (amended)")
+        s2_amended = cave_git(work_s2, "rev-parse", "HEAD").stdout.strip()
+        assert s2_amended != s2_sha
+
+        # Simulate post-commit hook: force-push session/s2 (recreates branch)
+        git_run("git", "--git-dir", str(shared_gd), "fetch",
+                str(gd_s2), s2_amended)
+        git_run("git", "--git-dir", str(shared_gd), "update-ref",
+                f"refs/heads/{s2_branch}", s2_amended)
+
+        # Step 6: ff_session_branches runs again
+        ff_session_branches(shared_gd)
+
+        # Verify: no duplicate commits
+        log = git_run("git", "--git-dir", str(shared_gd),
+                      "log", "--oneline", "refs/heads/main")
+        # "Add feature" content should appear at most once
+        feature_count = log.stdout.count("Add feature")
+        assert feature_count <= 1, (
+            f"Expected at most 1 'Add feature' commit, got {feature_count}:\n"
+            f"{log.stdout}"
+        )
+
+        # Main should have: initial + agent 1 work (+ possibly amended feature)
+        lines = [l for l in log.stdout.strip().splitlines() if l]
+        assert len(lines) <= 3, (
+            f"Expected at most 3 commits, got {len(lines)}:\n{log.stdout}"
+        )
+
+    def test_ff_session_branches_content_amend_no_duplicate(
+            self, shared_project, tmp_path):
+        """Content amend after ff merge must not duplicate the commit.
+
+        Same as above but the amend also changes file content.
+        """
+        host, slug, projects_dir = shared_project
+        shared_gd = projects_dir / slug / "gitdir"
+
+        gd_s1, work_s1, _ = self._make_session(
+            tmp_path, slug, projects_dir, "s1")
+        gd_s2, work_s2, _ = self._make_session(
+            tmp_path, slug, projects_dir, "s2")
+
+        # Agent 2 commits
+        (work_s2 / "feature.txt").write_text("version 1\n")
+        cave_git(work_s2, "add", "feature.txt")
+        cave_git(work_s2, "commit", "-m", "Add feature")
+        s2_sha = cave_git(work_s2, "rev-parse", "HEAD").stdout.strip()
+        s2_branch = cave_git(
+            work_s2, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+
+        # Push + FF merge
+        git_run("git", "--git-dir", str(shared_gd), "fetch",
+                str(gd_s2), s2_sha)
+        git_run("git", "--git-dir", str(shared_gd), "update-ref",
+                f"refs/heads/{s2_branch}", s2_sha)
+        ff_session_branches(shared_gd)
+
+        # Agent 1 commits on different file
+        (work_s1 / "other.txt").write_text("from agent 1\n")
+        cave_git(work_s1, "add", "other.txt")
+        cave_git(work_s1, "commit", "-m", "Agent 1 work")
+        s1_sha = cave_git(work_s1, "rev-parse", "HEAD").stdout.strip()
+        s1_branch = cave_git(
+            work_s1, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+        git_run("git", "--git-dir", str(shared_gd), "fetch",
+                str(gd_s1), s1_sha)
+        git_run("git", "--git-dir", str(shared_gd), "update-ref",
+                f"refs/heads/{s1_branch}", s1_sha)
+        ff_session_branches(shared_gd)
+
+        # Agent 2 amends with content change
+        (work_s2 / "feature.txt").write_text("version 2\n")
+        cave_git(work_s2, "add", "feature.txt")
+        cave_git(work_s2, "commit", "--amend", "-m", "Add feature")
+        s2_amended = cave_git(work_s2, "rev-parse", "HEAD").stdout.strip()
+
+        # Push amended version
+        git_run("git", "--git-dir", str(shared_gd), "fetch",
+                str(gd_s2), s2_amended)
+        git_run("git", "--git-dir", str(shared_gd), "update-ref",
+                f"refs/heads/{s2_branch}", s2_amended)
+
+        # ff_session_branches should not create a duplicate
+        ff_session_branches(shared_gd)
+
+        log = git_run("git", "--git-dir", str(shared_gd),
+                      "log", "--oneline", "refs/heads/main")
+        feature_count = log.stdout.count("Add feature")
+        assert feature_count <= 1, (
+            f"Expected at most 1 'Add feature' commit, got {feature_count}:\n"
+            f"{log.stdout}"
+        )
+
+    def test_repeated_pull_no_accumulating_duplicates(
+            self, shared_project, tmp_path):
+        """Repeated ff_session_branches calls must not accumulate duplicates.
+
+        The user's bug: every pull adds another copy of the same commit.
+        """
+        host, slug, projects_dir = shared_project
+        shared_gd = projects_dir / slug / "gitdir"
+
+        gd_s2, work_s2, _ = self._make_session(
+            tmp_path, slug, projects_dir, "s2")
+
+        # Agent commits
+        (work_s2 / "feature.txt").write_text("v1\n")
+        cave_git(work_s2, "add", "feature.txt")
+        cave_git(work_s2, "commit", "-m", "Add feature")
+        s2_sha = cave_git(work_s2, "rev-parse", "HEAD").stdout.strip()
+        s2_branch = cave_git(
+            work_s2, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+
+        # Push + merge
+        git_run("git", "--git-dir", str(shared_gd), "fetch",
+                str(gd_s2), s2_sha)
+        git_run("git", "--git-dir", str(shared_gd), "update-ref",
+                f"refs/heads/{s2_branch}", s2_sha)
+        ff_session_branches(shared_gd)
+
+        initial_log = git_run("git", "--git-dir", str(shared_gd),
+                              "log", "--oneline", "refs/heads/main").stdout
+
+        # Simulate repeated pulls — agent hasn't changed anything but
+        # session branch still exists (post-commit hook recreated it)
+        for i in range(3):
+            # Re-push same commit (simulates agent's post-commit on next commit)
+            git_run("git", "--git-dir", str(shared_gd), "update-ref",
+                    f"refs/heads/{s2_branch}", s2_sha)
+            ff_session_branches(shared_gd)
+
+        final_log = git_run("git", "--git-dir", str(shared_gd),
+                            "log", "--oneline", "refs/heads/main").stdout
+        assert final_log == initial_log, (
+            f"Repeated pulls changed the log:\n"
+            f"Before: {initial_log}\nAfter: {final_log}"
+        )
 
 
 class TestBranchPerSession:

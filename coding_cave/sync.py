@@ -175,7 +175,9 @@ def _rebase_plumbing(host_git, onto_sha, merge_base, cave_sha,
             return None
         merged_tree = merge.stdout.strip().splitlines()[0]
 
-        # Empty commit means something went wrong (duplicate work, bad ref state)
+        # Skip empty commits (tree unchanged) — happens when the commit's
+        # changes are already upstream, e.g. after an amend of a
+        # previously-pulled commit.
         parent_tree = subprocess.run(
             host_git + ["rev-parse", f"{parent}^{{tree}}"],
             capture_output=True, text=True,
@@ -186,9 +188,9 @@ def _rebase_plumbing(host_git, onto_sha, merge_base, cave_sha,
                 capture_output=True, text=True,
             )
             msg = orig_msg.stdout.strip() if orig_msg.returncode == 0 else commit
-            raise RuntimeError(
-                f"Rebase produced empty commit '{msg}' — cave and host have diverged unexpectedly"
-            )
+            print(f"  skip empty commit '{msg}' (already upstream)",
+                  file=sys.stderr)
+            continue
 
         info = subprocess.run(
             host_git + ["log", "-1",

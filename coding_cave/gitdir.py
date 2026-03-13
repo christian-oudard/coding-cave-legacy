@@ -164,6 +164,13 @@ def _rebase_onto_reauthored(gitdir, shared_sha, session_sha, merge_base):
     # Rebase new commits onto shared HEAD using commit-tree
     parent = shared_sha
     for commit, tree in new_commits:
+        # Skip empty commits (tree unchanged from parent)
+        parent_tree = git_mod.git(gitdir, "rev-parse", f"{parent}^{{tree}}",
+                          capture_output=True, text=True)
+        if (parent_tree.returncode == 0
+                and parent_tree.stdout.strip() == tree):
+            continue
+
         info = git_mod.git(gitdir, "log", "-1",
                    "--format=%an%n%ae%n%aI%n%cn%n%ce%n%cI%n%B", commit,
                    capture_output=True, text=True)
@@ -230,6 +237,15 @@ def _rebase_commits(gitdir, shared_sha, session_sha, merge_base):
         if merge.returncode != 0:
             return None  # conflict
         merged_tree = merge.stdout.strip().splitlines()[0]
+
+        # Skip empty commits (tree unchanged) — happens when the commit's
+        # changes are already in the target, e.g. after an amend of a
+        # previously-merged session commit.
+        parent_tree = git_mod.git(gitdir, "rev-parse", f"{parent}^{{tree}}",
+                          capture_output=True, text=True)
+        if (parent_tree.returncode == 0
+                and parent_tree.stdout.strip() == merged_tree):
+            continue
 
         # Preserve original author and committer info
         info = git_mod.git(gitdir, "log", "-1",
