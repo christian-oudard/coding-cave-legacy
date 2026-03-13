@@ -265,23 +265,21 @@ def _forward_refs(sid, session_gitdir, shared_gitdir, *, force=False):
 
         # Skip refs the session never modified (still at init value)
         # or hasn't changed since last sync (still at synced value).
-        # Without this, a session that hasn't touched a project can
-        # revert another session's amend by forwarding its stale ref,
-        # and a session whose commits were re-authored by pull would
-        # overwrite the re-authored ref with its original.
-        if not force:
-            init_ref = git_mod.git(session_gitdir, "rev-parse",
-                           f"refs/init/{branch}",
-                           capture_output=True, text=True)
-            if (init_ref.returncode == 0
-                    and init_ref.stdout.strip() == sha):
-                continue
-            synced_ref = git_mod.git(session_gitdir, "rev-parse",
-                             f"refs/synced/{branch}",
-                             capture_output=True, text=True)
-            if (synced_ref.returncode == 0
-                    and synced_ref.stdout.strip() == sha):
-                continue
+        # This applies to BOTH live sync and cleanup — without it,
+        # a session that never touched a branch will force-forward its
+        # stale ref on cleanup, reverting another session's amend.
+        init_ref = git_mod.git(session_gitdir, "rev-parse",
+                       f"refs/init/{branch}",
+                       capture_output=True, text=True)
+        if (init_ref.returncode == 0
+                and init_ref.stdout.strip() == sha):
+            continue
+        synced_ref = git_mod.git(session_gitdir, "rev-parse",
+                         f"refs/synced/{branch}",
+                         capture_output=True, text=True)
+        if (synced_ref.returncode == 0
+                and synced_ref.stdout.strip() == sha):
+            continue
 
         # Fetch the objects into shared gitdir
         fetch = git_mod.git(shared_gitdir, "fetch", str(session_gitdir), sha,
