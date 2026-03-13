@@ -45,6 +45,8 @@ def build_parser():
     p_cp.add_argument("-R", "-r", "--recursive", action="store_true", help="copy directories recursively")
     p_cp.add_argument("paths", nargs="+", help="source(s) and destination (use slug:path for cave)")
 
+    sub.add_parser("update-plugins", help="update cave.nix flake inputs")
+
     p_move = sub.add_parser("move", help="update a project's source path")
     p_move.add_argument("old_slug", help="current project name")
     p_move.add_argument("new_path", help="new directory path")
@@ -97,5 +99,7 @@ def main():
             print("Usage: coding-cave cp <src>... <dest>", file=sys.stderr)
             sys.exit(1)
         commands.cmd_cp(parsed.paths[:-1], parsed.paths[-1], recursive=parsed.recursive)
+    elif parsed.command == "update-plugins":
+        commands.cmd_update_plugins([])
     elif parsed.command == "move":
         commands.cmd_move(parsed.old_slug, parsed.new_path)

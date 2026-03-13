@@ -5,7 +5,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import _state, projects, sessions, git as git_mod, gitdir, overlay
+from . import _state, config, projects, sessions, git as git_mod, gitdir, overlay
 
 
 def start_session(project, command, gpu=False):
@@ -64,6 +64,32 @@ def start_session(project, command, gpu=False):
         if cave_nix_db.exists():
             os.environ["CODING_CAVE_NIX_DB_DIR"] = str(nix_db_dir)
 
+    # Build user environment from cave.nix (packages, settings, skills, env)
+    user_env = config.build_user_env()
+    if user_env:
+        os.environ["CODING_CAVE_USER_ENV"] = str(user_env)
+        # Merge user settings into persistent home
+        user_settings = user_env / "claude" / "settings.json"
+        if user_settings.is_file():
+            import json
+            cave_home = _state.cave_home()
+            claude_dir = cave_home / ".claude"
+            claude_dir.mkdir(parents=True, exist_ok=True)
+            existing = {}
+            settings_file = claude_dir / "settings.json"
+            if settings_file.exists():
+                try:
+                    existing = json.loads(settings_file.read_text())
+                except (json.JSONDecodeError, OSError):
+                    pass
+            try:
+                user = json.loads(user_settings.read_text())
+            except (json.JSONDecodeError, OSError):
+                user = {}
+            if user:
+                existing.update(user)
+                settings_file.write_text(json.dumps(existing, indent=2))
+
     # Ensure gitdirs exist
     for slug, source in projects.load_projects().items():
         gitdir_path = _state.projects_dir() / slug / "gitdir"
@@ -75,11 +101,6 @@ def start_session(project, command, gpu=False):
 
     # Build extra bwrap args (project mounts, dotfiles, passwd)
     bwrap_args = []
-
-    # CLAUDE.md
-    claude_md = os.environ.get("CODING_CAVE_CLAUDE_MD", "")
-    if claude_md and Path(claude_md).is_file():
-        bwrap_args += ["--ro-bind", claude_md, f"{_state.JAIL_HOME}/.claude/CLAUDE.md"]
 
     # Zsh dotfiles
     zdotdir = os.environ.get("CODING_CAVE_ZDOTDIR", "")
@@ -228,6 +249,47 @@ def start_session(project, command, gpu=False):
             if os.path.isfile(src):
                 bwrap_args += ["--ro-bind", src, f"{cave_gnupghome}/{fname}"]
 
+    # User environment: extra packages, skills, env from cave.nix
+    if user_env:
+        import json
+        # Extra PATH entries from user packages
+        packages_dir = user_env / "packages"
+        if packages_dir.is_dir():
+            extra_paths = []
+            for pkg in sorted(packages_dir.iterdir()):
+                bin_dir = pkg / "bin"
+                if bin_dir.is_dir():
+                    extra_paths.append(str(bin_dir))
+            if extra_paths:
+                bwrap_args += ["--setenv", "CODING_CAVE_EXTRA_PATH",
+                               ":".join(extra_paths)]
+        # Skills from user env
+        skills_dir = user_env / "claude" / "skills"
+        if skills_dir.is_dir():
+            cave_home = _state.cave_home()
+            claude_skills = cave_home / ".claude" / "skills"
+            claude_skills.mkdir(parents=True, exist_ok=True)
+            for skill in skills_dir.iterdir():
+                if skill.is_dir():
+                    dest = claude_skills / skill.name
+                    if not dest.exists():
+                        import shutil
+                        shutil.copytree(skill, dest)
+        # Extra env vars
+        env_json = user_env / "claude" / "env.json"
+        if env_json.is_file():
+            try:
+                extra_env = json.loads(env_json.read_text())
+                for k, v in extra_env.items():
+                    bwrap_args += ["--setenv", k, str(v)]
+            except (json.JSONDecodeError, OSError):
+                pass
+
+    # Git config mirroring
+    gitconfig = os.environ.get("CODING_CAVE_GITCONFIG", "")
+    if gitconfig and Path(gitconfig).is_file():
+        bwrap_args += ["--ro-bind", gitconfig, f"{_state.JAIL_HOME}/.gitconfig"]
+
     # Passwd/group files
     uid = os.getuid()
     gid = os.getgid()
@@ -269,7 +331,7 @@ def start_session(project, command, gpu=False):
         "HOME", "PATH", "TERM",
         # Forwarded into cave via try-fwd-env
         "COLORTERM",
-        "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "GITHUB_TOKEN",
+        "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY",
         # Host git identity and GPG signing
         "CODING_CAVE_GIT_NAME", "CODING_CAVE_GIT_EMAIL",
         "CODING_CAVE_GIT_SIGNING_KEY", "CODING_CAVE_GIT_GPG_SIGN",
@@ -279,6 +341,8 @@ def start_session(project, command, gpu=False):
         "CODING_CAVE_BWRAP_ARGS",
         "CODING_CAVE_SESSION_ID", "CODING_CAVE_PROJECT",
         "CODING_CAVE_SESSION_INDEX",
+        "CODING_CAVE_USER_ENV", "CODING_CAVE_USER_CLAUDE_MD",
+        "CODING_CAVE_EXTRA_PATH", "CODING_CAVE_GITCONFIG",
     }
     bwrap_env = {k: v for k, v in os.environ.items() if k in BWRAP_ENV_ALLOWLIST}
 

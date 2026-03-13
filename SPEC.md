@@ -219,7 +219,58 @@ Files copied into the cave appear immediately — no restart needed. Files copie
 
 ## Credential isolation
 
-Credentials enter the cave only as environment variables (`--clearenv` + explicit forwarding). Nothing is written to disk inside the cave. OAuth tokens, API keys, and GitHub tokens are forwarded from the host config at entry time.
+Credentials enter the cave only as environment variables (`--clearenv` + explicit forwarding). Nothing is written to disk inside the cave. OAuth tokens and API keys are forwarded from the host config at entry time.
+
+## User/system configuration split
+
+The cave separates system-level configuration (baked into the nix derivation) from user-level configuration (`~/.config/coding-cave/`).
+
+### System layer (flake.nix)
+
+Base packages are infrastructure only: claude-code, nix, git, coreutils, and standard unix tools. No editors, language runtimes, or dev tools — those come from the user layer. `system-claude.md` is baked into the derivation and concatenated with the user's CLAUDE.md at session startup.
+
+### User layer (cave.nix)
+
+`~/.config/coding-cave/cave.nix` declares extra packages, settings, environment variables, and skills:
+
+    {
+      inputs = {
+        # "name" = "github:owner/repo";
+      };
+      config = { pkgs }: {
+        packages = with pkgs; [ python3 uv nano ];
+        settings = { };
+        env = { EDITOR = "nano"; };
+        skills = { };
+      };
+    }
+
+On session start, `build_user_env()` evaluates cave.nix:
+
+1. Copies cave.nix to `~/.local/share/coding-cave/user-env/`
+2. Extracts `inputs` via `nix eval --json`
+3. Generates a flake.nix that resolves inputs and builds a derivation
+4. Runs `nix build` (cached via content hash)
+5. Returns the output path
+
+The output derivation contains `packages/` (symlinks to nix packages), `claude/settings.json`, `claude/env.json`, and `claude/skills/`. Lifecycle.py consumes this: adds package bin dirs to PATH, merges settings, seeds skills, and passes env vars via bwrap.
+
+If cave.nix doesn't exist, a minimal default is generated. If the build fails, the previous result is used.
+
+`coding-cave update-plugins` runs `nix flake update` in the user-env directory.
+
+### Mirror config
+
+`config.toml` controls which host dotfiles are forwarded into the cave:
+
+    [mirror]
+    bash = true     # default: forward ~/.bashrc and ~/.bash_profile
+    zsh = false     # forward ~/.config/zsh/ (opt-in)
+    git = false     # forward ~/.gitconfig (opt-in)
+
+### CLAUDE.md concatenation
+
+Every session gets `~/.claude/CLAUDE.md` = system-claude.md + user CLAUDE.md. The system portion describes the cave environment (overlay model, no sudo, nix package management, git rules). The user portion comes from `~/.config/coding-cave/CLAUDE.md` on the host.
 
 ## Nix for reproducibility, fuse-overlayfs for mutability
 

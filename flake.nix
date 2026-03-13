@@ -14,6 +14,7 @@
 
     defaultClaudeSettings = ./defaults/claude-settings.json;
     defaultStatusline = ./defaults/statusline.sh;
+    systemClaudeMd = ./system-claude.md;
     version = self.shortRev or self.dirtyShortRev or "dev";
 
     jailHome = "/home/cave-coder";
@@ -29,7 +30,7 @@
         [ -e /dev/fuse ] && RUNTIME_ARGS+=(--dev-bind /dev/fuse /dev/fuse)
       '')
       (unsafe-add-raw-args "--symlink /bin/sh /bin/bash")
-      (unsafe-add-raw-args "--symlink ${pkgs.zsh}/bin/zsh /bin/zsh")
+      # zsh symlink added dynamically when user env includes zsh
       (set-env "SHELL" "/bin/bash")
       (set-env "CODING_CAVE_VERSION" version)
       (set-env "HOME" jailHome)
@@ -64,16 +65,14 @@
       (set-env "NIX_CONFIG" "sandbox = false\nexperimental-features = nix-command flakes")
       (set-env "NIX_PATH" "nixpkgs=${nixpkgs}")
 
-      # Dev tools
+      # Base packages (infrastructure — user packages come from cave.nix)
       (add-pkg-deps (with pkgs; [
         claude-code.packages.x86_64-linux.default
         nix
         git
-        github-cli
         ripgrep
         fd
         jq
-        python3
         curl
         coreutils
         gawk
@@ -86,24 +85,17 @@
         gzip
         unzip
         wget
-        perl
-        tree
+        bash
         less
         file
         ncurses
         which
-        zsh
-        eza
-        nano
-        direnv
-        uv
         glibc.bin
         util-linux
         fuse-overlayfs
         fuse3
         gnupg
       ]))
-      (set-env "EDITOR" "${pkgs.nano}/bin/nano")
       (set-env "TERMINFO_DIRS" "${pkgs.ncurses}/share/terminfo")
       (set-env "LOCALE_ARCHIVE" "${pkgs.glibcLocales}/lib/locale/locale-archive")
       (set-env "LANG" "en_US.UTF-8")
@@ -123,7 +115,6 @@
       # Credential forwarding
       (try-fwd-env "CLAUDE_CODE_OAUTH_TOKEN")
       (try-fwd-env "ANTHROPIC_API_KEY")
-      (try-fwd-env "GITHUB_TOKEN")
 
       # Session identity
       (try-fwd-env "CODING_CAVE_SESSION_ID")
@@ -133,19 +124,18 @@
       # Extra bwrap args file from wrapper.py
       (try-fwd-env "CODING_CAVE_BWRAP_ARGS")
 
-      # First-run init for Claude Code state
-      (try-fwd-env "CODING_CAVE_CLAUDE_SETTINGS")
-      (try-fwd-env "CODING_CAVE_SKILLS_DIR")
+      # User environment output from cave.nix build (packages, settings, skills)
+      (try-fwd-env "CODING_CAVE_USER_ENV")
+      (try-fwd-env "CODING_CAVE_USER_CLAUDE_MD")
+      (try-fwd-env "CODING_CAVE_EXTRA_PATH")
+      (try-fwd-env "CODING_CAVE_GITCONFIG")
+      # Claude Code state init
       (add-runtime ''
         CAVE_HOME="$HOME/.local/share/coding-cave/home"
         CLAUDE_DIR="$CAVE_HOME/.claude"
         if [ ! -d "$CLAUDE_DIR" ]; then
           mkdir -p "$CLAUDE_DIR"
-          if [ -n "''${CODING_CAVE_CLAUDE_SETTINGS:-}" ] && [ -f "''${CODING_CAVE_CLAUDE_SETTINGS}" ]; then
-            cp "''${CODING_CAVE_CLAUDE_SETTINGS}" "$CLAUDE_DIR/settings.json"
-          else
-            cp ${defaultClaudeSettings} "$CLAUDE_DIR/settings.json"
-          fi
+          cp ${defaultClaudeSettings} "$CLAUDE_DIR/settings.json"
           chmod 644 "$CLAUDE_DIR/settings.json"
           printf '%s' '{"hasCompletedOnboarding":true,"theme":"dark","effortCalloutDismissed":true}' > "$CAVE_HOME/.claude.json"
         fi
@@ -154,18 +144,18 @@
           cp ${defaultStatusline} "$CLAUDE_DIR/statusline.sh"
           chmod +x "$CLAUDE_DIR/statusline.sh"
         fi
-        # Seed per-user skills if missing
-        SKILLS_DIR="$CLAUDE_DIR/skills"
-        mkdir -p "$SKILLS_DIR"
-        if [ -n "''${CODING_CAVE_SKILLS_DIR:-}" ] && [ -d "''${CODING_CAVE_SKILLS_DIR}" ]; then
-          for d in "''${CODING_CAVE_SKILLS_DIR}"/*/; do
-            [ -d "$d" ] || continue
-            base="$(basename "$d")"
-            if [ ! -d "$SKILLS_DIR/$base" ]; then
-              cp -r "$d" "$SKILLS_DIR/$base"
-            fi
-          done
-        fi
+        # Concatenate system + user CLAUDE.md
+        {
+          cat ${systemClaudeMd}
+          if [ -n "''${CODING_CAVE_USER_CLAUDE_MD:-}" ] && [ -f "''${CODING_CAVE_USER_CLAUDE_MD}" ]; then
+            printf '\n'
+            cat "''${CODING_CAVE_USER_CLAUDE_MD}"
+          fi
+        } > "$CLAUDE_DIR/CLAUDE.md.tmp"
+        mv "$CLAUDE_DIR/CLAUDE.md.tmp" "$CLAUDE_DIR/CLAUDE.md"
+        chmod 644 "$CLAUDE_DIR/CLAUDE.md"
+        # Skills directory (seeded by lifecycle.py from user-env)
+        mkdir -p "$CLAUDE_DIR/skills"
       '')
 
       # Extra bwrap args from wrapper.py (project mounts, dotfiles, passwd).
@@ -183,6 +173,10 @@
         export TMPDIR="$HOME/.cache/tmp"
         mkdir -p "$TMPDIR"
         export PATH="$HOME/.local/bin:$PATH"
+        # User packages from cave.nix
+        if [ -n "''${CODING_CAVE_EXTRA_PATH:-}" ]; then
+          export PATH="''${CODING_CAVE_EXTRA_PATH}:$PATH"
+        fi
         # GPG commit signing via forwarded agent socket.
         # Create .gnupg dir inside the cave (must be here, not add-runtime,
         # because add-runtime runs on host where /home/cave-coder doesn't exist).

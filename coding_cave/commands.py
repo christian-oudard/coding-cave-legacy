@@ -401,6 +401,27 @@ def cmd_cp(srcs, dest, recursive=False):
         sys.exit(1)
 
 
+def cmd_update_plugins(args):
+    """Update flake inputs in user-env (cave.nix dependencies)."""
+    user_env = config._user_env_dir()
+    if not (user_env / "flake.nix").exists():
+        # Trigger a build first to generate the flake
+        config.build_user_env()
+    if not (user_env / "flake.nix").exists():
+        print("No user environment to update.", file=sys.stderr)
+        sys.exit(1)
+    r = subprocess.run(
+        ["nix", "flake", "update"],
+        cwd=str(user_env),
+    )
+    if r.returncode != 0:
+        sys.exit(r.returncode)
+    # Clear hash to force rebuild on next session
+    hash_file = user_env / ".cave-nix-hash"
+    hash_file.unlink(missing_ok=True)
+    print("Plugins updated. Changes take effect on next cave session.", file=sys.stderr)
+
+
 def cmd_status(args):
     show_all = "--all" in args or "-a" in args
 

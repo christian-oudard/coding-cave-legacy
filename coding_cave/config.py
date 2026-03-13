@@ -1,6 +1,9 @@
 """Configuration loading and environment setup."""
+import hashlib
+import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 try:
@@ -58,15 +61,7 @@ def setup_env(global_config):
 
     claude_md = Path.home() / ".config" / "coding-cave" / "CLAUDE.md"
     if claude_md.exists():
-        os.environ["CODING_CAVE_CLAUDE_MD"] = str(claude_md)
-
-    claude_settings = Path.home() / ".config" / "coding-cave" / "settings.json"
-    if claude_settings.exists():
-        os.environ["CODING_CAVE_CLAUDE_SETTINGS"] = str(claude_settings)
-
-    skills_dir = Path.home() / ".config" / "coding-cave" / "skills"
-    if skills_dir.is_dir():
-        os.environ["CODING_CAVE_SKILLS_DIR"] = str(skills_dir)
+        os.environ["CODING_CAVE_USER_CLAUDE_MD"] = str(claude_md)
 
     # Forward host git identity into cave (eliminates re-authoring on pull)
     for key, env_var in [
@@ -88,15 +83,172 @@ def setup_env(global_config):
     if Path(gnupghome).is_dir():
         os.environ["CODING_CAVE_GNUPGHOME"] = gnupghome
 
-    user_shell = Path(os.environ.get("SHELL", "/bin/bash")).name
-    if user_shell == "zsh":
+    # Shell dotfiles — only forwarded if mirror config enables them
+    mirror = global_config.get("mirror", {})
+    if mirror.get("zsh"):
         zdotdir = Path.home() / ".config" / "zsh"
         if zdotdir.is_dir():
             os.environ["CODING_CAVE_ZDOTDIR"] = str(zdotdir)
-    else:
+    if mirror.get("bash", True):
         bashrc = Path.home() / ".bashrc"
         if bashrc.exists():
             os.environ["CODING_CAVE_BASHRC"] = str(bashrc)
         bash_profile = Path.home() / ".bash_profile"
         if bash_profile.exists():
             os.environ["CODING_CAVE_BASH_PROFILE"] = str(bash_profile)
+    if mirror.get("git"):
+        gitconfig = Path.home() / ".gitconfig"
+        if gitconfig.exists():
+            os.environ["CODING_CAVE_GITCONFIG"] = str(gitconfig)
+
+
+_DEFAULT_CAVE_NIX = """\
+{
+  inputs = {};
+  config = { pkgs }: {
+    # packages = with pkgs; [ python3 uv ];
+    # settings = {};
+    # env = {};
+    # skills = {};
+  };
+}
+"""
+
+_GENERATED_FLAKE_TEMPLATE = """\
+{{
+  inputs = {{
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+{input_declarations}
+  }};
+
+  outputs = {{ self, nixpkgs{input_names_param} }}: let
+    pkgs = import nixpkgs {{ system = "x86_64-linux"; }};
+    caveNix = import ./cave.nix;
+    userConfig = caveNix.config {{
+      inherit pkgs;
+{input_passes}
+    }};
+    packages = userConfig.packages or [];
+    settings = userConfig.settings or {{}};
+    env = userConfig.env or {{}};
+    skills = userConfig.skills or {{}};
+  in {{
+    packages.x86_64-linux.default = pkgs.runCommand "cave-user-env" {{}} ''
+      mkdir -p $out/packages $out/claude/skills
+
+      # Symlink package bin dirs
+      ${{pkgs.lib.concatMapStringsSep "\\n" (p: ''
+        if [ -d "${{p}}/bin" ]; then
+          ln -s ${{p}} $out/packages/${{p.pname or p.name or (builtins.parseDrvName p.name).name}}
+        fi
+      '') packages}}
+
+      # Write settings.json
+      printf '%s' '${{builtins.toJSON settings}}' > $out/claude/settings.json
+
+      # Write env.json
+      printf '%s' '${{builtins.toJSON env}}' > $out/claude/env.json
+
+      # Write skills
+      ${{pkgs.lib.concatStringsSep "\\n" (pkgs.lib.mapAttrsToList (name: content: ''
+        mkdir -p $out/claude/skills/${{name}}
+        cat > $out/claude/skills/${{name}}/SKILL.md << 'SKILL_EOF'
+${{content}}
+SKILL_EOF
+      '') skills)}}
+    '';
+  }};
+}}
+"""
+
+
+def _cave_nix_path():
+    return Path.home() / ".config" / "coding-cave" / "cave.nix"
+
+
+def _user_env_dir():
+    return _state.cave_data() / "user-env"
+
+
+def build_user_env():
+    """Build user environment from cave.nix. Returns result path or None."""
+    cave_nix = _cave_nix_path()
+
+    # Auto-generate cave.nix if missing
+    if not cave_nix.exists():
+        cave_nix.parent.mkdir(parents=True, exist_ok=True)
+        cave_nix.write_text(_DEFAULT_CAVE_NIX)
+
+    user_env = _user_env_dir()
+    user_env.mkdir(parents=True, exist_ok=True)
+
+    # Copy cave.nix into build dir
+    dest_cave_nix = user_env / "cave.nix"
+    cave_nix_content = cave_nix.read_text()
+    dest_cave_nix.write_text(cave_nix_content)
+
+    # Check if rebuild needed (hash cave.nix + flake.lock)
+    content_hash = hashlib.sha256(cave_nix_content.encode()).hexdigest()[:16]
+    hash_file = user_env / ".cave-nix-hash"
+    result_link = user_env / "result"
+    if hash_file.exists() and hash_file.read_text() == content_hash and result_link.exists():
+        return result_link.resolve()
+
+    # Extract inputs from cave.nix via nix eval
+    r = subprocess.run(
+        ["nix", "eval", "--json", "-f", str(dest_cave_nix), "inputs"],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        print(f"Warning: failed to eval cave.nix inputs: {r.stderr.strip()}", file=sys.stderr)
+        return _try_existing_result(result_link)
+
+    try:
+        inputs = json.loads(r.stdout)
+    except json.JSONDecodeError:
+        print(f"Warning: cave.nix inputs is not valid JSON", file=sys.stderr)
+        return _try_existing_result(result_link)
+
+    # Generate flake.nix
+    input_declarations = ""
+    input_names = []
+    input_passes = ""
+    for name, url in inputs.items():
+        input_declarations += f'    {name}.url = "{url}";\n'
+        input_names.append(name)
+        input_passes += f'      {name} = {name};\n'
+
+    input_names_param = ""
+    if input_names:
+        input_names_param = ", " + ", ".join(input_names)
+
+    flake_content = _GENERATED_FLAKE_TEMPLATE.format(
+        input_declarations=input_declarations,
+        input_names_param=input_names_param,
+        input_passes=input_passes,
+    )
+    (user_env / "flake.nix").write_text(flake_content)
+
+    # Build
+    r = subprocess.run(
+        ["nix", "build", "--no-link", "--print-out-paths"],
+        capture_output=True, text=True,
+        cwd=str(user_env),
+    )
+    if r.returncode != 0:
+        print(f"Warning: cave.nix build failed: {r.stderr.strip()}", file=sys.stderr)
+        return _try_existing_result(result_link)
+
+    out_path = r.stdout.strip().split("\n")[0]
+    # Create/update result symlink
+    result_link.unlink(missing_ok=True)
+    result_link.symlink_to(out_path)
+    hash_file.write_text(content_hash)
+    return Path(out_path)
+
+
+def _try_existing_result(result_link):
+    """Return existing build result if available, else None."""
+    if result_link.exists():
+        return result_link.resolve()
+    return None
