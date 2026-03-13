@@ -453,9 +453,9 @@ class TestPullMidSession:
     def test_pull_session_commits_non_main_branch(self, tmp_path):
         """Session commits on a non-main branch (e.g. develop) are pulled.
 
-        Regression: ff_session_branches and merge_session_gitdirs hardcoded
-        'refs/heads/main', so projects using develop/master/etc. as their
-        default branch silently lost all session commits on pull.
+        Regression: merge_session_gitdirs hardcoded 'refs/heads/main',
+        so projects using develop/master/etc. as their default branch
+        silently lost all session commits on pull.
         """
         slug = "test-project"
         sid = "test-session-develop"
@@ -526,6 +526,111 @@ class TestPullMidSession:
         # Pull should pick up the session commit
         wrapper.pull_project(slug)
         assert (host / "file.txt").read_text() == "from develop session\n"
+
+    def test_session_born_from_main_does_not_leak_into_develop(self, tmp_path):
+        """Session commits on main must not leak into develop on pull.
+
+        Sessions commit directly on their real branch. A session on main
+        should not affect develop when pull runs.
+        """
+        slug = "test-project"
+        sid = "test-session-noleak"
+
+        # Host repo: develop (1 commit), main (2 extra commits ahead)
+        host = tmp_path / "host"
+        host.mkdir()
+        _run("git", "-C", str(host), "init", "-b", "develop")
+        _run("git", "-C", str(host), "config", "user.email", "host@test.com")
+        _run("git", "-C", str(host), "config", "user.name", "Host User")
+        (host / "file.txt").write_text("initial\n")
+        _run("git", "-C", str(host), "add", ".")
+        _run("git", "-C", str(host), "commit", "-m", "initial")
+        _run("git", "-C", str(host), "checkout", "-b", "main")
+        (host / "main-only.txt").write_text("main stuff\n")
+        _run("git", "-C", str(host), "add", ".")
+        _run("git", "-C", str(host), "commit", "-m", "main-only commit")
+        _run("git", "-C", str(host), "checkout", "develop")
+        develop_count = _log_count(host)
+
+        # Set up cave gitdir
+        tmpclone = tmp_path / "_tmpclone"
+        _run("git", "clone", "--no-checkout", "--local", str(host), str(tmpclone))
+        projects_dir = tmp_path / "projects"
+        proj_state = projects_dir / slug
+        proj_state.mkdir(parents=True)
+        gitdir = proj_state / "gitdir"
+        (tmpclone / ".git").rename(gitdir)
+        tmpclone.rmdir()
+        _run("git", "--git-dir", str(gitdir), "remote", "remove", "origin",
+             check=False)
+        _run("git", "--git-dir", str(gitdir), "config", "user.email",
+             "cave-coder@cave")
+        _run("git", "--git-dir", str(gitdir), "config", "user.name",
+             "cave-coder")
+
+        _state.set_cave_data(tmp_path)
+        write_projects(tmp_path, {slug: str(host)})
+        wrapper.ensure_cave_remote(host, gitdir)
+        # Sync both branches
+        dev_head = _run("git", "-C", str(host),
+                        "rev-parse", "develop").stdout.strip()
+        main_head = _run("git", "-C", str(host),
+                         "rev-parse", "main").stdout.strip()
+        wrapper.sync_refs(gitdir, host, dev_head, "develop")
+        wrapper.sync_refs(gitdir, host, main_head, "main")
+
+        # Point shared gitdir HEAD to main (simulates session created while
+        # HEAD was on main)
+        _run("git", "--git-dir", str(gitdir), "symbolic-ref", "HEAD",
+             "refs/heads/main")
+
+        # Create session — born from main
+        overlay_base = tmp_path / "session-overlays" / sid
+        overlay_base.mkdir(parents=True)
+        session_gitdir = wrapper.create_session_gitdir(slug, sid, overlay_base)
+        assert session_gitdir is not None
+
+        # Register session
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+        session_info = {
+            "sid": sid, "project": slug,
+            "bwrap_pid": os.getpid(), "started": 0,
+        }
+        (sessions_dir / f"{sid}.json").write_text(json.dumps(session_info))
+
+        # Commit in session (on top of main)
+        _run("git", "--git-dir", str(session_gitdir), "config",
+             "user.email", "cave@test.com")
+        _run("git", "--git-dir", str(session_gitdir), "config",
+             "user.name", "cave-coder")
+        session_cave = tmp_path / "session-cave"
+        session_cave.mkdir()
+        _run("git", "--git-dir", str(session_gitdir), "--work-tree",
+             str(session_cave), "checkout", "HEAD", "--", ".", check=False)
+        (session_cave / "new.txt").write_text("session work\n")
+        _run("git", "--git-dir", str(session_gitdir), "--work-tree",
+             str(session_cave), "add", "new.txt")
+        _run("git", "--git-dir", str(session_gitdir), "--work-tree",
+             str(session_cave), "commit", "-m", "session on main")
+
+        # Now switch shared gitdir HEAD to develop (simulates a push from
+        # host while on develop, or just natural HEAD movement)
+        _run("git", "--git-dir", str(gitdir), "symbolic-ref", "HEAD",
+             "refs/heads/develop")
+
+        # Pull while host is on develop
+        wrapper.pull_project(slug)
+
+        # develop must NOT have the main-only commit or the session commit
+        assert _log_count(host) == develop_count
+        assert not (host / "main-only.txt").exists()
+        assert not (host / "new.txt").exists()
+
+        # main should have the session commit (pulled as non-current branch)
+        main_log = _run("git", "-C", str(host), "log", "--oneline",
+                        "main").stdout
+        assert "session on main" in main_log
 
 
 class TestPullHostIdentity:

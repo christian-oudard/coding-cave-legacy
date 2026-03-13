@@ -96,24 +96,9 @@ def mirror_origin_refs(gitdir, project_dir):
 
 
 def finalize_sync(gitdir, project_dir):
-    """Refresh host's cave remote refs and mirror origin refs into gitdir.
-
-    Only fetches non-session branches to avoid polluting the host with
-    per-agent session refs.
-    """
+    """Refresh host's cave remote refs and mirror origin refs into gitdir."""
     host_git = ["git", "-C", str(project_dir)]
     subprocess.run(host_git + ["fetch", "cave", "--prune"], capture_output=True)
-    # Delete any session remote-tracking refs that slipped through
-    result = subprocess.run(
-        host_git + ["for-each-ref", "--format=%(refname)",
-                    "refs/remotes/cave/session/"],
-        capture_output=True, text=True,
-    )
-    if result.returncode == 0:
-        for ref in result.stdout.strip().splitlines():
-            if ref:
-                subprocess.run(host_git + ["update-ref", "-d", ref],
-                               capture_output=True)
     mirror_origin_refs(gitdir, project_dir)
 
 

@@ -53,8 +53,6 @@ def sync_live_sessions(slug):
         session_gitdir = overlay_base / f"gitdir-{slug}"
         if session_gitdir.is_dir():
             gitdir.forward_session_refs(slug, session_gitdir, shared_gitdir)
-    # FF-merge session branches to main so pull/push can see them
-    gitdir.ff_session_branches(shared_gitdir)
 
 
 def _parse_log(git_cmd, range_spec):
@@ -121,9 +119,8 @@ def _get_branches(gitdir_path, *, bare=False):
 
 
 def _get_cave_branches(gitdir_path):
-    """Return {branch_name: sha} for non-session branches in cave gitdir."""
-    return {name: sha for name, sha in _get_branches(gitdir_path, bare=True).items()
-            if not name.startswith("session/")}
+    """Return {branch_name: sha} for branches in cave gitdir."""
+    return _get_branches(gitdir_path, bare=True)
 
 
 def _rebase_plumbing(host_git, onto_sha, merge_base, cave_sha,
