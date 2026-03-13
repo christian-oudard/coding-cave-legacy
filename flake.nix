@@ -95,7 +95,7 @@
         fuse-overlayfs
         fuse3
         gnupg
-      ]))
+      ] ++ [ pkgs."poppler-utils" ]))
       (set-env "TERMINFO_DIRS" "${pkgs.ncurses}/share/terminfo")
       (set-env "LOCALE_ARCHIVE" "${pkgs.glibcLocales}/lib/locale/locale-archive")
       (set-env "LANG" "en_US.UTF-8")
