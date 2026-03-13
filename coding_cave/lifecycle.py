@@ -493,7 +493,7 @@ def enter_session(session_info, shell_type, workdir=None):
     if inner_pid is not None:
         child_pid = inner_pid
 
-    shell_bin = "/bin/zsh" if shell_type == "zsh" else "/bin/bash"
+    shell_bin = "zsh" if shell_type == "zsh" else "/bin/bash"
 
     proc = subprocess.Popen([
         "nsenter",
