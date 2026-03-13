@@ -59,13 +59,13 @@ def cmd_shell(args, gpu=False):
     active_sessions = sessions.list_sessions(project=project)
     if active_sessions:
         if len(active_sessions) == 1:
-            print(f"Joining session (PID {active_sessions[0]['bwrap_pid']}).", file=sys.stderr)
+            print(f"Joining session {active_sessions[0]['sid']} (PID {active_sessions[0]['bwrap_pid']}).", file=sys.stderr)
             lifecycle.enter_session(active_sessions[0], shell_type, workdir=workdir)
         else:
             print("Running sessions:", file=sys.stderr)
             for i, s in enumerate(active_sessions):
                 started = time.strftime("%H:%M", time.localtime(s["started"]))
-                print(f"  [{i}] [{started}] {s.get('project', '?')} (PID {s['bwrap_pid']})", file=sys.stderr)
+                print(f"  [{i}] [{started}] {s['sid']}  {s.get('project', '?')} (PID {s['bwrap_pid']})", file=sys.stderr)
             print(f"  [n] Start new session", file=sys.stderr)
             try:
                 choice = input("Join session: ").strip()
@@ -331,7 +331,7 @@ def cmd_cp(srcs, dest, recursive=False):
             print("Multiple sessions running:", file=sys.stderr)
             for i, s in enumerate(active_sessions):
                 started = time.strftime("%H:%M", time.localtime(s["started"]))
-                print(f"  [{i}] [{started}] PID {s['bwrap_pid']}", file=sys.stderr)
+                print(f"  [{i}] [{started}] {s['sid']}  PID {s['bwrap_pid']}", file=sys.stderr)
             try:
                 choice = int(input("Session: ").strip())
                 sid = active_sessions[choice]["sid"]
@@ -428,4 +428,4 @@ def cmd_status(args):
         active_sessions = sessions.list_sessions(project=slug)
         for s in active_sessions:
             started = time.strftime("%H:%M", time.localtime(s["started"]))
-            print(f"    [{started}] PID {s['bwrap_pid']}  running", file=sys.stderr)
+            print(f"    [{started}] {s['sid']}  PID {s['bwrap_pid']}", file=sys.stderr)

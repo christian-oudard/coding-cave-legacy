@@ -246,6 +246,7 @@ def start_session(project, command, gpu=False):
             f.write(arg.encode() + b"\0")
     os.environ["CODING_CAVE_BWRAP_ARGS"] = str(args_file)
     os.environ["CODING_CAVE_SESSION_ID"] = sid
+    os.environ["CODING_CAVE_PROJECT"] = project
 
     binary = _state.SANDBOX_GPU_BIN if gpu else _state.SANDBOX_BIN
 
@@ -265,7 +266,7 @@ def start_session(project, command, gpu=False):
         # coding-cave internal
         "CODING_CAVE_NIX_MERGED", "CODING_CAVE_NIX_DB_DIR",
         "CODING_CAVE_BWRAP_ARGS",
-        "CODING_CAVE_SESSION_ID",
+        "CODING_CAVE_SESSION_ID", "CODING_CAVE_PROJECT",
     }
     bwrap_env = {k: v for k, v in os.environ.items() if k in BWRAP_ENV_ALLOWLIST}
 
@@ -292,6 +293,7 @@ def start_session(project, command, gpu=False):
         )
 
     sessions.register_session(sid, project, proc.pid)
+    sessions.update_pane_titles(project)
     print("Started coding-cave.", file=sys.stderr)
 
     try:
@@ -299,6 +301,7 @@ def start_session(project, command, gpu=False):
     finally:
         gitdir.merge_session_gitdirs(sid, overlay_base)
         sessions.cleanup_session(sid)
+        sessions.update_pane_titles(project)
         for merged in overlay_mounts:
             overlay.unmount_fuse(merged)
         # Save overlay uppers for session continuity (uncommitted

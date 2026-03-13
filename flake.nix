@@ -124,6 +124,10 @@
       (try-fwd-env "ANTHROPIC_API_KEY")
       (try-fwd-env "GITHUB_TOKEN")
 
+      # Session identity
+      (try-fwd-env "CODING_CAVE_SESSION_ID")
+      (try-fwd-env "CODING_CAVE_PROJECT")
+
       # Extra bwrap args file from wrapper.py
       (try-fwd-env "CODING_CAVE_BWRAP_ARGS")
 
