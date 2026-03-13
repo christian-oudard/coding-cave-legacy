@@ -121,8 +121,9 @@ def _get_branches(gitdir_path, *, bare=False):
 
 
 def _get_cave_branches(gitdir_path):
-    """Return {branch_name: sha} for all branches in cave gitdir."""
-    return _get_branches(gitdir_path, bare=True)
+    """Return {branch_name: sha} for non-session branches in cave gitdir."""
+    return {name: sha for name, sha in _get_branches(gitdir_path, bare=True).items()
+            if not name.startswith("session/")}
 
 
 def _rebase_plumbing(host_git, onto_sha, merge_base, cave_sha,
@@ -173,6 +174,21 @@ def _rebase_plumbing(host_git, onto_sha, merge_base, cave_sha,
         if merge.returncode != 0:
             return None
         merged_tree = merge.stdout.strip().splitlines()[0]
+
+        # Empty commit means something went wrong (duplicate work, bad ref state)
+        parent_tree = subprocess.run(
+            host_git + ["rev-parse", f"{parent}^{{tree}}"],
+            capture_output=True, text=True,
+        )
+        if parent_tree.returncode == 0 and parent_tree.stdout.strip() == merged_tree:
+            orig_msg = subprocess.run(
+                host_git + ["log", "-1", "--format=%s", commit],
+                capture_output=True, text=True,
+            )
+            msg = orig_msg.stdout.strip() if orig_msg.returncode == 0 else commit
+            raise RuntimeError(
+                f"Rebase produced empty commit '{msg}' — cave and host have diverged unexpectedly"
+            )
 
         info = subprocess.run(
             host_git + ["log", "-1",
@@ -376,7 +392,7 @@ def _pull_branch_current(slug, project_dir, gitdir_path, branch, cave_sha,
     subprocess.run(host_git + ["branch", "-f", "_cave_pull", "FETCH_HEAD"], check=True, capture_output=True)
     rebase_cmd = host_git + [
         "rebase", "--onto", branch, merge_base, "_cave_pull",
-        "--no-reapply-cherry-picks",
+        "--no-reapply-cherry-picks", "--empty=stop",
     ]
     if _needs_reauthoring(gitdir_path, project_dir):
         rebase_cmd += [

@@ -100,6 +100,11 @@ def setup_env(global_config):
         gitconfig = Path.home() / ".gitconfig"
         if gitconfig.exists():
             os.environ["CODING_CAVE_GITCONFIG"] = str(gitconfig)
+    if mirror.get("nvim"):
+        xdg_config = os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
+        nvim_config = Path(xdg_config) / "nvim"
+        if nvim_config.is_dir():
+            os.environ["CODING_CAVE_NVIM_CONFIG"] = str(nvim_config)
 
 
 _DEFAULT_CAVE_NIX = """\

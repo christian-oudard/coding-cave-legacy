@@ -97,7 +97,7 @@ def mirror_origin_refs(gitdir, project_dir):
 
 def finalize_sync(gitdir, project_dir):
     """Refresh host's cave remote refs and mirror origin refs into gitdir."""
-    subprocess.run(["git", "-C", str(project_dir), "fetch", "cave"], capture_output=True)
+    subprocess.run(["git", "-C", str(project_dir), "fetch", "cave", "--prune"], capture_output=True)
     mirror_origin_refs(gitdir, project_dir)
 
 

@@ -267,6 +267,7 @@ If cave.nix doesn't exist, a minimal default is generated. If the build fails, t
     bash = true     # default: forward ~/.bashrc and ~/.bash_profile
     zsh = false     # forward ~/.config/zsh/ (opt-in)
     git = false     # forward ~/.gitconfig (opt-in)
+    nvim = false    # forward ~/.config/nvim/ (opt-in, ro-bind)
 
 ### CLAUDE.md concatenation
 

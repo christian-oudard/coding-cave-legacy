@@ -137,6 +137,11 @@ def start_session(project, command, gpu=False):
     if bash_profile and Path(bash_profile).is_file():
         bwrap_args += ["--ro-bind", bash_profile, f"{_state.JAIL_HOME}/.bash_profile"]
 
+    # Neovim config
+    nvim_config = os.environ.get("CODING_CAVE_NVIM_CONFIG", "")
+    if nvim_config and Path(nvim_config).is_dir():
+        bwrap_args += ["--ro-bind", nvim_config, f"{_state.JAIL_HOME}/.config/nvim"]
+
     # Project overlays via fuse-overlayfs.
     # Kernel overlayfs in user namespaces has two problems:
     #   1. uuid=on (forced by kernel with userxattr) remaps inodes, causing

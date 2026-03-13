@@ -84,7 +84,7 @@ def cmd_shell(args, gpu=False):
 
     # Start new shell session
     workdir = projects.cave_workdir(project)
-    shell_bin = "/bin/zsh" if shell_type == "zsh" else "/bin/bash"
+    shell_bin = "zsh" if shell_type == "zsh" else "/bin/bash"
     if args:
         # Run a specific command (cav shell -- <cmd>)
         user_cmd = shlex.join(args)
