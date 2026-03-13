@@ -142,10 +142,18 @@ _GENERATED_FLAKE_TEMPLATE = """\
       inherit pkgs;
 {input_passes}
     }};
-    packages = userConfig.packages or [];
-    settings = userConfig.settings or {{}};
+    # Resolve plugins: user passes raw flake inputs, we extract plugin.${{system}}
+    rawPlugins = userConfig.plugins or [];
+    plugins = map (p: if p ? plugin then p.plugin.x86_64-linux else p) rawPlugins;
+    pluginPackages = builtins.concatMap (p: if p ? package then [p.package] else []) plugins;
+    packages = (userConfig.packages or []) ++ pluginPackages;
+    pluginSettings = builtins.foldl' (acc: p:
+      pkgs.lib.recursiveUpdate acc (p.settings or {{}})
+    ) {{}} plugins;
+    settings = pkgs.lib.recursiveUpdate pluginSettings (userConfig.settings or {{}});
     env = userConfig.env or {{}};
     skills = userConfig.skills or {{}};
+    pluginSkills = builtins.concatMap (p: p.skills or []) plugins;
   in {{
     packages.x86_64-linux.default = pkgs.runCommand "cave-user-env" {{}} ''
       mkdir -p $out/packages $out/claude/skills
@@ -163,13 +171,24 @@ _GENERATED_FLAKE_TEMPLATE = """\
       # Write env.json
       printf '%s' '${{builtins.toJSON env}}' > $out/claude/env.json
 
-      # Write skills
+      # Write inline skills
       ${{pkgs.lib.concatStringsSep "\\n" (pkgs.lib.mapAttrsToList (name: content: ''
         mkdir -p $out/claude/skills/${{name}}
         cat > $out/claude/skills/${{name}}/SKILL.md << 'SKILL_EOF'
 ${{content}}
 SKILL_EOF
       '') skills)}}
+
+      # Copy plugin skills (strip nix hash prefix from directory names)
+      ${{pkgs.lib.concatMapStringsSep "\\n" (skillPath:
+        let name = builtins.substring 33 (-1) (builtins.baseNameOf skillPath);
+        in ''
+        rm -rf "$out/claude/skills/${{name}}"
+        mkdir -p "$out/claude/skills/${{name}}"
+        for f in ${{skillPath}}/*; do
+          install -m 644 "$f" "$out/claude/skills/${{name}}/"
+        done
+      '') pluginSkills}}
     '';
   }};
 }}
