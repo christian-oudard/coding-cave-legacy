@@ -484,51 +484,63 @@ def forward_session_refs(slug, session_gitdir, shared_gitdir):
         alt_file.write_text(f"{cave_path}\n")
 
 
+def _target_branch(shared_gitdir):
+    """Resolve the target branch from the shared gitdir's HEAD symbolic ref."""
+    head_ref = git_mod.git(shared_gitdir, "symbolic-ref", "HEAD",
+        capture_output=True, text=True)
+    if head_ref.returncode != 0:
+        return None
+    return head_ref.stdout.strip().removeprefix("refs/heads/")
+
+
 def ff_session_branches(shared_gitdir):
-    """Merge session branches into main in the shared gitdir.
+    """Merge session branches into the target branch in the shared gitdir.
 
     Called by sync_live_sessions so pull/push can see session commits.
     Tries FF first, then rebase for diverged branches.  Deletes session
-    branches that are successfully merged or already behind main.
+    branches that are successfully merged or already behind the target.
     """
     result = git_mod.git(shared_gitdir, "for-each-ref",
                  "--format=%(refname) %(objectname)", "refs/heads/session/",
                  capture_output=True, text=True)
     if result.returncode != 0:
         return
-    main_ref = git_mod.git(shared_gitdir, "rev-parse", "refs/heads/main",
-        capture_output=True, text=True)
-    if main_ref.returncode != 0:
+    target = _target_branch(shared_gitdir)
+    if not target:
         return
-    main_sha = main_ref.stdout.strip()
+    target_ref = git_mod.git(shared_gitdir, "rev-parse",
+        f"refs/heads/{target}", capture_output=True, text=True)
+    if target_ref.returncode != 0:
+        return
+    target_sha = target_ref.stdout.strip()
     for line in result.stdout.strip().splitlines():
         if not line:
             continue
         ref, sha = line.split()
-        mb = git_mod.git(shared_gitdir, "merge-base", main_sha, sha,
+        mb = git_mod.git(shared_gitdir, "merge-base", target_sha, sha,
             capture_output=True, text=True)
         if mb.returncode != 0:
             continue
         merge_base = mb.stdout.strip()
-        if merge_base == main_sha:
-            # Session is ahead of main — FF merge
+        if merge_base == target_sha:
+            # Session is ahead — FF merge
             git_mod.git(shared_gitdir, "update-ref",
-                "refs/heads/main", sha, capture_output=True)
-            main_sha = sha
+                f"refs/heads/{target}", sha, capture_output=True)
+            target_sha = sha
             git_mod.git(shared_gitdir, "update-ref", "-d", ref,
                 capture_output=True)
         elif merge_base == sha:
-            # Session is behind main — already merged
+            # Session is behind — already merged
             git_mod.git(shared_gitdir, "update-ref", "-d", ref,
                 capture_output=True)
         else:
             # Diverged — try rebase
-            rebased = _rebase_commits(shared_gitdir, main_sha,
+            rebased = _rebase_commits(shared_gitdir, target_sha,
                 sha, merge_base)
             if rebased:
                 git_mod.git(shared_gitdir, "update-ref",
-                    "refs/heads/main", rebased, capture_output=True)
-                main_sha = rebased
+                    f"refs/heads/{target}", rebased, capture_output=True)
+                target_sha = rebased
                 git_mod.git(shared_gitdir, "update-ref", "-d", ref,
                     capture_output=True)
 
@@ -603,50 +615,53 @@ def merge_session_gitdirs(sid, overlay_base):
 
         _forward_refs(sid, session_gitdir, shared_gitdir, force=True)
 
-        # Try to fast-forward main to the session branch
+        # Try to fast-forward target branch to the session branch
+        target = _target_branch(shared_gitdir)
         session_branch = f"refs/heads/session/{sid}"
         session_ref = git_mod.git(shared_gitdir, "rev-parse", session_branch,
             capture_output=True, text=True)
-        if session_ref.returncode == 0:
+        if session_ref.returncode == 0 and target:
             session_sha = session_ref.stdout.strip()
-            main_ref = git_mod.git(shared_gitdir, "rev-parse",
-                "refs/heads/main", capture_output=True, text=True)
-            if main_ref.returncode == 0:
-                main_sha = main_ref.stdout.strip()
-                # If session branch tree == main tree, nothing to merge
+            target_ref = git_mod.git(shared_gitdir, "rev-parse",
+                f"refs/heads/{target}", capture_output=True, text=True)
+            if target_ref.returncode == 0:
+                target_sha = target_ref.stdout.strip()
+                # If session branch tree == target tree, nothing to merge
                 sess_tree = git_mod.git(shared_gitdir, "rev-parse",
                     f"{session_sha}^{{tree}}",
                     capture_output=True, text=True)
-                main_tree = git_mod.git(shared_gitdir, "rev-parse",
-                    f"{main_sha}^{{tree}}",
+                tgt_tree = git_mod.git(shared_gitdir, "rev-parse",
+                    f"{target_sha}^{{tree}}",
                     capture_output=True, text=True)
                 if (sess_tree.returncode == 0
-                        and main_tree.returncode == 0
+                        and tgt_tree.returncode == 0
                         and sess_tree.stdout.strip()
-                            == main_tree.stdout.strip()):
+                            == tgt_tree.stdout.strip()):
                     git_mod.git(shared_gitdir, "update-ref", "-d",
                         session_branch, capture_output=True)
                     continue
                 mb = git_mod.git(shared_gitdir, "merge-base",
-                    main_sha, session_sha,
+                    target_sha, session_sha,
                     capture_output=True, text=True)
-                if mb.returncode == 0 and mb.stdout.strip() == main_sha:
-                    # Session branch is a descendant of main — FF merge
+                if mb.returncode == 0 and mb.stdout.strip() == target_sha:
+                    # Session branch is a descendant — FF merge
                     git_mod.git(shared_gitdir, "update-ref",
-                        "refs/heads/main", session_sha, capture_output=True)
+                        f"refs/heads/{target}", session_sha,
+                        capture_output=True)
                     git_mod.git(shared_gitdir, "update-ref", "-d",
                         session_branch, capture_output=True)
                 elif mb.returncode == 0 and mb.stdout.strip() == session_sha:
-                    # Session branch is behind main — just clean up
+                    # Session branch is behind — just clean up
                     git_mod.git(shared_gitdir, "update-ref", "-d",
                         session_branch, capture_output=True)
                 elif mb.returncode == 0:
-                    # Diverged — try rebase onto main
-                    rebased = _rebase_commits(shared_gitdir, main_sha,
+                    # Diverged — try rebase onto target
+                    rebased = _rebase_commits(shared_gitdir, target_sha,
                         session_sha, mb.stdout.strip())
                     if rebased:
                         git_mod.git(shared_gitdir, "update-ref",
-                            "refs/heads/main", rebased, capture_output=True)
+                            f"refs/heads/{target}", rebased,
+                            capture_output=True)
                         git_mod.git(shared_gitdir, "update-ref", "-d",
                             session_branch, capture_output=True)
                     # else: leave session branch for manual recovery

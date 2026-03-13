@@ -450,6 +450,83 @@ class TestPullMidSession:
         wrapper.pull_project(env.slug)
         assert (env.host / "file.txt").read_text() == "cross-project\n"
 
+    def test_pull_session_commits_non_main_branch(self, tmp_path):
+        """Session commits on a non-main branch (e.g. develop) are pulled.
+
+        Regression: ff_session_branches and merge_session_gitdirs hardcoded
+        'refs/heads/main', so projects using develop/master/etc. as their
+        default branch silently lost all session commits on pull.
+        """
+        slug = "test-project"
+        sid = "test-session-develop"
+
+        # Create host repo with 'develop' as default branch (no 'main')
+        host = tmp_path / "host"
+        host.mkdir()
+        _run("git", "-C", str(host), "init", "-b", "develop")
+        _run("git", "-C", str(host), "config", "user.email", "host@test.com")
+        _run("git", "-C", str(host), "config", "user.name", "Host User")
+        (host / "file.txt").write_text("initial\n")
+        _run("git", "-C", str(host), "add", ".")
+        _run("git", "-C", str(host), "commit", "-m", "initial")
+
+        # Set up cave gitdir (clone of host)
+        tmpclone = tmp_path / "_tmpclone"
+        _run("git", "clone", "--no-checkout", "--local", str(host), str(tmpclone))
+        projects_dir = tmp_path / "projects"
+        proj_state = projects_dir / slug
+        proj_state.mkdir(parents=True)
+        gitdir = proj_state / "gitdir"
+        (tmpclone / ".git").rename(gitdir)
+        tmpclone.rmdir()
+        _run("git", "--git-dir", str(gitdir), "remote", "remove", "origin",
+             check=False)
+        _run("git", "--git-dir", str(gitdir), "config", "user.email",
+             "cave-coder@cave")
+        _run("git", "--git-dir", str(gitdir), "config", "user.name",
+             "cave-coder")
+        _run("git", "--git-dir", str(gitdir), "read-tree", "HEAD")
+
+        _state.set_cave_data(tmp_path)
+        write_projects(tmp_path, {slug: str(host)})
+        wrapper.ensure_cave_remote(host, gitdir)
+        host_head = _head(host)
+        wrapper.sync_refs(gitdir, host, host_head, "develop")
+
+        # Create per-session gitdir
+        overlay_base = tmp_path / "session-overlays" / sid
+        overlay_base.mkdir(parents=True)
+        session_gitdir = wrapper.create_session_gitdir(slug, sid, overlay_base)
+        assert session_gitdir is not None
+
+        # Register a fake running session
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+        session_info = {
+            "sid": sid, "project": slug,
+            "bwrap_pid": os.getpid(), "started": 0,
+        }
+        (sessions_dir / f"{sid}.json").write_text(json.dumps(session_info))
+
+        # Commit in the session gitdir
+        _run("git", "--git-dir", str(session_gitdir), "config",
+             "user.email", "cave@test.com")
+        _run("git", "--git-dir", str(session_gitdir), "config",
+             "user.name", "cave-coder")
+        session_cave = tmp_path / "session-cave"
+        session_cave.mkdir()
+        _run("git", "--git-dir", str(session_gitdir), "--work-tree",
+             str(session_cave), "checkout", "HEAD", "--", ".", check=False)
+        (session_cave / "file.txt").write_text("from develop session\n")
+        _run("git", "--git-dir", str(session_gitdir), "--work-tree",
+             str(session_cave), "add", "file.txt")
+        _run("git", "--git-dir", str(session_gitdir), "--work-tree",
+             str(session_cave), "commit", "-m", "develop session commit")
+
+        # Pull should pick up the session commit
+        wrapper.pull_project(slug)
+        assert (host / "file.txt").read_text() == "from develop session\n"
+
 
 class TestPullHostIdentity:
     """Pull when cave uses the host's git identity (no re-authoring needed).
