@@ -7,36 +7,6 @@ from pathlib import Path
 from . import _state, projects, sessions, git as git_mod, gitdir
 
 
-def _needs_reauthoring(gitdir_path, project_dir):
-    """Check if cave commits need re-authoring on pull.
-
-    Returns False when the cave is already using the host's git identity
-    (GPG agent forwarding mode), True when the cave uses the throwaway
-    cave-coder identity and commits need to be rewritten.
-    """
-    # Get the author of the latest cave commit
-    cave_author = git_mod.git(gitdir_path, "log", "-1", "--format=%ae",
-        capture_output=True, text=True)
-    if cave_author.returncode != 0 or not cave_author.stdout.strip():
-        return True  # can't determine, default to re-authoring
-    cave_email = cave_author.stdout.strip()
-
-    # Get the host's configured email (local config, then global)
-    host_email = subprocess.run(
-        ["git", "-C", str(project_dir), "config", "user.email"],
-        capture_output=True, text=True,
-    )
-    if host_email.returncode != 0 or not host_email.stdout.strip():
-        # Try global config
-        host_email = subprocess.run(
-            ["git", "config", "--global", "user.email"],
-            capture_output=True, text=True,
-        )
-    if host_email.returncode != 0 or not host_email.stdout.strip():
-        return True  # can't determine host identity
-
-    return cave_email != host_email.stdout.strip()
-
 
 def sync_live_sessions(slug):
     """Forward refs from running sessions into the shared gitdir.
@@ -53,6 +23,8 @@ def sync_live_sessions(slug):
         session_gitdir = overlay_base / f"gitdir-{slug}"
         if session_gitdir.is_dir():
             gitdir.forward_session_refs(slug, session_gitdir, shared_gitdir)
+    # FF-merge session branches to main so pull/push can see them
+    gitdir.ff_session_branches(shared_gitdir)
 
 
 def _parse_log(git_cmd, range_spec):
@@ -119,16 +91,15 @@ def _get_branches(gitdir_path, *, bare=False):
 
 
 def _get_cave_branches(gitdir_path):
-    """Return {branch_name: sha} for branches in cave gitdir."""
-    return _get_branches(gitdir_path, bare=True)
+    """Return {branch_name: sha} for non-session branches in cave gitdir."""
+    return {name: sha for name, sha in _get_branches(gitdir_path, bare=True).items()
+            if not name.startswith("session/")}
 
 
-def _rebase_plumbing(host_git, onto_sha, merge_base, cave_sha,
-                     gitdir_path, project_dir):
+def _rebase_plumbing(host_git, onto_sha, merge_base, cave_sha):
     """Rebase commits (merge_base..cave_sha) onto onto_sha using plumbing.
 
     Uses merge-tree + commit-tree so it never touches the working tree.
-    Re-authors commits if the cave used a throwaway identity.
     Returns new tip SHA, or None on conflict/error.
     """
     commits_result = subprocess.run(
@@ -140,18 +111,6 @@ def _rebase_plumbing(host_git, onto_sha, merge_base, cave_sha,
     commits = [c for c in commits_result.stdout.strip().splitlines() if c]
     if not commits:
         return None
-
-    reauthor = _needs_reauthoring(gitdir_path, project_dir)
-    host_name = host_email = None
-    if reauthor:
-        host_name = subprocess.run(
-            ["git", "-C", str(project_dir), "config", "user.name"],
-            capture_output=True, text=True,
-        ).stdout.strip()
-        host_email = subprocess.run(
-            ["git", "-C", str(project_dir), "config", "user.email"],
-            capture_output=True, text=True,
-        ).stdout.strip()
 
     parent = onto_sha
     for commit in commits:
@@ -197,26 +156,15 @@ def _rebase_plumbing(host_git, onto_sha, merge_base, cave_sha,
         if info.returncode != 0:
             return None
         lines = info.stdout.rstrip("\n").split("\n", 6)
-        if reauthor:
-            env = {
-                **os.environ,
-                "GIT_AUTHOR_NAME": host_name or lines[0],
-                "GIT_AUTHOR_EMAIL": host_email or lines[1],
-                "GIT_AUTHOR_DATE": lines[2],
-                "GIT_COMMITTER_NAME": host_name or lines[3],
-                "GIT_COMMITTER_EMAIL": host_email or lines[4],
-                "GIT_COMMITTER_DATE": lines[5],
-            }
-        else:
-            env = {
-                **os.environ,
-                "GIT_AUTHOR_NAME": lines[0],
-                "GIT_AUTHOR_EMAIL": lines[1],
-                "GIT_AUTHOR_DATE": lines[2],
-                "GIT_COMMITTER_NAME": lines[3],
-                "GIT_COMMITTER_EMAIL": lines[4],
-                "GIT_COMMITTER_DATE": lines[5],
-            }
+        env = {
+            **os.environ,
+            "GIT_AUTHOR_NAME": lines[0],
+            "GIT_AUTHOR_EMAIL": lines[1],
+            "GIT_AUTHOR_DATE": lines[2],
+            "GIT_COMMITTER_NAME": lines[3],
+            "GIT_COMMITTER_EMAIL": lines[4],
+            "GIT_COMMITTER_DATE": lines[5],
+        }
         message = lines[6] if len(lines) > 6 else ""
         result = subprocess.run(
             host_git + ["commit-tree", merged_tree, "-p", parent,
@@ -355,10 +303,6 @@ def _pull_branch_current(slug, project_dir, gitdir_path, branch, cave_sha,
             "rebase", "--onto", branch, merge_base, "_cave_pull",
             "--no-reapply-cherry-picks",
         ]
-        if _needs_reauthoring(gitdir_path, project_dir):
-            rebase_cmd += [
-                "--exec", "git -c core.hooksPath=/dev/null -c core.pager=cat -c core.fsmonitor= commit --amend --reset-author --allow-empty --no-edit --quiet",
-            ]
         subprocess.run(rebase_cmd, check=True, capture_output=True)
         subprocess.run(host_git + ["checkout", branch], check=True, capture_output=True)
         subprocess.run(host_git + ["merge", "--ff-only", "_cave_pull"], check=True, capture_output=True)
@@ -393,10 +337,6 @@ def _pull_branch_current(slug, project_dir, gitdir_path, branch, cave_sha,
         "rebase", "--onto", branch, merge_base, "_cave_pull",
         "--no-reapply-cherry-picks", "--empty=stop",
     ]
-    if _needs_reauthoring(gitdir_path, project_dir):
-        rebase_cmd += [
-            "--exec", "git -c core.hooksPath=/dev/null -c core.pager=cat -c core.fsmonitor= commit --amend --reset-author --allow-empty --no-edit --quiet",
-        ]
     result = subprocess.run(rebase_cmd, capture_output=True)
     if result.returncode != 0:
         rebase_in_progress = ((host_git_dir / "rebase-merge").is_dir() or
@@ -509,15 +449,13 @@ def _pull_branch_other(slug, project_dir, gitdir_path, branch, cave_sha,
         return None
 
     # Normal pull
-    if (merge_base == host_sha
-            and not _needs_reauthoring(gitdir_path, project_dir)):
-        # True fast-forward, no re-authoring needed
+    if merge_base == host_sha:
+        # True fast-forward
         new_sha = cave_sha
     else:
-        # Rebase (handles both ff-with-reauthor and diverged cases)
+        # Rebase (diverged)
         new_sha = _rebase_plumbing(
             host_git, host_sha, merge_base, cave_sha,
-            gitdir_path, project_dir,
         )
         if new_sha is None:
             print(f"Rebase conflicts for {slug}/{branch} -- skipping.",
@@ -613,13 +551,6 @@ def pull_project(slug, force=False):
             host_git + ["symbolic-ref", "HEAD", f"refs/heads/{branch}"],
             check=True)
         subprocess.run(host_git + ["checkout", branch], capture_output=True)
-        if _needs_reauthoring(gitdir_path, project_dir):
-            subprocess.run(host_git + [
-                "rebase", "--root",
-                "--exec", "git -c core.hooksPath=/dev/null -c core.pager=cat "
-                          "-c core.fsmonitor= commit --amend --reset-author "
-                          "--allow-empty --no-edit --quiet",
-            ], capture_output=True)
         print(f"Pulled {slug} (initialized from cave):", file=sys.stderr)
         subprocess.run(host_git + ["log", "--oneline"], check=False)
         host_head = subprocess.run(

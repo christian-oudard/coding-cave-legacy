@@ -1,9 +1,8 @@
-"""End-to-end integration tests: identity forwarding, pull re-authoring, GPG signing.
+"""End-to-end integration tests: identity forwarding, GPG signing.
 
 These tests exercise the full commit→pull cycle using real git repos and the
 actual pull_project code path. They verify that:
-- Commits with the host identity don't need re-authoring (hash preserved)
-- Commits with the throwaway identity get re-authored on pull
+- Commits with the host identity are preserved exactly (hash preserved)
 - GPG signing works via the forwarded agent socket
 """
 import os
@@ -15,7 +14,7 @@ import pytest
 
 import wrapper
 from coding_cave import _state
-from coding_cave.sync import _needs_reauthoring, pull_project
+from coding_cave.sync import pull_project
 from tests.conftest import write_projects
 
 
@@ -24,13 +23,6 @@ GIT_HOST_ENV = {
     "GIT_AUTHOR_EMAIL": "host@test.com",
     "GIT_COMMITTER_NAME": "Host User",
     "GIT_COMMITTER_EMAIL": "host@test.com",
-}
-
-GIT_THROWAWAY_ENV = {
-    "GIT_AUTHOR_NAME": "coding-cave",
-    "GIT_AUTHOR_EMAIL": "coding-cave@noreply",
-    "GIT_COMMITTER_NAME": "coding-cave",
-    "GIT_COMMITTER_EMAIL": "coding-cave@noreply",
 }
 
 
@@ -134,34 +126,6 @@ class TestIdentityForwarding:
         assert _author_email(env.host) == "host@test.com"
         assert _author_name(env.host) == "Host User"
 
-    def test_throwaway_identity_reauthored(self, e2e_env):
-        """Cave commits with throwaway identity → pull re-authors."""
-        env = e2e_env
-        _cave_commit(env, "cave work", git_env=GIT_THROWAWAY_ENV)
-        cave_head = _head(env.gitdir, gitdir=True)
-
-        pull_project(env.slug)
-
-        host_head = _head(env.host)
-        assert host_head != cave_head, \
-            "Pull should re-author (different hash) for throwaway identity"
-        assert _author_email(env.host) == "host@test.com", \
-            "Re-authored commit should have host email"
-        assert _author_name(env.host) == "Host User", \
-            "Re-authored commit should have host name"
-
-    def test_needs_reauthoring_host_identity(self, e2e_env):
-        """_needs_reauthoring returns False for host identity."""
-        env = e2e_env
-        _cave_commit(env, "cave work", git_env=GIT_HOST_ENV)
-        assert not _needs_reauthoring(env.gitdir, env.host)
-
-    def test_needs_reauthoring_throwaway_identity(self, e2e_env):
-        """_needs_reauthoring returns True for throwaway identity."""
-        env = e2e_env
-        _cave_commit(env, "cave work", git_env=GIT_THROWAWAY_ENV)
-        assert _needs_reauthoring(env.gitdir, env.host)
-
     def test_multiple_commits_host_identity(self, e2e_env):
         """Multiple cave commits with host identity → all hashes preserved."""
         env = e2e_env
@@ -176,22 +140,6 @@ class TestIdentityForwarding:
         assert _head(env.host) == cave_head
         assert (env.host / "a.txt").read_text() == "a\n"
         assert (env.host / "b.txt").read_text() == "b\n"
-
-    def test_multiple_commits_throwaway_all_reauthored(self, e2e_env):
-        """Multiple throwaway commits → all get re-authored on pull."""
-        env = e2e_env
-        _cave_commit(env, "commit 1", filename="a.txt", content="a\n",
-                      git_env=GIT_THROWAWAY_ENV)
-        _cave_commit(env, "commit 2", filename="b.txt", content="b\n",
-                      git_env=GIT_THROWAWAY_ENV)
-
-        pull_project(env.slug)
-
-        # Verify all commits have host identity
-        log = _run("git", "-C", str(env.host), "log", "--format=%ae")
-        emails = log.stdout.strip().splitlines()
-        assert all(e == "host@test.com" for e in emails), \
-            f"All commits should be re-authored: {emails}"
 
 
 class TestGpgSigning:
@@ -264,27 +212,3 @@ class TestGpgSigning:
         assert sig_status in ("G", "U", "E"), \
             f"Pulled commit should have GPG signature, got '{sig_status}'"
 
-    def test_gpg_signed_throwaway_reauthored_gets_host_signature(self, gpg_env):
-        """GPG-signed throwaway commit → re-authoring re-signs with host key."""
-        env = gpg_env
-        # Enable signing in host repo so re-authoring produces a new signature
-        key = os.environ["CODING_CAVE_GIT_SIGNING_KEY"]
-        _run("git", "-C", str(env.host), "config", "commit.gpgsign", "true")
-
-        _cave_commit(env, "signed throwaway", git_env=GIT_THROWAWAY_ENV)
-        cave_head = _head(env.gitdir, gitdir=True)
-
-        pull_project(env.slug)
-
-        # Re-authored (different hash, host identity)
-        host_head = _head(env.host)
-        assert host_head != cave_head
-        assert _author_email(env.host) == "host@test.com"
-
-        # Re-authored commit is re-signed by host
-        result = _run("git", "-C", str(env.host),
-                       "log", "-1", "--format=%G? %GK")
-        parts = result.stdout.strip().split()
-        sig_status = parts[0]
-        assert sig_status in ("G", "U"), \
-            f"Re-authored commit should be re-signed, got '{sig_status}'"

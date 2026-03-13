@@ -9,7 +9,6 @@ from unittest.mock import patch
 import pytest
 
 from coding_cave.config import _detect_gpg_agent_socket, _git_config, setup_env
-from coding_cave.sync import _needs_reauthoring
 from coding_cave import _state
 
 FLAKE_NIX = Path(__file__).parent.parent / "flake.nix"
@@ -46,114 +45,6 @@ class TestGpgDetection:
         sock.touch()  # not a real socket, but exists
         with patch.dict(os.environ, {"GNUPGHOME": str(tmp_path)}):
             assert _detect_gpg_agent_socket() == str(sock)
-
-
-class TestNeedsReauthoring:
-    def test_same_email_no_reauthoring(self, tmp_path):
-        """Cave commits with host email don't need re-authoring."""
-        _state.set_cave_data(tmp_path)
-
-        # Create a host repo
-        host = tmp_path / "host"
-        host.mkdir()
-        subprocess.run(["git", "-C", str(host), "init", "-b", "main"],
-                       capture_output=True, check=True)
-        subprocess.run(["git", "-C", str(host), "config", "user.email", "me@host.com"],
-                       capture_output=True)
-        subprocess.run(["git", "-C", str(host), "config", "user.name", "Me"],
-                       capture_output=True)
-        (host / "f.txt").write_text("x\n")
-        subprocess.run(["git", "-C", str(host), "add", "."],
-                       capture_output=True, check=True)
-        subprocess.run(["git", "-C", str(host), "commit", "-m", "init"],
-                       capture_output=True, check=True)
-
-        # Create gitdir with SAME email as host
-        proj = _state.projects_dir() / "test"
-        proj.mkdir(parents=True)
-        tmpclone = tmp_path / "_clone"
-        subprocess.run(["git", "clone", "--no-checkout", "--local",
-                        str(host), str(tmpclone)],
-                       capture_output=True, check=True)
-        gitdir = proj / "gitdir"
-        (tmpclone / ".git").rename(gitdir)
-        tmpclone.rmdir()
-        subprocess.run(["git", "--git-dir", str(gitdir), "remote", "remove",
-                        "origin"], capture_output=True)
-        subprocess.run(["git", "--git-dir", str(gitdir), "read-tree", "HEAD"],
-                       capture_output=True, check=True)
-
-        # Make a cave commit with the HOST email (simulates host identity forwarding)
-        workdir = tmp_path / "cave-work"
-        workdir.mkdir()
-        subprocess.run(["git", "--git-dir", str(gitdir), "--work-tree",
-                        str(workdir), "checkout", "HEAD", "--", "."],
-                       capture_output=True, check=True)
-        (workdir / "cave.txt").write_text("cave work\n")
-        env = {**os.environ,
-               "GIT_AUTHOR_NAME": "Me", "GIT_AUTHOR_EMAIL": "me@host.com",
-               "GIT_COMMITTER_NAME": "Me", "GIT_COMMITTER_EMAIL": "me@host.com"}
-        subprocess.run(["git", "--git-dir", str(gitdir), "--work-tree",
-                        str(workdir), "add", "cave.txt"],
-                       capture_output=True, check=True, env=env)
-        subprocess.run(["git", "--git-dir", str(gitdir), "--work-tree",
-                        str(workdir), "commit", "-m", "cave commit"],
-                       capture_output=True, check=True, env=env)
-
-        assert not _needs_reauthoring(gitdir, host)
-
-    def test_different_email_needs_reauthoring(self, tmp_path):
-        """Cave commits with throwaway email need re-authoring."""
-        _state.set_cave_data(tmp_path)
-
-        host = tmp_path / "host"
-        host.mkdir()
-        subprocess.run(["git", "-C", str(host), "init", "-b", "main"],
-                       capture_output=True, check=True)
-        subprocess.run(["git", "-C", str(host), "config", "user.email", "me@host.com"],
-                       capture_output=True)
-        subprocess.run(["git", "-C", str(host), "config", "user.name", "Me"],
-                       capture_output=True)
-        (host / "f.txt").write_text("x\n")
-        subprocess.run(["git", "-C", str(host), "add", "."],
-                       capture_output=True, check=True)
-        subprocess.run(["git", "-C", str(host), "commit", "-m", "init"],
-                       capture_output=True, check=True)
-
-        proj = _state.projects_dir() / "test"
-        proj.mkdir(parents=True)
-        tmpclone = tmp_path / "_clone"
-        subprocess.run(["git", "clone", "--no-checkout", "--local",
-                        str(host), str(tmpclone)],
-                       capture_output=True, check=True)
-        gitdir = proj / "gitdir"
-        (tmpclone / ".git").rename(gitdir)
-        tmpclone.rmdir()
-        subprocess.run(["git", "--git-dir", str(gitdir), "remote", "remove",
-                        "origin"], capture_output=True)
-        subprocess.run(["git", "--git-dir", str(gitdir), "read-tree", "HEAD"],
-                       capture_output=True, check=True)
-
-        # Make a cave commit with THROWAWAY identity
-        workdir = tmp_path / "cave-work"
-        workdir.mkdir()
-        subprocess.run(["git", "--git-dir", str(gitdir), "--work-tree",
-                        str(workdir), "checkout", "HEAD", "--", "."],
-                       capture_output=True, check=True)
-        (workdir / "cave.txt").write_text("cave work\n")
-        env = {**os.environ,
-               "GIT_AUTHOR_NAME": "coding-cave",
-               "GIT_AUTHOR_EMAIL": "coding-cave@noreply",
-               "GIT_COMMITTER_NAME": "coding-cave",
-               "GIT_COMMITTER_EMAIL": "coding-cave@noreply"}
-        subprocess.run(["git", "--git-dir", str(gitdir), "--work-tree",
-                        str(workdir), "add", "cave.txt"],
-                       capture_output=True, check=True, env=env)
-        subprocess.run(["git", "--git-dir", str(gitdir), "--work-tree",
-                        str(workdir), "commit", "-m", "cave commit"],
-                       capture_output=True, check=True, env=env)
-
-        assert _needs_reauthoring(gitdir, host)
 
 
 class TestFlakeNixSafety:

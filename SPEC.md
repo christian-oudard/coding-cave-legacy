@@ -20,13 +20,23 @@ On the host, the user thinks in terms of project directories, not slugs. The pro
 
 Each agent session runs in its own bwrap namespace with its own overlay and its own gitdir. Multiple agents working on the same project get independent working trees and independent git state — they cannot see or interfere with each other's uncommitted work or HEAD position.
 
-### Per-session gitdirs
+### Branch-per-session
 
-Each session has its own gitdir with its own HEAD, index, and refs, sharing the object store via git alternates. Sessions work directly on the real branch (e.g. `main`, `develop`) — just like separate developer clones of the same repo.
+Each session works on a private `session/<sid>` branch, not `main`. This mirrors how human developers use feature branches:
 
-- `create_session_gitdir` initializes a bare gitdir with alternates pointing to the shared object store, copies HEAD and all refs from the shared gitdir, and configures a `shared` remote pointing to `/projects/.shared-gitdirs/<slug>`.
-- A post-commit hook pushes the branch to shared and fetches latest, giving agents visibility into each other's work via `shared/<branch>`.
-- Concurrency is handled the same way git handles multiple developers: `_forward_refs` tries fast-forward, then rebase, and falls back to force-update with backup on final cleanup.
+- `create_session_gitdir` creates `refs/heads/session/<sid>` pointing to the current HEAD and sets it as the session's HEAD via `symbolic-ref`.
+- A `shared` remote is configured pointing to `/projects/.shared-gitdirs/<slug>` (the shared gitdir bind-mounted rw into the cave).
+- A post-commit hook pushes the current branch to shared (FF only, non-FF pushes fail silently), records the pushed SHA in `refs/pushed/<branch>`, and fetches latest from shared. `refs/pushed` lets `_forward_refs` know that this session was the last to update shared, enabling ownership detection even when `refs/synced` is stale. This gives agents visibility into each other's work via `shared/session/<other-sid>`.
+- Agents can rebase onto `shared/main` periodically and merge to main when done.
+
+On cleanup (`merge_session_gitdirs`), after forwarding all refs via `_forward_refs`, the session branch is merged to main:
+
+1. **Same tree**: session branch tree == main tree → delete branch (nothing to merge).
+2. **Fast-forward**: session branch is a descendant of main → update main, delete branch.
+3. **Behind**: session branch is an ancestor of main → delete branch.
+4. **Diverged**: attempt `_rebase_commits` onto main. If clean → update main, delete branch. If conflict → leave branch under `refs/heads/session/<sid>` for manual recovery.
+
+During live sync (`sync_live_sessions`), after forwarding session refs, `ff_session_branches` attempts FF-merges of all session branches to main so pull/push can see session commits.
 
 `cav shell` joins a running agent's namespace via `nsenter`, giving the user direct access to that agent's in-progress files for inspection, testing, and debugging.
 
@@ -60,7 +70,7 @@ A shared gitdir holds the canonical objects and refs for each project. Each sess
 
 Per-session gitdirs are small (index file + refs + config). The bulk of git data (packfiles, loose objects) lives in the shared gitdir and is never duplicated. New objects created during a session live in the session gitdir until cleanup, when they're pushed to the shared gitdir.
 
-On session end, refs and new objects from the session gitdir are forwarded into the shared gitdir via `_forward_refs` (with force=True for final cleanup), then the session gitdir is removed. `pull` and `push` operate on the shared gitdir.
+On session end, refs and new objects from the session gitdir are merged into the shared gitdir, the session branch is FF-merged to main (or rebased if diverged), then the session gitdir is removed. `pull` and `push` operate on the shared gitdir as before.
 
 ### Alternates path management
 
@@ -75,66 +85,56 @@ Session gitdirs use `objects/info/alternates` to share the object store with the
 
 There are two distinct operations that move refs from session gitdirs to the shared gitdir. They have different safety requirements because one operates on live sessions and the other on dead ones.
 
-**Live sync** (`forward_session_refs`): called by `pull` and `push` to pick up in-flight commits from running sessions. `forward_session_refs` forwards each session's branch refs to shared via `_forward_refs`. Decision logic for each branch ref:
+**Live sync** (`forward_session_refs` + `ff_session_branches`): called by `pull` and `push` to pick up in-flight commits from running sessions. `forward_session_refs` forwards each session's refs (including `session/<sid>` branches) to shared. Then `ff_session_branches` attempts FF-merges of all session branches to main so pull/push can see session commits. Decision logic for each branch ref in `_forward_refs`:
 
 1. **Unchanged** (ref == `refs/init` or `refs/synced`) → skip. Session never touched this branch, or hasn't changed since last sync.
-2. **Fast-forward** → update shared, record `refs/synced`.
-3. **Session behind shared** → skip.
-4. **Diverged, same tree** → update if session changed since sync (squash/message-amend preserving content), skip otherwise (re-authoring metadata).
-5. **Diverged, different tree, session rewrote its own commits** → session wins. Detected by: `refs/synced` exists AND synced tree == shared tree (shared only re-authored, no new content from push/other session).
-6. **Diverged, different tree, first sync after amend** → session wins. Detected by: `refs/init` == shared ref.
-7. **Diverged, different tree, shared has new content** → try rebase (`_rebase_onto_reauthored`, then `_rebase_commits`). If rebase fails, skip (cleanup will handle it).
+2. **New ref** (doesn't exist in shared) → create it, record `refs/synced`.
+3. **Already in sync** (shared ref == session ref) → skip.
+4. **Fast-forward** → update shared, record `refs/synced`.
+5. **Session behind shared** → skip.
+6. **Session owns branch** → session wins. Ownership = `existing_sha in (init, synced, pushed)`. Handles amend, amend + new commits, squash, message-only amend, any rewrite — regardless of whether trees match.
+7. **Diverged, session doesn't own** → try rebase (`_rebase_commits`). If rebase succeeds, update shared. If fails: skip during live sync, force-update with backup during cleanup.
 
-Key safety invariant: live sync only lets a session "win" (replace the shared ref) when it can verify shared has no new content since the last sync. If shared has new content (from push or another session), live sync either rebases or skips. This prevents one session's rewrite from clobbering another session's commits or host pushes.
+Ownership is the central mechanism. It answers: "has any other source (push, other session) modified shared since this session last knew about it?" Three independent signals, any one sufficient:
 
-Tracking refs in session gitdirs:
+- `refs/init/<branch>` — shared ref at session creation. If `refs/init` == current shared ref, no one else has modified the branch since this session was born.
+- `refs/synced/<branch>` — session ref at last successful `_forward_refs` sync. If `refs/synced` == current shared ref, no one else has modified the branch since the last sync.
+- `refs/pushed/<branch>` — session ref at last successful post-commit hook push. If `refs/pushed` == current shared ref, this session's hook was the last to update shared. Bridges the gap between hook pushes and `_forward_refs` syncs — without it, the hook moves shared past `refs/init`, `refs/synced` doesn't exist yet, and the ownership check fails even though the session is the sole authority.
 
-- `refs/init/<branch>` — shared ref at session creation. Identifies sessions that never touched a branch.
-- `refs/synced/<branch>` — session ref at last successful sync. Identifies sessions unchanged since last sync. Also used to detect whether shared only re-authored: if `tree(refs/synced) == tree(shared)`, shared's content hasn't changed.
+Safety invariant: a session can only replace a shared ref when it can prove no other source has modified it. If another source modified shared (none of the three signals match), _forward_refs either rebases (preserving both sides' work) or force-updates with backup (cleanup only, no data loss).
 
 Safety constraints:
 
-- **Read-only from the session's perspective**: must not modify the session gitdir in any way visible to the running agent. Alternates must be temporarily rewritten for host-side git operations, then restored.
-- **Never clobber new content**: only replace shared refs when the session is the sole authority (shared hasn't gained new content since last sync).
+- **Read-only from the session's perspective**: `_forward_refs` must not modify the session gitdir in any way visible to the running agent. In practice, it writes `refs/synced` (internal bookkeeping, not visible to normal git operations) and temporarily rewrites alternates (restored immediately after). The running agent is unlikely to observe these, and the agent's git operations don't depend on them.
+- **Never clobber new content**: only replace shared refs when the session is the sole authority (ownership proven) or via rebase (preserving both sides).
 
-**Final cleanup** (`merge_session_gitdirs`): called when a session exits. The session is dead, its overlay is about to be deleted. Safety constraints are relaxed:
+**Cleanup** (`merge_session_gitdirs`): called when a session exits. Uses the same `_forward_refs` logic. The only difference: when rebase fails and ownership is unproven, cleanup force-updates shared and backs up the old ref under `refs/sessions/<sid>/`. Live sync skips instead.
 
-- **Force-update is acceptable**: this is the session's last chance to push its refs. If it diverges from shared, force-update and back up the old shared ref under `refs/sessions/<sid>/`.
-- **Alternates don't need restoration**: the session gitdir is about to be deleted.
-- **All refs must be preserved**: even divergent refs get backed up, so no work is lost.
+#### Scenario analysis
+
+**Single session, normal commit:**
+Session commits A → hook pushes `main=A` (FF), `pushed=A`. Shared is current.
+
+**Single session, amend:**
+Session commits A → hook pushes (FF), `pushed=A` → session amends to A' → hook push fails (non-FF), `pushed` stays at A. `_forward_refs` sees `pushed=A==existing` → ownership proven → adopt A'.
+
+**Single session, amend + new commits:**
+Session commits A → hook pushes → amends to A' → commits B on top → hook push fails (non-FF from A). `pushed=A==existing` → ownership → adopt B (which includes A').
+
+**Two sessions on main (normal concurrent):**
+Session 1 commits A, hook pushes (FF). Session 2 commits B (based on pre-A HEAD), hook push fails (non-FF). `_forward_refs` for session 2: `pushed` doesn't match existing (A) → no ownership → rebase B onto A → shared gets both. No data loss, no race.
+
+**Session commits, host pushes new content (`cav push`):**
+Session commits A, syncs (`synced=A, shared=A`). Host `cav push` updates `shared=H`. Session amends A to A'. `synced=A ≠ existing=H` → no ownership → rebase A' onto H. Host's content preserved.
+
+**Cleanup with failed hook (force=True):**
+Session amends, hook fails, session exits. `_forward_refs(force=True)`: ownership check fires (same as live sync). If ownership proven → adopt directly (clean history). If not (another source modified shared) → rebase. If rebase fails → force-update with backup.
 
 ### Host identity forwarding and GPG signing
 
-The cave forwards the host's git identity (`user.name`, `user.email`) via environment variables. When available, cave commits use the host's real identity. Pull detects this by comparing the cave commit author email to the host's configured email. When they match, pull skips re-authoring entirely — commit hashes are preserved through the pull/push cycle.
-
-This eliminates the fundamental source of sync complexity: re-authoring created new commit hashes for the same tree content, causing hash divergence between sessions and the shared gitdir. With host identity forwarding, there is no hash divergence. Sessions, shared gitdir, and host all use the same commit objects.
+The cave forwards the host's git identity (`user.name`, `user.email`) via environment variables. Cave commits use the host's real identity, so commit hashes are preserved through the pull/push cycle. Sessions, shared gitdir, and host all use the same commit objects — no hash divergence.
 
 GPG commit signing is supported via agent socket forwarding. The host's `gpg-agent` socket is bind-mounted into the cave (read-write). The host's public keyring is bind-mounted read-only. The private key never enters the cave. When the cave runs `git commit -S`, gpg talks to the forwarded socket, the host's gpg-agent signs with the private key, and returns the signature.
-
-Falls back to throwaway identity (`coding-cave <coding-cave@noreply>`) when the host's git identity is not configured. In this mode, pull re-authors commits as before.
-
-### Session merge and re-authoring (legacy mode)
-
-When the cave uses the throwaway identity (host identity not available), pull re-authors cave commits to replace the cave identity with the host user's. This creates new commit hashes for the same tree content. Push then writes these re-authored hashes back to the shared gitdir. But running sessions still have the OLD (pre-re-authoring) commit chain. When a session makes new commits, they build on the old chain, creating a divergence from the shared gitdir.
-
-Without handling this, every session merge would force-update the shared gitdir (undoing the re-authoring), and every subsequent pull would require `--force`. With multiple agents, this cycle never ends.
-
-The fix: when `merge_session_gitdirs` detects that a session's chain diverges from the shared gitdir, it checks whether the divergence is caused by re-authoring — commits with the same tree but different hashes. If it finds a re-authoring boundary, it rebases only the session's NEW commits (those beyond the boundary) onto the shared HEAD.
-
-Algorithm:
-
-1. Session has `initial -> A -> B -> C` (A, B are old; C is new work)
-2. Shared has `initial -> A' -> B'` (A', B' are re-authored: same trees as A, B but different hashes)
-3. Build a tree->commit map from the shared chain
-4. Walk the session chain backward from HEAD. For each commit, check if its tree matches one in the shared chain
-5. The first match is the "re-authoring boundary" — session commit B has the same tree as shared commit B'
-6. Commits above the boundary (C) are "new work" to rebase
-7. For each new commit, create a re-parented copy via `git commit-tree`, preserving the original tree and author metadata but changing the parent to the shared HEAD
-8. Update the shared ref to the final rebased commit
-
-This uses `git commit-tree` (not `git rebase`) because it works on bare gitdirs without a working tree. It's correct because re-authoring preserves tree hashes: if B and B' have the same tree, then C's tree (which includes B's changes) is already correct when parented on B'.
-
-The result: shared gitdir has `initial -> A' -> B' -> C'`, which is a clean fast-forward from the host's perspective. The next pull produces a normal fast-forward pull instead of requiring `--force`.
 
 ## Pull
 
@@ -144,9 +144,7 @@ Pull is branch-aware: it iterates all branches in the cave gitdir and pulls each
 
 For the host's currently checked-out branch, pull uses checkout-based rebase (with stash/unstash to preserve uncommitted changes). For other branches, pull uses git plumbing (merge-tree + commit-tree + update-ref) so it never touches the working tree.
 
-When the cave uses the host's git identity (the default when `user.name`/`user.email` are configured on the host), pull preserves commit hashes — fast-forwards for the host identity case are true fast-forwards. After pulling, it syncs refs back to the cave gitdir so both repos share the same commit objects.
-
-When the cave uses the throwaway identity (legacy mode), pull additionally re-authors commits to replace `coding-cave <coding-cave@noreply>` with the host user's git identity.
+Pull preserves commit hashes — fast-forwards are true fast-forwards since the cave uses the host's git identity. After pulling, it syncs refs back to the cave gitdir so both repos share the same commit objects.
 
 The rebase uses `--no-reapply-cherry-picks` to skip commits already present on the host. Conflicts on the current branch pause the rebase and print instructions for manual resolution. Conflicts on non-current branches are skipped with a warning.
 
@@ -174,7 +172,7 @@ Pull must not create commits that diverge from an already-pushed remote branch:
 - Commits previously pulled and pushed to a remote keep their exact hashes in subsequent pulls.
 - The result is always fast-forwardable from the remote tracking branch (assuming no independent host-side changes).
 
-This is why the force path uses `reset --hard` (adopting exact commit objects) rather than rebase+re-author (which creates new hashes).
+This is why the force path uses `reset --hard` (adopting exact commit objects) rather than rebase (which creates new hashes).
 
 ## Push
 

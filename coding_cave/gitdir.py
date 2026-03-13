@@ -74,11 +74,19 @@ def create_session_gitdir(slug, sid, overlay_base):
     else:
         git_mod.git(session_gitdir, "read-tree", "HEAD", capture_output=True)
 
+    # Create session branch and point HEAD to it
+    head_sha = git_mod.git(session_gitdir, "rev-parse", "HEAD",
+        capture_output=True, text=True).stdout.strip()
+    git_mod.git(session_gitdir, "update-ref",
+        f"refs/heads/session/{sid}", head_sha, capture_output=True)
+    git_mod.git(session_gitdir, "symbolic-ref", "HEAD",
+        f"refs/heads/session/{sid}", capture_output=True)
+
     # Add remote pointing to shared gitdir (cave-internal path)
     git_mod.git(session_gitdir, "remote", "add", "shared",
         f"/projects/.shared-gitdirs/{slug}", capture_output=True)
 
-    # Post-commit hook: push branch to shared, fetch latest
+    # Post-commit hook: push session branch to shared, fetch latest
     hooks = session_gitdir / "hooks"
     if hooks.exists():
         shutil.rmtree(hooks)
@@ -86,7 +94,8 @@ def create_session_gitdir(slug, sid, overlay_base):
     (hooks / "post-commit").write_text(
         '#!/bin/bash\n'
         'branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null) || exit 0\n'
-        'git push shared "$branch" 2>/dev/null\n'
+        'git push shared "$branch" 2>/dev/null &&\n'
+        '  git update-ref "refs/pushed/$branch" HEAD 2>/dev/null\n'
         'git fetch shared 2>/dev/null\n'
         'exit 0\n'
     )
@@ -94,98 +103,6 @@ def create_session_gitdir(slug, sid, overlay_base):
 
     return session_gitdir
 
-
-def _rebase_onto_reauthored(gitdir, shared_sha, session_sha, merge_base):
-    """Rebase session commits onto a re-authored shared chain.
-
-    When the shared gitdir has re-authored commits (same trees, different
-    hashes from pull --reset-author), and the session has new commits on top
-    of the old chain, this rebases only the new commits onto the shared HEAD.
-
-    Returns the new tip SHA if successful, None if not applicable.
-    """
-    if not merge_base:
-        return None
-
-    # Build tree->commit map from shared chain (merge_base..shared_sha)
-    shared_log = git_mod.git(gitdir, "log", "--format=%H %T",
-                     f"{merge_base}..{shared_sha}",
-                     capture_output=True, text=True)
-    if shared_log.returncode != 0:
-        return None
-    shared_trees = {}
-    for line in shared_log.stdout.strip().splitlines():
-        if not line:
-            continue
-        commit, tree = line.split()
-        shared_trees[tree] = commit
-    if not shared_trees:
-        return None
-
-    # Walk session chain (merge_base..session_sha) to find re-authoring boundary
-    session_log = git_mod.git(gitdir, "log", "--format=%H %T",
-                      f"{merge_base}..{session_sha}",
-                      capture_output=True, text=True)
-    if session_log.returncode != 0:
-        return None
-    session_commits = []
-    for line in session_log.stdout.strip().splitlines():
-        if not line:
-            continue
-        commit, tree = line.split()
-        session_commits.append((commit, tree))
-
-    # Find boundary: first session commit whose tree exists in shared chain
-    # (session_commits is newest-first from git log)
-    boundary_idx = None
-    for i, (commit, tree) in enumerate(session_commits):
-        if tree in shared_trees:
-            boundary_idx = i
-            break
-    if boundary_idx is None:
-        return None
-
-    # Commits above the boundary are new work to rebase (reverse for oldest-first)
-    new_commits = list(reversed(session_commits[:boundary_idx]))
-    if not new_commits:
-        return None
-
-    # Rebase new commits onto shared HEAD using commit-tree
-    parent = shared_sha
-    for commit, tree in new_commits:
-        # Skip empty commits (tree unchanged from parent)
-        parent_tree = git_mod.git(gitdir, "rev-parse", f"{parent}^{{tree}}",
-                          capture_output=True, text=True)
-        if (parent_tree.returncode == 0
-                and parent_tree.stdout.strip() == tree):
-            continue
-
-        info = git_mod.git(gitdir, "log", "-1",
-                   "--format=%an%n%ae%n%aI%n%cn%n%ce%n%cI%n%B", commit,
-                   capture_output=True, text=True)
-        if info.returncode != 0:
-            return None
-        lines = info.stdout.rstrip("\n").split("\n", 6)
-        env = {
-            **os.environ,
-            "GIT_AUTHOR_NAME": lines[0],
-            "GIT_AUTHOR_EMAIL": lines[1],
-            "GIT_AUTHOR_DATE": lines[2],
-            "GIT_COMMITTER_NAME": lines[3],
-            "GIT_COMMITTER_EMAIL": lines[4],
-            "GIT_COMMITTER_DATE": lines[5],
-        }
-        message = lines[6] if len(lines) > 6 else ""
-        result = subprocess.run(
-            ["git", "--git-dir", str(gitdir)] + git_mod.SAFE_GIT_OPTS +
-            ["commit-tree", tree, "-p", parent, "-m", message],
-            capture_output=True, text=True, env=env,
-        )
-        if result.returncode != 0:
-            return None
-        parent = result.stdout.strip()
-
-    return parent
 
 
 def _rebase_commits(gitdir, shared_sha, session_sha, merge_base):
@@ -265,6 +182,13 @@ def _rebase_commits(gitdir, shared_sha, session_sha, merge_base):
     return parent
 
 
+def _ref_sha(gitdir, ref):
+    """Return the SHA a ref points to, or None if it doesn't exist."""
+    r = git_mod.git(gitdir, "rev-parse", ref,
+                    capture_output=True, text=True)
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
 def _forward_refs(sid, session_gitdir, shared_gitdir, *, force=False):
     """Forward branch refs from a session gitdir into the shared gitdir.
 
@@ -290,22 +214,17 @@ def _forward_refs(sid, session_gitdir, shared_gitdir, *, force=False):
         ref, sha = line.split()
         branch = ref.removeprefix("refs/heads/")
 
+        # Read all tracking refs once per branch.
+        init_sha = _ref_sha(session_gitdir, f"refs/init/{branch}")
+        synced_sha = _ref_sha(session_gitdir, f"refs/synced/{branch}")
+        pushed_sha = _ref_sha(session_gitdir, f"refs/pushed/{branch}")
+
         # Skip refs the session never modified (still at init value)
         # or hasn't changed since last sync (still at synced value).
         # This applies to BOTH live sync and cleanup — without it,
         # a session that never touched a branch will force-forward its
         # stale ref on cleanup, reverting another session's amend.
-        init_ref = git_mod.git(session_gitdir, "rev-parse",
-                       f"refs/init/{branch}",
-                       capture_output=True, text=True)
-        if (init_ref.returncode == 0
-                and init_ref.stdout.strip() == sha):
-            continue
-        synced_ref = git_mod.git(session_gitdir, "rev-parse",
-                         f"refs/synced/{branch}",
-                         capture_output=True, text=True)
-        if (synced_ref.returncode == 0
-                and synced_ref.stdout.strip() == sha):
+        if sha == init_sha or sha == synced_sha:
             continue
 
         # Fetch the objects into shared gitdir
@@ -329,6 +248,10 @@ def _forward_refs(sid, session_gitdir, shared_gitdir, *, force=False):
         if existing_sha == sha:
             continue  # already up to date
 
+        # Ownership: can this session prove no other source modified
+        # shared?  Three independent signals — any match suffices.
+        session_owns = (existing_sha in (init_sha, synced_sha, pushed_sha))
+
         merge_base = git_mod.git(shared_gitdir, "merge-base",
                          existing_sha, sha,
                          capture_output=True, text=True)
@@ -337,99 +260,37 @@ def _forward_refs(sid, session_gitdir, shared_gitdir, *, force=False):
             # Fast-forward
             git_mod.git(shared_gitdir, "update-ref", ref, sha,
                 capture_output=True)
-            # Record that this session has synced this branch
             git_mod.git(session_gitdir, "update-ref",
                 f"refs/synced/{branch}", sha, capture_output=True)
         elif (merge_base.returncode == 0
                   and merge_base.stdout.strip() == sha):
             continue  # session is behind shared, skip
+        elif session_owns:
+            # Session owns this branch (no other source modified shared).
+            # Adopt session's version directly — handles amend, amend +
+            # new commits, squash, message-only amend, any rewrite.
+            git_mod.git(shared_gitdir, "update-ref", ref, sha,
+                capture_output=True)
+            git_mod.git(session_gitdir, "update-ref",
+                f"refs/synced/{branch}", sha, capture_output=True)
         else:
-            # Diverged -- check if it's a real content change or just
-            # re-authoring (pull rewrites commits to change author).
-            session_tree = git_mod.git(shared_gitdir, "rev-parse",
-                               f"{sha}^{{tree}}",
-                               capture_output=True, text=True)
-            shared_tree = git_mod.git(shared_gitdir, "rev-parse",
-                              f"{existing_sha}^{{tree}}",
-                              capture_output=True, text=True)
-            if (session_tree.returncode == 0
-                    and shared_tree.returncode == 0
-                    and session_tree.stdout.strip()
-                        == shared_tree.stdout.strip()):
-                # Same final tree.  If the session changed since last
-                # sync, it rewrote history (squash/amend) preserving
-                # content -- update shared so pull can detect the
-                # rewrite.  Otherwise it's just re-authoring metadata.
-                synced = git_mod.git(session_gitdir, "rev-parse",
-                              f"refs/synced/{branch}",
-                              capture_output=True, text=True)
-                if (synced.returncode == 0
-                        and synced.stdout.strip() != sha):
-                    git_mod.git(shared_gitdir, "update-ref", ref, sha,
-                        capture_output=True)
-                    git_mod.git(session_gitdir, "update-ref",
-                        f"refs/synced/{branch}", sha,
-                        capture_output=True)
-                continue
-
-            # Try rebasing new session commits onto shared chain
+            # Diverged, session doesn't own — try rebase, then
+            # force-update (cleanup only) or skip (live sync).
             mb = (merge_base.stdout.strip()
                   if merge_base.returncode == 0 else None)
 
-            # Detect single-commit amendment: both sides have exactly
-            # 1 commit above the merge base (same parent).  This is
-            # the normal `git commit --amend` case -- let the session
-            # version win since it has the most recent work.
-            # Trigger when either:
-            #   - refs/synced exists (session previously synced this branch)
-            #   - refs/init equals shared sha (session was born with this
-            #     exact commit and amended it -- first sync after amend)
-            has_synced = git_mod.git(session_gitdir, "rev-parse",
-                             f"refs/synced/{branch}",
-                             capture_output=True, text=True)
-            init_ref = git_mod.git(session_gitdir, "rev-parse",
-                           f"refs/init/{branch}",
-                           capture_output=True, text=True)
-            init_matches_shared = (init_ref.returncode == 0
-                                   and init_ref.stdout.strip() == existing_sha)
-            if mb and not force and (has_synced.returncode == 0
-                                     or init_matches_shared):
-                shared_count = git_mod.git(shared_gitdir, "rev-list", "--count",
-                                   f"{mb}..{existing_sha}",
-                                   capture_output=True, text=True)
-                session_count = git_mod.git(shared_gitdir, "rev-list", "--count",
-                                    f"{mb}..{sha}",
-                                    capture_output=True, text=True)
-                if (shared_count.returncode == 0
-                        and session_count.returncode == 0
-                        and shared_count.stdout.strip() == "1"
-                        and session_count.stdout.strip() == "1"):
-                    git_mod.git(shared_gitdir, "update-ref", ref, sha,
-                        capture_output=True)
-                    git_mod.git(session_gitdir, "update-ref",
-                        f"refs/synced/{branch}", sha,
-                        capture_output=True)
-                    continue
-
-            rebased = _rebase_onto_reauthored(
+            rebased = _rebase_commits(
                 shared_gitdir, existing_sha, sha, mb)
-            if not rebased:
-                rebased = _rebase_commits(
-                    shared_gitdir, existing_sha, sha, mb)
             if rebased:
                 git_mod.git(shared_gitdir, "update-ref", ref, rebased,
                     capture_output=True)
-                continue
-
-            if not force:
-                continue  # live sync: skip diverged refs
-
-            # Final cleanup: force-update shared ref, back up old ref.
-            git_mod.git(shared_gitdir, "update-ref",
-                f"refs/sessions/{sid}/{branch}", existing_sha,
-                capture_output=True)
-            git_mod.git(shared_gitdir, "update-ref", ref, sha,
-                capture_output=True)
+            elif force:
+                # Final cleanup: force-update, back up old ref.
+                git_mod.git(shared_gitdir, "update-ref",
+                    f"refs/sessions/{sid}/{branch}", existing_sha,
+                    capture_output=True)
+                git_mod.git(shared_gitdir, "update-ref", ref, sha,
+                    capture_output=True)
 
     # Also fetch tags
     git_mod.git(shared_gitdir, "fetch", str(session_gitdir),
@@ -471,6 +332,55 @@ def forward_session_refs(slug, session_gitdir, shared_gitdir):
     # Restore cave-internal alternates path
     if cave_path is not None:
         alt_file.write_text(f"{cave_path}\n")
+
+
+def ff_session_branches(shared_gitdir):
+    """Merge session branches into main in the shared gitdir.
+
+    Called by sync_live_sessions so pull/push can see session commits.
+    Tries FF first, then rebase for diverged branches.  Deletes session
+    branches that are successfully merged or already behind main.
+    """
+    result = git_mod.git(shared_gitdir, "for-each-ref",
+                 "--format=%(refname) %(objectname)", "refs/heads/session/",
+                 capture_output=True, text=True)
+    if result.returncode != 0:
+        return
+    main_ref = git_mod.git(shared_gitdir, "rev-parse", "refs/heads/main",
+        capture_output=True, text=True)
+    if main_ref.returncode != 0:
+        return
+    main_sha = main_ref.stdout.strip()
+    for line in result.stdout.strip().splitlines():
+        if not line:
+            continue
+        ref, sha = line.split()
+        mb = git_mod.git(shared_gitdir, "merge-base", main_sha, sha,
+            capture_output=True, text=True)
+        if mb.returncode != 0:
+            continue
+        merge_base = mb.stdout.strip()
+        if merge_base == main_sha:
+            # Session is ahead of main — FF merge
+            git_mod.git(shared_gitdir, "update-ref",
+                "refs/heads/main", sha, capture_output=True)
+            main_sha = sha
+            git_mod.git(shared_gitdir, "update-ref", "-d", ref,
+                capture_output=True)
+        elif merge_base == sha:
+            # Session is behind main — already merged
+            git_mod.git(shared_gitdir, "update-ref", "-d", ref,
+                capture_output=True)
+        else:
+            # Diverged — try rebase
+            rebased = _rebase_commits(shared_gitdir, main_sha,
+                sha, merge_base)
+            if rebased:
+                git_mod.git(shared_gitdir, "update-ref",
+                    "refs/heads/main", rebased, capture_output=True)
+                main_sha = rebased
+                git_mod.git(shared_gitdir, "update-ref", "-d", ref,
+                    capture_output=True)
 
 
 def _save_session_index(session_gitdir, shared_gitdir, slug):
@@ -542,6 +452,54 @@ def merge_session_gitdirs(sid, overlay_base):
             alt_file.write_text(f"{shared_gitdir / 'objects'}\n")
 
         _forward_refs(sid, session_gitdir, shared_gitdir, force=True)
+
+        # Try to fast-forward main to the session branch
+        session_branch = f"refs/heads/session/{sid}"
+        session_ref = git_mod.git(shared_gitdir, "rev-parse", session_branch,
+            capture_output=True, text=True)
+        if session_ref.returncode == 0:
+            session_sha = session_ref.stdout.strip()
+            main_ref = git_mod.git(shared_gitdir, "rev-parse",
+                "refs/heads/main", capture_output=True, text=True)
+            if main_ref.returncode == 0:
+                main_sha = main_ref.stdout.strip()
+                # If session branch tree == main tree, nothing to merge
+                sess_tree = git_mod.git(shared_gitdir, "rev-parse",
+                    f"{session_sha}^{{tree}}",
+                    capture_output=True, text=True)
+                main_tree = git_mod.git(shared_gitdir, "rev-parse",
+                    f"{main_sha}^{{tree}}",
+                    capture_output=True, text=True)
+                if (sess_tree.returncode == 0
+                        and main_tree.returncode == 0
+                        and sess_tree.stdout.strip()
+                            == main_tree.stdout.strip()):
+                    git_mod.git(shared_gitdir, "update-ref", "-d",
+                        session_branch, capture_output=True)
+                    continue
+                mb = git_mod.git(shared_gitdir, "merge-base",
+                    main_sha, session_sha,
+                    capture_output=True, text=True)
+                if mb.returncode == 0 and mb.stdout.strip() == main_sha:
+                    # Session branch is a descendant of main — FF merge
+                    git_mod.git(shared_gitdir, "update-ref",
+                        "refs/heads/main", session_sha, capture_output=True)
+                    git_mod.git(shared_gitdir, "update-ref", "-d",
+                        session_branch, capture_output=True)
+                elif mb.returncode == 0 and mb.stdout.strip() == session_sha:
+                    # Session branch is behind main — just clean up
+                    git_mod.git(shared_gitdir, "update-ref", "-d",
+                        session_branch, capture_output=True)
+                elif mb.returncode == 0:
+                    # Diverged — try rebase onto main
+                    rebased = _rebase_commits(shared_gitdir, main_sha,
+                        session_sha, mb.stdout.strip())
+                    if rebased:
+                        git_mod.git(shared_gitdir, "update-ref",
+                            "refs/heads/main", rebased, capture_output=True)
+                        git_mod.git(shared_gitdir, "update-ref", "-d",
+                            session_branch, capture_output=True)
+                    # else: leave session branch for manual recovery
 
         # Save index and its loose objects so staging area survives
         # session restarts.  Loose objects in the session gitdir include
