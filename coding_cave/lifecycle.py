@@ -8,6 +8,15 @@ from pathlib import Path
 from . import _state, config, projects, sessions, git as git_mod, gitdir, overlay
 
 
+# CODING_CAVE_* vars visible at runtime inside the cave.
+# Referenced by both start_session (bwrap allowlist) and enter_session (nsenter filter).
+_CAVE_RUNTIME_VARS = {
+    "CODING_CAVE_VERSION",
+    "CODING_CAVE_PROJECT_PATH",
+    "CODING_CAVE_SESSION_INDEX",
+}
+
+
 def _merge_nix_db(host_db_path, cave_db_path):
     """Incrementally add new host nix DB entries into the cave DB.
 
@@ -490,11 +499,9 @@ def start_session(project, command, gpu=False):
         # Host-side only (add-runtime reads from process env)
         "CODING_CAVE_NIX_MERGED", "CODING_CAVE_NIX_DB_DIR",
         "CODING_CAVE_BWRAP_ARGS", "CODING_CAVE_USER_CLAUDE_MD",
-        # Runtime (visible inside cave)
-        "CODING_CAVE_PROJECT_PATH", "CODING_CAVE_SESSION_INDEX",
         # Setup-only (try-fwd-env → wrap-entry, then unset)
         "CODING_CAVE_EXTRA_PATH",
-    }
+    } | _CAVE_RUNTIME_VARS
     bwrap_env = {k: v for k, v in os.environ.items() if k in BWRAP_ENV_ALLOWLIST}
 
     if inside_cave:
@@ -654,6 +661,12 @@ def enter_session(session_info, shell_type, workdir=None):
     from .commands import _shell_exec_cmd
     shell_cmd = _shell_exec_cmd(shell_type)
 
+    # Strip CODING_CAVE_* vars — they're host-side config plumbing that
+    # shouldn't be visible inside the cave.  The nsenter shell sources
+    # /tmp/cave-env which has the correct cave environment.
+    nsenter_env = {k: v for k, v in os.environ.items()
+                   if not k.startswith("CODING_CAVE_") or k in _CAVE_RUNTIME_VARS}
+
     proc = subprocess.Popen([
         "nsenter",
         f"--target={child_pid}",
@@ -661,6 +674,6 @@ def enter_session(session_info, shell_type, workdir=None):
         "--preserve-credentials",
         "--", "/bin/bash", "-c",
         nsenter_shell_script(shell_cmd, workdir or "/projects"),
-    ])
+    ], env=nsenter_env)
 
     sys.exit(wait_for_child(proc.pid))
