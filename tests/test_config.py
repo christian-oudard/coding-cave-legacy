@@ -404,12 +404,13 @@ def _sync_nix_db():
         return
     registered = set(result.stdout.strip().splitlines())
 
-    # Get all paths on disk (skip internal dirs like .links)
+    # Get all paths on disk (skip internal dirs like .links and non-store entries)
     store = Path("/nix/store")
     if not store.is_dir():
         return
+    _STORE_NAME = re.compile(r"[a-z0-9]{32}-.+")
     on_disk = {f"/nix/store/{p}" for p in os.listdir(store)
-               if not p.startswith(".")}
+               if _STORE_NAME.fullmatch(p)}
 
     unregistered = on_disk - registered
     if not unregistered:
