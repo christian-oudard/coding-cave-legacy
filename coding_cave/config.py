@@ -64,8 +64,10 @@ def _setup_proxy(global_config):
     port = parsed.port or 10255
     os.environ["CODING_CAVE_PROXY_PORT"] = str(port)
     ca_cert = proxy.get("ca-cert")
-    if ca_cert and Path(ca_cert).is_file():
-        os.environ["CODING_CAVE_PROXY_CA_CERT"] = str(Path(ca_cert).resolve())
+    if ca_cert:
+        ca_path = Path(ca_cert).expanduser()
+        if ca_path.is_file():
+            os.environ["CODING_CAVE_PROXY_CA_CERT"] = str(ca_path.resolve())
     return True
 
 
