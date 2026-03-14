@@ -407,3 +407,58 @@ class TestPushUpdatesHead:
         head_after = _run("git", "--git-dir", str(env.gitdir),
                           "symbolic-ref", "HEAD").stdout.strip()
         assert head_after == "refs/heads/develop"
+
+
+class TestForcePushClearsSyncedPerBranch:
+    """Force-push main clears refs/synced/main but not refs/synced/develop."""
+
+    def test_force_push_clears_only_target_branch_synced(self, push_env, tmp_path):
+        env = push_env
+        sid = "test-session-synced"
+
+        # Create develop branch on both sides
+        _run("git", "-C", str(env.host), "branch", "develop")
+        _run("git", "--git-dir", str(env.gitdir), "branch", "develop")
+        wrapper.sync_refs(env.gitdir, env.host, _head(env.host), "develop")
+
+        # Create a session with refs/synced for both branches
+        overlay_base = _state.cave_data() / "session-overlays" / sid
+        overlay_base.mkdir(parents=True)
+        session_gitdir = wrapper.create_session_gitdir(
+            env.slug, sid, overlay_base)
+        write_session(_state.cave_data(), sid, env.slug)
+
+        # Simulate refs/synced for both branches
+        synced_main = (session_gitdir / "refs" / "synced" / "main")
+        synced_develop = (session_gitdir / "refs" / "synced" / "develop")
+        synced_main.parent.mkdir(parents=True, exist_ok=True)
+        synced_develop.parent.mkdir(parents=True, exist_ok=True)
+        synced_main.write_text(_head(env.host) + "\n")
+        synced_develop.write_text(_head(env.host) + "\n")
+
+        # Make cave commit on main so force push has something to overwrite
+        cave_work = tmp_path / "cave-work"
+        cave_work.mkdir()
+        _run("git", "--git-dir", str(env.gitdir), "--work-tree",
+             str(cave_work), "checkout", "HEAD", "--", ".")
+        (cave_work / "cave.txt").write_text("cave\n")
+        _run("git", "--git-dir", str(env.gitdir), "--work-tree",
+             str(cave_work), "add", "cave.txt")
+        _run("git", "--git-dir", str(env.gitdir), "--work-tree",
+             str(cave_work), "commit", "-m", "cave commit")
+
+        # Host commits on main
+        (env.host / "file.txt").write_text("force push\n")
+        _run("git", "-C", str(env.host), "add", ".")
+        _run("git", "-C", str(env.host), "commit", "-m", "host force")
+
+        # Force push main
+        wrapper.push_project(env.slug, force=True)
+
+        # refs/synced/main should be cleared
+        assert not synced_main.exists(), \
+            "refs/synced/main should be cleared after force push"
+
+        # refs/synced/develop should still exist
+        assert synced_develop.exists(), \
+            "refs/synced/develop should NOT be cleared by force push of main"

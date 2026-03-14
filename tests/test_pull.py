@@ -1965,3 +1965,102 @@ class TestHostRewriteDetection:
         wrapper.pull_project(env.slug, force=True)
         assert (env.host / "file.txt").read_text() == "host rewrite\n"
         assert (env.host / "new.txt").read_text() == "new\n"
+
+
+class TestPullStashPopFailure:
+    """Stash pop failures produce a warning instead of silent data loss."""
+
+    def test_stash_pop_conflict_warns(self, pull_env, capsys):
+        """Host has uncommitted changes conflicting with pulled code.
+
+        After pull rebases, stash pop conflicts.  Verify warning is printed
+        and the stash is preserved (not silently lost).
+        """
+        env = pull_env
+
+        # Host has uncommitted changes to file.txt
+        (env.host / "file.txt").write_text("host uncommitted\n")
+        _run("git", "-C", str(env.host), "add", "file.txt")
+
+        # Cave commits a conflicting change to file.txt
+        cave_commit(env, "cave edit", content="cave committed\n")
+
+        # Pull will stash, rebase, then stash pop (which will conflict)
+        wrapper.pull_project(env.slug)
+
+        captured = capsys.readouterr()
+        assert "stash pop failed" in captured.err.lower() or \
+               "stash pop failed" in captured.err
+        # The stash should still exist (changes not lost)
+        stash_list = _run("git", "-C", str(env.host), "stash", "list")
+        assert stash_list.stdout.strip() != "", \
+            "Stash should still contain the uncommitted changes"
+
+
+class TestPullHostAmendPushWhileSessionRunning:
+    """Host amends + pushes while a session is running on old history."""
+
+    @pytest.fixture
+    def session_pull_env(self, pull_env, tmp_path):
+        """Extend pull_env with a running session."""
+        env = pull_env
+        from coding_cave import _state
+        from tests.conftest import write_session
+
+        sid = "test-session-amend"
+        overlay_base = _state.cave_data() / "session-overlays" / sid
+        overlay_base.mkdir(parents=True)
+        session_gitdir = wrapper.create_session_gitdir(
+            env.slug, sid, overlay_base)
+
+        write_session(_state.cave_data(), sid, env.slug)
+
+        session_work = tmp_path / "session-work"
+        session_work.mkdir()
+        _run("git", "--git-dir", str(session_gitdir), "--work-tree",
+             str(session_work), "checkout", "HEAD", "--", ".", check=False)
+        _run("git", "--git-dir", str(session_gitdir), "config",
+             "user.email", "cave@test.com")
+        _run("git", "--git-dir", str(session_gitdir), "config",
+             "user.name", "cave-coder")
+
+        env.session_gitdir = session_gitdir
+        env.session_work = session_work
+        env.overlay_base = overlay_base
+        env.sid = sid
+        return env
+
+    def test_host_amend_push_session_on_old_history(self, session_pull_env):
+        """Session works on old history, host amends and pushes.
+
+        Cave makes commit A, pull it to host. Host amends A to A' and pushes.
+        Session (still on original commit) makes commit B.
+        Pull should succeed — session commit is synced via live sync,
+        then host pull resolves.
+        """
+        env = session_pull_env
+
+        # Cave makes commit A
+        cave_commit(env, "original commit", content="original\n")
+        wrapper.pull_project(env.slug)
+
+        # Host amends the commit
+        (env.host / "file.txt").write_text("amended by host\n")
+        _run("git", "-C", str(env.host), "add", ".")
+        _run("git", "-C", str(env.host), "commit", "--amend",
+             "-m", "amended commit")
+
+        # Push amended commit back to cave
+        wrapper.push_project(env.slug, force=True)
+
+        # Session makes a new commit on a different file
+        (env.session_work / "session.txt").write_text("session work\n")
+        _run("git", "--git-dir", str(env.session_gitdir), "--work-tree",
+             str(env.session_work), "add", "session.txt")
+        _run("git", "--git-dir", str(env.session_gitdir), "--work-tree",
+             str(env.session_work), "commit", "-m", "session commit")
+
+        # Pull should handle the session's commit being on old history
+        # (live sync runs first, then pull resolves)
+        wrapper.pull_project(env.slug, force=True)
+        assert (env.host / "file.txt").read_text() == "amended by host\n"

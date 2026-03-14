@@ -367,6 +367,39 @@ class TestSafeGitOpts:
 
         assert not marker.exists(), "Poisoned core.sshCommand was executed!"
 
+    def test_filter_driver_neutralized(self, two_repos, tmp_path):
+        """Smudge/clean filter drivers in gitdir don't execute.
+
+        A poisoned .gitattributes + filter config could execute arbitrary
+        code when host-side git() reads objects.
+        """
+        _host, gitdir, _cave = two_repos
+
+        marker = tmp_path / "filter_executed"
+        # Configure a smudge filter in gitdir config
+        subprocess.run(
+            ["git", "--git-dir", str(gitdir), "config",
+             "filter.evil.smudge", f"touch {marker}; cat"],
+            capture_output=True, check=True,
+        )
+        subprocess.run(
+            ["git", "--git-dir", str(gitdir), "config",
+             "filter.evil.clean", f"touch {marker}; cat"],
+            capture_output=True, check=True,
+        )
+        # Write filter assignment in info/attributes (gitdir-level)
+        info_dir = gitdir / "info"
+        info_dir.mkdir(exist_ok=True)
+        (info_dir / "attributes").write_text("* filter=evil\n")
+
+        # Run git operations via the safe wrapper
+        wrapper.safe_git(gitdir, "log", "--oneline", "-1",
+                     capture_output=True, text=True)
+        wrapper.safe_git(gitdir, "rev-parse", "HEAD",
+                     capture_output=True, text=True)
+
+        assert not marker.exists(), "Poisoned filter driver was executed!"
+
 
 # --- Shared gitdir problems (motivating per-session gitdirs) ---
 
@@ -2782,3 +2815,192 @@ class TestPostRewriteHook:
         log = cave_git(work, "log", "--oneline")
         assert "update a" in log.stdout
         assert (work / "a.txt").read_text() == "v2\n"
+
+
+class TestForceCleanupBackupRef:
+    """Force cleanup creates backup refs for conflicting force-updates."""
+
+    @pytest.fixture
+    def shared_project(self, tmp_path):
+        slug = "test-project"
+        _state.set_cave_data(tmp_path)
+        projects_dir = _state.projects_dir()
+        (projects_dir / slug).mkdir(parents=True)
+
+        host = tmp_path / "host"
+        host.mkdir()
+        git_run("git", "init", "-b", "main", str(host))
+        (host / "file.txt").write_text("initial\n")
+        git_run("git", "-C", str(host), "add", ".")
+        git_run("git", "-C", str(host), "commit", "-m", "initial")
+
+        wrapper.initialize_gitdir(slug, host)
+        return host, slug, projects_dir
+
+    def _make_session(self, tmp_path, slug, projects_dir, name):
+        overlay_base = tmp_path / f"overlay-{name}"
+        overlay_base.mkdir()
+        session_gitdir = wrapper.create_session_gitdir(
+            slug, f"sid-{name}", overlay_base)
+        workdir = tmp_path / f"work-{name}"
+        workdir.mkdir()
+        git_run("git", "--git-dir", str(session_gitdir), "--work-tree",
+                str(workdir), "checkout", "HEAD", "--", ".")
+        make_cave_session(session_gitdir, workdir)
+        return session_gitdir, workdir, overlay_base
+
+    def test_force_cleanup_creates_backup_ref(self, shared_project, tmp_path):
+        """When cleanup force-updates a diverged ref, a backup is created
+        under refs/sessions/<sid>/<branch>.
+        """
+        host, slug, projects_dir = shared_project
+        shared_gd = projects_dir / slug / "gitdir"
+
+        _, work_a, overlay_a = self._make_session(
+            tmp_path, slug, projects_dir, "a")
+        _, work_b, overlay_b = self._make_session(
+            tmp_path, slug, projects_dir, "b")
+
+        # Both sessions commit on main (same file, different content)
+        (work_a / "file.txt").write_text("version A\n")
+        cave_git(work_a, "add", "file.txt")
+        cave_git(work_a, "commit", "-m", "commit A")
+
+        (work_b / "file.txt").write_text("version B\n")
+        cave_git(work_b, "add", "file.txt")
+        cave_git(work_b, "commit", "-m", "commit B")
+
+        # A merges first (cleanup)
+        wrapper.merge_session_gitdirs("sid-a", overlay_a)
+        shared_after_a = git_head(shared_gd, gitdir=True)
+
+        # B cleanup — must force-update and create backup
+        wrapper.merge_session_gitdirs("sid-b", overlay_b)
+
+        # Backup ref should exist for session B
+        backup = git_run("git", "--git-dir", str(shared_gd),
+                         "rev-parse", "refs/sessions/sid-b/main")
+        assert backup.returncode == 0, \
+            "Expected backup ref refs/sessions/sid-b/main"
+        assert backup.stdout.strip() == shared_after_a
+
+    def test_multi_branch_concurrent_sessions(self, shared_project, tmp_path):
+        """Session A on main, Session B on develop — both merge cleanly."""
+        host, slug, projects_dir = shared_project
+        shared_gd = projects_dir / slug / "gitdir"
+
+        _, work_a, overlay_a = self._make_session(
+            tmp_path, slug, projects_dir, "a")
+        _, work_b, overlay_b = self._make_session(
+            tmp_path, slug, projects_dir, "b")
+
+        # Session A commits on main
+        (work_a / "a.txt").write_text("from A\n")
+        cave_git(work_a, "add", "a.txt")
+        cave_git(work_a, "commit", "-m", "A on main")
+        sha_a = cave_git(work_a, "rev-parse", "HEAD").stdout.strip()
+
+        # Session B creates and commits on develop
+        cave_git(work_b, "checkout", "-b", "develop")
+        (work_b / "b.txt").write_text("from B\n")
+        cave_git(work_b, "add", "b.txt")
+        cave_git(work_b, "commit", "-m", "B on develop")
+        sha_b = cave_git(work_b, "rev-parse", "HEAD").stdout.strip()
+
+        # Both merge — should succeed without backup refs
+        wrapper.merge_session_gitdirs("sid-a", overlay_a)
+        wrapper.merge_session_gitdirs("sid-b", overlay_b)
+
+        # Verify both branches exist in shared
+        main_sha = git_run("git", "--git-dir", str(shared_gd),
+                           "rev-parse", "refs/heads/main").stdout.strip()
+        dev_sha = git_run("git", "--git-dir", str(shared_gd),
+                          "rev-parse", "refs/heads/develop").stdout.strip()
+        assert main_sha == sha_a
+        assert dev_sha == sha_b
+
+        # No backup refs — no conflicts
+        backup_a = git_run("git", "--git-dir", str(shared_gd),
+                           "rev-parse", "refs/sessions/sid-a/main")
+        backup_b = git_run("git", "--git-dir", str(shared_gd),
+                           "rev-parse", "refs/sessions/sid-b/develop")
+        assert backup_a.returncode != 0
+        assert backup_b.returncode != 0
+
+    def test_three_session_cleanup_ordering(self, shared_project, tmp_path):
+        """A, B, C created in order — merge in non-creation order (C, A, B)."""
+        host, slug, projects_dir = shared_project
+        shared_gd = projects_dir / slug / "gitdir"
+
+        _, work_a, overlay_a = self._make_session(
+            tmp_path, slug, projects_dir, "a")
+        _, work_b, overlay_b = self._make_session(
+            tmp_path, slug, projects_dir, "b")
+        _, work_c, overlay_c = self._make_session(
+            tmp_path, slug, projects_dir, "c")
+
+        # All three commit on different files (no conflicts, rebase succeeds)
+        (work_a / "a.txt").write_text("from A\n")
+        cave_git(work_a, "add", "a.txt")
+        cave_git(work_a, "commit", "-m", "commit A")
+
+        (work_b / "b.txt").write_text("from B\n")
+        cave_git(work_b, "add", "b.txt")
+        cave_git(work_b, "commit", "-m", "commit B")
+
+        (work_c / "c.txt").write_text("from C\n")
+        cave_git(work_c, "add", "c.txt")
+        cave_git(work_c, "commit", "-m", "commit C")
+
+        # Merge in reverse creation order: C, A, B
+        wrapper.merge_session_gitdirs("sid-c", overlay_c)
+        wrapper.merge_session_gitdirs("sid-a", overlay_a)
+        wrapper.merge_session_gitdirs("sid-b", overlay_b)
+
+        # All three commits should be in the log
+        log = git_run("git", "--git-dir", str(shared_gd),
+                      "log", "--oneline", "refs/heads/main")
+        assert "commit A" in log.stdout
+        assert "commit B" in log.stdout
+        assert "commit C" in log.stdout
+
+
+class TestAtomicAlternates:
+    """Atomic alternates rewrite leaves no temp files."""
+
+    @pytest.fixture
+    def shared_project(self, tmp_path):
+        slug = "test-project"
+        _state.set_cave_data(tmp_path)
+        projects_dir = _state.projects_dir()
+        (projects_dir / slug).mkdir(parents=True)
+
+        host = tmp_path / "host"
+        host.mkdir()
+        git_run("git", "init", "-b", "main", str(host))
+        (host / "file.txt").write_text("initial\n")
+        git_run("git", "-C", str(host), "add", ".")
+        git_run("git", "-C", str(host), "commit", "-m", "initial")
+
+        wrapper.initialize_gitdir(slug, host)
+        return host, slug, projects_dir
+
+    def test_no_tmp_files_after_forward_session_refs(
+            self, shared_project, tmp_path):
+        """forward_session_refs leaves no .tmp files in objects/info/."""
+        host, slug, projects_dir = shared_project
+        shared_gd = projects_dir / slug / "gitdir"
+        overlay = tmp_path / "overlay"
+        overlay.mkdir()
+        session_gd = wrapper.create_session_gitdir(slug, "test-sid", overlay)
+
+        cave_path = f"/projects/.shared-objects/{slug}"
+        alt_file = session_gd / "objects" / "info" / "alternates"
+        alt_file.write_text(f"{cave_path}\n")
+
+        wrapper.forward_session_refs(slug, session_gd, shared_gd)
+
+        info_dir = session_gd / "objects" / "info"
+        tmp_files = list(info_dir.glob("*.tmp"))
+        assert tmp_files == [], \
+            f"Temp files left behind: {[f.name for f in tmp_files]}"
