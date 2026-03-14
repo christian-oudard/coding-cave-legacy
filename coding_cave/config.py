@@ -276,8 +276,16 @@ def build_user_env():
     input_declarations = ""
     input_names = []
     input_passes = ""
-    for name, url in inputs.items():
-        input_declarations += f'    {name}.url = "{url}";\n'
+    for name, spec in inputs.items():
+        if isinstance(spec, str):
+            input_declarations += f'    {name}.url = "{spec}";\n'
+        elif isinstance(spec, dict):
+            for attr, val in spec.items():
+                if isinstance(val, bool):
+                    nix_val = "true" if val else "false"
+                    input_declarations += f'    {name}.{attr} = {nix_val};\n'
+                elif isinstance(val, str):
+                    input_declarations += f'    {name}.{attr} = "{val}";\n'
         input_names.append(name)
         input_passes += f'      {name} = {name};\n'
 

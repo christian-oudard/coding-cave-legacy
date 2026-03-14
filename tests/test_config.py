@@ -8,7 +8,10 @@ from unittest.mock import patch
 
 import pytest
 
-from coding_cave.config import _detect_gpg_agent_socket, _git_config, setup_env
+from coding_cave.config import (
+    _detect_gpg_agent_socket, _git_config, setup_env, build_user_env,
+    _GENERATED_FLAKE_TEMPLATE,
+)
 from coding_cave import _state
 
 FLAKE_NIX = Path(__file__).parent.parent / "flake.nix"
@@ -372,6 +375,60 @@ class TestMergeNixDb:
         c.commit(); c.close()
 
         _merge_nix_db(host_db, cave_db)  # should not raise
+
+
+class TestBuildUserEnvFlakeGeneration:
+    """Test that build_user_env generates correct flake.nix from cave.nix inputs."""
+
+    def _run_build_and_read_flake(self, tmp_path, inputs_json):
+        """Run build_user_env with mocked nix eval returning inputs_json.
+
+        Returns the generated flake.nix content.
+        """
+        config_dir = tmp_path / ".config" / "coding-cave"
+        config_dir.mkdir(parents=True)
+        cave_nix = config_dir / "cave.nix"
+        cave_nix.write_text('{ inputs = {}; config = { pkgs }: { packages = []; }; }')
+
+        user_env = tmp_path / "cave-data" / "user-env"
+        user_env.mkdir(parents=True)
+
+        eval_result = subprocess.CompletedProcess(args=[], returncode=0, stdout=inputs_json, stderr="")
+        build_result = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="build skipped")
+
+        with patch.dict(os.environ, {"HOME": str(tmp_path)}), \
+             patch("coding_cave.config._state.cave_data", return_value=tmp_path / "cave-data"), \
+             patch("subprocess.run", side_effect=[eval_result, build_result]):
+            build_user_env()
+
+        return (user_env / "flake.nix").read_text()
+
+    def test_string_input_generates_url(self, tmp_path):
+        """Plain string input produces name.url = "...";"""
+        flake = self._run_build_and_read_flake(tmp_path, '{"foo": "github:owner/repo"}')
+        assert 'foo.url = "github:owner/repo";' in flake
+
+    def test_attrset_input_generates_separate_attrs(self, tmp_path):
+        """Dict input with flake=false produces name.url and name.flake."""
+        inputs = json.dumps({
+            "agent-capabilities": {
+                "flake": False,
+                "url": "git+ssh://git@github.com/user/repo",
+            }
+        })
+        flake = self._run_build_and_read_flake(tmp_path, inputs)
+        assert 'agent-capabilities.flake = false;' in flake
+        assert 'agent-capabilities.url = "git+ssh://git@github.com/user/repo";' in flake
+        # Must NOT contain Python dict repr
+        assert "{'flake'" not in flake
+
+    def test_attrset_input_with_follows(self, tmp_path):
+        """Dict input with follows produces name.follows."""
+        inputs = json.dumps({
+            "foo-nixpkgs": {"follows": "nixpkgs"},
+        })
+        flake = self._run_build_and_read_flake(tmp_path, inputs)
+        assert 'foo-nixpkgs.follows = "nixpkgs";' in flake
 
 
 def _sync_nix_db():
