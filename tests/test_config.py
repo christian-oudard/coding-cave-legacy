@@ -134,20 +134,13 @@ class TestFlakeNixSafety:
             ".gnupg creation should be in wrap-entry"
         # And NOT in add-runtime (covered by test_add_runtime_no_mutating_ops)
 
-    def test_gpg_signing_config_in_wrap_entry(self):
-        """GPG signing key and gpgsign config set inside cave (wrap-entry)."""
+    def test_gpg_signing_comes_from_host_gitconfig(self):
+        """GPG signing config comes from included host gitconfig, not env vars."""
         flake = FLAKE_NIX.read_text()
-        # These git config commands must run inside the cave where
-        # ~/.gitconfig is writable, not on the host
-        assert "git config --global user.signingkey" in flake
-        assert "git config --global commit.gpgsign" in flake
-        # Verify they're in wrap-entry, not add-runtime
-        add_runtime_blocks = self._extract_blocks(flake, "add-runtime")
-        for block in add_runtime_blocks:
-            assert "git config --global user.signingkey" not in block, \
-                "signingkey config must be in wrap-entry, not add-runtime"
-            assert "git config --global commit.gpgsign" not in block, \
-                "gpgsign config must be in wrap-entry, not add-runtime"
+        # signingkey and gpgsign should NOT be set via git config --global;
+        # they come through the host gitconfig include.path
+        assert "git config --global user.signingkey" not in flake
+        assert "git config --global commit.gpgsign" not in flake
 
     def test_git_identity_in_wrap_entry_not_add_runtime(self):
         """GIT_AUTHOR/COMMITTER env vars must be set in wrap-entry.
@@ -503,10 +496,9 @@ class TestNixBuild:
             "entry script missing GPG agent socket check"
         assert 'mkdir -p "$HOME/.gnupg"' in entry_script, \
             "entry script missing .gnupg dir creation"
-        assert "git config --global user.signingkey" in entry_script, \
-            "entry script missing signingkey config"
-        assert "git config --global commit.gpgsign" in entry_script, \
-            "entry script missing gpgsign config"
+        # signingkey and gpgsign come from host gitconfig include, not env vars
+        assert "git config --global user.signingkey" not in entry_script
+        assert "git config --global commit.gpgsign" not in entry_script
 
     def test_sandbox_has_gpg_env_forwarding(self, sandbox_scripts):
         """Built sandbox forwards GPG env vars via try-fwd-env."""
@@ -514,8 +506,8 @@ class TestNixBuild:
         assert "CODING_CAVE_GPG_AGENT_SOCK" in sandbox_script, \
             "sandbox missing GPG agent socket forwarding"
         # GNUPGHOME is host-only (lifecycle.py bind-mount), not forwarded
-        assert "CODING_CAVE_GIT_SIGNING_KEY" in sandbox_script, \
-            "sandbox missing signing key forwarding"
+        # Signing key comes from host gitconfig include, not env var
+        assert "CODING_CAVE_GIT_SIGNING_KEY" not in sandbox_script
 
     def test_sandbox_entry_has_git_identity(self, sandbox_scripts):
         """Built entry script sets GIT_AUTHOR/COMMITTER from forwarded vars."""

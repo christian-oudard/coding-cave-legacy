@@ -106,8 +106,6 @@
       # These are consumed once in wrap-entry (init) then unset.
       (try-fwd-env "CODING_CAVE_GIT_NAME")
       (try-fwd-env "CODING_CAVE_GIT_EMAIL")
-      (try-fwd-env "CODING_CAVE_GIT_SIGNING_KEY")
-      (try-fwd-env "CODING_CAVE_GIT_GPG_SIGN")
       (try-fwd-env "CODING_CAVE_GPG_AGENT_SOCK")
       # GNUPGHOME is only used by lifecycle.py (host-side bind-mount).
 
@@ -188,13 +186,6 @@
         if [ -f "$HOME/.gitconfig.host" ]; then
           git config --global include.path "$HOME/.gitconfig.host"
         fi
-        # Configure GPG commit signing if host forwarded signing key
-        if [ -n "''${CODING_CAVE_GIT_SIGNING_KEY:-}" ]; then
-          git config --global user.signingkey "''${CODING_CAVE_GIT_SIGNING_KEY}"
-        fi
-        if [ -n "''${CODING_CAVE_GIT_GPG_SIGN:-}" ]; then
-          git config --global commit.gpgsign "''${CODING_CAVE_GIT_GPG_SIGN}"
-        fi
         # Git identity from forwarded host vars (or fallback).
         if [ -n "''${CODING_CAVE_GIT_NAME:-}" ]; then
           export GIT_AUTHOR_NAME="''${CODING_CAVE_GIT_NAME}"
@@ -212,8 +203,7 @@
         fi
         # Clean up setup-only vars before saving the env snapshot.
         unset CODING_CAVE_EXTRA_PATH CODING_CAVE_GIT_NAME \
-              CODING_CAVE_GIT_EMAIL CODING_CAVE_GIT_SIGNING_KEY \
-              CODING_CAVE_GIT_GPG_SIGN CODING_CAVE_GPG_AGENT_SOCK
+              CODING_CAVE_GIT_EMAIL CODING_CAVE_GPG_AGENT_SOCK
         export -p > /tmp/cave-env
         chmod 444 /tmp/cave-env
         # Ensure shells started via nsenter get the cave environment.

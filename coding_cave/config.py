@@ -67,8 +67,6 @@ def setup_env(global_config):
     for key, env_var in [
         ("user.name", "CODING_CAVE_GIT_NAME"),
         ("user.email", "CODING_CAVE_GIT_EMAIL"),
-        ("user.signingkey", "CODING_CAVE_GIT_SIGNING_KEY"),
-        ("commit.gpgsign", "CODING_CAVE_GIT_GPG_SIGN"),
     ]:
         val = _git_config(key)
         if val:
