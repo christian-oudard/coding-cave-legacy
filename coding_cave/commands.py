@@ -11,6 +11,21 @@ from pathlib import Path
 from . import _state, config, projects, sessions, git as git_mod, overlay, lifecycle, sync
 
 
+def _pick(items, fmt, prompt="Session: ", footer=None):
+    """Numbered interactive picker. Returns (choice_str, item) or (None, None) on EOF."""
+    by_index = {}
+    for i, item in enumerate(items, 1):
+        by_index[str(i)] = item
+        print(f"  [{i}] {fmt(item)}", file=sys.stderr)
+    if footer:
+        print(footer, file=sys.stderr)
+    try:
+        choice = input(prompt).strip()
+    except EOFError:
+        return None, None
+    return choice, by_index.get(choice)
+
+
 def _shell_exec_cmd(preferred_shell):
     """Return a shell command string that execs the preferred shell.
 
@@ -78,22 +93,17 @@ def cmd_shell(args, gpu=False):
             lifecycle.enter_session(active_sessions[0], preferred_shell, workdir=workdir)
         else:
             print("Running sessions:", file=sys.stderr)
-            by_index = {}
-            for s in active_sessions:
-                started = time.strftime("%H:%M", time.localtime(s["started"]))
-                idx = s.get("index", "?")
-                by_index[str(idx)] = s
-                print(f"  [{idx}] [{started}] {s['sid']}  {s.get('project', '?')} (PID {s['bwrap_pid']})", file=sys.stderr)
-            print(f"  [n] Start new session", file=sys.stderr)
-            try:
-                choice = input("Join session: ").strip()
-            except EOFError:
-                return
+            choice, session = _pick(
+                active_sessions,
+                lambda s: f"[{time.strftime('%H:%M', time.localtime(s['started']))}] {s['sid']}  {s.get('project', '?')} (PID {s['bwrap_pid']})",
+                prompt="Join session: ",
+                footer="  [n] Start new session",
+            )
             if choice == "n":
                 pass  # fall through to start new
-            elif choice in by_index:
-                lifecycle.enter_session(by_index[choice], preferred_shell, workdir=workdir)
-            else:
+            elif session:
+                lifecycle.enter_session(session, preferred_shell, workdir=workdir)
+            elif choice is not None:
                 print("Invalid choice.", file=sys.stderr)
                 sys.exit(1)
 
@@ -370,18 +380,14 @@ def cmd_cp(srcs, dest, recursive=False, force=False):
             sys.exit(1)
         if len(matching) > 1:
             print("Multiple sessions found:", file=sys.stderr)
-            by_index = {}
-            for s, m in matching:
-                started = time.strftime("%H:%M", time.localtime(s["started"]))
-                idx = s.get("index", "?")
-                by_index[str(idx)] = m
-                print(f"  [{idx}] [{started}] {s['sid']}  PID {s['bwrap_pid']}", file=sys.stderr)
-            try:
-                choice = input("Session: ").strip()
-                return by_index[choice]
-            except (KeyError, EOFError):
+            _, chosen = _pick(
+                matching,
+                lambda sm: f"[{time.strftime('%H:%M', time.localtime(sm[0]['started']))}] {sm[0]['sid']}  PID {sm[0]['bwrap_pid']}",
+            )
+            if chosen is None:
                 print("Invalid choice.", file=sys.stderr)
                 sys.exit(1)
+            return chosen[1]
         return matching[0][1]
 
     def cave_host_path(slug, path):
