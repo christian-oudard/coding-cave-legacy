@@ -121,10 +121,13 @@ def _build_mirror_args():
     if bash_profile and Path(bash_profile).is_file():
         args += ["--ro-bind", bash_profile, f"{_state.JAIL_HOME}/.bash_profile"]
 
-    # Neovim config
+    # Neovim config and data (plugins)
     nvim_config = os.environ.get("CODING_CAVE_NVIM_CONFIG", "")
     if nvim_config and Path(nvim_config).is_dir():
         args += ["--ro-bind", nvim_config, f"{_state.JAIL_HOME}/.config/nvim"]
+    nvim_data = os.environ.get("CODING_CAVE_NVIM_DATA", "")
+    if nvim_data and Path(nvim_data).is_dir():
+        args += ["--ro-bind", nvim_data, f"{_state.JAIL_HOME}/.local/share/nvim"]
     # Use host nvim binary (with its plugins, LUA_PATH, etc.) instead of
     # the bare cave neovim.  Bind into ~/.local/bin which is early in PATH,
     # so it shadows the cave's nix neovim.  (Binding over a path inside

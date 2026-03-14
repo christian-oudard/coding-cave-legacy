@@ -177,11 +177,13 @@
         mkdir -p /projects
         export TMPDIR="$HOME/.cache/tmp"
         mkdir -p "$TMPDIR"
-        export PATH="$HOME/.local/bin:$PATH"
         # User packages from cave.nix
         if [ -n "''${CODING_CAVE_EXTRA_PATH:-}" ]; then
           export PATH="''${CODING_CAVE_EXTRA_PATH}:$PATH"
         fi
+        # ~/.local/bin after EXTRA_PATH so mirrored binaries (e.g. host
+        # nvim with plugins) shadow the bare cave equivalents.
+        export PATH="$HOME/.local/bin:$PATH"
         # GPG commit signing via forwarded agent socket.
         # Create .gnupg dir inside the cave (must be here, not add-runtime,
         # because add-runtime runs on host where /home/cave-coder doesn't exist).

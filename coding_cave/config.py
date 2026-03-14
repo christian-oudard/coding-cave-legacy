@@ -105,6 +105,10 @@ def setup_env(global_config):
         nvim_config = Path(xdg_config) / "nvim"
         if nvim_config.is_dir():
             os.environ["CODING_CAVE_NVIM_CONFIG"] = str(nvim_config)
+        xdg_data = os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share"))
+        nvim_data = Path(xdg_data) / "nvim"
+        if nvim_data.is_dir():
+            os.environ["CODING_CAVE_NVIM_DATA"] = str(nvim_data)
         # Discover host nvim wrapper's nix store path so the cave uses the
         # same binary (with its plugins, LUA_PATH, etc.) instead of the bare
         # cave neovim.  The nix store is available in the cave via overlay.
