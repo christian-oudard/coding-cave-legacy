@@ -11,21 +11,6 @@ from pathlib import Path
 from . import _state, config, projects, sessions, git as git_mod, overlay, lifecycle, sync
 
 
-def _pick(items, fmt, prompt="Session: ", footer=None):
-    """Numbered interactive picker. Returns (choice_str, item) or (None, None) on EOF."""
-    by_index = {}
-    for i, item in enumerate(items, 1):
-        by_index[str(i)] = item
-        print(f"  [{i}] {fmt(item)}", file=sys.stderr)
-    if footer:
-        print(footer, file=sys.stderr)
-    try:
-        choice = input(prompt).strip()
-    except EOFError:
-        return None, None
-    return choice, by_index.get(choice)
-
-
 def _shell_exec_cmd(preferred_shell):
     """Return a shell command string that execs the preferred shell.
 
@@ -93,17 +78,22 @@ def cmd_shell(args, gpu=False):
             lifecycle.enter_session(active_sessions[0], preferred_shell, workdir=workdir)
         else:
             print("Running sessions:", file=sys.stderr)
-            choice, session = _pick(
-                active_sessions,
-                lambda s: f"[{time.strftime('%H:%M', time.localtime(s['started']))}] {s['sid']}  {s.get('project', '?')} (PID {s['bwrap_pid']})",
-                prompt="Join session: ",
-                footer="  [n] Start new session",
-            )
+            by_index = {}
+            for s in active_sessions:
+                started = time.strftime("%H:%M", time.localtime(s["started"]))
+                idx = s.get("index", "?")
+                by_index[str(idx)] = s
+                print(f"  [{idx}] [{started}] {s['sid']}  {s.get('project', '?')} (PID {s['bwrap_pid']})", file=sys.stderr)
+            print(f"  [n] Start new session", file=sys.stderr)
+            try:
+                choice = input("Join session: ").strip()
+            except EOFError:
+                return
             if choice == "n":
                 pass  # fall through to start new
-            elif session:
-                lifecycle.enter_session(session, preferred_shell, workdir=workdir)
-            elif choice is not None:
+            elif choice in by_index:
+                lifecycle.enter_session(by_index[choice], preferred_shell, workdir=workdir)
+            else:
                 print("Invalid choice.", file=sys.stderr)
                 sys.exit(1)
 
@@ -321,34 +311,85 @@ def cmd_push(args):
             pass
 
 
+def _find_cave_root(project=None):
+    """Find the root filesystem of a running cave session via /proc/<pid>/root.
+
+    If project is given, prefers sessions for that project (auto-selects if
+    exactly one). Falls back to any running session since all projects are
+    mounted in every session. Returns None if no sessions are running.
+    """
+    all_sessions = sessions.list_sessions()
+    if not all_sessions:
+        return None
+
+    if project:
+        proj_sessions = [s for s in all_sessions if s.get("project") == project]
+        if len(proj_sessions) == 1:
+            session_info = proj_sessions[0]
+        elif len(proj_sessions) > 1:
+            session_info = _prompt_session(proj_sessions)
+        else:
+            # No sessions for this project — any session will do
+            # (all projects are mounted in every session)
+            session_info = all_sessions[0]
+    elif len(all_sessions) == 1:
+        session_info = all_sessions[0]
+    else:
+        session_info = _prompt_session(all_sessions)
+
+    bwrap_pid = session_info["bwrap_pid"]
+    child_pid = lifecycle.find_bwrap_child(bwrap_pid)
+    if child_pid is None:
+        return None
+    inner = lifecycle.find_bwrap_child(child_pid)
+    pid = inner if inner is not None else child_pid
+    return Path(f"/proc/{pid}/root")
+
+
+def _prompt_session(session_list):
+    """Prompt user to select from multiple sessions."""
+    print("Multiple sessions running:", file=sys.stderr)
+    by_index = {}
+    for s in session_list:
+        started = time.strftime("%H:%M", time.localtime(s["started"]))
+        idx = s.get("index", "?")
+        proj = s.get("project", "?")
+        by_index[str(idx)] = s
+        print(f"  [{idx}] [{started}] {proj}  PID {s['bwrap_pid']}", file=sys.stderr)
+    try:
+        choice = input("Session: ").strip()
+        return by_index[choice]
+    except (KeyError, EOFError):
+        print("Invalid choice.", file=sys.stderr)
+        sys.exit(1)
+
+
 def cmd_cp(srcs, dest, recursive=False, force=False):
-    """Copy files between host and a running cave session's overlay."""
-    session_overlays = _state.cave_data() / "session-overlays"
+    """Copy files between host and a running cave session."""
 
     def resolve_cave_path(spec):
-        """Parse 'slug:path', ':path', or 'cave:path'. Returns (slug, path) or (None, None).
+        """Parse cave path spec. Returns (cave_abs_path, is_home) or (None, False).
 
-        Special slug values:
-        - None: not a cave path
-        - "~": path relative to cave home (no session needed)
-        - anything else: project slug, path relative to project overlay
+        cave_abs_path is the absolute path inside the cave filesystem.
+        is_home=True means the path can be accessed directly via cave_home()
+        without a running session.
         """
         if ":" not in spec:
-            return None, None
+            return None, False
         slug, _, path = spec.partition(":")
 
-        # Tilde expansion → persistent home
-        if path.startswith("~/") or path == "~":
-            return "~", path[2:] or "."
+        # Tilde expansion → /home/cave-coder/...
+        if path.startswith("~/"):
+            return f"{_state.JAIL_HOME}/{path[2:]}", True
+        if path == "~":
+            return _state.JAIL_HOME, True
 
-        # /home/cave-coder/ prefix → persistent home
-        if path == _state.JAIL_HOME:
-            return "~", "."
-        if path.startswith(_state.JAIL_HOME + "/"):
-            return "~", path[len(_state.JAIL_HOME) + 1:]
+        # /home/cave-coder/ already absolute → home
+        if path == _state.JAIL_HOME or path.startswith(_state.JAIL_HOME + "/"):
+            return path, True
 
+        # Resolve slug for relative paths
         if not slug or slug == "cave":
-            # Auto-detect from CWD
             slug = None
             cwd = Path.cwd().resolve()
             for s, source in projects.load_projects().items():
@@ -359,52 +400,52 @@ def cmd_cp(srcs, dest, recursive=False, force=False):
                 print("No project specified and CWD is not a registered project.", file=sys.stderr)
                 sys.exit(1)
 
-        # Handle /projects/<slug>/ prefix (supports cross-project access).
-        m = re.match(r'^/projects/([^/]+)(?:/(.*)|$)', path)
-        if m:
-            slug = m.group(1)
-            path = m.group(2) or "."
+        # Absolute paths use as-is (including /projects/..., /tmp/..., etc.)
+        if path.startswith("/"):
+            return path, False
 
-        return slug, path or "."
+        # Relative path → /projects/<slug>/path
+        rel = path or "."
+        return f"/projects/{slug}/{rel}" if rel != "." else f"/projects/{slug}", False
 
-    def find_session_merged(slug):
-        """Find the overlay merged dir for any running session with this project."""
-        all_sessions = sessions.list_sessions()
-        matching = []
-        for s in all_sessions:
-            merged = session_overlays / s["sid"] / f"{slug}-merged"
-            if merged.is_dir():
-                matching.append((s, merged))
-        if not matching:
-            print(f"No running sessions with project {slug}.", file=sys.stderr)
-            sys.exit(1)
-        if len(matching) > 1:
-            print("Multiple sessions found:", file=sys.stderr)
-            _, chosen = _pick(
-                matching,
-                lambda sm: f"[{time.strftime('%H:%M', time.localtime(sm[0]['started']))}] {sm[0]['sid']}  PID {sm[0]['bwrap_pid']}",
-            )
-            if chosen is None:
-                print("Invalid choice.", file=sys.stderr)
-                sys.exit(1)
-            return chosen[1]
-        return matching[0][1]
+    def cave_host_path(cave_path, is_home):
+        """Map a cave-absolute path to a host filesystem path.
 
-    def cave_host_path(slug, path):
-        """Resolve a cave path spec to a host filesystem path."""
-        if slug == "~":
+        Home paths use cave_home() directly (no session needed).
+        Project paths fall back to the host source dir if no session is running.
+        Other paths require a running session (accessed via /proc/<pid>/root/).
+        """
+        if is_home:
             home = _state.cave_home()
-            return home if path == "." else home / path
-        merged = find_session_merged(slug)
-        return merged / path.lstrip("/")
+            rel = cave_path[len(_state.JAIL_HOME):]
+            return home / rel.lstrip("/") if rel else home
+
+        # Extract project hint from path
+        m = re.match(r'^/projects/([^/]+)', cave_path)
+        project_hint = m.group(1) if m else None
+
+        root = _find_cave_root(project=project_hint)
+        if root is not None:
+            return root / cave_path.lstrip("/")
+
+        # No session — fall back to host source for project paths
+        if project_hint:
+            all_projects = projects.load_projects()
+            if project_hint in all_projects:
+                host_source = Path(all_projects[project_hint])
+                rel = cave_path[len(f"/projects/{project_hint}"):]
+                return host_source / rel.lstrip("/") if rel else host_source
+
+        print("No running sessions.", file=sys.stderr)
+        sys.exit(1)
 
     # Determine direction: host->cave or cave->host
-    dest_slug, dest_path = resolve_cave_path(dest)
-    src_slug, src_path = resolve_cave_path(srcs[0]) if len(srcs) == 1 else (None, None)
+    dest_cave, dest_home = resolve_cave_path(dest)
+    src_cave, src_home = resolve_cave_path(srcs[0]) if len(srcs) == 1 else (None, False)
 
-    if dest_slug:
+    if dest_cave:
         # host -> cave: cp <host-files>... <slug>:<cave-path>
-        cave_dest = cave_host_path(dest_slug, dest_path)
+        cave_dest = cave_host_path(dest_cave, dest_home)
         cave_dest.parent.mkdir(parents=True, exist_ok=True)
         for src in srcs:
             src_path_obj = Path(src).resolve()
@@ -421,11 +462,11 @@ def cmd_cp(srcs, dest, recursive=False, force=False):
                 target = cave_dest / src_path_obj.name if cave_dest.is_dir() else cave_dest
                 shutil.copy2(src_path_obj, target)
             print(f"  {src} -> {dest}", file=sys.stderr)
-    elif src_slug:
+    elif src_cave:
         # cave -> host: cp <slug>:<cave-path> <host-dest>
-        cave_src = cave_host_path(src_slug, src_path)
+        cave_src = cave_host_path(src_cave, src_home)
         if not cave_src.exists():
-            print(f"Source not found in cave: {src_path}", file=sys.stderr)
+            print(f"Source not found in cave: {srcs[0]}", file=sys.stderr)
             sys.exit(1)
         host_dest = Path(dest).resolve()
         host_dest.parent.mkdir(parents=True, exist_ok=True)

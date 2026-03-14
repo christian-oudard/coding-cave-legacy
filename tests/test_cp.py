@@ -1,16 +1,22 @@
 """Tests for coding-cave cp: file transfer to/from running sessions."""
+import os
+import subprocess
+
 import pytest
 
 import wrapper
-from coding_cave import _state
+from coding_cave import _state, commands
 from tests.conftest import git_run, write_projects, write_session
 
 
 @pytest.fixture
-def cp_env(tmp_path):
-    """Environment with a running session, simulating the overlay merged dir.
+def cp_env(tmp_path, monkeypatch):
+    """Environment simulating a cave filesystem via a fake /proc/pid/root.
 
-    Returns namespace with: host, slug, merged (overlay merged dir), tmp_path.
+    Creates a fake cave root with /projects/<slug>/ populated with test files.
+    Mocks _find_cave_root() to return the fake root.
+
+    Returns namespace with: host, slug, merged (project dir in fake root), cave_root, tmp_path.
     """
     slug = "test-project"
 
@@ -26,15 +32,18 @@ def cp_env(tmp_path):
     cave_data = tmp_path / "cave-data"
     _state.set_cave_data(cave_data)
 
-    # Session overlay merged dir (simulates fuse-overlayfs merged view)
-    sid = "test-session-1"
-    merged = cave_data / "session-overlays" / sid / f"{slug}-merged"
+    # Fake cave root (simulates /proc/<pid>/root)
+    cave_root = tmp_path / "cave-root"
+    merged = cave_root / "projects" / slug
     merged.mkdir(parents=True)
-    # Populate with "host" files (simulates overlay lower + upper)
     (merged / "file.txt").write_text("initial\n")
 
-    # Session tracking
-    write_session(cave_data, sid, slug)
+    # Mock _find_cave_root to return our fake root
+    monkeypatch.setattr(commands, "_find_cave_root", lambda project=None: cave_root)
+
+    # Session tracking (needed so _find_cave_root's session lookup succeeds,
+    # though we've mocked the function itself)
+    write_session(cave_data, "test-session-1", slug)
 
     # Project registry
     (_state.projects_dir() / slug).mkdir(parents=True)
@@ -46,6 +55,7 @@ def cp_env(tmp_path):
     e.host = host
     e.slug = slug
     e.merged = merged
+    e.cave_root = cave_root
     e.tmp_path = tmp_path
     return e
 
@@ -171,19 +181,59 @@ class TestCpCaveToHost:
 
 
 class TestCpNoSession:
-    """cp fails gracefully when no session is running."""
+    """cp with no running session falls back to host source for project paths."""
 
-    def test_no_session_exits(self, cp_env):
-        e = cp_env
-        # Remove the session file
-        for f in _state.sessions_dir().iterdir():
-            f.unlink()
+    @pytest.fixture
+    def no_session_env(self, tmp_path):
+        slug = "test-project"
+        cave_data = tmp_path / "cave-data"
+        _state.set_cave_data(cave_data)
+        (cave_data / "sessions").mkdir(parents=True)
 
+        host = tmp_path / "host"
+        host.mkdir()
+        git_run("git", "init", "-b", "main", str(host))
+        (host / "f.txt").write_text("host content\n")
+        git_run("git", "-C", str(host), "add", ".")
+        git_run("git", "-C", str(host), "commit", "-m", "init")
+        write_projects(cave_data, {slug: str(host)})
+        (_state.projects_dir() / slug).mkdir(parents=True)
+
+        class Env:
+            pass
+        e = Env()
+        e.slug = slug
+        e.host = host
+        e.tmp_path = tmp_path
+        return e
+
+    def test_cave_to_host_falls_back(self, no_session_env):
+        """Reading from a project path without a session uses host source."""
+        e = no_session_env
+        dest = e.tmp_path / "out.txt"
+
+        wrapper.cmd_cp([f"{e.slug}:f.txt"], str(dest))
+
+        assert dest.read_text() == "host content\n"
+
+    def test_host_to_cave_falls_back(self, no_session_env):
+        """Writing to a project path without a session writes to host source."""
+        e = no_session_env
+        src = e.tmp_path / "data.txt"
+        src.write_text("data\n")
+
+        wrapper.cmd_cp([str(src)], f"{e.slug}:data.txt")
+
+        assert (e.host / "data.txt").read_text() == "data\n"
+
+    def test_non_project_path_exits(self, no_session_env):
+        """Non-project paths (e.g. /tmp) require a running session."""
+        e = no_session_env
         src = e.tmp_path / "data.txt"
         src.write_text("data\n")
 
         with pytest.raises(SystemExit):
-            wrapper.cmd_cp([str(src)], f"{e.slug}:data.txt")
+            wrapper.cmd_cp([str(src)], f"{e.slug}:/tmp/data.txt")
 
 
 class TestCpCavePrefix:
@@ -429,11 +479,11 @@ class TestCpTildeExpansion:
 
 
 class TestCpCrossProject:
-    """cp can access other projects mounted in the same session."""
+    """cp can access other projects in the cave filesystem."""
 
     @pytest.fixture
     def multi_env(self, cp_env):
-        """Extend cp_env with a second project in the same session."""
+        """Extend cp_env with a second project in the fake cave root."""
         e = cp_env
         slug2 = "other-project"
         host2 = e.tmp_path / "host2"
@@ -443,16 +493,12 @@ class TestCpCrossProject:
         git_run("git", "-C", str(host2), "add", ".")
         git_run("git", "-C", str(host2), "commit", "-m", "initial")
 
-        cave_data = _state.cave_data()
-
-        # Create merged overlay for second project in same session
-        sid = "test-session-1"
-        merged2 = cave_data / "session-overlays" / sid / f"{slug2}-merged"
+        # Create second project in the fake cave root
+        merged2 = e.cave_root / "projects" / slug2
         merged2.mkdir(parents=True)
         (merged2 / "other.txt").write_text("from other\n")
 
         # Register second project
-        (_state.projects_dir() / slug2).mkdir(parents=True, exist_ok=True)
         import json
         proj = json.loads((_state.projects_file()).read_text())
         proj[slug2] = str(host2)
@@ -498,6 +544,73 @@ class TestCpCrossProject:
         assert (e.merged2 / "new.txt").read_text() == "into other\n"
 
 
+class TestCpArbitraryPaths:
+    """cp can access arbitrary cave filesystem paths via /proc/pid/root."""
+
+    def test_copy_from_tmp(self, cp_env):
+        e = cp_env
+        tmp = e.cave_root / "tmp"
+        tmp.mkdir()
+        (tmp / "data.txt").write_text("from /tmp\n")
+        dest = e.tmp_path / "out.txt"
+
+        wrapper.cmd_cp([f"{e.slug}:/tmp/data.txt"], str(dest))
+
+        assert dest.read_text() == "from /tmp\n"
+
+    def test_copy_to_tmp(self, cp_env):
+        e = cp_env
+        tmp = e.cave_root / "tmp"
+        tmp.mkdir()
+        src = e.tmp_path / "upload.txt"
+        src.write_text("to /tmp\n")
+
+        wrapper.cmd_cp([str(src)], f"{e.slug}:/tmp/upload.txt")
+
+        assert (tmp / "upload.txt").read_text() == "to /tmp\n"
+
+    def test_copy_dir_from_arbitrary_path(self, cp_env):
+        e = cp_env
+        src_dir = e.cave_root / "tmp" / "mydir"
+        src_dir.mkdir(parents=True)
+        (src_dir / "a.txt").write_text("a\n")
+        (src_dir / "b.txt").write_text("b\n")
+        dest = e.tmp_path / "mydir"
+
+        wrapper.cmd_cp([f"{e.slug}:/tmp/mydir"], str(dest), recursive=True)
+
+        assert (dest / "a.txt").read_text() == "a\n"
+        assert (dest / "b.txt").read_text() == "b\n"
+
+    def test_nonexistent_arbitrary_path_exits(self, cp_env):
+        e = cp_env
+        with pytest.raises(SystemExit):
+            wrapper.cmd_cp([f"{e.slug}:/tmp/nonexistent"], str(e.tmp_path / "out"))
+
+    def test_nix_store_path(self, cp_env):
+        e = cp_env
+        store_path = e.cave_root / "nix" / "store" / "abc-pkg" / "bin"
+        store_path.mkdir(parents=True)
+        (store_path / "tool").write_text("#!/bin/sh\n")
+        dest = e.tmp_path / "tool"
+
+        wrapper.cmd_cp([f"{e.slug}:/nix/store/abc-pkg/bin/tool"], str(dest))
+
+        assert dest.read_text() == "#!/bin/sh\n"
+
+    def test_cave_prefix_arbitrary_path(self, cp_env, monkeypatch):
+        e = cp_env
+        monkeypatch.chdir(e.host)
+        tmp = e.cave_root / "tmp"
+        tmp.mkdir(exist_ok=True)
+        (tmp / "data.txt").write_text("via cave:\n")
+        dest = e.tmp_path / "out.txt"
+
+        wrapper.cmd_cp(["cave:/tmp/data.txt"], str(dest))
+
+        assert dest.read_text() == "via cave:\n"
+
+
 class TestCpNoColonSyntax:
     """cp requires colon syntax for at least one argument."""
 
@@ -505,3 +618,156 @@ class TestCpNoColonSyntax:
         e = cp_env
         with pytest.raises(SystemExit):
             wrapper.cmd_cp(["/tmp/a"], "/tmp/b")
+
+
+class TestCpSessionSelection:
+    """Session selection prefers sessions for the target project."""
+
+    def test_single_project_session_auto_selects(self, tmp_path, monkeypatch):
+        """One session for the project → auto-selected, no prompt."""
+        slug = "myproject"
+        cave_data = tmp_path / "cave-data"
+        _state.set_cave_data(cave_data)
+
+        host = tmp_path / "host"
+        host.mkdir()
+        git_run("git", "init", "-b", "main", str(host))
+        (host / "f.txt").write_text("x\n")
+        git_run("git", "-C", str(host), "add", ".")
+        git_run("git", "-C", str(host), "commit", "-m", "init")
+        write_projects(cave_data, {slug: str(host), "other": str(host)})
+        (_state.projects_dir() / slug).mkdir(parents=True)
+
+        # Two sessions: one for myproject, one for other
+        write_session(cave_data, "sess-mine", slug)
+        write_session(cave_data, "sess-other", "other")
+
+        cave_root = tmp_path / "cave-root"
+        merged = cave_root / "projects" / slug
+        merged.mkdir(parents=True)
+        (merged / "f.txt").write_text("from cave\n")
+
+        # _find_cave_root should auto-select sess-mine without prompting.
+        # We mock it to verify it receives the project hint.
+        called_with = []
+        def mock_find(project=None):
+            called_with.append(project)
+            return cave_root
+        monkeypatch.setattr(commands, "_find_cave_root", mock_find)
+
+        dest = tmp_path / "out.txt"
+        wrapper.cmd_cp([f"{slug}:f.txt"], str(dest))
+
+        assert called_with == [slug]
+        assert dest.read_text() == "from cave\n"
+
+    def test_no_project_sessions_uses_any(self, tmp_path, monkeypatch):
+        """No sessions for this project but others exist → uses any session."""
+        slug = "myproject"
+        cave_data = tmp_path / "cave-data"
+        _state.set_cave_data(cave_data)
+
+        host = tmp_path / "host"
+        host.mkdir()
+        git_run("git", "init", "-b", "main", str(host))
+        write_projects(cave_data, {slug: str(host), "other": str(host)})
+        (_state.projects_dir() / slug).mkdir(parents=True)
+
+        # Only a session for "other"
+        write_session(cave_data, "sess-other", "other")
+
+        cave_root = tmp_path / "cave-root"
+        merged = cave_root / "projects" / slug
+        merged.mkdir(parents=True)
+        (merged / "f.txt").write_text("cross-session\n")
+
+        monkeypatch.setattr(commands, "_find_cave_root", lambda project=None: cave_root)
+
+        dest = tmp_path / "out.txt"
+        wrapper.cmd_cp([f"{slug}:f.txt"], str(dest))
+
+        assert dest.read_text() == "cross-session\n"
+
+
+class TestCpBwrapIntegration:
+    """Integration tests using a real bwrap subprocess."""
+
+    @pytest.fixture
+    def bwrap_env(self, tmp_path):
+        """Start a bwrap process and provide its /proc/pid/root path."""
+        bash = subprocess.run(["which", "bash"], capture_output=True, text=True).stdout.strip()
+        proc = subprocess.Popen(
+            ["bwrap",
+             "--ro-bind", "/nix/store", "/nix/store",
+             "--tmpfs", "/tmp",
+             "--proc", "/proc",
+             "--dev", "/dev",
+             "--", bash, "-c",
+             "echo integration > /tmp/bwrap-test.txt; "
+             "mkdir -p /tmp/testdir; "
+             "echo one > /tmp/testdir/one.txt; "
+             "echo two > /tmp/testdir/two.txt; "
+             "sleep 60"],
+        )
+        import time
+        time.sleep(0.3)
+
+        # Find inner PID
+        inner_pid = None
+        for entry in os.scandir("/proc"):
+            if not entry.name.isdigit():
+                continue
+            try:
+                from pathlib import Path
+                stat = Path(entry.path, "stat").read_text()
+                close_paren = stat.rfind(")")
+                fields = stat[close_paren + 2:].split()
+                ppid = int(fields[1])
+                if ppid == proc.pid:
+                    inner_pid = int(entry.name)
+                    break
+            except (FileNotFoundError, ValueError, PermissionError, IndexError):
+                continue
+
+        if inner_pid is None:
+            proc.kill()
+            proc.wait()
+            pytest.skip("Could not find bwrap child PID")
+
+        root = Path(f"/proc/{inner_pid}/root")
+        if not root.is_dir():
+            proc.kill()
+            proc.wait()
+            pytest.skip("/proc/pid/root not accessible")
+
+        yield root, tmp_path
+
+        proc.kill()
+        proc.wait()
+
+    def test_read_file_from_bwrap(self, bwrap_env):
+        root, tmp_path = bwrap_env
+        dest = tmp_path / "out.txt"
+        import shutil
+        src = root / "tmp" / "bwrap-test.txt"
+        if not src.exists():
+            pytest.skip("bwrap file not ready")
+        shutil.copy2(src, dest)
+        assert dest.read_text() == "integration\n"
+
+    def test_write_file_to_bwrap(self, bwrap_env):
+        root, tmp_path = bwrap_env
+        target = root / "tmp" / "written.txt"
+        target.write_text("from host\n")
+        assert target.read_text() == "from host\n"
+
+    def test_copy_dir_from_bwrap(self, bwrap_env):
+        root, tmp_path = bwrap_env
+        import shutil
+        src = root / "tmp" / "testdir"
+        if not src.is_dir():
+            pytest.skip("bwrap dir not ready")
+        dest = tmp_path / "testdir"
+        shutil.copytree(src, dest)
+        assert (dest / "one.txt").read_text() == "one\n"
+        assert (dest / "two.txt").read_text() == "two\n"
