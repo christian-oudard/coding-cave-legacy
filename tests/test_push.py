@@ -462,3 +462,125 @@ class TestForcePushClearsSyncedPerBranch:
         # refs/synced/develop should still exist
         assert synced_develop.exists(), \
             "refs/synced/develop should NOT be cleared by force push of main"
+
+
+class TestPushAfterPull:
+    """Push after pull sends host commits to cave (not 'already up to date')."""
+
+    def test_push_after_pull_sends_host_commits(self, push_env):
+        """Host commit B + cave commit C, pull, push -> cave has both."""
+        env = push_env
+
+        # Cave makes a commit
+        cave = push_env.host.parent / "cave-work"
+        cave.mkdir()
+        _run("git", "--git-dir", str(env.gitdir), "--work-tree", str(cave),
+             "checkout", "HEAD", "--", ".")
+        (cave / "cave.txt").write_text("from cave\n")
+        _run("git", "--git-dir", str(env.gitdir), "--work-tree", str(cave),
+             "add", "cave.txt")
+        _run("git", "--git-dir", str(env.gitdir), "--work-tree", str(cave),
+             "commit", "-m", "cave commit")
+        cave_sha = _head(env.gitdir, gitdir=True)
+
+        # Host makes a commit
+        (env.host / "host.txt").write_text("from host\n")
+        _run("git", "-C", str(env.host), "add", ".")
+        _run("git", "-C", str(env.host), "commit", "-m", "host commit")
+
+        # Pull cave commit to host
+        wrapper.pull_project(env.slug)
+        assert (env.host / "cave.txt").read_text() == "from cave\n"
+
+        # Cave gitdir refs/heads should NOT have been updated by pull
+        assert _head(env.gitdir, gitdir=True) == cave_sha
+
+        # Push should succeed (NOT "already up to date")
+        wrapper.push_project(env.slug)
+        assert _head(env.gitdir, gitdir=True) == _head(env.host)
+
+    def test_pull_then_push_roundtrip(self, push_env):
+        """The user's scenario: push blocked, pull, push succeeds."""
+        env = push_env
+
+        # Cave makes a commit
+        cave = push_env.host.parent / "cave-work"
+        cave.mkdir()
+        _run("git", "--git-dir", str(env.gitdir), "--work-tree", str(cave),
+             "checkout", "HEAD", "--", ".")
+        (cave / "cave.txt").write_text("from cave\n")
+        _run("git", "--git-dir", str(env.gitdir), "--work-tree", str(cave),
+             "add", "cave.txt")
+        _run("git", "--git-dir", str(env.gitdir), "--work-tree", str(cave),
+             "commit", "-m", "cave commit")
+
+        # Host makes a commit
+        (env.host / "host.txt").write_text("from host\n")
+        _run("git", "-C", str(env.host), "add", ".")
+        _run("git", "-C", str(env.host), "commit", "-m", "host commit")
+
+        # Push should be blocked (unpulled cave commits)
+        with pytest.raises(SystemExit):
+            wrapper.push_project(env.slug)
+
+        # Pull first
+        wrapper.pull_project(env.slug)
+
+        # Now push should succeed
+        wrapper.push_project(env.slug)
+        assert _head(env.gitdir, gitdir=True) == _head(env.host)
+
+
+class TestCheckUnpulledWithRefsPulled:
+    """_check_unpulled uses refs/pulled when available."""
+
+    def test_returns_none_when_refs_pulled_matches(self, push_env):
+        """_check_unpulled returns None when refs/pulled matches cave tip."""
+        env = push_env
+
+        # Cave makes a commit
+        cave = push_env.host.parent / "cave-work"
+        cave.mkdir()
+        _run("git", "--git-dir", str(env.gitdir), "--work-tree", str(cave),
+             "checkout", "HEAD", "--", ".")
+        (cave / "cave.txt").write_text("from cave\n")
+        _run("git", "--git-dir", str(env.gitdir), "--work-tree", str(cave),
+             "add", "cave.txt")
+        _run("git", "--git-dir", str(env.gitdir), "--work-tree", str(cave),
+             "commit", "-m", "cave commit")
+
+        # Pull (sets refs/pulled)
+        wrapper.pull_project(env.slug)
+
+        # Host makes another commit
+        (env.host / "host2.txt").write_text("more host\n")
+        _run("git", "-C", str(env.host), "add", ".")
+        _run("git", "-C", str(env.host), "commit", "-m", "host commit 2")
+
+        # Push should succeed since all cave commits were pulled
+        wrapper.push_project(env.slug)
+        assert _head(env.gitdir, gitdir=True) == _head(env.host)
+
+    def test_backward_compat_no_refs_pulled(self, push_env):
+        """Old gitdirs without refs/pulled still work via merge-base."""
+        env = push_env
+
+        # Cave makes a commit
+        cave = push_env.host.parent / "cave-work"
+        cave.mkdir()
+        _run("git", "--git-dir", str(env.gitdir), "--work-tree", str(cave),
+             "checkout", "HEAD", "--", ".")
+        (cave / "cave.txt").write_text("from cave\n")
+        _run("git", "--git-dir", str(env.gitdir), "--work-tree", str(cave),
+             "add", "cave.txt")
+        _run("git", "--git-dir", str(env.gitdir), "--work-tree", str(cave),
+             "commit", "-m", "cave commit")
+
+        # Host makes a commit
+        (env.host / "host.txt").write_text("from host\n")
+        _run("git", "-C", str(env.host), "add", ".")
+        _run("git", "-C", str(env.host), "commit", "-m", "host commit")
+
+        # Without refs/pulled, push should still detect unpulled commits
+        with pytest.raises(SystemExit):
+            wrapper.push_project(env.slug)

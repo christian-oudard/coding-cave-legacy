@@ -217,6 +217,20 @@ def _sync_branch(gitdir_path, project_dir, host_sha, branch):
         f"refs/remotes/host/{branch}", host_sha, capture_output=True)
 
 
+def _sync_tracking_ref(gitdir_path, project_dir, host_sha, branch):
+    """Update only refs/remotes/host/<branch> (tracking ref, used by pull)."""
+    git_mod.git(gitdir_path, "fetch", str(project_dir), host_sha,
+        capture_output=True)
+    git_mod.git(gitdir_path, "update-ref",
+        f"refs/remotes/host/{branch}", host_sha, capture_output=True)
+
+
+def _mark_pulled(gitdir_path, cave_sha, branch):
+    """Record that cave commits up to cave_sha have been pulled to host."""
+    git_mod.git(gitdir_path, "update-ref",
+        f"refs/pulled/{branch}", cave_sha, capture_output=True)
+
+
 def _last_synced_sha(gitdir_path, branch):
     """Get the last-synced host SHA for a branch."""
     result = git_mod.git(gitdir_path, "rev-parse",
@@ -386,15 +400,14 @@ def _pull_branch_current(slug, project_dir, gitdir_path, branch, cave_sha,
                 # host's rewrite is all that changed.
                 print(f"Host rewrote history for {slug}, no new cave commits.",
                       file=sys.stderr)
-                _sync_branch(gitdir_path, project_dir,
-                    subprocess.run(
-                        host_git + ["rev-parse", "HEAD"],
-                        capture_output=True, text=True, check=True,
-                    ).stdout.strip(), branch)
-                return subprocess.run(
+                host_head_sha = subprocess.run(
                     host_git + ["rev-parse", "HEAD"],
                     capture_output=True, text=True, check=True,
                 ).stdout.strip()
+                _sync_tracking_ref(gitdir_path, project_dir,
+                    host_head_sha, branch)
+                _mark_pulled(gitdir_path, cave_sha, branch)
+                return host_head_sha
 
             stash_result = subprocess.run(
                 host_git + ["stash", "--include-untracked"],
@@ -680,6 +693,7 @@ def pull_project(slug, force=False):
             capture_output=True, text=True, check=True,
         ).stdout.strip()
         git_mod.sync_refs(gitdir_path, project_dir, host_head, branch)
+        _mark_pulled(gitdir_path, host_head, branch)
         return
 
     current_branch = branch_result.stdout.strip()
@@ -726,7 +740,8 @@ def pull_project(slug, force=False):
             cave_branches[branch], host_git,
         )
         if new_sha:
-            _sync_branch(gitdir_path, project_dir, new_sha, branch)
+            _sync_tracking_ref(gitdir_path, project_dir, new_sha, branch)
+            _mark_pulled(gitdir_path, cave_branches[branch], branch)
             any_pulled = True
 
     # Pull current branch (checkout-based, with stash).
@@ -737,8 +752,10 @@ def pull_project(slug, force=False):
             cave_branches[current_branch], host_git, force,
         )
         if current_pulled:
-            _sync_branch(gitdir_path, project_dir,
-                         current_pulled, current_branch)
+            _sync_tracking_ref(gitdir_path, project_dir,
+                               current_pulled, current_branch)
+            _mark_pulled(gitdir_path,
+                         cave_branches[current_branch], current_branch)
             any_pulled = True
 
     # Keep shared gitdir HEAD in sync with host's current branch so new
@@ -757,12 +774,22 @@ def pull_project(slug, force=False):
     host_branches = _get_branches(project_dir)
     total_ahead = 0
     for branch in sorted(host_branches):
-        result = subprocess.run(
-            host_git + ["rev-list", "--count", f"cave/{branch}..{branch}"],
+        host_sha = host_branches[branch]
+        tracking = git_mod.git(gitdir_path, "rev-parse",
+            f"refs/remotes/host/{branch}",
+            capture_output=True, text=True)
+        if tracking.returncode != 0:
+            continue
+        tracking_sha = tracking.stdout.strip()
+        if tracking_sha == host_sha:
+            continue
+        count_result = subprocess.run(
+            host_git + ["rev-list", "--count",
+                f"{tracking_sha}..{branch}"],
             capture_output=True, text=True,
         )
-        if result.returncode == 0:
-            total_ahead += int(result.stdout.strip())
+        if count_result.returncode == 0:
+            total_ahead += int(count_result.stdout.strip())
 
     if not any_pulled:
         if total_ahead:
@@ -781,6 +808,20 @@ def _check_unpulled(gitdir_path, project_dir, cave_sha, host_sha, branch):
 
     Returns the count (str) of unpulled commits, or None if clean.
     """
+    # Check refs/pulled/<branch> first — records what was already pulled
+    pulled = git_mod.git(gitdir_path, "rev-parse",
+        f"refs/pulled/{branch}",
+        capture_output=True, text=True)
+    if pulled.returncode == 0:
+        pulled_sha = pulled.stdout.strip()
+        unpulled = git_mod.git(gitdir_path, "rev-list", "--count",
+            f"{pulled_sha}..{cave_sha}",
+            capture_output=True, text=True)
+        if unpulled.returncode == 0 and unpulled.stdout.strip() != "0":
+            return unpulled.stdout.strip()
+        return None
+
+    # Fallback for old gitdirs without refs/pulled
     git_mod.git(gitdir_path, "fetch", str(project_dir), host_sha,
         capture_output=True)
     merge_base = git_mod.git(gitdir_path, "merge-base",
@@ -854,6 +895,7 @@ def push_project(slug, force=False):
                 print(f"  Session work will be rebased on next sync.",
                       file=sys.stderr)
         _sync_branch(gitdir_path, project_dir, host_sha, current_branch)
+        _mark_pulled(gitdir_path, host_sha, current_branch)
         # Clear refs/synced in running sessions so _forward_refs
         # re-evaluates on next sync (their synced ref now points to a
         # SHA that is no longer the shared branch tip).
@@ -892,6 +934,7 @@ def push_project(slug, force=False):
                 continue
 
         _sync_branch(gitdir_path, project_dir, host_sha, branch)
+        _mark_pulled(gitdir_path, host_sha, branch)
         pushed_branches.append((branch, host_sha))
 
     # Keep shared gitdir HEAD in sync with host's current branch so new
@@ -989,24 +1032,59 @@ def project_sync_status(slug, source):
     for branch in sorted(all_branches):
         host_sha = host_branches.get(branch)
         cave_sha = cave_branches.get(branch)
-        if not host_sha or not cave_sha or host_sha == cave_sha:
+        if not host_sha or not cave_sha:
             continue
-        git_mod.git(gitdir_path, "fetch", str(project_dir), host_sha,
-            capture_output=True)
-        mb = git_mod.git(gitdir_path, "merge-base", cave_sha, host_sha,
+
+        # to pull: cave commits not yet pulled
+        pulled = git_mod.git(gitdir_path, "rev-parse",
+            f"refs/pulled/{branch}",
             capture_output=True, text=True)
-        if mb.returncode != 0:
-            diverged.append(branch)
-            continue
-        base = mb.stdout.strip()
-        to_pull = git_mod.git(gitdir_path, "rev-list", "--count",
-             f"{base}..{cave_sha}",
-            capture_output=True, text=True)
-        to_push = git_mod.git(gitdir_path, "rev-list", "--count",
-             f"{base}..{host_sha}",
-            capture_output=True, text=True)
+        if pulled.returncode == 0:
+            pulled_sha = pulled.stdout.strip()
+            to_pull = git_mod.git(gitdir_path, "rev-list", "--count",
+                f"{pulled_sha}..{cave_sha}",
+                capture_output=True, text=True)
+        else:
+            # Fallback: merge-base for old gitdirs without refs/pulled
+            git_mod.git(gitdir_path, "fetch", str(project_dir), host_sha,
+                capture_output=True)
+            mb = git_mod.git(gitdir_path, "merge-base", cave_sha, host_sha,
+                capture_output=True, text=True)
+            if mb.returncode != 0:
+                diverged.append(branch)
+                continue
+            to_pull = git_mod.git(gitdir_path, "rev-list", "--count",
+                f"{mb.stdout.strip()}..{cave_sha}",
+                capture_output=True, text=True)
         n_pull = int(to_pull.stdout.strip()) if to_pull.returncode == 0 else 0
-        n_push = int(to_push.stdout.strip()) if to_push.returncode == 0 else 0
+
+        # to push: host commits beyond what cave knows
+        tracking_sha = _last_synced_sha(gitdir_path, branch)
+        if tracking_sha:
+            if tracking_sha == host_sha:
+                n_push = 0
+            else:
+                git_mod.git(gitdir_path, "fetch", str(project_dir), host_sha,
+                    capture_output=True)
+                to_push = git_mod.git(gitdir_path, "rev-list", "--count",
+                    f"{tracking_sha}..{host_sha}",
+                    capture_output=True, text=True)
+                n_push = int(to_push.stdout.strip()) if to_push.returncode == 0 else 0
+        else:
+            # Fallback: merge-base
+            git_mod.git(gitdir_path, "fetch", str(project_dir), host_sha,
+                capture_output=True)
+            mb = git_mod.git(gitdir_path, "merge-base", cave_sha, host_sha,
+                capture_output=True, text=True)
+            if mb.returncode != 0:
+                if branch not in diverged:
+                    diverged.append(branch)
+                continue
+            to_push = git_mod.git(gitdir_path, "rev-list", "--count",
+                f"{mb.stdout.strip()}..{host_sha}",
+                capture_output=True, text=True)
+            n_push = int(to_push.stdout.strip()) if to_push.returncode == 0 else 0
+
         total_pull += n_pull
         total_push += n_push
 

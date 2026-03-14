@@ -3,6 +3,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -1810,6 +1811,105 @@ class TestSessionGitdir:
         result = cave_git(work_b, "stash", "apply")
         assert result.returncode == 0
         assert (work_b / "file.txt").read_text() == "stashed\n"
+
+
+class TestPullDoesNotUpdateCaveRefs:
+    """Pull should update tracking refs but NOT cave refs/heads."""
+
+    @pytest.fixture
+    def pull_setup(self, tmp_path):
+        """Host + gitdir with diverging commits for pull testing."""
+        slug = "test-project"
+        _state.set_cave_data(tmp_path)
+
+        host = tmp_path / "host"
+        host.mkdir()
+        git_run("git", "-C", str(host), "init", "-b", "main")
+        git_run("git", "-C", str(host), "config", "user.email", "host@test.com")
+        git_run("git", "-C", str(host), "config", "user.name", "Host User")
+        (host / "file.txt").write_text("initial\n")
+        git_run("git", "-C", str(host), "add", ".")
+        git_run("git", "-C", str(host), "commit", "-m", "initial")
+
+        projects_dir = _state.projects_dir()
+        proj_state = projects_dir / slug
+        proj_state.mkdir(parents=True)
+        tmpclone = tmp_path / "_tmpclone"
+        git_run("git", "clone", "--no-checkout", "--local",
+                str(host), str(tmpclone))
+        gitdir = proj_state / "gitdir"
+        (tmpclone / ".git").rename(gitdir)
+        tmpclone.rmdir()
+        git_run("git", "--git-dir", str(gitdir), "remote", "remove", "origin")
+        git_run("git", "--git-dir", str(gitdir), "config",
+                "user.email", "cave@cave")
+        git_run("git", "--git-dir", str(gitdir), "config",
+                "user.name", "cave-coder")
+        git_run("git", "--git-dir", str(gitdir), "read-tree", "HEAD")
+
+        cave = tmp_path / "cave"
+        cave.mkdir()
+        git_run("git", "--git-dir", str(gitdir), "--work-tree", str(cave),
+                "checkout", "HEAD", "--", ".")
+
+        write_projects(tmp_path, {slug: str(host)})
+        wrapper.ensure_cave_remote(host, gitdir)
+        host_head = git_head(host)
+        wrapper.sync_refs(gitdir, host, host_head, "main")
+
+        return SimpleNamespace(host=host, gitdir=gitdir, cave=cave, slug=slug)
+
+    def test_pull_does_not_update_cave_refs_heads(self, pull_setup):
+        """Cave gitdir refs/heads unchanged after pull."""
+        env = pull_setup
+
+        # Cave makes a commit
+        (env.cave / "cave.txt").write_text("from cave\n")
+        git_run("git", "--git-dir", str(env.gitdir), "--work-tree",
+                str(env.cave), "add", "cave.txt")
+        git_run("git", "--git-dir", str(env.gitdir), "--work-tree",
+                str(env.cave), "commit", "-m", "cave commit")
+        cave_head_before = git_head(env.gitdir, gitdir=True)
+
+        wrapper.pull_project(env.slug)
+
+        # refs/heads/main should still be the cave's original tip
+        cave_head_after = git_head(env.gitdir, gitdir=True)
+        assert cave_head_after == cave_head_before
+
+        # But tracking ref should be updated
+        tracking = git_run("git", "--git-dir", str(env.gitdir),
+                           "rev-parse", "refs/remotes/host/main").stdout.strip()
+        assert tracking == git_head(env.host)
+
+        # And refs/pulled should be set
+        pulled = git_run("git", "--git-dir", str(env.gitdir),
+                         "rev-parse", "refs/pulled/main").stdout.strip()
+        assert pulled == cave_head_before
+
+    def test_new_session_starts_from_cave_state(self, pull_setup, tmp_path):
+        """After pull, new session starts from cave refs/heads, not host state."""
+        env = pull_setup
+
+        # Cave makes a commit
+        (env.cave / "cave.txt").write_text("from cave\n")
+        git_run("git", "--git-dir", str(env.gitdir), "--work-tree",
+                str(env.cave), "add", "cave.txt")
+        git_run("git", "--git-dir", str(env.gitdir), "--work-tree",
+                str(env.cave), "commit", "-m", "cave commit")
+        cave_head = git_head(env.gitdir, gitdir=True)
+
+        wrapper.pull_project(env.slug)
+
+        # Create a new session — should start from cave's refs/heads
+        overlay = tmp_path / "session-overlay"
+        overlay.mkdir()
+        session_gd = wrapper.create_session_gitdir(env.slug, "new-sid", overlay)
+
+        session_head = git_run("git", "--git-dir", str(session_gd),
+                               "rev-parse", "HEAD").stdout.strip()
+        assert session_head == cave_head
+
 
 class TestSessionSetup:
     """Test per-session gitdir: sessions work on real branches (e.g. main)."""
