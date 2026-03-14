@@ -631,8 +631,27 @@ def pull_project(slug, force=False):
     ).stdout.strip()
     git_mod.finalize_sync(gitdir_path, project_dir)
 
+    # Check if host is ahead of cave (has commits to push)
+    host_branches = _get_branches(project_dir)
+    total_ahead = 0
+    for branch in sorted(host_branches):
+        result = subprocess.run(
+            host_git + ["rev-list", "--count", f"cave/{branch}..{branch}"],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            total_ahead += int(result.stdout.strip())
+
     if not any_pulled:
-        print(f"Already up to date.", file=sys.stderr)
+        if total_ahead:
+            print(f"Already up to date, host is {total_ahead} commit(s) ahead.",
+                  file=sys.stderr)
+            print(f"  (use 'coding-cave push' to sync)", file=sys.stderr)
+        else:
+            print(f"Already up to date.", file=sys.stderr)
+    elif total_ahead:
+        print(f"Host is {total_ahead} commit(s) ahead, use 'coding-cave push' to sync.",
+              file=sys.stderr)
 
 
 def _check_unpulled(gitdir_path, project_dir, cave_sha, host_sha, branch):

@@ -2806,3 +2806,59 @@ class TestHostIdentitySync:
             capture_output=True, text=True,
         ).stdout.strip()
         assert shared_head == session_head
+
+
+class TestPullAheadMessage:
+    """pull_project shows 'host is ahead' when host has unpushed commits."""
+
+    def test_pull_nothing_to_pull_host_ahead(self, tmp_path, capsys):
+        slug = "test-project"
+        _state.set_cave_data(tmp_path)
+
+        host = tmp_path / "host"
+        host.mkdir()
+        git_run("git", "-C", str(host), "init", "-b", "main")
+        git_run("git", "-C", str(host), "config", "user.email", "t@t")
+        git_run("git", "-C", str(host), "config", "user.name", "Test")
+        (host / "file.txt").write_text("initial\n")
+        git_run("git", "-C", str(host), "add", ".")
+        git_run("git", "-C", str(host), "commit", "-m", "initial")
+
+        write_projects(tmp_path, {slug: str(host)})
+        wrapper.initialize_gitdir(slug, host)
+
+        # Host makes a commit that cave doesn't have
+        (host / "extra.txt").write_text("host-only\n")
+        git_run("git", "-C", str(host), "add", ".")
+        git_run("git", "-C", str(host), "commit", "-m", "host commit")
+
+        from coding_cave.sync import pull_project
+        pull_project(slug)
+
+        err = capsys.readouterr().err
+        assert "Already up to date" in err
+        assert "1 commit(s) ahead" in err
+        assert "coding-cave push" in err
+
+    def test_pull_nothing_to_pull_synced(self, tmp_path, capsys):
+        slug = "test-project"
+        _state.set_cave_data(tmp_path)
+
+        host = tmp_path / "host"
+        host.mkdir()
+        git_run("git", "-C", str(host), "init", "-b", "main")
+        git_run("git", "-C", str(host), "config", "user.email", "t@t")
+        git_run("git", "-C", str(host), "config", "user.name", "Test")
+        (host / "file.txt").write_text("initial\n")
+        git_run("git", "-C", str(host), "add", ".")
+        git_run("git", "-C", str(host), "commit", "-m", "initial")
+
+        write_projects(tmp_path, {slug: str(host)})
+        wrapper.initialize_gitdir(slug, host)
+
+        from coding_cave.sync import pull_project
+        pull_project(slug)
+
+        err = capsys.readouterr().err
+        assert "Already up to date" in err
+        assert "ahead" not in err
