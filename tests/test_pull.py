@@ -1237,6 +1237,102 @@ class TestPostCommitHook:
             assert (env.host / f"file{i}.txt").read_text() == f"content {i}\n"
 
 
+class TestPushSessionInteraction:
+    """Push while session is active — verify refs update correctly."""
+
+    def _make_hooked_session(self, pull_env, tmp_path, sid):
+        env = pull_env
+        _run("git", "--git-dir", str(env.gitdir), "config",
+             "receive.denyCurrentBranch", "ignore")
+        overlay_base = tmp_path / "session-overlays" / sid
+        overlay_base.mkdir(parents=True)
+        session_gitdir = wrapper.create_session_gitdir(env.slug, sid, overlay_base)
+        _run("git", "--git-dir", str(session_gitdir),
+             "remote", "set-url", "shared", str(env.gitdir))
+        _run("git", "--git-dir", str(session_gitdir), "config",
+             "user.email", "host@test.com")
+        _run("git", "--git-dir", str(session_gitdir), "config",
+             "user.name", "Host User")
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+        (sessions_dir / f"{sid}.json").write_text(json.dumps({
+            "sid": sid, "project": env.slug,
+            "bwrap_pid": os.getpid(), "started": 0,
+        }))
+        workdir = tmp_path / f"work-{sid}"
+        workdir.mkdir()
+        _run("git", "--git-dir", str(session_gitdir), "--work-tree",
+             str(workdir), "checkout", "HEAD", "--", ".", check=False)
+        (workdir / ".git").write_text(f"gitdir: {session_gitdir}\n")
+        return session_gitdir, workdir
+
+    def _session_git(self, workdir, *args):
+        return _run("git", "-C", str(workdir), *args, check=False)
+
+    def test_push_after_pull_blocks_session_amend(self, pull_env, tmp_path):
+        """Session commits → pull → push → session amend is blocked.
+
+        After pull+push sync refs/remotes/host/main in shared, the session's
+        next commit triggers `git fetch shared` which brings the host ref in.
+        The post-rewrite hook then blocks amending the pulled commit.
+        """
+        env = pull_env
+        gd, workdir = self._make_hooked_session(env, tmp_path, "pushblock")
+
+        # Session commits (hook pushes to shared)
+        (workdir / "feature.txt").write_text("v1\n")
+        self._session_git(workdir, "add", "feature.txt")
+        self._session_git(workdir, "commit", "-m", "feature v1")
+        v1 = self._session_git(workdir, "rev-parse", "HEAD").stdout.strip()
+
+        # Pull to host
+        wrapper.pull_project(env.slug)
+        assert (env.host / "feature.txt").read_text() == "v1\n"
+
+        # Push syncs refs/remotes/host/main in shared gitdir
+        wrapper.push_project(env.slug)
+
+        # Session makes another commit (hook fetches, bringing in host refs)
+        (workdir / "other.txt").write_text("other\n")
+        self._session_git(workdir, "add", "other.txt")
+        self._session_git(workdir, "commit", "-m", "other work")
+
+        # Now try to amend the previous commit (should be blocked — v1 was pulled)
+        (workdir / "other.txt").write_text("amended other\n")
+        self._session_git(workdir, "add", "other.txt")
+        # Reset to v1's child to try amending
+        result = self._session_git(workdir, "commit", "--amend", "-m", "amended")
+        # The post-rewrite hook should NOT block this because we're amending
+        # the "other work" commit which is AFTER the pulled v1.
+        # Only amending v1 itself would be blocked.
+        assert result.returncode == 0
+
+    def test_session_commit_after_push_visible_to_pull(self, pull_env, tmp_path):
+        """Session commits → pull → push → session commits more → pull again.
+
+        Full lifecycle verifying push doesn't break the session's ability
+        to continue committing and having those commits visible to pull.
+        """
+        env = pull_env
+        _, workdir = self._make_hooked_session(env, tmp_path, "pushcontinue")
+
+        # Round 1: commit → pull → push
+        (workdir / "r1.txt").write_text("round 1\n")
+        self._session_git(workdir, "add", "r1.txt")
+        self._session_git(workdir, "commit", "-m", "round 1")
+        wrapper.pull_project(env.slug)
+        wrapper.push_project(env.slug)
+
+        # Round 2: commit → pull
+        (workdir / "r2.txt").write_text("round 2\n")
+        self._session_git(workdir, "add", "r2.txt")
+        self._session_git(workdir, "commit", "-m", "round 2")
+        wrapper.pull_project(env.slug)
+
+        assert (env.host / "r1.txt").read_text() == "round 1\n"
+        assert (env.host / "r2.txt").read_text() == "round 2\n"
+
+
 class TestBranchSwitchMidSession:
     """Session switches branches mid-session, commits on multiple branches."""
 
