@@ -998,3 +998,453 @@ class TestPullSessionIntegration:
             f"Repeated pulls changed history:\n"
             f"After 1: {log1}\nAfter 2: {log2}\nAfter 3: {log3}"
         )
+
+
+class TestPostCommitHook:
+    """Test the actual post-commit hook shell script against a real shared remote.
+
+    The hook does: push current branch to shared → set refs/pushed → fetch shared.
+    These tests create a session with the shared remote repointed to the actual
+    host-side shared gitdir, then commit and verify the hook's effects.
+    """
+
+    def _make_hooked_session(self, pull_env, tmp_path, sid):
+        """Create a session where the shared remote points to the real gitdir."""
+        env = pull_env
+        # Allow pushes to the shared gitdir (it's bare-ish, no working tree)
+        _run("git", "--git-dir", str(env.gitdir), "config",
+             "receive.denyCurrentBranch", "ignore")
+
+        overlay_base = tmp_path / "session-overlays" / sid
+        overlay_base.mkdir(parents=True)
+        session_gitdir = wrapper.create_session_gitdir(env.slug, sid, overlay_base)
+
+        # Repoint shared remote to the actual shared gitdir (not cave-internal path)
+        _run("git", "--git-dir", str(session_gitdir),
+             "remote", "set-url", "shared", str(env.gitdir))
+
+        _run("git", "--git-dir", str(session_gitdir), "config",
+             "user.email", "host@test.com")
+        _run("git", "--git-dir", str(session_gitdir), "config",
+             "user.name", "Host User")
+
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+        (sessions_dir / f"{sid}.json").write_text(json.dumps({
+            "sid": sid, "project": env.slug,
+            "bwrap_pid": os.getpid(), "started": 0,
+        }))
+
+        workdir = tmp_path / f"work-{sid}"
+        workdir.mkdir()
+        _run("git", "--git-dir", str(session_gitdir), "--work-tree",
+             str(workdir), "checkout", "HEAD", "--", ".", check=False)
+        (workdir / ".git").write_text(f"gitdir: {session_gitdir}\n")
+        return session_gitdir, workdir
+
+    def _session_git(self, workdir, *args):
+        return _run("git", "-C", str(workdir), *args, check=False)
+
+    def test_hook_pushes_commit_to_shared(self, pull_env, tmp_path):
+        """Post-commit hook FF-pushes the new commit to shared gitdir."""
+        env = pull_env
+        gd, workdir = self._make_hooked_session(env, tmp_path, "hook1")
+
+        shared_before = _head(env.gitdir, gitdir=True)
+
+        (workdir / "new.txt").write_text("hooked\n")
+        self._session_git(workdir, "add", "new.txt")
+        result = self._session_git(workdir, "commit", "-m", "hook test")
+        assert result.returncode == 0
+
+        session_head = self._session_git(workdir, "rev-parse", "HEAD").stdout.strip()
+
+        # Hook should have pushed to shared — shared main now at session head
+        shared_after = _head(env.gitdir, gitdir=True)
+        assert shared_after == session_head
+        assert shared_after != shared_before
+
+    def test_hook_sets_refs_pushed(self, pull_env, tmp_path):
+        """Post-commit hook sets refs/pushed/<branch> after successful push."""
+        env = pull_env
+        gd, workdir = self._make_hooked_session(env, tmp_path, "hook2")
+
+        (workdir / "new.txt").write_text("pushed\n")
+        self._session_git(workdir, "add", "new.txt")
+        self._session_git(workdir, "commit", "-m", "pushed commit")
+
+        session_head = self._session_git(workdir, "rev-parse", "HEAD").stdout.strip()
+
+        # refs/pushed/main should be set in the session gitdir
+        pushed = _run("git", "--git-dir", str(gd),
+                       "rev-parse", "refs/pushed/main", check=False)
+        assert pushed.returncode == 0
+        assert pushed.stdout.strip() == session_head
+
+    def test_hook_fails_silently_on_non_ff(self, pull_env, tmp_path):
+        """Post-commit hook fails silently when push is non-FF (after amend)."""
+        env = pull_env
+        gd, workdir = self._make_hooked_session(env, tmp_path, "hook3")
+
+        # First commit — hook pushes successfully
+        (workdir / "new.txt").write_text("v1\n")
+        self._session_git(workdir, "add", "new.txt")
+        self._session_git(workdir, "commit", "-m", "first")
+        first_sha = self._session_git(workdir, "rev-parse", "HEAD").stdout.strip()
+        assert _head(env.gitdir, gitdir=True) == first_sha
+
+        # Amend — hook push fails (non-FF), but commit succeeds
+        (workdir / "new.txt").write_text("v2\n")
+        self._session_git(workdir, "add", "new.txt")
+        result = self._session_git(workdir, "commit", "--amend", "-m", "amended")
+        assert result.returncode == 0  # commit itself succeeds
+
+        amended_sha = self._session_git(workdir, "rev-parse", "HEAD").stdout.strip()
+        assert amended_sha != first_sha
+
+        # Shared still at first_sha (hook push failed)
+        assert _head(env.gitdir, gitdir=True) == first_sha
+
+        # refs/pushed/main still at first_sha (not updated on failed push)
+        pushed = _run("git", "--git-dir", str(gd),
+                       "rev-parse", "refs/pushed/main", check=False)
+        assert pushed.stdout.strip() == first_sha
+
+    def test_hook_fetches_shared_updates(self, pull_env, tmp_path):
+        """Post-commit hook fetches from shared, so session sees other work."""
+        env = pull_env
+        gd_a, work_a = self._make_hooked_session(env, tmp_path, "hookA")
+        gd_b, work_b = self._make_hooked_session(env, tmp_path, "hookB")
+
+        # Session A commits (hook pushes to shared)
+        (work_a / "a.txt").write_text("from A\n")
+        self._session_git(work_a, "add", "a.txt")
+        self._session_git(work_a, "commit", "-m", "A's work")
+        a_sha = self._session_git(work_a, "rev-parse", "HEAD").stdout.strip()
+
+        # Session B commits (hook fetches, so B's fetch should see A's work)
+        (work_b / "b.txt").write_text("from B\n")
+        self._session_git(work_b, "add", "b.txt")
+        self._session_git(work_b, "commit", "-m", "B's work")
+
+        # B's hook failed to push (non-FF, A is ahead) but fetch succeeded.
+        # B should see A's commit via shared remote refs.
+        b_refs = self._session_git(work_b, "for-each-ref",
+                                   "--format=%(objectname)", "refs/remotes/shared/")
+        assert a_sha in b_refs.stdout or \
+            _run("git", "--git-dir", str(gd_b), "cat-file", "-t", a_sha,
+                 check=False).returncode == 0, \
+            "Session B should have fetched A's commit from shared"
+
+    def test_hook_pull_sees_hooked_commit(self, pull_env, tmp_path):
+        """Full lifecycle: hook pushes to shared → pull_project picks it up.
+
+        This is the most realistic test — it's exactly what happens when
+        a user runs `cav pull` while an agent is working.
+        """
+        env = pull_env
+        _, workdir = self._make_hooked_session(env, tmp_path, "hookpull")
+
+        # Session commits — hook pushes to shared immediately
+        (workdir / "feature.txt").write_text("feature\n")
+        self._session_git(workdir, "add", "feature.txt")
+        self._session_git(workdir, "commit", "-m", "add feature")
+
+        # Verify hook already pushed (shared gitdir updated)
+        session_head = self._session_git(workdir, "rev-parse", "HEAD").stdout.strip()
+        assert _head(env.gitdir, gitdir=True) == session_head
+
+        # Pull should see the commit immediately (no forward_session_refs needed)
+        wrapper.pull_project(env.slug)
+        assert (env.host / "feature.txt").read_text() == "feature\n"
+
+    def test_hook_amend_pulled_commit_blocked(self, pull_env, tmp_path):
+        """Amending a pulled commit is blocked by post-rewrite hook.
+
+        Agent commits, hook pushes. User pulls. Agent tries to amend →
+        post-rewrite hook detects the commit was pulled (via refs/remotes/host)
+        and reverts the amend. This protects pulled commits from rewriting.
+        """
+        env = pull_env
+        gd, workdir = self._make_hooked_session(env, tmp_path, "hookamend")
+
+        # First commit — hook pushes
+        (workdir / "feature.txt").write_text("v1\n")
+        self._session_git(workdir, "add", "feature.txt")
+        self._session_git(workdir, "commit", "-m", "add feature")
+
+        # Pull v1 — this sets refs/remotes/host/main in shared
+        wrapper.pull_project(env.slug)
+        assert (env.host / "feature.txt").read_text() == "v1\n"
+
+        # Hook fetched host refs — session now knows v1 was pulled
+        v1_sha = self._session_git(workdir, "rev-parse", "HEAD").stdout.strip()
+
+        # Amend attempt — post-rewrite hook reverts it (git commit returns 0
+        # but the hook does `git reset --soft` to undo the amend)
+        (workdir / "feature.txt").write_text("v2\n")
+        self._session_git(workdir, "add", "feature.txt")
+        result = self._session_git(workdir, "commit", "--amend", "-m", "amended")
+        assert "already pulled" in result.stderr
+
+        # HEAD should still be v1 (amend was reverted by hook)
+        current = self._session_git(workdir, "rev-parse", "HEAD").stdout.strip()
+        assert current == v1_sha
+
+    def test_hook_amend_unpulled_commit_succeeds(self, pull_env, tmp_path):
+        """Amending a commit that was NOT pulled is allowed.
+
+        Agent commits, hook pushes. Agent amends before user pulls.
+        The post-rewrite hook allows it because refs/remotes/host is empty.
+        """
+        env = pull_env
+        gd, workdir = self._make_hooked_session(env, tmp_path, "hookamend2")
+
+        # First commit — hook pushes
+        (workdir / "feature.txt").write_text("v1\n")
+        self._session_git(workdir, "add", "feature.txt")
+        self._session_git(workdir, "commit", "-m", "add feature")
+        v1_sha = self._session_git(workdir, "rev-parse", "HEAD").stdout.strip()
+
+        # Amend BEFORE pull — should succeed (no host refs yet)
+        (workdir / "feature.txt").write_text("v2\n")
+        self._session_git(workdir, "add", "feature.txt")
+        result = self._session_git(workdir, "commit", "--amend", "-m", "amended")
+        assert result.returncode == 0
+
+        v2_sha = self._session_git(workdir, "rev-parse", "HEAD").stdout.strip()
+        assert v2_sha != v1_sha
+
+        # Pull picks up the amended version via forward_session_refs
+        wrapper.pull_project(env.slug, force=True)
+        assert (env.host / "feature.txt").read_text() == "v2\n"
+
+    def test_hook_multiple_commits_all_pushed(self, pull_env, tmp_path):
+        """Multiple sequential commits each trigger the hook and push."""
+        env = pull_env
+        _, workdir = self._make_hooked_session(env, tmp_path, "hookmulti")
+
+        for i in range(3):
+            (workdir / f"file{i}.txt").write_text(f"content {i}\n")
+            self._session_git(workdir, "add", f"file{i}.txt")
+            self._session_git(workdir, "commit", "-m", f"commit {i}")
+
+        session_head = self._session_git(workdir, "rev-parse", "HEAD").stdout.strip()
+        assert _head(env.gitdir, gitdir=True) == session_head
+
+        wrapper.pull_project(env.slug)
+        for i in range(3):
+            assert (env.host / f"file{i}.txt").read_text() == f"content {i}\n"
+
+
+class TestBranchSwitchMidSession:
+    """Session switches branches mid-session, commits on multiple branches."""
+
+    def _make_session_env(self, pull_env, tmp_path, sid):
+        """Create a session with shared remote pointing to real gitdir."""
+        env = pull_env
+        overlay_base = tmp_path / "session-overlays" / sid
+        overlay_base.mkdir(parents=True)
+        session_gitdir = wrapper.create_session_gitdir(env.slug, sid, overlay_base)
+
+        _run("git", "--git-dir", str(session_gitdir),
+             "remote", "set-url", "shared", str(env.gitdir))
+        _run("git", "--git-dir", str(session_gitdir), "config",
+             "user.email", "host@test.com")
+        _run("git", "--git-dir", str(session_gitdir), "config",
+             "user.name", "Host User")
+
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+        (sessions_dir / f"{sid}.json").write_text(json.dumps({
+            "sid": sid, "project": env.slug,
+            "bwrap_pid": os.getpid(), "started": 0,
+        }))
+
+        workdir = tmp_path / f"work-{sid}"
+        workdir.mkdir()
+        _run("git", "--git-dir", str(session_gitdir), "--work-tree",
+             str(workdir), "checkout", "HEAD", "--", ".", check=False)
+        (workdir / ".git").write_text(f"gitdir: {session_gitdir}\n")
+        return session_gitdir, workdir
+
+    def _session_git(self, workdir, *args):
+        return _run("git", "-C", str(workdir), *args, check=False)
+
+    def test_branch_switch_commits_on_both(self, pull_env, tmp_path):
+        """Session creates feature branch, commits on both, pull gets both."""
+        env = pull_env
+
+        # Create feature branch on host too (so pull has a target)
+        _run("git", "-C", str(env.host), "branch", "feature")
+        _run("git", "--git-dir", str(env.gitdir), "branch", "feature")
+        host_head = _head(env.host)
+        wrapper.sync_refs(env.gitdir, env.host, host_head, "feature")
+
+        _, workdir = self._make_session_env(env, tmp_path, "branch1")
+
+        # Commit on main
+        (workdir / "main.txt").write_text("main work\n")
+        self._session_git(workdir, "add", "main.txt")
+        self._session_git(workdir, "commit", "-m", "main commit")
+
+        # Switch to feature, commit there
+        self._session_git(workdir, "checkout", "feature")
+        (workdir / "feature.txt").write_text("feature work\n")
+        self._session_git(workdir, "add", "feature.txt")
+        self._session_git(workdir, "commit", "-m", "feature commit")
+
+        # Switch back to main
+        self._session_git(workdir, "checkout", "main")
+
+        # Pull should get both branches
+        wrapper.pull_project(env.slug)
+        assert (env.host / "main.txt").read_text() == "main work\n"
+
+        _run("git", "-C", str(env.host), "checkout", "feature")
+        assert (env.host / "feature.txt").read_text() == "feature work\n"
+        # Feature should NOT have main's commit
+        assert not (env.host / "main.txt").exists()
+
+    def test_new_branch_created_in_session(self, pull_env, tmp_path):
+        """Session creates a new branch that doesn't exist on host.
+
+        The branch should appear in shared gitdir but pull should only
+        pull branches that exist on the host.
+        """
+        env = pull_env
+        _, workdir = self._make_session_env(env, tmp_path, "newbranch")
+
+        # Create and commit on new branch
+        self._session_git(workdir, "checkout", "-b", "experiment")
+        (workdir / "exp.txt").write_text("experiment\n")
+        self._session_git(workdir, "add", "exp.txt")
+        self._session_git(workdir, "commit", "-m", "experiment")
+
+        # Also commit on main
+        self._session_git(workdir, "checkout", "main")
+        (workdir / "main.txt").write_text("main work\n")
+        self._session_git(workdir, "add", "main.txt")
+        self._session_git(workdir, "commit", "-m", "main work")
+
+        wrapper.pull_project(env.slug)
+
+        # Main commit should be pulled
+        assert (env.host / "main.txt").read_text() == "main work\n"
+        # Experiment branch should not crash pull (it doesn't exist on host)
+
+
+class TestCleanupOrdering:
+    """Verify cleanup is safe regardless of session exit order."""
+
+    def _make_session_env(self, pull_env, tmp_path, sid):
+        env = pull_env
+        overlay_base = tmp_path / "session-overlays" / sid
+        overlay_base.mkdir(parents=True)
+        session_gitdir = wrapper.create_session_gitdir(env.slug, sid, overlay_base)
+
+        _run("git", "--git-dir", str(session_gitdir), "config",
+             "user.email", "host@test.com")
+        _run("git", "--git-dir", str(session_gitdir), "config",
+             "user.name", "Host User")
+
+        workdir = tmp_path / f"work-{sid}"
+        workdir.mkdir()
+        _run("git", "--git-dir", str(session_gitdir), "--work-tree",
+             str(workdir), "checkout", "HEAD", "--", ".", check=False)
+        (workdir / ".git").write_text(f"gitdir: {session_gitdir}\n")
+        return session_gitdir, workdir, overlay_base
+
+    def _session_git(self, workdir, *args):
+        return _run("git", "-C", str(workdir), *args, check=False)
+
+    def test_cleanup_a_then_b(self, pull_env, tmp_path):
+        """Two sessions with non-conflicting changes: A cleans up first."""
+        env = pull_env
+        _, work_a, overlay_a = self._make_session_env(env, tmp_path, "a")
+        _, work_b, overlay_b = self._make_session_env(env, tmp_path, "b")
+
+        (work_a / "a.txt").write_text("from A\n")
+        self._session_git(work_a, "add", "a.txt")
+        self._session_git(work_a, "commit", "-m", "A's work")
+
+        (work_b / "b.txt").write_text("from B\n")
+        self._session_git(work_b, "add", "b.txt")
+        self._session_git(work_b, "commit", "-m", "B's work")
+
+        wrapper.merge_session_gitdirs("a", overlay_a)
+        wrapper.merge_session_gitdirs("b", overlay_b)
+
+        wrapper.pull_project(env.slug)
+        assert (env.host / "a.txt").read_text() == "from A\n"
+        assert (env.host / "b.txt").read_text() == "from B\n"
+
+    def test_cleanup_b_then_a(self, pull_env, tmp_path):
+        """Same as above but B cleans up first — result should be identical."""
+        env = pull_env
+        _, work_a, overlay_a = self._make_session_env(env, tmp_path, "a")
+        _, work_b, overlay_b = self._make_session_env(env, tmp_path, "b")
+
+        (work_a / "a.txt").write_text("from A\n")
+        self._session_git(work_a, "add", "a.txt")
+        self._session_git(work_a, "commit", "-m", "A's work")
+
+        (work_b / "b.txt").write_text("from B\n")
+        self._session_git(work_b, "add", "b.txt")
+        self._session_git(work_b, "commit", "-m", "B's work")
+
+        # Reverse order
+        wrapper.merge_session_gitdirs("b", overlay_b)
+        wrapper.merge_session_gitdirs("a", overlay_a)
+
+        wrapper.pull_project(env.slug)
+        assert (env.host / "a.txt").read_text() == "from A\n"
+        assert (env.host / "b.txt").read_text() == "from B\n"
+
+    def test_cleanup_with_conflicting_changes(self, pull_env, tmp_path):
+        """Two sessions edit the same file — second gets backed up."""
+        env = pull_env
+        _, work_a, overlay_a = self._make_session_env(env, tmp_path, "a")
+        _, work_b, overlay_b = self._make_session_env(env, tmp_path, "b")
+
+        (work_a / "file.txt").write_text("version A\n")
+        self._session_git(work_a, "add", "file.txt")
+        self._session_git(work_a, "commit", "-m", "A's edit")
+
+        (work_b / "file.txt").write_text("version B\n")
+        self._session_git(work_b, "add", "file.txt")
+        self._session_git(work_b, "commit", "-m", "B's edit")
+
+        wrapper.merge_session_gitdirs("a", overlay_a)
+        wrapper.merge_session_gitdirs("b", overlay_b)
+
+        # B's ref should be backed up (conflict, can't rebase)
+        backup = _run("git", "--git-dir", str(env.gitdir), "for-each-ref",
+                       "--format=%(refname)", "refs/sessions/b/", check=False)
+        assert "refs/sessions/b/main" in backup.stdout
+
+        # Pull should succeed (main has one version, backup has the other)
+        wrapper.pull_project(env.slug)
+
+    def test_message_only_amend_during_cleanup(self, pull_env, tmp_path):
+        """Session amends only the commit message (same tree) — cleanup handles it."""
+        env = pull_env
+        _, workdir, overlay = self._make_session_env(env, tmp_path, "msgamend")
+
+        (workdir / "file.txt").write_text("content\n")
+        self._session_git(workdir, "add", "file.txt")
+        self._session_git(workdir, "commit", "-m", "original message")
+
+        # Amend message only (tree unchanged)
+        self._session_git(workdir, "commit", "--amend", "-m", "better message")
+        amended_sha = self._session_git(workdir, "rev-parse", "HEAD").stdout.strip()
+
+        wrapper.merge_session_gitdirs("msgamend", overlay)
+
+        # Shared should have the amended version
+        shared_head = _head(env.gitdir, gitdir=True)
+        assert shared_head == amended_sha
+
+        wrapper.pull_project(env.slug)
+        msg = _run("git", "-C", str(env.host), "log", "-1", "--format=%s").stdout.strip()
+        assert msg == "better message"
