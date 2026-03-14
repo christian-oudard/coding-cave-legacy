@@ -2862,3 +2862,141 @@ class TestPullAheadMessage:
         err = capsys.readouterr().err
         assert "Already up to date" in err
         assert "ahead" not in err
+
+
+class TestPostRewriteHook:
+    """Test that the post-rewrite hook blocks amending pulled commits."""
+
+    @pytest.fixture
+    def shared_project(self, tmp_path):
+        slug = "test-project"
+        _state.set_cave_data(tmp_path)
+        projects_dir = _state.projects_dir()
+        (projects_dir / slug).mkdir(parents=True)
+
+        host = tmp_path / "host"
+        host.mkdir()
+        git_run("git", "init", "-b", "main", str(host))
+        (host / "file.txt").write_text("initial\n")
+        git_run("git", "-C", str(host), "add", ".")
+        git_run("git", "-C", str(host), "commit", "-m", "initial")
+
+        wrapper.initialize_gitdir(slug, host)
+        return host, slug, projects_dir
+
+    def _make_session(self, tmp_path, slug, projects_dir, name):
+        overlay_base = tmp_path / f"overlay-{name}"
+        overlay_base.mkdir()
+        session_gitdir = wrapper.create_session_gitdir(
+            slug, f"sid-{name}", overlay_base)
+
+        workdir = tmp_path / f"work-{name}"
+        workdir.mkdir()
+        git_run("git", "--git-dir", str(session_gitdir),
+                "--work-tree", str(workdir),
+                "checkout", "HEAD", "--", ".")
+        make_cave_session(session_gitdir, workdir)
+        return session_gitdir, workdir, overlay_base
+
+    def test_amend_pulled_commit_blocked(self, shared_project, tmp_path):
+        """Amending a commit that was pulled to the host is blocked."""
+        _, slug, projects_dir = shared_project
+        gd, work, _ = self._make_session(
+            tmp_path, slug, projects_dir, "test")
+
+        # Make a commit
+        (work / "a.txt").write_text("v1\n")
+        cave_git(work, "add", "a.txt")
+        cave_git(work, "commit", "-m", "add a")
+        sha_a = cave_git(work, "rev-parse", "HEAD").stdout.strip()
+
+        # Simulate pull: mark this commit as pulled to host
+        cave_git(work, "update-ref", "refs/remotes/host/main", sha_a)
+
+        # Try to amend — should be blocked by post-rewrite hook
+        (work / "a.txt").write_text("v2\n")
+        cave_git(work, "add", "a.txt")
+        result = cave_git(work, "commit", "--amend", "-m", "amended a")
+
+        # HEAD should still be at the original commit (hook did reset --soft)
+        head = cave_git(work, "rev-parse", "HEAD").stdout.strip()
+        assert head == sha_a, (
+            f"Expected HEAD at original {sha_a[:8]}, got {head[:8]}")
+
+        # Error message should mention the pull
+        assert "already pulled" in result.stderr
+
+    def test_amend_unpulled_commit_allowed(self, shared_project, tmp_path):
+        """Amending a commit that was NOT pulled is allowed."""
+        _, slug, projects_dir = shared_project
+        gd, work, _ = self._make_session(
+            tmp_path, slug, projects_dir, "test")
+
+        # Make a commit (no pull simulation)
+        (work / "a.txt").write_text("v1\n")
+        cave_git(work, "add", "a.txt")
+        cave_git(work, "commit", "-m", "add a")
+        sha_a = cave_git(work, "rev-parse", "HEAD").stdout.strip()
+
+        # Amend should succeed
+        (work / "a.txt").write_text("v2\n")
+        cave_git(work, "add", "a.txt")
+        cave_git(work, "commit", "--amend", "-m", "amended a")
+
+        head = cave_git(work, "rev-parse", "HEAD").stdout.strip()
+        assert head != sha_a, "Amend should have created a new commit"
+
+    def test_amend_commit_after_pulled_allowed(self, shared_project, tmp_path):
+        """Amending a commit made AFTER the pulled boundary is allowed."""
+        _, slug, projects_dir = shared_project
+        gd, work, _ = self._make_session(
+            tmp_path, slug, projects_dir, "test")
+
+        # Make commit A and mark as pulled
+        (work / "a.txt").write_text("v1\n")
+        cave_git(work, "add", "a.txt")
+        cave_git(work, "commit", "-m", "add a")
+        sha_a = cave_git(work, "rev-parse", "HEAD").stdout.strip()
+        cave_git(work, "update-ref", "refs/remotes/host/main", sha_a)
+
+        # Make commit B on top (not pulled)
+        (work / "b.txt").write_text("v1\n")
+        cave_git(work, "add", "b.txt")
+        cave_git(work, "commit", "-m", "add b")
+        sha_b = cave_git(work, "rev-parse", "HEAD").stdout.strip()
+
+        # Amend B — should be allowed (B was not pulled)
+        (work / "b.txt").write_text("v2\n")
+        cave_git(work, "add", "b.txt")
+        cave_git(work, "commit", "--amend", "-m", "amended b")
+
+        head = cave_git(work, "rev-parse", "HEAD").stdout.strip()
+        assert head != sha_b, "Amend should have created a new commit"
+
+    def test_new_commit_after_blocked_amend(self, shared_project, tmp_path):
+        """After amend is blocked, changes are staged for a new commit."""
+        _, slug, projects_dir = shared_project
+        gd, work, _ = self._make_session(
+            tmp_path, slug, projects_dir, "test")
+
+        # Make a commit and mark as pulled
+        (work / "a.txt").write_text("v1\n")
+        cave_git(work, "add", "a.txt")
+        cave_git(work, "commit", "-m", "add a")
+        sha_a = cave_git(work, "rev-parse", "HEAD").stdout.strip()
+        cave_git(work, "update-ref", "refs/remotes/host/main", sha_a)
+
+        # Try to amend (blocked)
+        (work / "a.txt").write_text("v2\n")
+        cave_git(work, "add", "a.txt")
+        cave_git(work, "commit", "--amend", "-m", "amended a")
+        assert cave_git(work, "rev-parse", "HEAD").stdout.strip() == sha_a
+
+        # Changes should still be staged — create a new commit instead
+        result = cave_git(work, "commit", "-m", "update a")
+        assert result.returncode == 0
+        head = cave_git(work, "rev-parse", "HEAD").stdout.strip()
+        assert head != sha_a
+        log = cave_git(work, "log", "--oneline")
+        assert "update a" in log.stdout
+        assert (work / "a.txt").read_text() == "v2\n"

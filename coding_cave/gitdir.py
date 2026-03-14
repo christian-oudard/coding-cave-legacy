@@ -85,6 +85,10 @@ def create_session_gitdir(slug, sid, overlay_base):
     # Add remote pointing to shared gitdir (cave-internal path)
     git_mod.git(session_gitdir, "remote", "add", "shared",
         f"/projects/.shared-gitdirs/{slug}", capture_output=True)
+    # Also fetch host-tracking refs so post-rewrite hook can detect
+    # commits that have been pulled to the host.
+    git_mod.git(session_gitdir, "config", "--add", "remote.shared.fetch",
+        "+refs/remotes/host/*:refs/remotes/host/*", capture_output=True)
 
     # Post-commit hook: push session branch to shared, fetch latest
     hooks = session_gitdir / "hooks"
@@ -100,6 +104,37 @@ def create_session_gitdir(slug, sid, overlay_base):
         'exit 0\n'
     )
     os.chmod(hooks / "post-commit", 0o755)
+
+    # Post-rewrite hook: block amending/rebasing commits already pulled
+    # to the host.  Uses refs/remotes/host/* (fetched from shared gitdir)
+    # to detect pulled commits.  Cannot be bypassed with --no-verify.
+    (hooks / "post-rewrite").write_text(
+        '#!/bin/bash\n'
+        'action=$1\n'
+        'pulled_refs=$(git for-each-ref --format="%(objectname)" '
+        'refs/remotes/host/ 2>/dev/null)\n'
+        '[ -z "$pulled_refs" ] && exit 0\n'
+        'while read old_sha new_sha extra; do\n'
+        '    for pulled in $pulled_refs; do\n'
+        '        if git merge-base --is-ancestor "$old_sha" "$pulled" '
+        '2>/dev/null; then\n'
+        '            echo >&2\n'
+        '            echo "ERROR: Cannot $action — commit '
+        '${old_sha:0:8} was already pulled to the host." >&2\n'
+        '            echo "Create a new commit instead of '
+        'rewriting." >&2\n'
+        '            if [ "$action" = "amend" ]; then\n'
+        '                git reset --soft "$old_sha" 2>/dev/null\n'
+        '            else\n'
+        '                git reset --hard ORIG_HEAD 2>/dev/null\n'
+        '            fi\n'
+        '            exit 1\n'
+        '        fi\n'
+        '    done\n'
+        'done\n'
+        'exit 0\n'
+    )
+    os.chmod(hooks / "post-rewrite", 0o755)
 
     return session_gitdir
 
