@@ -689,6 +689,36 @@ class TestPullMultiBranch:
                             "rev-parse", "develop").stdout.strip()
         assert develop_head == host_develop
 
+    def test_repeated_pull_skips_already_pulled_branch(self, pull_env):
+        """Second pull of already-pulled non-current branch is a noop."""
+        env = pull_env
+
+        # Create develop on both sides
+        _run("git", "-C", str(env.host), "branch", "develop")
+        _run("git", "--git-dir", str(env.gitdir), "branch", "develop")
+        host_develop = _run("git", "-C", str(env.host),
+                            "rev-parse", "develop").stdout.strip()
+        wrapper.sync_refs(env.gitdir, env.host, host_develop, "develop")
+
+        # Cave commits on develop
+        _cave_git(env, "checkout", "develop")
+        cave_commit(env, "develop work", content="develop content\n")
+        _cave_git(env, "checkout", "main")
+
+        # First pull
+        wrapper.pull_project(env.slug)
+        _run("git", "-C", str(env.host), "checkout", "develop")
+        assert (env.host / "file.txt").read_text() == "develop content\n"
+        develop_after_pull = _run("git", "-C", str(env.host),
+                                  "rev-parse", "develop").stdout.strip()
+        _run("git", "-C", str(env.host), "checkout", "main")
+
+        # Second pull should be a clean noop (no skip messages)
+        wrapper.pull_project(env.slug)
+        develop_after_second = _run("git", "-C", str(env.host),
+                                    "rev-parse", "develop").stdout.strip()
+        assert develop_after_second == develop_after_pull
+
     def test_host_identity_preserves_hash_non_current(self, tmp_path):
         """Non-current branch with host identity preserves commit hash."""
         slug = "test-project"

@@ -173,7 +173,7 @@ def _rebase_plumbing(host_git, onto_sha, merge_base, cave_sha):
                 capture_output=True, text=True,
             )
             msg = orig_msg.stdout.strip() if orig_msg.returncode == 0 else commit
-            print(f"  skip empty commit '{msg}' (already upstream)",
+            print(f"  {msg} (already applied, skipping)",
                   file=sys.stderr)
             continue
 
@@ -255,6 +255,18 @@ def _pull_branch_current(slug, project_dir, gitdir_path, branch, cave_sha,
 
     if host_head == cave_sha:
         return None
+
+    # Check if all cave commits were already pulled (skip unless --force)
+    if not force:
+        pulled_ref = git_mod.git(gitdir_path, "rev-parse",
+            f"refs/pulled/{branch}",
+            capture_output=True, text=True)
+        if pulled_ref.returncode == 0:
+            unpulled = git_mod.git(gitdir_path, "rev-list", "--count",
+                f"{pulled_ref.stdout.strip()}..{cave_sha}",
+                capture_output=True, text=True)
+            if unpulled.returncode == 0 and unpulled.stdout.strip() == "0":
+                return None
 
     # Force with matching trees: adopt cave's history
     if force:
@@ -543,6 +555,17 @@ def _pull_branch_other(slug, project_dir, gitdir_path, branch, cave_sha,
 
     if host_sha == cave_sha:
         return None
+
+    # Check if all cave commits were already pulled
+    pulled_ref = git_mod.git(gitdir_path, "rev-parse",
+        f"refs/pulled/{branch}",
+        capture_output=True, text=True)
+    if pulled_ref.returncode == 0:
+        unpulled = git_mod.git(gitdir_path, "rev-list", "--count",
+            f"{pulled_ref.stdout.strip()}..{cave_sha}",
+            capture_output=True, text=True)
+        if unpulled.returncode == 0 and unpulled.stdout.strip() == "0":
+            return None
 
     # Fetch cave commits into host object store
     fetch = subprocess.run(
