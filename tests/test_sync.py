@@ -11,19 +11,7 @@ from coding_cave import _state
 from coding_cave.gitdir import (
     _save_session_index, forward_session_refs, ff_session_branches,
 )
-from tests.conftest import write_projects, write_session
-
-
-GIT_ENV = {
-    "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "t@t",
-    "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "t@t",
-}
-
-
-def git_run(*args, **kwargs):
-    """Run a git command with test identity."""
-    env = {**os.environ, **GIT_ENV}
-    return subprocess.run(list(args), capture_output=True, text=True, env=env, **kwargs)
+from tests.conftest import GIT_ENV, git_run, git_head, write_projects, write_session
 
 
 @pytest.fixture
@@ -83,14 +71,6 @@ def cave_git(workdir, *args, **kwargs):
         capture_output=True, text=True, env=env, **kwargs,
     )
 
-
-def git_head(path, gitdir=False):
-    """Get HEAD commit hash."""
-    if gitdir:
-        cmd = ["git", "--git-dir", str(path), "rev-parse", "HEAD"]
-    else:
-        cmd = ["git", "-C", str(path), "rev-parse", "HEAD"]
-    return subprocess.run(cmd, capture_output=True, text=True, check=True).stdout.strip()
 
 
 
