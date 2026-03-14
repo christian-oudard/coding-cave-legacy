@@ -632,7 +632,7 @@ def pull_project(slug, force=False):
     git_mod.finalize_sync(gitdir_path, project_dir)
 
     if not any_pulled:
-        print(f"No new commits to pull from {slug}.", file=sys.stderr)
+        print(f"Already up to date.", file=sys.stderr)
 
 
 def _check_unpulled(gitdir_path, project_dir, cave_sha, host_sha, branch):
@@ -710,7 +710,7 @@ def push_project(slug, force=False):
         return
 
     # Push all branches, checking each for unpulled cave commits
-    any_pushed = False
+    pushed_branches = []
     any_blocked = False
     for branch in sorted(host_branches):
         host_sha = host_branches[branch]
@@ -736,7 +736,7 @@ def push_project(slug, force=False):
                 continue
 
         _sync_branch(gitdir_path, project_dir, host_sha, branch)
-        any_pushed = True
+        pushed_branches.append((branch, host_sha))
 
     # Keep shared gitdir HEAD in sync with host's current branch so new
     # sessions start on the right branch (gitdir.py copies HEAD on creation).
@@ -746,15 +746,17 @@ def push_project(slug, force=False):
     # Final bookkeeping
     git_mod.finalize_sync(gitdir_path, project_dir)
 
-    if any_pushed:
-        print(f"Pushed to {slug}.", file=sys.stderr)
+    if pushed_branches:
+        for branch, sha in pushed_branches:
+            print(f"Pushed to {slug}/{branch} ({sha[:8]}).",
+                  file=sys.stderr)
     elif not any_blocked:
-        print(f"No commits to push to {slug}.", file=sys.stderr)
+        print(f"Already up to date.", file=sys.stderr)
 
     if any_blocked:
         print(f"Run 'coding-cave pull' first, or check out the branch "
               f"and use 'coding-cave push --force'.", file=sys.stderr)
-        if not any_pushed:
+        if not pushed_branches:
             sys.exit(1)
 
 
