@@ -1332,6 +1332,62 @@ class TestPushSessionInteraction:
         assert (env.host / "r1.txt").read_text() == "round 1\n"
         assert (env.host / "r2.txt").read_text() == "round 2\n"
 
+    def test_force_push_preserves_session_work_on_next_sync(
+            self, pull_env, tmp_path):
+        """push --force overwrites shared main → session work is rebased on next sync.
+
+        Regression: push --force after sync_live_sessions left refs/synced in
+        session gitdirs, so _forward_refs skipped the session's work on the
+        next sync cycle, permanently losing it from shared.
+        """
+        env = pull_env
+        gd, workdir = self._make_hooked_session(env, tmp_path, "forcepush")
+
+        # Session commits (hook pushes to shared)
+        (workdir / "session.txt").write_text("session work\n")
+        self._session_git(workdir, "add", "session.txt")
+        self._session_git(workdir, "commit", "-m", "session work")
+        session_head = self._session_git(
+            workdir, "rev-parse", "HEAD").stdout.strip()
+
+        # Verify session work is in shared
+        shared_head = _head(env.gitdir, gitdir=True)
+        assert shared_head == session_head
+
+        # Host makes an independent commit
+        (env.host / "host.txt").write_text("host work\n")
+        _run("git", "-C", str(env.host), "add", "host.txt")
+        _run("git", "-C", str(env.host), "commit", "-m", "host work")
+
+        # Force-push host to cave (overwrites session work on shared main)
+        wrapper.push_project(env.slug, force=True)
+
+        # Shared main is now at host's HEAD, session work gone from shared
+        host_head = _head(env.host)
+        assert _head(env.gitdir, gitdir=True) == host_head
+
+        # Now pull — sync_live_sessions should re-forward session work
+        # because push --force cleared refs/synced
+        wrapper.pull_project(env.slug)
+
+        # Both host work and session work should be present
+        assert (env.host / "host.txt").read_text() == "host work\n"
+        assert (env.host / "session.txt").read_text() == "session work\n"
+
+    def test_force_push_no_session_commits_is_clean(self, pull_env, tmp_path):
+        """push --force with no session commits doesn't warn or break."""
+        env = pull_env
+        self._make_hooked_session(env, tmp_path, "noop")
+
+        # Host makes a commit
+        (env.host / "host.txt").write_text("host work\n")
+        _run("git", "-C", str(env.host), "add", "host.txt")
+        _run("git", "-C", str(env.host), "commit", "-m", "host work")
+
+        # Force-push — no session commits to lose
+        wrapper.push_project(env.slug, force=True)
+        assert _head(env.gitdir, gitdir=True) == _head(env.host)
+
 
 class TestBranchSwitchMidSession:
     """Session switches branches mid-session, commits on multiple branches."""

@@ -20,23 +20,16 @@ On the host, the user thinks in terms of project directories, not slugs. The pro
 
 Each agent session runs in its own bwrap namespace with its own overlay and its own gitdir. Multiple agents working on the same project get independent working trees and independent git state — they cannot see or interfere with each other's uncommitted work or HEAD position.
 
-### Branch-per-session
+### Session branches
 
-Each session works on a private `session/<sid>` branch, not `main`. This mirrors how human developers use feature branches:
+Sessions work directly on real branches (e.g. `main`, `develop`), not on private session branches. `create_session_gitdir` copies HEAD and all refs from the shared gitdir, then records the initial state in `refs/init/<branch>` for each branch.
 
-- `create_session_gitdir` creates `refs/heads/session/<sid>` pointing to the current HEAD and sets it as the session's HEAD via `symbolic-ref`.
 - A `shared` remote is configured pointing to `/projects/.shared-gitdirs/<slug>` (the shared gitdir bind-mounted rw into the cave).
-- A post-commit hook pushes the current branch to shared (FF only, non-FF pushes fail silently), records the pushed SHA in `refs/pushed/<branch>`, and fetches latest from shared. `refs/pushed` lets `_forward_refs` know that this session was the last to update shared, enabling ownership detection even when `refs/synced` is stale. This gives agents visibility into each other's work via `shared/session/<other-sid>`.
-- Agents can rebase onto `shared/main` periodically and merge to main when done.
+- A post-commit hook pushes the current branch to shared (FF only, non-FF pushes fail silently), records the pushed SHA in `refs/pushed/<branch>`, and fetches latest from shared. `refs/pushed` lets `_forward_refs` know that this session was the last to update shared, enabling ownership detection even when `refs/synced` is stale.
 
-On cleanup (`merge_session_gitdirs`), after forwarding all refs via `_forward_refs`, the session branch is merged to main:
+On cleanup (`merge_session_gitdirs`), `_forward_refs(force=True)` forwards all branch refs into the shared gitdir. Diverged refs that can't be rebased are force-updated with backup under `refs/sessions/<sid>/`.
 
-1. **Same tree**: session branch tree == main tree → delete branch (nothing to merge).
-2. **Fast-forward**: session branch is a descendant of main → update main, delete branch.
-3. **Behind**: session branch is an ancestor of main → delete branch.
-4. **Diverged**: attempt `_rebase_commits` onto main. If clean → update main, delete branch. If conflict → leave branch under `refs/heads/session/<sid>` for manual recovery.
-
-During live sync (`sync_live_sessions`), after forwarding session refs, `ff_session_branches` attempts FF-merges of all session branches to main so pull/push can see session commits.
+During live sync (`sync_live_sessions`), `forward_session_refs` calls `_forward_refs(force=False)` for each running session. Diverged refs that can't be rebased are skipped (picked up on final cleanup).
 
 `cav shell` joins a running agent's namespace via `nsenter`, giving the user direct access to that agent's in-progress files for inspection, testing, and debugging.
 
@@ -70,7 +63,7 @@ A shared gitdir holds the canonical objects and refs for each project. Each sess
 
 Per-session gitdirs are small (index file + refs + config). The bulk of git data (packfiles, loose objects) lives in the shared gitdir and is never duplicated. New objects created during a session live in the session gitdir until cleanup, when they're pushed to the shared gitdir.
 
-On session end, refs and new objects from the session gitdir are merged into the shared gitdir, the session branch is FF-merged to main (or rebased if diverged), then the session gitdir is removed. `pull` and `push` operate on the shared gitdir as before.
+On session end, refs and new objects from the session gitdir are forwarded into the shared gitdir via `_forward_refs(force=True)`, then the session gitdir is removed. `pull` and `push` operate on the shared gitdir.
 
 ### Alternates path management
 
@@ -85,7 +78,7 @@ Session gitdirs use `objects/info/alternates` to share the object store with the
 
 There are two distinct operations that move refs from session gitdirs to the shared gitdir. They have different safety requirements because one operates on live sessions and the other on dead ones.
 
-**Live sync** (`forward_session_refs` + `ff_session_branches`): called by `pull` and `push` to pick up in-flight commits from running sessions. `forward_session_refs` forwards each session's refs (including `session/<sid>` branches) to shared. Then `ff_session_branches` attempts FF-merges of all session branches to main so pull/push can see session commits. Decision logic for each branch ref in `_forward_refs`:
+**Live sync** (`forward_session_refs`): called by `pull` and `push` to pick up in-flight commits from running sessions. `forward_session_refs` forwards each session's branch refs to shared. Decision logic for each branch ref in `_forward_refs`:
 
 1. **Unchanged** (ref == `refs/init` or `refs/synced`) → skip. Session never touched this branch, or hasn't changed since last sync.
 2. **New ref** (doesn't exist in shared) → create it, record `refs/synced`.
@@ -182,7 +175,7 @@ Push is branch-aware: it iterates all host branches and pushes each one to the c
 
 Push first syncs refs from any running sessions into the shared gitdir (same as pull), so it can detect unpulled commits even when they exist only in a session gitdir. For each branch, push checks whether the cave has unpulled commits. Branches with unpulled commits are skipped with a warning suggesting `coding-cave pull` first. Clean branches are pushed regardless. This means a partial push can succeed — some branches update while others are blocked.
 
-`--force` only applies to the currently checked-out host branch. It skips the unpulled check for that branch and force-updates it in the cave gitdir. Other branches are not touched.
+`--force` only applies to the currently checked-out host branch. It skips the unpulled check for that branch and force-updates it in the cave gitdir. Other branches are not touched. After overwriting the shared ref, push --force clears `refs/synced/<branch>` in all running session gitdirs so that `_forward_refs` re-evaluates on the next sync cycle — without this, sessions would think they're already synced and skip re-forwarding their work. On the next sync, session commits are rebased onto the new shared main.
 
 The gitdir is bind-mounted into the cave, so push updates are immediately visible to running agents. No cave restart needed.
 

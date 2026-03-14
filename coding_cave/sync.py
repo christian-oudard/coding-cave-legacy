@@ -25,6 +25,24 @@ def sync_live_sessions(slug):
             gitdir.forward_session_refs(slug, session_gitdir, shared_gitdir)
 
 
+def _clear_session_synced_refs(slug, branch):
+    """Clear refs/synced/<branch> in running session gitdirs.
+
+    After push --force overwrites a shared branch, session refs/synced
+    may point to SHAs no longer at the shared tip.  Clearing ensures
+    _forward_refs re-evaluates on next sync instead of skipping.
+    """
+    for session in sessions.list_sessions():
+        sid = session["sid"]
+        overlay_base = _state.cave_data() / "session-overlays" / sid
+        synced_ref = (overlay_base / f"gitdir-{slug}"
+                      / "refs" / "synced" / branch)
+        try:
+            synced_ref.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def _parse_log(git_cmd, range_spec):
     """Parse 'git log' output into [(hash, tree, subject), ...]."""
     result = subprocess.run(
@@ -812,7 +830,22 @@ def push_project(slug, force=False):
         host_sha = host_branches.get(current_branch)
         if not host_sha:
             return
+        # Warn if overwriting cave commits from sessions
+        cave_sha = cave_branches.get(current_branch)
+        if cave_sha and cave_sha != host_sha:
+            count = _check_unpulled(
+                gitdir_path, project_dir, cave_sha, host_sha,
+                current_branch)
+            if count:
+                print(f"Overwriting {count} unpulled cave commit(s) "
+                      f"on {current_branch}.", file=sys.stderr)
+                print(f"  Session work will be rebased on next sync.",
+                      file=sys.stderr)
         _sync_branch(gitdir_path, project_dir, host_sha, current_branch)
+        # Clear refs/synced in running sessions so _forward_refs
+        # re-evaluates on next sync (their synced ref now points to a
+        # SHA that is no longer the shared branch tip).
+        _clear_session_synced_refs(slug, current_branch)
         git_mod.git(gitdir_path, "symbolic-ref", "HEAD",
             f"refs/heads/{current_branch}", capture_output=True)
         git_mod.finalize_sync(gitdir_path, project_dir)
