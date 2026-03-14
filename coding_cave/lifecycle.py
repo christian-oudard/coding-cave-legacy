@@ -187,7 +187,11 @@ def start_session(project, command, gpu=False):
                     print(f"nix overlay: removing stale upper entry: "
                           f"{entry.name} (could not inspect)",
                           file=sys.stderr)
-                shutil.rmtree(entry.path)
+                def _force_remove(func, path, exc):
+                    parent = os.path.dirname(path)
+                    os.chmod(parent, 0o755)
+                    func(path)
+                shutil.rmtree(entry.path, onexc=_force_remove)
         # Per-session work and merged dirs (clean FUSE cache each session)
         session_nix = _state.cave_data() / "session-overlays" / sid / "nix"
         nix_work = session_nix / "work"
