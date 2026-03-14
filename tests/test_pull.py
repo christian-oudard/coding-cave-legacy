@@ -806,3 +806,195 @@ class TestPullUpdatesHead:
         head_after = _run("git", "--git-dir", str(env.gitdir),
                           "symbolic-ref", "HEAD").stdout.strip()
         assert head_after == "refs/heads/develop"
+
+
+class TestPullSessionIntegration:
+    """End-to-end: session commit → pull_project sees it.
+
+    These test the full chain: create_session_gitdir → commit in session →
+    sync_live_sessions (inside pull_project) → host gets the commit.
+    Reproduces the failure patterns from real multi-session usage.
+    """
+
+    def _make_session_env(self, pull_env, tmp_path, sid):
+        """Create a live session with a registered session file."""
+        env = pull_env
+        overlay_base = tmp_path / "session-overlays" / sid
+        overlay_base.mkdir(parents=True)
+        session_gitdir = wrapper.create_session_gitdir(env.slug, sid, overlay_base)
+
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+        session_info = {
+            "sid": sid,
+            "project": env.slug,
+            "bwrap_pid": os.getpid(),
+            "started": 0,
+        }
+        (sessions_dir / f"{sid}.json").write_text(json.dumps(session_info))
+
+        _run("git", "--git-dir", str(session_gitdir), "config",
+             "user.email", "host@test.com")
+        _run("git", "--git-dir", str(session_gitdir), "config",
+             "user.name", "Host User")
+
+        workdir = tmp_path / f"work-{sid}"
+        workdir.mkdir()
+        _run("git", "--git-dir", str(session_gitdir), "--work-tree",
+             str(workdir), "checkout", "HEAD", "--", ".", check=False)
+        (workdir / ".git").write_text(f"gitdir: {session_gitdir}\n")
+        return session_gitdir, workdir
+
+    def _session_git(self, workdir, *args):
+        return _run("git", "-C", str(workdir), *args, check=False)
+
+    def test_session_commit_visible_to_pull(self, pull_env, tmp_path):
+        """Session commits on main → pull picks them up.
+
+        Regression: with session branches, the session committed on
+        session/<sid>, but pull only looked at non-session branches,
+        so pull said 'Already up to date'.
+        """
+        env = pull_env
+        _, workdir = self._make_session_env(env, tmp_path, "s1")
+
+        (workdir / "new.txt").write_text("from session\n")
+        self._session_git(workdir, "add", "new.txt")
+        self._session_git(workdir, "commit", "-m", "session work")
+
+        # Verify session is on main, not a session branch
+        branch = self._session_git(workdir, "rev-parse",
+                                   "--abbrev-ref", "HEAD").stdout.strip()
+        assert branch == "main"
+
+        wrapper.pull_project(env.slug)
+        assert (env.host / "new.txt").read_text() == "from session\n"
+
+    def test_session_amend_visible_to_pull(self, pull_env, tmp_path):
+        """Session commits then amends → pull picks up the amended version.
+
+        Regression: session amends diverged the session branch from shared
+        main, then pull couldn't see the amended commit.
+        """
+        env = pull_env
+        _, workdir = self._make_session_env(env, tmp_path, "s1")
+
+        (workdir / "file.txt").write_text("v1\n")
+        self._session_git(workdir, "add", "file.txt")
+        self._session_git(workdir, "commit", "-m", "first version")
+
+        # Pull once (sync establishes refs/synced)
+        wrapper.pull_project(env.slug)
+        assert (env.host / "file.txt").read_text() == "v1\n"
+
+        # Session amends
+        (workdir / "file.txt").write_text("v2\n")
+        self._session_git(workdir, "add", "file.txt")
+        self._session_git(workdir, "commit", "--amend", "-m", "amended")
+
+        # Pull again — must see the amend
+        wrapper.pull_project(env.slug, force=True)
+        assert (env.host / "file.txt").read_text() == "v2\n"
+
+    def test_two_sessions_both_visible_to_pull(self, pull_env, tmp_path):
+        """Two concurrent sessions commit on main → pull gets both.
+
+        Regression: with session branches, each session pushed to its own
+        session/<sid> branch, but pull only looked at main.
+        """
+        env = pull_env
+        _, work_a = self._make_session_env(env, tmp_path, "s1")
+        _, work_b = self._make_session_env(env, tmp_path, "s2")
+
+        (work_a / "a.txt").write_text("from A\n")
+        self._session_git(work_a, "add", "a.txt")
+        self._session_git(work_a, "commit", "-m", "session A work")
+
+        (work_b / "b.txt").write_text("from B\n")
+        self._session_git(work_b, "add", "b.txt")
+        self._session_git(work_b, "commit", "-m", "session B work")
+
+        wrapper.pull_project(env.slug)
+
+        # Both commits should be present
+        assert (env.host / "a.txt").read_text() == "from A\n"
+        assert (env.host / "b.txt").read_text() == "from B\n"
+
+    def test_push_then_session_commit_then_pull(self, pull_env, tmp_path):
+        """Host pushes, session commits on top, pull sees both.
+
+        Regression: push updated shared gitdir but session was on a
+        session branch forked before the push, so session commits
+        diverged from main.
+        """
+        env = pull_env
+
+        # Host makes a commit and pushes to cave
+        (env.host / "host.txt").write_text("from host\n")
+        _run("git", "-C", str(env.host), "add", ".")
+        _run("git", "-C", str(env.host), "commit", "-m", "host commit")
+        wrapper.push_project(env.slug)
+
+        # Session starts AFTER push (session gitdir has host's commit)
+        _, workdir = self._make_session_env(env, tmp_path, "s1")
+
+        (workdir / "cave.txt").write_text("from cave\n")
+        self._session_git(workdir, "add", "cave.txt")
+        self._session_git(workdir, "commit", "-m", "cave commit")
+
+        wrapper.pull_project(env.slug)
+
+        assert (env.host / "host.txt").read_text() == "from host\n"
+        assert (env.host / "cave.txt").read_text() == "from cave\n"
+
+    def test_pull_no_stale_session_branches(self, pull_env, tmp_path):
+        """After pull, no session/* branches leak into the shared gitdir.
+
+        Regression: session branches accumulated in the shared gitdir
+        and were never cleaned up.
+        """
+        env = pull_env
+        _, workdir = self._make_session_env(env, tmp_path, "s1")
+
+        (workdir / "new.txt").write_text("work\n")
+        self._session_git(workdir, "add", "new.txt")
+        self._session_git(workdir, "commit", "-m", "work")
+
+        wrapper.pull_project(env.slug)
+
+        # No session/* branches should exist in shared gitdir
+        refs = _run("git", "--git-dir", str(env.gitdir), "for-each-ref",
+                     "--format=%(refname)", "refs/heads/session/").stdout.strip()
+        assert refs == "", f"Leaked session branches: {refs}"
+
+    def test_repeated_pull_no_duplicates(self, pull_env, tmp_path):
+        """Repeated pulls don't create duplicate commits.
+
+        Regression: ff_session_branches created a new rebased copy of the
+        same commit on every pull invocation.
+        """
+        env = pull_env
+        _, workdir = self._make_session_env(env, tmp_path, "s1")
+
+        (workdir / "new.txt").write_text("work\n")
+        self._session_git(workdir, "add", "new.txt")
+        self._session_git(workdir, "commit", "-m", "one-time work")
+
+        wrapper.pull_project(env.slug)
+        log1 = _run("git", "-C", str(env.host),
+                     "log", "--oneline").stdout
+
+        # Pull again — should be no-op
+        wrapper.pull_project(env.slug)
+        log2 = _run("git", "-C", str(env.host),
+                     "log", "--oneline").stdout
+
+        # Pull a third time
+        wrapper.pull_project(env.slug)
+        log3 = _run("git", "-C", str(env.host),
+                     "log", "--oneline").stdout
+
+        assert log1 == log2 == log3, (
+            f"Repeated pulls changed history:\n"
+            f"After 1: {log1}\nAfter 2: {log2}\nAfter 3: {log3}"
+        )
