@@ -200,7 +200,7 @@ def _rebase_commits(gitdir, shared_sha, session_sha, merge_base):
             orig_msg = git_mod.git(gitdir, "log", "-1", "--format=%s", commit,
                                    capture_output=True, text=True)
             msg = orig_msg.stdout.strip() if orig_msg.returncode == 0 else commit
-            print(f"  skip empty commit '{msg}' (already upstream)",
+            print(f"  {msg} (already applied, skipping)",
                   file=sys.stderr)
             continue
 
@@ -345,6 +345,17 @@ def _forward_refs(sid, session_gitdir, shared_gitdir, *, force=False):
                     capture_output=True)
                 git_mod.git(shared_gitdir, "update-ref", ref, sha,
                     capture_output=True)
+            else:
+                # Live sync: can't rebase, warn so pull doesn't
+                # silently hide unsynced session work.
+                count = git_mod.git(shared_gitdir, "rev-list", "--count",
+                    f"{mb}..{sha}" if mb else f"{existing_sha}..{sha}",
+                    capture_output=True, text=True)
+                n = (count.stdout.strip()
+                     if count.returncode == 0 else "?")
+                print(f"Session has {n} commit(s) on {branch} that "
+                      f"diverged from shared (will sync on exit).",
+                      file=sys.stderr)
 
     # Also fetch tags
     git_mod.git(shared_gitdir, "fetch", str(session_gitdir),
