@@ -7,6 +7,20 @@ from pathlib import Path
 from . import _state, projects, sessions, git as git_mod, gitdir
 
 
+def _stash_pop_or_warn(host_git, project_dir):
+    """Pop the git stash, warning on failure instead of silently losing changes."""
+    result = subprocess.run(host_git + ["stash", "pop"],
+                            capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"WARNING: git stash pop failed in {project_dir}.",
+              file=sys.stderr)
+        print(f"  Your uncommitted changes are still in the stash.",
+              file=sys.stderr)
+        print(f"  Run: git -C {project_dir} stash pop", file=sys.stderr)
+        if result.stderr:
+            for line in result.stderr.strip().splitlines()[:3]:
+                print(f"  {line}", file=sys.stderr)
+
 
 def sync_live_sessions(slug):
     """Forward refs from running sessions into the shared gitdir.
@@ -324,7 +338,7 @@ def _pull_branch_current(slug, project_dir, gitdir_path, branch, cave_sha,
         subprocess.run(host_git + ["branch", "-D", "_cave_pull"], capture_output=True)
 
         if stashed:
-            subprocess.run(host_git + ["stash", "pop"], capture_output=True)
+            _stash_pop_or_warn(host_git, project_dir)
 
         print(f"Pulled {slug} ({host_count} -> {count} commit(s)):", file=sys.stderr)
         new_entries = _parse_log(host_git, f"{merge_base}..HEAD")
@@ -406,8 +420,7 @@ def _pull_branch_current(slug, project_dir, gitdir_path, branch, cave_sha,
                 subprocess.run(host_git + ["branch", "-D", "_cave_pull"],
                                capture_output=True)
                 if stashed:
-                    subprocess.run(host_git + ["stash", "pop"],
-                                   capture_output=True)
+                    _stash_pop_or_warn(host_git, project_dir)
                 print(f"Rebase failed for {slug} after host rewrite.",
                       file=sys.stderr)
                 return None
@@ -420,8 +433,7 @@ def _pull_branch_current(slug, project_dir, gitdir_path, branch, cave_sha,
                            capture_output=True)
 
             if stashed:
-                subprocess.run(host_git + ["stash", "pop"],
-                               capture_output=True)
+                _stash_pop_or_warn(host_git, project_dir)
 
             print(f"Pulled {new_count} new cave commit(s) for {slug} "
                   f"(host rewrote history).", file=sys.stderr)
@@ -469,7 +481,7 @@ def _pull_branch_current(slug, project_dir, gitdir_path, branch, cave_sha,
             subprocess.run(host_git + ["checkout", branch], capture_output=True)
             subprocess.run(host_git + ["branch", "-D", "_cave_pull"], capture_output=True)
             if stashed:
-                subprocess.run(host_git + ["stash", "pop"], capture_output=True)
+                _stash_pop_or_warn(host_git, project_dir)
             sys.exit(1)
 
     subprocess.run(host_git + ["checkout", branch], capture_output=True, check=True)
@@ -477,7 +489,7 @@ def _pull_branch_current(slug, project_dir, gitdir_path, branch, cave_sha,
     subprocess.run(host_git + ["branch", "-D", "_cave_pull"], capture_output=True)
 
     if stashed:
-        subprocess.run(host_git + ["stash", "pop"], capture_output=True)
+        _stash_pop_or_warn(host_git, project_dir)
 
     actual = subprocess.run(
         host_git + ["rev-list", "--count", f"{pre_head}..HEAD"],

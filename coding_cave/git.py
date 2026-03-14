@@ -13,6 +13,7 @@ SAFE_GIT_OPTS = [
     "-c", "diff.external=",
     "-c", "core.sshCommand=echo blocked",
     "-c", "protocol.ext.allow=never",
+    "-c", "core.attributesFile=/dev/null",
 ]
 
 
@@ -24,7 +25,9 @@ def git(gitdir, *args, **kwargs):
     or filter drivers. This wrapper overrides all such options.
     """
     cmd = ["git", "--git-dir", str(gitdir)] + SAFE_GIT_OPTS + list(args)
-    return subprocess.run(cmd, **kwargs)
+    env = kwargs.pop("env", None) or os.environ.copy()
+    env["GIT_ATTR_NOSYSTEM"] = "1"
+    return subprocess.run(cmd, env=env, **kwargs)
 
 
 def initialize_gitdir(slug, project_dir):

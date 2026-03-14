@@ -2,9 +2,28 @@
 import os
 import shutil
 import subprocess
+import sys
+import tempfile
 from pathlib import Path
 
 from . import _state, git as git_mod
+
+
+def _atomic_write(path, content):
+    """Write content to path atomically via temp file + rename."""
+    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    try:
+        os.write(fd, content.encode())
+    finally:
+        os.close(fd)
+    try:
+        os.rename(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def create_session_gitdir(slug, sid, overlay_base):
@@ -178,6 +197,11 @@ def _rebase_commits(gitdir, shared_sha, session_sha, merge_base):
                           capture_output=True, text=True)
         if (parent_tree.returncode == 0
                 and parent_tree.stdout.strip() == merged_tree):
+            orig_msg = git_mod.git(gitdir, "log", "-1", "--format=%s", commit,
+                                   capture_output=True, text=True)
+            msg = orig_msg.stdout.strip() if orig_msg.returncode == 0 else commit
+            print(f"  skip empty commit '{msg}' (already upstream)",
+                  file=sys.stderr)
             continue
 
         # Preserve original author and committer info
@@ -355,13 +379,13 @@ def forward_session_refs(slug, session_gitdir, shared_gitdir):
     cave_path = None
     if alt_file.exists():
         cave_path = alt_file.read_text().strip()
-        alt_file.write_text(f"{shared_gitdir / 'objects'}\n")
+        _atomic_write(alt_file, f"{shared_gitdir / 'objects'}\n")
 
     _forward_refs(None, session_gitdir, shared_gitdir, force=False)
 
     # Restore cave-internal alternates path
     if cave_path is not None:
-        alt_file.write_text(f"{cave_path}\n")
+        _atomic_write(alt_file, f"{cave_path}\n")
 
 
 def _save_session_index(session_gitdir, shared_gitdir, slug):
@@ -430,7 +454,7 @@ def merge_session_gitdirs(sid, overlay_base):
         # Rewrite alternates to host path (cave path won't exist on host)
         alt_file = session_gitdir / "objects" / "info" / "alternates"
         if alt_file.exists():
-            alt_file.write_text(f"{shared_gitdir / 'objects'}\n")
+            _atomic_write(alt_file, f"{shared_gitdir / 'objects'}\n")
 
         _forward_refs(sid, session_gitdir, shared_gitdir, force=True)
 
