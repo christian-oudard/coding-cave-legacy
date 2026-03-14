@@ -9,8 +9,8 @@ from unittest.mock import patch
 import pytest
 
 from coding_cave.config import (
-    _detect_gpg_agent_socket, _git_config, setup_env, build_user_env,
-    _GENERATED_FLAKE_TEMPLATE,
+    _detect_gpg_agent_socket, _git_config, setup_env,
+    _generate_user_env_flake,
 )
 from coding_cave import _state
 
@@ -378,34 +378,24 @@ class TestMergeNixDb:
 
 
 class TestBuildUserEnvFlakeGeneration:
-    """Test that build_user_env generates correct flake.nix from cave.nix inputs."""
+    """Test that _generate_user_env_flake produces correct flake.nix from cave.nix inputs."""
 
-    def _run_build_and_read_flake(self, tmp_path, inputs_json):
-        """Run build_user_env with mocked nix eval returning inputs_json.
-
-        Returns the generated flake.nix content.
-        """
-        config_dir = tmp_path / ".config" / "coding-cave"
-        config_dir.mkdir(parents=True)
-        cave_nix = config_dir / "cave.nix"
-        cave_nix.write_text('{ inputs = {}; config = { pkgs }: { packages = []; }; }')
-
-        user_env = tmp_path / "cave-data" / "user-env"
-        user_env.mkdir(parents=True)
-
-        eval_result = subprocess.CompletedProcess(args=[], returncode=0, stdout=inputs_json, stderr="")
-        build_result = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="build skipped")
-
-        with patch.dict(os.environ, {"HOME": str(tmp_path)}), \
-             patch("coding_cave.config._state.cave_data", return_value=tmp_path / "cave-data"), \
-             patch("subprocess.run", side_effect=[eval_result, build_result]):
-            build_user_env()
-
+    def _generate_and_read(self, tmp_path, inputs_json):
+        """Mock nix eval to return inputs_json, generate flake, return content."""
+        cave_nix = tmp_path / "cave.nix"
+        cave_nix.write_text('{ inputs = {}; config = { pkgs }: {}; }')
+        user_env = tmp_path / "user-env"
+        user_env.mkdir()
+        eval_result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=inputs_json, stderr="",
+        )
+        with patch("subprocess.run", return_value=eval_result):
+            assert _generate_user_env_flake(cave_nix, user_env)
         return (user_env / "flake.nix").read_text()
 
     def test_string_input_generates_url(self, tmp_path):
         """Plain string input produces name.url = "...";"""
-        flake = self._run_build_and_read_flake(tmp_path, '{"foo": "github:owner/repo"}')
+        flake = self._generate_and_read(tmp_path, '{"foo": "github:owner/repo"}')
         assert 'foo.url = "github:owner/repo";' in flake
 
     def test_attrset_input_generates_separate_attrs(self, tmp_path):
@@ -416,7 +406,7 @@ class TestBuildUserEnvFlakeGeneration:
                 "url": "git+ssh://git@github.com/user/repo",
             }
         })
-        flake = self._run_build_and_read_flake(tmp_path, inputs)
+        flake = self._generate_and_read(tmp_path, inputs)
         assert 'agent-capabilities.flake = false;' in flake
         assert 'agent-capabilities.url = "git+ssh://git@github.com/user/repo";' in flake
         # Must NOT contain Python dict repr
@@ -427,7 +417,7 @@ class TestBuildUserEnvFlakeGeneration:
         inputs = json.dumps({
             "foo-nixpkgs": {"follows": "nixpkgs"},
         })
-        flake = self._run_build_and_read_flake(tmp_path, inputs)
+        flake = self._generate_and_read(tmp_path, inputs)
         assert 'foo-nixpkgs.follows = "nixpkgs";' in flake
 
 

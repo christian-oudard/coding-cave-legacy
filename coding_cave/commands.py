@@ -542,9 +542,9 @@ def cmd_cp(srcs, dest, recursive=False, force=False):
 
 def cmd_flake_update(inputs):
     """Update flake inputs in user-env. Pass input names to update selectively."""
+    # Always regenerate flake.nix to pick up code fixes and cave.nix changes
+    config.build_user_env()
     user_env = config._user_env_dir()
-    if not (user_env / "flake.nix").exists():
-        config.build_user_env()
     if not (user_env / "flake.nix").exists():
         print("No user environment to update.", file=sys.stderr)
         sys.exit(1)

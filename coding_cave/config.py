@@ -229,50 +229,22 @@ def _user_env_dir():
     return _state.cave_data() / "user-env"
 
 
-def build_user_env():
-    """Build user environment from cave.nix. Returns result path or None."""
-    cave_nix = _cave_nix_path()
-
-    # Auto-generate cave.nix if missing
-    if not cave_nix.exists():
-        cave_nix.parent.mkdir(parents=True, exist_ok=True)
-        cave_nix.write_text(_DEFAULT_CAVE_NIX)
-
-    user_env = _user_env_dir()
-    user_env.mkdir(parents=True, exist_ok=True)
-
-    # Copy cave.nix into build dir
-    dest_cave_nix = user_env / "cave.nix"
-    cave_nix_content = cave_nix.read_text()
-    dest_cave_nix.write_text(cave_nix_content)
-
-    # Check if rebuild needed (hash cave.nix + flake.lock)
-    h = hashlib.sha256(cave_nix_content.encode())
-    lock_file = user_env / "flake.lock"
-    if lock_file.exists():
-        h.update(lock_file.read_bytes())
-    content_hash = h.hexdigest()[:16]
-    hash_file = user_env / ".cave-nix-hash"
-    result_link = user_env / "result"
-    if hash_file.exists() and hash_file.read_text() == content_hash and result_link.exists():
-        return result_link.resolve()
-
-    # Extract inputs from cave.nix via nix eval
+def _generate_user_env_flake(cave_nix_path, user_env):
+    """Generate flake.nix from cave.nix inputs. Returns True on success."""
     r = subprocess.run(
-        ["nix", "eval", "--json", "-f", str(dest_cave_nix), "inputs"],
+        ["nix", "eval", "--json", "-f", str(cave_nix_path), "inputs"],
         capture_output=True, text=True,
     )
     if r.returncode != 0:
         print(f"Warning: failed to eval cave.nix inputs: {r.stderr.strip()}", file=sys.stderr)
-        return _try_existing_result(result_link)
+        return False
 
     try:
         inputs = json.loads(r.stdout)
     except json.JSONDecodeError:
         print(f"Warning: cave.nix inputs is not valid JSON", file=sys.stderr)
-        return _try_existing_result(result_link)
+        return False
 
-    # Generate flake.nix
     input_declarations = ""
     input_names = []
     input_passes = ""
@@ -299,6 +271,42 @@ def build_user_env():
         input_passes=input_passes,
     )
     (user_env / "flake.nix").write_text(flake_content)
+    return True
+
+
+def build_user_env():
+    """Build user environment from cave.nix. Returns result path or None."""
+    cave_nix = _cave_nix_path()
+
+    # Auto-generate cave.nix if missing
+    if not cave_nix.exists():
+        cave_nix.parent.mkdir(parents=True, exist_ok=True)
+        cave_nix.write_text(_DEFAULT_CAVE_NIX)
+
+    user_env = _user_env_dir()
+    user_env.mkdir(parents=True, exist_ok=True)
+
+    # Copy cave.nix into build dir
+    dest_cave_nix = user_env / "cave.nix"
+    cave_nix_content = cave_nix.read_text()
+    dest_cave_nix.write_text(cave_nix_content)
+
+    result_link = user_env / "result"
+
+    # Always regenerate flake.nix (cheap) so code fixes propagate even
+    # when cave.nix content hasn't changed.  Only the nix build is cached.
+    if not _generate_user_env_flake(dest_cave_nix, user_env):
+        return _try_existing_result(result_link)
+
+    # Check if rebuild needed (hash cave.nix + flake.lock)
+    h = hashlib.sha256(cave_nix_content.encode())
+    lock_file = user_env / "flake.lock"
+    if lock_file.exists():
+        h.update(lock_file.read_bytes())
+    content_hash = h.hexdigest()[:16]
+    hash_file = user_env / ".cave-nix-hash"
+    if hash_file.exists() and hash_file.read_text() == content_hash and result_link.exists():
+        return result_link.resolve()
 
     # Build and register a GC root so nix-collect-garbage on the host
     # can't delete the cave-user-env or its closure.  nix build --out-link
