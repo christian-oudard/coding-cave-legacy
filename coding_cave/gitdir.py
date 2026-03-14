@@ -151,6 +151,43 @@ def create_session_gitdir(slug, sid, overlay_base):
 
 
 
+def _is_patch_upstream(gitdir, commit, merge_base, upstream_sha):
+    """Check if a commit's patch is already applied in the upstream range.
+
+    Uses git patch-id to compare the commit's diff against all diffs
+    in merge_base..upstream_sha.  Returns True if a match is found.
+    """
+    # Get patch-id of the commit
+    show = git_mod.git(gitdir, "diff-tree", "-p", commit,
+                       capture_output=True)
+    if show.returncode != 0 or not show.stdout:
+        return False
+    pid = subprocess.run(
+        ["git", "patch-id", "--stable"],
+        input=show.stdout, capture_output=True,
+    )
+    if pid.returncode != 0 or not pid.stdout.strip():
+        return False
+    commit_patch_id = pid.stdout.split()[0]
+
+    # Get patch-ids of all upstream commits
+    log = git_mod.git(gitdir, "log", "-p",
+                      f"{merge_base}..{upstream_sha}",
+                      capture_output=True)
+    if log.returncode != 0 or not log.stdout:
+        return False
+    upstream_pids = subprocess.run(
+        ["git", "patch-id", "--stable"],
+        input=log.stdout, capture_output=True,
+    )
+    if upstream_pids.returncode != 0:
+        return False
+    for line in upstream_pids.stdout.strip().splitlines():
+        if line and line.split()[0] == commit_patch_id:
+            return True
+    return False
+
+
 def _rebase_commits(gitdir, shared_sha, session_sha, merge_base):
     """Rebase session commits onto shared HEAD using three-way merge.
 
@@ -187,7 +224,14 @@ def _rebase_commits(gitdir, shared_sha, session_sha, merge_base):
                     f"--merge-base={commit_parent}", parent, commit,
                     capture_output=True, text=True)
         if merge.returncode != 0:
-            return None  # conflict
+            # Conflict — check if this commit's patch is already upstream
+            # (equivalent to --no-reapply-cherry-picks in git rebase).
+            # Use patch-id to detect cherry-pick equivalence.
+            already_applied = _is_patch_upstream(
+                gitdir, commit, merge_base, shared_sha)
+            if already_applied:
+                continue
+            return None  # real conflict
         merged_tree = merge.stdout.strip().splitlines()[0]
 
         # Skip empty commits (tree unchanged) — happens when the commit's
@@ -197,11 +241,6 @@ def _rebase_commits(gitdir, shared_sha, session_sha, merge_base):
                           capture_output=True, text=True)
         if (parent_tree.returncode == 0
                 and parent_tree.stdout.strip() == merged_tree):
-            orig_msg = git_mod.git(gitdir, "log", "-1", "--format=%s", commit,
-                                   capture_output=True, text=True)
-            msg = orig_msg.stdout.strip() if orig_msg.returncode == 0 else commit
-            print(f"  {msg} (already applied, skipping)",
-                  file=sys.stderr)
             continue
 
         # Preserve original author and committer info

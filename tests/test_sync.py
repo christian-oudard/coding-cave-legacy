@@ -1038,6 +1038,79 @@ class TestSessionGitdir:
         # Shared HEAD should NOT have moved
         assert git_head(shared_gd, gitdir=True) == shared_after_push
 
+    def test_rebase_skips_cherry_pick_equivalent_commits(
+            self, shared_project, tmp_path):
+        """Session commits that are already upstream (cherry-pick equivalent)
+        are skipped during rebase, allowing new commits to apply.
+
+        Scenario: session makes commits A, B. Host independently applies the
+        same changes as A (different SHA) plus an extra commit X. Push updates
+        shared. Live sync should skip A (already upstream) and apply B.
+        """
+        host, slug, projects_dir = shared_project
+        shared_gd = projects_dir / slug / "gitdir"
+
+        _, work_a, overlay_a = self._make_session(
+            tmp_path, slug, projects_dir, "a")
+        session_gd = overlay_a / f"gitdir-{slug}"
+
+        # Session makes commit A (add a.txt)
+        (work_a / "a.txt").write_text("content a\n")
+        cave_git(work_a, "add", "a.txt")
+        cave_git(work_a, "commit", "-m", "add a")
+
+        # Session makes commit B (add b.txt) — truly new
+        (work_a / "b.txt").write_text("content b\n")
+        cave_git(work_a, "add", "b.txt")
+        cave_git(work_a, "commit", "-m", "add b")
+
+        # Separately, shared gets the same A change + extra commit X
+        shared_work = tmp_path / "shared-work"
+        shared_work.mkdir()
+        git_run("git", "--git-dir", str(shared_gd), "--work-tree",
+                str(shared_work), "checkout", "HEAD", "--", ".")
+        (shared_work / "a.txt").write_text("content a\n")
+        env = {**os.environ, **GIT_ENV}
+        subprocess.run(
+            ["git", "--git-dir", str(shared_gd), "--work-tree",
+             str(shared_work), "add", "a.txt"],
+            capture_output=True, check=True, env=env,
+        )
+        subprocess.run(
+            ["git", "--git-dir", str(shared_gd), "--work-tree",
+             str(shared_work), "commit", "-m", "add a"],
+            capture_output=True, check=True, env=env,
+        )
+        # Extra commit X
+        (shared_work / "x.txt").write_text("extra\n")
+        subprocess.run(
+            ["git", "--git-dir", str(shared_gd), "--work-tree",
+             str(shared_work), "add", "x.txt"],
+            capture_output=True, check=True, env=env,
+        )
+        subprocess.run(
+            ["git", "--git-dir", str(shared_gd), "--work-tree",
+             str(shared_work), "commit", "-m", "extra X"],
+            capture_output=True, check=True, env=env,
+        )
+
+        # Live sync — should skip A (cherry-pick equivalent) and apply B
+        wrapper.forward_session_refs(slug, session_gd, shared_gd)
+
+        # B's content should be in shared
+        b_content = git_run("git", "--git-dir", str(shared_gd),
+                            "show", "refs/heads/main:b.txt")
+        assert b_content.returncode == 0
+        assert b_content.stdout.strip() == "content b"
+
+        # A and X should also be present
+        a_content = git_run("git", "--git-dir", str(shared_gd),
+                            "show", "refs/heads/main:a.txt")
+        assert a_content.stdout.strip() == "content a"
+        x_content = git_run("git", "--git-dir", str(shared_gd),
+                            "show", "refs/heads/main:x.txt")
+        assert x_content.stdout.strip() == "extra"
+
     def test_rebase_sync_then_resync_is_noop(
             self, shared_project, tmp_path):
         """After a successful rebase-sync, the next sync is a no-op.
