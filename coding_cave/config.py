@@ -98,6 +98,11 @@ def setup_env(global_config):
             os.environ["CODING_CAVE_BASH_PROFILE"] = str(bash_profile)
     if mirror.get("git"):
         gitconfig = Path.home() / ".gitconfig"
+        if not gitconfig.exists():
+            xdg_config = os.environ.get(
+                "XDG_CONFIG_HOME", str(Path.home() / ".config")
+            )
+            gitconfig = Path(xdg_config) / "git" / "config"
         if gitconfig.exists():
             os.environ["CODING_CAVE_GITCONFIG"] = str(gitconfig)
     if mirror.get("nvim"):

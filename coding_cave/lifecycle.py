@@ -436,7 +436,7 @@ def start_session(project, command, gpu=False):
     # Git config mirroring
     gitconfig = os.environ.get("CODING_CAVE_GITCONFIG", "")
     if gitconfig and Path(gitconfig).is_file():
-        bwrap_args += ["--ro-bind", gitconfig, f"{_state.JAIL_HOME}/.gitconfig"]
+        bwrap_args += ["--ro-bind", gitconfig, f"{_state.JAIL_HOME}/.gitconfig.host"]
 
     # Passwd/group files
     uid = os.getuid()

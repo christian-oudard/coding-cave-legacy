@@ -184,6 +184,10 @@
           mkdir -p "$HOME/.gnupg"
           chmod 700 "$HOME/.gnupg" 2>/dev/null || true
         fi
+        # Include host gitconfig if mirrored (aliases, etc.)
+        if [ -f "$HOME/.gitconfig.host" ]; then
+          git config --global include.path "$HOME/.gitconfig.host"
+        fi
         # Configure GPG commit signing if host forwarded signing key
         if [ -n "''${CODING_CAVE_GIT_SIGNING_KEY:-}" ]; then
           git config --global user.signingkey "''${CODING_CAVE_GIT_SIGNING_KEY}"
