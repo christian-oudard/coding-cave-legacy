@@ -562,6 +562,7 @@ def cmd_flake_update(inputs):
 
 
 def cmd_status(args):
+    overlay.clean_stale_session_overlays()
     show_all = "--all" in args or "-a" in args
 
     print(f"coding-cave {_state.VERSION}", file=sys.stderr)

@@ -156,6 +156,9 @@ def start_session(project, command, gpu=False):
     _state.cave_data().mkdir(parents=True, exist_ok=True)
     sid = sessions.session_id()
 
+    # Clean up overlay dirs left behind by sessions that died without cleanup.
+    overlay.clean_stale_session_overlays()
+
     # Build user environment from cave.nix BEFORE mounting the nix overlay.
     # build_user_env() may produce new store paths (e.g. after flake update);
     # these must exist in /nix/store before fuse-overlayfs snapshots it.
@@ -545,9 +548,23 @@ def start_session(project, command, gpu=False):
     sessions.update_pane_titles(project)
     print("Started coding-cave.", file=sys.stderr)
 
+    # Convert SIGTERM/SIGHUP into SystemExit so the finally block runs.
+    # Without this, closing the terminal or `kill <pid>` skips cleanup
+    # entirely, leaving ~60G+ of orphaned session overlays.
+    def _exit_on_signal(signum, _frame):
+        try:
+            os.kill(proc.pid, signum)
+        except OSError:
+            pass
+        raise SystemExit(128 + signum)
+
+    prev_term = signal.signal(signal.SIGTERM, _exit_on_signal)
+    prev_hup = signal.signal(signal.SIGHUP, _exit_on_signal)
     try:
         ret = wait_for_child(proc.pid)
     finally:
+        signal.signal(signal.SIGTERM, prev_term)
+        signal.signal(signal.SIGHUP, prev_hup)
         gitdir.merge_session_gitdirs(sid, overlay_base)
         sessions.cleanup_session(sid)
         sessions.update_pane_titles(project)
@@ -578,6 +595,7 @@ def start_session(project, command, gpu=False):
             except OSError:
                 pass
         overlay.force_rmtree(overlay_base)
+        overlay.clean_stale_session_overlays()
 
     sys.exit(ret)
 
