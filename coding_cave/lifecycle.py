@@ -484,7 +484,6 @@ def start_session(project, command, gpu=False):
         "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY",
         # Git identity (try-fwd-env → wrap-entry, then unset)
         "CODING_CAVE_GIT_NAME", "CODING_CAVE_GIT_EMAIL",
-        "CODING_CAVE_GIT_SIGNING_KEY", "CODING_CAVE_GIT_GPG_SIGN",
         "CODING_CAVE_GPG_AGENT_SOCK",
         # Proxy (onecli credential injection)
         "CODING_CAVE_PROXY_ADDR",
