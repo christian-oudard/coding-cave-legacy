@@ -14,8 +14,8 @@ done
 
 persist=""
 if [ -n "$persist_file" ]; then
-    read -r iteration total deadline < <(jq -r \
-        '[(.iteration // 0), (.total // 0), (.deadline // 0)] | map(tostring) | join(" ")' \
+    read -r iteration total deadline started < <(jq -r \
+        '[.[]] | first | [(.iteration // 0), (.total // 0), (.deadline // 0), (.started // 0)] | map(tostring) | join(" ")' \
         "$persist_file" 2>/dev/null)
     if [ "$total" -gt 0 ] 2>/dev/null; then
         persist="persist $iteration/$total"
@@ -24,6 +24,16 @@ if [ -n "$persist_file" ]; then
         remaining=$(( ${deadline%.*} - now ))
         if [ "$remaining" -le 0 ]; then
             persist="persist #$iteration expired"
+        elif [ "${started%.*}" -gt 0 ] 2>/dev/null; then
+            elapsed=$(( now - ${started%.*} ))
+            total_dur=$(( ${deadline%.*} - ${started%.*} ))
+            fmt_dur() {
+                local s=$1 h m
+                h=$((s / 3600)); m=$(( (s % 3600) / 60 ))
+                if [ "$h" -gt 0 ]; then printf '%dh%02dm' "$h" "$m"
+                else printf '%dm' "$m"; fi
+            }
+            persist=$(printf 'persist #%s %s/%s' "$iteration" "$(fmt_dur $elapsed)" "$(fmt_dur $total_dur)")
         else
             hours=$((remaining / 3600))
             minutes=$(( (remaining % 3600) / 60 ))
