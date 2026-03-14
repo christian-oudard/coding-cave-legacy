@@ -114,10 +114,10 @@ class TestFlakeNixSafety:
         flake = FLAKE_NIX.read_text()
         assert '(try-fwd-env "CODING_CAVE_GPG_AGENT_SOCK")' in flake
 
-    def test_gnupghome_forwarded(self):
-        """CODING_CAVE_GNUPGHOME is forwarded into the cave via try-fwd-env."""
+    def test_gnupghome_not_forwarded(self):
+        """CODING_CAVE_GNUPGHOME is host-only (bind-mount in lifecycle.py)."""
         flake = FLAKE_NIX.read_text()
-        assert '(try-fwd-env "CODING_CAVE_GNUPGHOME")' in flake
+        assert '(try-fwd-env "CODING_CAVE_GNUPGHOME")' not in flake
 
     def test_gnupg_in_packages(self):
         """gnupg is included in sandbox packages (needed for GPG signing)."""
@@ -513,8 +513,7 @@ class TestNixBuild:
         sandbox_script, _ = sandbox_scripts
         assert "CODING_CAVE_GPG_AGENT_SOCK" in sandbox_script, \
             "sandbox missing GPG agent socket forwarding"
-        assert "CODING_CAVE_GNUPGHOME" in sandbox_script, \
-            "sandbox missing GNUPGHOME forwarding"
+        # GNUPGHOME is host-only (lifecycle.py bind-mount), not forwarded
         assert "CODING_CAVE_GIT_SIGNING_KEY" in sandbox_script, \
             "sandbox missing signing key forwarding"
 

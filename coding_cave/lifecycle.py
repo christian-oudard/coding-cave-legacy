@@ -240,7 +240,6 @@ def start_session(project, command, gpu=False):
         if cave_nix_db.exists():
             os.environ["CODING_CAVE_NIX_DB_DIR"] = str(nix_db_dir)
     if user_env:
-        os.environ["CODING_CAVE_USER_ENV"] = str(user_env)
         # Merge user settings into persistent home
         user_settings = user_env / "claude" / "settings.json"
         if user_settings.is_file():
@@ -463,8 +462,6 @@ def start_session(project, command, gpu=False):
         for arg in bwrap_args:
             f.write(arg.encode() + b"\0")
     os.environ["CODING_CAVE_BWRAP_ARGS"] = str(args_file)
-    os.environ["CODING_CAVE_SESSION_ID"] = sid
-    os.environ["CODING_CAVE_PROJECT"] = project
     os.environ["CODING_CAVE_PROJECT_PATH"] = loaded_projects.get(project, "")
     session_index = sessions._next_session_index(project)
     os.environ["CODING_CAVE_SESSION_INDEX"] = str(session_index)
@@ -480,17 +477,17 @@ def start_session(project, command, gpu=False):
         # Forwarded into cave via try-fwd-env
         "COLORTERM",
         "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY",
-        # Host git identity and GPG signing
+        # Git identity (try-fwd-env → wrap-entry, then unset)
         "CODING_CAVE_GIT_NAME", "CODING_CAVE_GIT_EMAIL",
         "CODING_CAVE_GIT_SIGNING_KEY", "CODING_CAVE_GIT_GPG_SIGN",
-        "CODING_CAVE_GPG_AGENT_SOCK", "CODING_CAVE_GNUPGHOME",
-        # coding-cave internal
+        "CODING_CAVE_GPG_AGENT_SOCK",
+        # Host-side only (add-runtime reads from process env)
         "CODING_CAVE_NIX_MERGED", "CODING_CAVE_NIX_DB_DIR",
-        "CODING_CAVE_BWRAP_ARGS",
-        "CODING_CAVE_SESSION_ID", "CODING_CAVE_PROJECT",
+        "CODING_CAVE_BWRAP_ARGS", "CODING_CAVE_USER_CLAUDE_MD",
+        # Runtime (visible inside cave)
         "CODING_CAVE_PROJECT_PATH", "CODING_CAVE_SESSION_INDEX",
-        "CODING_CAVE_USER_ENV", "CODING_CAVE_USER_CLAUDE_MD",
-        "CODING_CAVE_EXTRA_PATH", "CODING_CAVE_GITCONFIG",
+        # Setup-only (try-fwd-env → wrap-entry, then unset)
+        "CODING_CAVE_EXTRA_PATH",
     }
     bwrap_env = {k: v for k, v in os.environ.items() if k in BWRAP_ENV_ALLOWLIST}
 

@@ -51,8 +51,8 @@
       # Writable /nix/store overlay (fuse-overlayfs, mounted by wrapper.py).
       # Host nix DB is seeded at startup so nix doesn't try to re-register
       # (chmod) existing lower-layer paths, which fails on overlayfs.
-      (try-fwd-env "CODING_CAVE_NIX_MERGED")
-      (try-fwd-env "CODING_CAVE_NIX_DB_DIR")
+      # NIX_MERGED and NIX_DB_DIR are read from the process env by
+      # add-runtime (host-side); no need to forward into bwrap.
       (add-runtime ''
         if [ -n "''${CODING_CAVE_NIX_MERGED:-}" ]; then
           RUNTIME_ARGS+=(--bind "$CODING_CAVE_NIX_MERGED" /nix/store)
@@ -103,33 +103,26 @@
 
       # Git identity: forwarded from host when available (eliminates
       # re-authoring on pull).  Falls back to throwaway identity.
+      # These are consumed once in wrap-entry (init) then unset.
       (try-fwd-env "CODING_CAVE_GIT_NAME")
       (try-fwd-env "CODING_CAVE_GIT_EMAIL")
       (try-fwd-env "CODING_CAVE_GIT_SIGNING_KEY")
       (try-fwd-env "CODING_CAVE_GIT_GPG_SIGN")
       (try-fwd-env "CODING_CAVE_GPG_AGENT_SOCK")
-      (try-fwd-env "CODING_CAVE_GNUPGHOME")
-      # Git identity is set in wrap-entry (add-runtime runs on host
-      # before bwrap, but --clearenv drops vars set there).
+      # GNUPGHOME is only used by lifecycle.py (host-side bind-mount).
 
       # Credential forwarding
       (try-fwd-env "CLAUDE_CODE_OAUTH_TOKEN")
       (try-fwd-env "ANTHROPIC_API_KEY")
 
-      # Session identity
-      (try-fwd-env "CODING_CAVE_SESSION_ID")
-      (try-fwd-env "CODING_CAVE_PROJECT")
-      (try-fwd-env "CODING_CAVE_PROJECT_PATH")
+      # Session identity (runtime — visible to statusline and scripts)
       (try-fwd-env "CODING_CAVE_SESSION_INDEX")
-
-      # Extra bwrap args file from wrapper.py
-      (try-fwd-env "CODING_CAVE_BWRAP_ARGS")
-
-      # User environment output from cave.nix build (packages, settings, skills)
-      (try-fwd-env "CODING_CAVE_USER_ENV")
-      (try-fwd-env "CODING_CAVE_USER_CLAUDE_MD")
+      (try-fwd-env "CODING_CAVE_PROJECT_PATH")
+      # Setup-only: consumed in wrap-entry then unset
       (try-fwd-env "CODING_CAVE_EXTRA_PATH")
-      (try-fwd-env "CODING_CAVE_GITCONFIG")
+      # Host-only vars (add-runtime / lifecycle.py): BWRAP_ARGS,
+      # USER_ENV, USER_CLAUDE_MD, GITCONFIG, SESSION_ID, PROJECT
+      # are read from the process env before bwrap starts.
       # Claude Code state init
       (add-runtime ''
         CAVE_HOME="$HOME/.local/share/coding-cave/home"
@@ -213,6 +206,10 @@
           export GIT_AUTHOR_EMAIL="coding-cave@noreply"
           export GIT_COMMITTER_EMAIL="coding-cave@noreply"
         fi
+        # Clean up setup-only vars before saving the env snapshot.
+        unset CODING_CAVE_EXTRA_PATH CODING_CAVE_GIT_NAME \
+              CODING_CAVE_GIT_EMAIL CODING_CAVE_GIT_SIGNING_KEY \
+              CODING_CAVE_GIT_GPG_SIGN CODING_CAVE_GPG_AGENT_SOCK
         export -p > /tmp/cave-env
         chmod 444 /tmp/cave-env
         # Ensure shells started via nsenter get the cave environment.
