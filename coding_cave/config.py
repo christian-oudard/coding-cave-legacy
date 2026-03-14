@@ -53,11 +53,30 @@ def _detect_gpg_agent_socket():
     return None
 
 
+def _setup_proxy(global_config):
+    """Configure proxy env vars if [proxy] section exists. Returns True if proxy is active."""
+    proxy = global_config.get("proxy", {})
+    url = proxy.get("url")
+    if not url:
+        return False
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    port = parsed.port or 10255
+    os.environ["CODING_CAVE_PROXY_PORT"] = str(port)
+    ca_cert = proxy.get("ca-cert")
+    if ca_cert and Path(ca_cert).is_file():
+        os.environ["CODING_CAVE_PROXY_CA_CERT"] = str(Path(ca_cert).resolve())
+    return True
+
+
 def setup_env(global_config):
     """Set environment variables from global config."""
-    token = global_config.get("credentials", {}).get("claude-oauth-token")
-    if token:
-        os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = token
+    proxy_enabled = _setup_proxy(global_config)
+    if not proxy_enabled:
+        # Only forward raw credentials when proxy is NOT configured
+        token = global_config.get("credentials", {}).get("claude-oauth-token")
+        if token:
+            os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = token
 
     claude_md = Path.home() / ".config" / "coding-cave" / "CLAUDE.md"
     if claude_md.exists():

@@ -106,12 +106,16 @@
       # These are consumed once in wrap-entry (init) then unset.
       (try-fwd-env "CODING_CAVE_GIT_NAME")
       (try-fwd-env "CODING_CAVE_GIT_EMAIL")
+      (try-fwd-env "CODING_CAVE_GIT_SIGNING_KEY")
+      (try-fwd-env "CODING_CAVE_GIT_GPG_SIGN")
       (try-fwd-env "CODING_CAVE_GPG_AGENT_SOCK")
       # GNUPGHOME is only used by lifecycle.py (host-side bind-mount).
 
       # Credential forwarding
       (try-fwd-env "CLAUDE_CODE_OAUTH_TOKEN")
       (try-fwd-env "ANTHROPIC_API_KEY")
+      # Proxy address (onecli) — consumed in wrap-entry
+      (try-fwd-env "CODING_CAVE_PROXY_ADDR")
 
       # Session identity (runtime — visible to statusline and scripts)
       (try-fwd-env "CODING_CAVE_SESSION_INDEX")
@@ -182,9 +186,12 @@
           mkdir -p "$HOME/.gnupg"
           chmod 700 "$HOME/.gnupg" 2>/dev/null || true
         fi
-        # Include host gitconfig if mirrored (aliases, etc.)
-        if [ -f "$HOME/.gitconfig.host" ]; then
-          git config --global include.path "$HOME/.gitconfig.host"
+        # Configure GPG commit signing if host forwarded signing key
+        if [ -n "''${CODING_CAVE_GIT_SIGNING_KEY:-}" ]; then
+          git config --global user.signingkey "''${CODING_CAVE_GIT_SIGNING_KEY}"
+        fi
+        if [ -n "''${CODING_CAVE_GIT_GPG_SIGN:-}" ]; then
+          git config --global commit.gpgsign "''${CODING_CAVE_GIT_GPG_SIGN}"
         fi
         # Git identity from forwarded host vars (or fallback).
         if [ -n "''${CODING_CAVE_GIT_NAME:-}" ]; then
@@ -201,9 +208,28 @@
           export GIT_AUTHOR_EMAIL="coding-cave@noreply"
           export GIT_COMMITTER_EMAIL="coding-cave@noreply"
         fi
+        # HTTP proxy for credential injection (onecli)
+        if [ -n "''${CODING_CAVE_PROXY_ADDR:-}" ]; then
+          export HTTP_PROXY="http://''${CODING_CAVE_PROXY_ADDR}"
+          export HTTPS_PROXY="http://''${CODING_CAVE_PROXY_ADDR}"
+          export http_proxy="$HTTP_PROXY"
+          export https_proxy="$HTTPS_PROXY"
+          export NO_PROXY="localhost,127.0.0.1,::1"
+          export no_proxy="$NO_PROXY"
+          # Trust onecli's MITM CA certificate
+          if [ -f /etc/onecli-ca.pem ]; then
+            # Combined bundle for tools that use SSL_CERT_FILE (curl, Python, etc.)
+            cat /etc/ssl/certs/ca-bundle.crt /etc/onecli-ca.pem > /tmp/combined-ca.pem
+            export SSL_CERT_FILE=/tmp/combined-ca.pem
+            # NODE_EXTRA_CA_CERTS is additive — only needs the extra cert
+            export NODE_EXTRA_CA_CERTS=/etc/onecli-ca.pem
+          fi
+        fi
         # Clean up setup-only vars before saving the env snapshot.
         unset CODING_CAVE_EXTRA_PATH CODING_CAVE_GIT_NAME \
-              CODING_CAVE_GIT_EMAIL CODING_CAVE_GPG_AGENT_SOCK
+              CODING_CAVE_GIT_EMAIL CODING_CAVE_GIT_SIGNING_KEY \
+              CODING_CAVE_GIT_GPG_SIGN CODING_CAVE_GPG_AGENT_SOCK \
+              CODING_CAVE_PROXY_ADDR
         export -p > /tmp/cave-env
         chmod 444 /tmp/cave-env
         # Ensure shells started via nsenter get the cave environment.

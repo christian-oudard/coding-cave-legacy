@@ -388,6 +388,11 @@ def start_session(project, command, gpu=False):
             if os.path.isfile(src):
                 bwrap_args += ["--ro-bind", src, f"{cave_gnupghome}/{fname}"]
 
+    # Proxy CA certificate bind-mount (onecli MITM)
+    proxy_ca = os.environ.get("CODING_CAVE_PROXY_CA_CERT", "")
+    if proxy_ca and os.path.isfile(proxy_ca):
+        bwrap_args += ["--ro-bind", proxy_ca, "/etc/onecli-ca.pem"]
+
     # User environment: extra packages, skills, env from cave.nix
     if user_env:
         import json
@@ -436,7 +441,7 @@ def start_session(project, command, gpu=False):
     # Git config mirroring
     gitconfig = os.environ.get("CODING_CAVE_GITCONFIG", "")
     if gitconfig and Path(gitconfig).is_file():
-        bwrap_args += ["--ro-bind", gitconfig, f"{_state.JAIL_HOME}/.gitconfig.host"]
+        bwrap_args += ["--ro-bind", gitconfig, f"{_state.JAIL_HOME}/.gitconfig"]
 
     # Passwd/group files
     uid = os.getuid()
@@ -481,6 +486,8 @@ def start_session(project, command, gpu=False):
         "CODING_CAVE_GIT_NAME", "CODING_CAVE_GIT_EMAIL",
         "CODING_CAVE_GIT_SIGNING_KEY", "CODING_CAVE_GIT_GPG_SIGN",
         "CODING_CAVE_GPG_AGENT_SOCK",
+        # Proxy (onecli credential injection)
+        "CODING_CAVE_PROXY_ADDR",
         # Host-side only (add-runtime reads from process env)
         "CODING_CAVE_NIX_MERGED", "CODING_CAVE_NIX_DB_DIR",
         "CODING_CAVE_BWRAP_ARGS", "CODING_CAVE_USER_CLAUDE_MD",
@@ -501,14 +508,29 @@ def start_session(project, command, gpu=False):
         # pasta provides an isolated network namespace with outbound-only access.
         # --quiet: suppress startup messages
         # --config-net: pasta directly configures the network interface (no DHCP wait)
-        # --map-host-loopback 192.0.2.1: disable gateway->host-loopback mapping
-        #   (pasta by default maps the gateway to host loopback, which would allow
-        #    access to host localhost services like 1Password, SSH agent)
         # -T none -U none: disable all TCP/UDP port forwarding
+        proxy_port = os.environ.get("CODING_CAVE_PROXY_PORT")
+        if proxy_port:
+            # Proxy mode: map 10.0.2.2 → host loopback so cave can reach onecli.
+            # Forward only the proxy port (TCP), block everything else.
+            loopback_addr = "10.0.2.2"
+            bwrap_env["CODING_CAVE_PROXY_ADDR"] = f"{loopback_addr}:{proxy_port}"
+            pasta_args = [
+                "pasta", "--quiet", "--config-net",
+                "--map-host-loopback", loopback_addr,
+                "-T", proxy_port, "-U", "none",
+            ]
+        else:
+            # No proxy: disable gateway->host-loopback mapping
+            # (pasta by default maps the gateway to host loopback, which would
+            # allow access to host localhost services like 1Password, SSH agent)
+            pasta_args = [
+                "pasta", "--quiet", "--config-net",
+                "--map-host-loopback", "192.0.2.1",
+                "-T", "none", "-U", "none",
+            ]
         proc = subprocess.Popen(
-            ["pasta", "--quiet", "--config-net",
-             "--map-host-loopback", "192.0.2.1",
-             "-T", "none", "-U", "none", "--", binary] + command,
+            pasta_args + ["--", binary] + command,
             start_new_session=False,
             env=bwrap_env,
         )
