@@ -20,23 +20,12 @@ On the host, the user thinks in terms of project directories, not slugs. The pro
 
 Each agent session runs in its own bwrap namespace with its own overlay and its own gitdir. Multiple agents working on the same project get independent working trees and independent git state — they cannot see or interfere with each other's uncommitted work or HEAD position.
 
-### Branch-per-session
+### Session branches
 
-Each session works on a private `session/<sid>` branch, not `main`. This mirrors how human developers use feature branches:
+Sessions work directly on real branches (e.g. `main`). Each session gets its own gitdir with independent HEAD, index, and refs, so multiple sessions can commit on the same branch without interfering with each other. `_forward_refs` handles all concurrency: fast-forward, rebase, ownership-based adopt, and force-update with backup.
 
-- `create_session_gitdir` creates `refs/heads/session/<sid>` pointing to the current HEAD and sets it as the session's HEAD via `symbolic-ref`.
 - A `shared` remote is configured pointing to `/projects/.shared-gitdirs/<slug>` (the shared gitdir bind-mounted rw into the cave).
-- A post-commit hook pushes the current branch to shared (FF only, non-FF pushes fail silently), records the pushed SHA in `refs/pushed/<branch>`, and fetches latest from shared. `refs/pushed` lets `_forward_refs` know that this session was the last to update shared, enabling ownership detection even when `refs/synced` is stale. This gives agents visibility into each other's work via `shared/session/<other-sid>`.
-- Agents can rebase onto `shared/main` periodically and merge to main when done.
-
-On cleanup (`merge_session_gitdirs`), after forwarding all refs via `_forward_refs`, the session branch is merged to main:
-
-1. **Same tree**: session branch tree == main tree → delete branch (nothing to merge).
-2. **Fast-forward**: session branch is a descendant of main → update main, delete branch.
-3. **Behind**: session branch is an ancestor of main → delete branch.
-4. **Diverged**: attempt `_rebase_commits` onto main. If clean → update main, delete branch. If conflict → leave branch under `refs/heads/session/<sid>` for manual recovery.
-
-During live sync (`sync_live_sessions`), after forwarding session refs, `ff_session_branches` attempts FF-merges of all session branches to main so pull/push can see session commits.
+- A post-commit hook pushes the current branch to shared (FF only, non-FF pushes fail silently), records the pushed SHA in `refs/pushed/<branch>`, and fetches latest from shared. `refs/pushed` lets `_forward_refs` know that this session was the last to update shared, enabling ownership detection even when `refs/synced` is stale.
 
 `cav shell` joins a running agent's namespace via `nsenter`, giving the user direct access to that agent's in-progress files for inspection, testing, and debugging.
 
@@ -70,7 +59,7 @@ A shared gitdir holds the canonical objects and refs for each project. Each sess
 
 Per-session gitdirs are small (index file + refs + config). The bulk of git data (packfiles, loose objects) lives in the shared gitdir and is never duplicated. New objects created during a session live in the session gitdir until cleanup, when they're pushed to the shared gitdir.
 
-On session end, refs and new objects from the session gitdir are merged into the shared gitdir, the session branch is FF-merged to main (or rebased if diverged), then the session gitdir is removed. `pull` and `push` operate on the shared gitdir as before.
+On session end, refs and new objects from the session gitdir are merged into the shared gitdir via `_forward_refs`, then the session gitdir is removed. `pull` and `push` operate on the shared gitdir as before.
 
 ### Alternates path management
 
@@ -85,7 +74,7 @@ Session gitdirs use `objects/info/alternates` to share the object store with the
 
 There are two distinct operations that move refs from session gitdirs to the shared gitdir. They have different safety requirements because one operates on live sessions and the other on dead ones.
 
-**Live sync** (`forward_session_refs` + `ff_session_branches`): called by `pull` and `push` to pick up in-flight commits from running sessions. `forward_session_refs` forwards each session's refs (including `session/<sid>` branches) to shared. Then `ff_session_branches` attempts FF-merges of all session branches to main so pull/push can see session commits. Decision logic for each branch ref in `_forward_refs`:
+**Live sync** (`forward_session_refs`): called by `pull` and `push` to pick up in-flight commits from running sessions. `forward_session_refs` forwards each session's branch refs to shared. Decision logic for each branch ref in `_forward_refs`:
 
 1. **Unchanged** (ref == `refs/init` or `refs/synced`) → skip. Session never touched this branch, or hasn't changed since last sync.
 2. **New ref** (doesn't exist in shared) → create it, record `refs/synced`.
