@@ -408,17 +408,30 @@ def cmd_cp(srcs, dest, recursive=False, force=False):
         rel = path or "."
         return f"/projects/{slug}/{rel}" if rel != "." else f"/projects/{slug}", False
 
+    def _check_boundary(resolved, boundary, label):
+        """Exit if resolved path escapes boundary directory."""
+        try:
+            resolved.relative_to(boundary.resolve())
+        except ValueError:
+            print(f"Path escapes {label}: {resolved}", file=sys.stderr)
+            sys.exit(1)
+
     def cave_host_path(cave_path, is_home):
         """Map a cave-absolute path to a host filesystem path.
 
         Home paths use cave_home() directly (no session needed).
         Project paths fall back to the host source dir if no session is running.
         Other paths require a running session (accessed via /proc/<pid>/root/).
+
+        Home and fallback paths are boundary-checked to prevent ..
+        traversal escaping the intended directory.
         """
         if is_home:
             home = _state.cave_home()
             rel = cave_path[len(_state.JAIL_HOME):]
-            return home / rel.lstrip("/") if rel else home
+            result = (home / rel.lstrip("/")).resolve() if rel else home.resolve()
+            _check_boundary(result, home, "cave home")
+            return result
 
         # Extract project hint from path
         m = re.match(r'^/projects/([^/]+)', cave_path)
@@ -426,6 +439,8 @@ def cmd_cp(srcs, dest, recursive=False, force=False):
 
         root = _find_cave_root(project=project_hint)
         if root is not None:
+            # /proc/pid/root paths are sandboxed by the kernel namespace —
+            # symlinks and .. resolve within the cave's mount namespace.
             return root / cave_path.lstrip("/")
 
         # No session — fall back to host source for project paths
@@ -434,7 +449,9 @@ def cmd_cp(srcs, dest, recursive=False, force=False):
             if project_hint in all_projects:
                 host_source = Path(all_projects[project_hint])
                 rel = cave_path[len(f"/projects/{project_hint}"):]
-                return host_source / rel.lstrip("/") if rel else host_source
+                result = (host_source / rel.lstrip("/")).resolve() if rel else host_source.resolve()
+                _check_boundary(result, host_source, "project dir")
+                return result
 
         print("No running sessions.", file=sys.stderr)
         sys.exit(1)
@@ -460,11 +477,17 @@ def cmd_cp(srcs, dest, recursive=False, force=False):
                 shutil.copytree(src_path_obj, target, dirs_exist_ok=True)
             else:
                 target = cave_dest / src_path_obj.name if cave_dest.is_dir() else cave_dest
-                shutil.copy2(src_path_obj, target)
+                # Replace symlinks instead of following them
+                if target.is_symlink():
+                    target.unlink()
+                shutil.copy2(src_path_obj, target, follow_symlinks=False)
             print(f"  {src} -> {dest}", file=sys.stderr)
     elif src_cave:
         # cave -> host: cp <slug>:<cave-path> <host-dest>
         cave_src = cave_host_path(src_cave, src_home)
+        if cave_src.is_symlink():
+            print(f"Refusing to copy symlink from cave: {srcs[0]}", file=sys.stderr)
+            sys.exit(1)
         if not cave_src.exists():
             print(f"Source not found in cave: {srcs[0]}", file=sys.stderr)
             sys.exit(1)
@@ -486,7 +509,12 @@ def cmd_cp(srcs, dest, recursive=False, force=False):
                 print("Aborted.", file=sys.stderr)
                 sys.exit(1)
         if cave_src.is_dir():
-            shutil.copytree(cave_src, target, dirs_exist_ok=True)
+            def _copy_no_symlinks(src, dst, **kwargs):
+                if Path(src).is_symlink():
+                    return  # skip symlinks inside cave directories
+                shutil.copy2(src, dst, **kwargs)
+            shutil.copytree(cave_src, target, dirs_exist_ok=True,
+                            copy_function=_copy_no_symlinks)
         else:
             shutil.copy2(cave_src, target)
         print(f"  {srcs[0]} -> {dest}", file=sys.stderr)

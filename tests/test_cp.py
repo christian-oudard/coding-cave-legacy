@@ -771,3 +771,114 @@ class TestCpBwrapIntegration:
         shutil.copytree(src, dest)
         assert (dest / "one.txt").read_text() == "one\n"
         assert (dest / "two.txt").read_text() == "two\n"
+
+
+class TestCpSymlinkEscape:
+    """Symlinks in the cave must not exfiltrate host files."""
+
+    def test_symlink_in_cave_blocked(self, cp_env):
+        """Symlink inside cave pointing outside is refused on copy-out."""
+        e = cp_env
+        secret = e.tmp_path / "secret" / "id_ed25519"
+        secret.parent.mkdir()
+        secret.write_text("-----BEGIN OPENSSH PRIVATE KEY-----\nSECRET\n")
+
+        link = e.merged / "readme.txt"
+        link.symlink_to(secret)
+
+        dest = e.tmp_path / "output.txt"
+        with pytest.raises(SystemExit):
+            wrapper.cmd_cp([f"{e.slug}:readme.txt"], str(dest), force=True)
+        assert not dest.exists()
+
+    def test_symlink_to_host_directory_blocked(self, cp_env):
+        """Symlink to a host directory is refused on copy-out."""
+        e = cp_env
+        ssh_dir = e.tmp_path / "fake-ssh"
+        ssh_dir.mkdir()
+        (ssh_dir / "id_ed25519").write_text("private key\n")
+
+        (e.merged / "docs").symlink_to(ssh_dir)
+
+        dest = e.tmp_path / "stolen"
+        with pytest.raises(SystemExit):
+            wrapper.cmd_cp([f"{e.slug}:docs"], str(dest), recursive=True, force=True)
+        assert not dest.exists()
+
+    def test_symlink_host_to_cave_replaces_link(self, cp_env):
+        """Host->cave copy replaces symlink instead of following it."""
+        e = cp_env
+        host_file = e.tmp_path / "host-config.txt"
+        host_file.write_text("original\n")
+
+        (e.merged / "config.txt").symlink_to(host_file)
+
+        payload = e.tmp_path / "payload.txt"
+        payload.write_text("new content\n")
+        wrapper.cmd_cp([str(payload)], f"{e.slug}:config.txt")
+
+        # Host file untouched, cave file replaced
+        assert host_file.read_text() == "original\n"
+        assert (e.merged / "config.txt").read_text() == "new content\n"
+        assert not (e.merged / "config.txt").is_symlink()
+
+    def test_symlink_inside_directory_skipped(self, cp_env):
+        """Symlinks inside a copied directory are skipped."""
+        e = cp_env
+        secret = e.tmp_path / "host-secret.txt"
+        secret.write_text("secret\n")
+
+        subdir = e.merged / "mixed"
+        subdir.mkdir()
+        (subdir / "real.txt").write_text("safe\n")
+        (subdir / "link.txt").symlink_to(secret)
+
+        dest = e.tmp_path / "output"
+        wrapper.cmd_cp([f"{e.slug}:mixed"], str(dest), recursive=True, force=True)
+
+        assert (dest / "real.txt").read_text() == "safe\n"
+        assert not (dest / "link.txt").exists()
+
+
+class TestCpPathTraversal:
+    """Path traversal via .. must not escape boundary directories."""
+
+    def test_tilde_dotdot_blocked(self, cp_env):
+        """~/.. traversal out of cave home is rejected."""
+        e = cp_env
+        cave_home = _state.cave_home()
+        cave_home.mkdir(parents=True, exist_ok=True)
+
+        escaped = cave_home.parent / "outside-home.txt"
+        escaped.write_text("host data\n")
+
+        dest = e.tmp_path / "stolen.txt"
+        with pytest.raises(SystemExit):
+            wrapper.cmd_cp([f"{e.slug}:~/../../outside.txt"], str(dest), force=True)
+        assert not dest.exists()
+
+    def test_tilde_dotdot_write_blocked(self, cp_env):
+        """~/.. traversal on write is rejected."""
+        e = cp_env
+        cave_home = _state.cave_home()
+        cave_home.mkdir(parents=True, exist_ok=True)
+
+        payload = e.tmp_path / "payload.txt"
+        payload.write_text("escaped!\n")
+
+        with pytest.raises(SystemExit):
+            wrapper.cmd_cp([str(payload)], f"{e.slug}:~/../../outside.txt")
+
+    def test_fallback_dotdot_blocked(self, cp_env, monkeypatch):
+        """.. traversal in sessionless fallback to host source is rejected."""
+        e = cp_env
+        # Disable session so it falls back to host source dir
+        monkeypatch.setattr(commands, "_find_cave_root", lambda project=None: None)
+
+        escaped = e.host.parent / "sensitive.txt"
+        escaped.write_text("host secrets\n")
+
+        dest = e.tmp_path / "stolen.txt"
+        with pytest.raises(SystemExit):
+            wrapper.cmd_cp([f"{e.slug}:../sensitive.txt"], str(dest), force=True)
+        assert not dest.exists()
