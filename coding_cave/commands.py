@@ -1,5 +1,6 @@
 """CLI command implementations."""
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -310,15 +311,32 @@ def cmd_push(args):
             pass
 
 
-def cmd_cp(srcs, dest, recursive=False):
+def cmd_cp(srcs, dest, recursive=False, force=False):
     """Copy files between host and a running cave session's overlay."""
     session_overlays = _state.cave_data() / "session-overlays"
 
     def resolve_cave_path(spec):
-        """Parse 'slug:path', ':path', or 'cave:path'. Returns (slug, path) or (None, None)."""
+        """Parse 'slug:path', ':path', or 'cave:path'. Returns (slug, path) or (None, None).
+
+        Special slug values:
+        - None: not a cave path
+        - "~": path relative to cave home (no session needed)
+        - anything else: project slug, path relative to project overlay
+        """
         if ":" not in spec:
             return None, None
         slug, _, path = spec.partition(":")
+
+        # Tilde expansion → persistent home
+        if path.startswith("~/") or path == "~":
+            return "~", path[2:] or "."
+
+        # /home/cave-coder/ prefix → persistent home
+        if path == _state.JAIL_HOME:
+            return "~", "."
+        if path.startswith(_state.JAIL_HOME + "/"):
+            return "~", path[len(_state.JAIL_HOME) + 1:]
+
         if not slug or slug == "cave":
             # Auto-detect from CWD
             slug = None
@@ -330,39 +348,49 @@ def cmd_cp(srcs, dest, recursive=False):
             if not slug:
                 print("No project specified and CWD is not a registered project.", file=sys.stderr)
                 sys.exit(1)
-        # Strip /projects/<slug>/ prefix so absolute cave paths work.
-        prefix = f"/projects/{slug}/"
-        if path.startswith(prefix):
-            path = path[len(prefix):]
+
+        # Handle /projects/<slug>/ prefix (supports cross-project access).
+        m = re.match(r'^/projects/([^/]+)(?:/(.*)|$)', path)
+        if m:
+            slug = m.group(1)
+            path = m.group(2) or "."
+
         return slug, path or "."
 
     def find_session_merged(slug):
-        """Find the overlay merged dir for a running session of this project."""
-        active_sessions = sessions.list_sessions(project=slug)
-        if not active_sessions:
-            print(f"No running sessions for {slug}.", file=sys.stderr)
+        """Find the overlay merged dir for any running session with this project."""
+        all_sessions = sessions.list_sessions()
+        matching = []
+        for s in all_sessions:
+            merged = session_overlays / s["sid"] / f"{slug}-merged"
+            if merged.is_dir():
+                matching.append((s, merged))
+        if not matching:
+            print(f"No running sessions with project {slug}.", file=sys.stderr)
             sys.exit(1)
-        if len(active_sessions) > 1:
-            print("Multiple sessions running:", file=sys.stderr)
+        if len(matching) > 1:
+            print("Multiple sessions found:", file=sys.stderr)
             by_index = {}
-            for s in active_sessions:
+            for s, m in matching:
                 started = time.strftime("%H:%M", time.localtime(s["started"]))
                 idx = s.get("index", "?")
-                by_index[str(idx)] = s
+                by_index[str(idx)] = m
                 print(f"  [{idx}] [{started}] {s['sid']}  PID {s['bwrap_pid']}", file=sys.stderr)
             try:
                 choice = input("Session: ").strip()
-                sid = by_index[choice]["sid"]
+                return by_index[choice]
             except (KeyError, EOFError):
                 print("Invalid choice.", file=sys.stderr)
                 sys.exit(1)
-        else:
-            sid = active_sessions[0]["sid"]
-        merged = session_overlays / sid / f"{slug}-merged"
-        if not merged.is_dir():
-            print(f"Session overlay not found: {merged}", file=sys.stderr)
-            sys.exit(1)
-        return merged
+        return matching[0][1]
+
+    def cave_host_path(slug, path):
+        """Resolve a cave path spec to a host filesystem path."""
+        if slug == "~":
+            home = _state.cave_home()
+            return home if path == "." else home / path
+        merged = find_session_merged(slug)
+        return merged / path.lstrip("/")
 
     # Determine direction: host->cave or cave->host
     dest_slug, dest_path = resolve_cave_path(dest)
@@ -370,8 +398,7 @@ def cmd_cp(srcs, dest, recursive=False):
 
     if dest_slug:
         # host -> cave: cp <host-files>... <slug>:<cave-path>
-        merged = find_session_merged(dest_slug)
-        cave_dest = merged / dest_path.lstrip("/")
+        cave_dest = cave_host_path(dest_slug, dest_path)
         cave_dest.parent.mkdir(parents=True, exist_ok=True)
         for src in srcs:
             src_path_obj = Path(src).resolve()
@@ -390,8 +417,7 @@ def cmd_cp(srcs, dest, recursive=False):
             print(f"  {src} -> {dest}", file=sys.stderr)
     elif src_slug:
         # cave -> host: cp <slug>:<cave-path> <host-dest>
-        merged = find_session_merged(src_slug)
-        cave_src = merged / src_path.lstrip("/")
+        cave_src = cave_host_path(src_slug, src_path)
         if not cave_src.exists():
             print(f"Source not found in cave: {src_path}", file=sys.stderr)
             sys.exit(1)
@@ -402,16 +428,26 @@ def cmd_cp(srcs, dest, recursive=False):
                 print(f"cp: -R not specified; omitting directory '{srcs[0]}'", file=sys.stderr)
                 sys.exit(1)
             target = host_dest / cave_src.name if host_dest.is_dir() else host_dest
-            shutil.copytree(cave_src, target, dirs_exist_ok=True)
         else:
             target = host_dest / cave_src.name if host_dest.is_dir() else host_dest
+        if not force and target.exists():
+            try:
+                answer = input(f"Overwrite {target}? [y/N] ").strip().lower()
+            except EOFError:
+                answer = ""
+            if answer != "y":
+                print("Aborted.", file=sys.stderr)
+                sys.exit(1)
+        if cave_src.is_dir():
+            shutil.copytree(cave_src, target, dirs_exist_ok=True)
+        else:
             shutil.copy2(cave_src, target)
         print(f"  {srcs[0]} -> {dest}", file=sys.stderr)
     else:
         print("One of source or destination must use cave: or slug:path syntax.", file=sys.stderr)
-        print("  coding-cave cp <file>... cave:              host -> cave (project root)", file=sys.stderr)
-        print("  coding-cave cp <file>... cave:<path>        host -> cave (subpath)", file=sys.stderr)
+        print("  coding-cave cp <file>... cave:<path>        host -> cave", file=sys.stderr)
         print("  coding-cave cp cave:<path> <dest>           cave -> host", file=sys.stderr)
+        print("  coding-cave cp cave:~/path <dest>           cave home -> host", file=sys.stderr)
         sys.exit(1)
 
 

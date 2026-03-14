@@ -83,7 +83,8 @@ coding-cave push [project] [--force]   push host commits into cave gitdir
 coding-cave reset [project]            wipe overlay + gitdir to match host (no running sessions)
 coding-cave remove [project]           unregister a project and delete overlay data
 coding-cave cp <src>... <slug>:<path>  copy host files into a running session
-coding-cave cp <slug>:<path> <dest>    copy cave files out to host
+coding-cave cp [-f] <slug>:<path> <dest>  copy cave files out to host (prompts before overwrite)
+coding-cave cp <slug>:~/path <dest>    copy from cave home (no session needed)
 coding-cave move <slug> <new-path>     update a project's source path (and slug if dir name changed)
 coding-cave status [-a/--all]          show projects and running sessions
 coding-cave flake update [INPUT...]     update cave.nix flake inputs (all or specific)

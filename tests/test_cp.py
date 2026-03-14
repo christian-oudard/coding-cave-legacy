@@ -261,6 +261,243 @@ class TestCpAbsoluteCavePaths:
         assert dest.read_text() == "relative\n"
 
 
+class TestCpClobberProtection:
+    """cave->host prompts before overwriting existing files."""
+
+    def test_existing_file_prompts_and_aborts(self, cp_env, monkeypatch):
+        e = cp_env
+        (e.merged / "data.txt").write_text("cave data\n")
+        dest = e.tmp_path / "data.txt"
+        dest.write_text("host original\n")
+
+        monkeypatch.setattr("builtins.input", lambda _: "n")
+        with pytest.raises(SystemExit):
+            wrapper.cmd_cp([f"{e.slug}:data.txt"], str(dest))
+
+        assert dest.read_text() == "host original\n"
+
+    def test_existing_file_prompts_and_proceeds(self, cp_env, monkeypatch):
+        e = cp_env
+        (e.merged / "data.txt").write_text("cave data\n")
+        dest = e.tmp_path / "data.txt"
+        dest.write_text("host original\n")
+
+        monkeypatch.setattr("builtins.input", lambda _: "y")
+        wrapper.cmd_cp([f"{e.slug}:data.txt"], str(dest))
+
+        assert dest.read_text() == "cave data\n"
+
+    def test_force_skips_prompt(self, cp_env):
+        e = cp_env
+        (e.merged / "data.txt").write_text("cave data\n")
+        dest = e.tmp_path / "data.txt"
+        dest.write_text("host original\n")
+
+        wrapper.cmd_cp([f"{e.slug}:data.txt"], str(dest), force=True)
+
+        assert dest.read_text() == "cave data\n"
+
+    def test_no_prompt_when_dest_new(self, cp_env):
+        """No prompt when destination doesn't exist."""
+        e = cp_env
+        (e.merged / "new.txt").write_text("new\n")
+        dest = e.tmp_path / "new.txt"
+
+        # Would fail if input() were called (no monkeypatch)
+        wrapper.cmd_cp([f"{e.slug}:new.txt"], str(dest))
+
+        assert dest.read_text() == "new\n"
+
+    def test_existing_dir_prompts(self, cp_env, monkeypatch):
+        e = cp_env
+        (e.merged / "subdir").mkdir()
+        (e.merged / "subdir" / "a.txt").write_text("a\n")
+        dest = e.tmp_path / "subdir"
+        dest.mkdir()
+        (dest / "old.txt").write_text("old\n")
+
+        monkeypatch.setattr("builtins.input", lambda _: "n")
+        with pytest.raises(SystemExit):
+            wrapper.cmd_cp([f"{e.slug}:subdir"], str(e.tmp_path), recursive=True)
+
+        # Original file untouched
+        assert (dest / "old.txt").read_text() == "old\n"
+        assert not (dest / "a.txt").exists()
+
+    def test_host_to_cave_no_prompt(self, cp_env):
+        """host->cave direction never prompts, even when overwriting."""
+        e = cp_env
+        src = e.tmp_path / "file.txt"
+        src.write_text("overwritten\n")
+
+        # file.txt already exists in merged from cp_env fixture
+        wrapper.cmd_cp([str(src)], f"{e.slug}:file.txt")
+
+        assert (e.merged / "file.txt").read_text() == "overwritten\n"
+
+
+class TestCpTildeExpansion:
+    """~ in cave paths resolves to the persistent home directory."""
+
+    def test_tilde_copy_from_home(self, cp_env):
+        e = cp_env
+        home = _state.cave_home()
+        home.mkdir(parents=True, exist_ok=True)
+        (home / "notes.txt").write_text("from home\n")
+        dest = e.tmp_path / "notes.txt"
+
+        wrapper.cmd_cp([f"{e.slug}:~/notes.txt"], str(dest))
+
+        assert dest.read_text() == "from home\n"
+
+    def test_tilde_copy_to_home(self, cp_env):
+        e = cp_env
+        home = _state.cave_home()
+        home.mkdir(parents=True, exist_ok=True)
+        src = e.tmp_path / "upload.txt"
+        src.write_text("to home\n")
+
+        wrapper.cmd_cp([str(src)], f"{e.slug}:~/upload.txt")
+
+        assert (home / "upload.txt").read_text() == "to home\n"
+
+    def test_tilde_subdir(self, cp_env):
+        e = cp_env
+        home = _state.cave_home()
+        subdir = home / "deep" / "dir"
+        subdir.mkdir(parents=True, exist_ok=True)
+        (subdir / "file.txt").write_text("deep\n")
+        dest = e.tmp_path / "file.txt"
+
+        wrapper.cmd_cp([f"{e.slug}:~/deep/dir/file.txt"], str(dest))
+
+        assert dest.read_text() == "deep\n"
+
+    def test_tilde_with_cave_prefix(self, cp_env, monkeypatch):
+        e = cp_env
+        monkeypatch.chdir(e.host)
+        home = _state.cave_home()
+        home.mkdir(parents=True, exist_ok=True)
+        (home / "data.txt").write_text("via cave:\n")
+        dest = e.tmp_path / "data.txt"
+
+        wrapper.cmd_cp(["cave:~/data.txt"], str(dest))
+
+        assert dest.read_text() == "via cave:\n"
+
+    def test_tilde_no_session_needed(self, cp_env):
+        """Home paths work even with no running session."""
+        e = cp_env
+        # Remove all sessions
+        for f in _state.sessions_dir().iterdir():
+            f.unlink()
+
+        home = _state.cave_home()
+        home.mkdir(parents=True, exist_ok=True)
+        (home / "orphan.txt").write_text("no session\n")
+        dest = e.tmp_path / "orphan.txt"
+
+        wrapper.cmd_cp([f"{e.slug}:~/orphan.txt"], str(dest))
+
+        assert dest.read_text() == "no session\n"
+
+    def test_home_cave_coder_prefix(self, cp_env):
+        """Absolute /home/cave-coder/ paths resolve to cave home."""
+        e = cp_env
+        home = _state.cave_home()
+        home.mkdir(parents=True, exist_ok=True)
+        (home / "abs.txt").write_text("absolute\n")
+        dest = e.tmp_path / "abs.txt"
+
+        wrapper.cmd_cp([f"{e.slug}:/home/cave-coder/abs.txt"], str(dest))
+
+        assert dest.read_text() == "absolute\n"
+
+    def test_tilde_recursive(self, cp_env):
+        e = cp_env
+        home = _state.cave_home()
+        subdir = home / "mydir"
+        subdir.mkdir(parents=True, exist_ok=True)
+        (subdir / "one.txt").write_text("1\n")
+        (subdir / "two.txt").write_text("2\n")
+        dest = e.tmp_path / "mydir"
+
+        wrapper.cmd_cp([f"{e.slug}:~/mydir"], str(dest), recursive=True)
+
+        assert (dest / "one.txt").read_text() == "1\n"
+        assert (dest / "two.txt").read_text() == "2\n"
+
+
+class TestCpCrossProject:
+    """cp can access other projects mounted in the same session."""
+
+    @pytest.fixture
+    def multi_env(self, cp_env):
+        """Extend cp_env with a second project in the same session."""
+        e = cp_env
+        slug2 = "other-project"
+        host2 = e.tmp_path / "host2"
+        host2.mkdir()
+        git_run("git", "init", "-b", "main", str(host2))
+        (host2 / "other.txt").write_text("from other\n")
+        git_run("git", "-C", str(host2), "add", ".")
+        git_run("git", "-C", str(host2), "commit", "-m", "initial")
+
+        cave_data = _state.cave_data()
+
+        # Create merged overlay for second project in same session
+        sid = "test-session-1"
+        merged2 = cave_data / "session-overlays" / sid / f"{slug2}-merged"
+        merged2.mkdir(parents=True)
+        (merged2 / "other.txt").write_text("from other\n")
+
+        # Register second project
+        (_state.projects_dir() / slug2).mkdir(parents=True, exist_ok=True)
+        import json
+        proj = json.loads((_state.projects_file()).read_text())
+        proj[slug2] = str(host2)
+        _state.projects_file().write_text(json.dumps(proj))
+
+        e.slug2 = slug2
+        e.host2 = host2
+        e.merged2 = merged2
+        return e
+
+    def test_cross_project_by_slug(self, multi_env):
+        e = multi_env
+        dest = e.tmp_path / "out.txt"
+
+        wrapper.cmd_cp([f"{e.slug2}:other.txt"], str(dest))
+
+        assert dest.read_text() == "from other\n"
+
+    def test_cross_project_by_path(self, multi_env):
+        e = multi_env
+        dest = e.tmp_path / "out.txt"
+
+        wrapper.cmd_cp([f"{e.slug}:/projects/{e.slug2}/other.txt"], str(dest))
+
+        assert dest.read_text() == "from other\n"
+
+    def test_cross_project_cave_prefix(self, multi_env, monkeypatch):
+        e = multi_env
+        monkeypatch.chdir(e.host)
+        dest = e.tmp_path / "out.txt"
+
+        wrapper.cmd_cp([f"cave:/projects/{e.slug2}/other.txt"], str(dest))
+
+        assert dest.read_text() == "from other\n"
+
+    def test_cross_project_copy_into(self, multi_env):
+        e = multi_env
+        src = e.tmp_path / "new.txt"
+        src.write_text("into other\n")
+
+        wrapper.cmd_cp([str(src)], f"{e.slug2}:new.txt")
+
+        assert (e.merged2 / "new.txt").read_text() == "into other\n"
+
+
 class TestCpNoColonSyntax:
     """cp requires colon syntax for at least one argument."""
 

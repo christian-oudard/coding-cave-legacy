@@ -43,6 +43,7 @@ def build_parser():
 
     p_cp = sub.add_parser("cp", help="copy files to/from a running cave session")
     p_cp.add_argument("-R", "-r", "--recursive", action="store_true", help="copy directories recursively")
+    p_cp.add_argument("-f", "--force", action="store_true", help="overwrite existing files without prompting")
     p_cp.add_argument("paths", nargs="+", help="source(s) and destination (use slug:path for cave)")
 
     sub.add_parser("update-plugins", help="(deprecated) alias for 'flake update'")
@@ -103,7 +104,7 @@ def main():
         if len(parsed.paths) < 2:
             print("Usage: coding-cave cp <src>... <dest>", file=sys.stderr)
             sys.exit(1)
-        commands.cmd_cp(parsed.paths[:-1], parsed.paths[-1], recursive=parsed.recursive)
+        commands.cmd_cp(parsed.paths[:-1], parsed.paths[-1], recursive=parsed.recursive, force=parsed.force)
     elif parsed.command == "update-plugins":
         commands.cmd_flake_update([])
     elif parsed.command == "flake":

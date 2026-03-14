@@ -200,8 +200,16 @@ Two locations make the state obvious: `/projects/` = synced with host, `~/unsync
 
     coding-cave cp <file>... <project>:<path>    host → cave
     coding-cave cp <project>:<path> <dest>       cave → host
+    coding-cave cp [-f] <project>:~/path <dest>  cave home → host
+    coding-cave cp [-R] [-f] <src>... <dest>     -R for directories, -f to skip overwrite prompt
 
-The project slug can be omitted (`:path`) if CWD is inside a registered project. When multiple sessions are running for the same project, `cp` prompts which to use.
+The project slug can be omitted (`cave:path` or `:path`) if CWD is inside a registered project. When multiple sessions are running, `cp` prompts which to use.
+
+**Tilde expansion**: paths starting with `~/` or `/home/cave-coder/` resolve to the persistent home directory (`~/.local/share/coding-cave/home/`). Home paths do not require a running session.
+
+**Cross-project access**: `slug:/projects/<other>/path` resolves to the other project's overlay within the same session. Direct slug syntax (`other-project:path`) also works — `cp` searches all running sessions for the requested project's overlay, not just sessions started for that project.
+
+**Clobber protection**: when copying cave → host, `cp` prompts before overwriting existing files. Use `-f`/`--force` to skip the prompt. Host → cave copies never prompt (cave overlay is ephemeral).
 
 Files copied into the cave appear immediately — no restart needed. Files copied out of the cave capture the current overlay state (host lower + cave upper merged), including uncommitted modifications.
 
