@@ -44,7 +44,7 @@ def build_parser():
     p_cp = sub.add_parser("cp", help="copy files to/from a running cave session")
     p_cp.add_argument("-R", "-r", "--recursive", action="store_true", help="copy directories recursively")
     p_cp.add_argument("-f", "--force", action="store_true", help="overwrite existing files without prompting")
-    p_cp.add_argument("paths", nargs="+", help="source(s) and destination (use slug:path for cave)")
+    p_cp.add_argument("paths", nargs="+", help="source(s) and destination (slug:path or cave:path for projects, cave-root:~/path or cave-root:/abs for non-project paths)")
 
     sub.add_parser("update-plugins", help="(deprecated) alias for 'flake update'")
 

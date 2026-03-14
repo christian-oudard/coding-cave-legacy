@@ -70,6 +70,7 @@ Each agent session runs in its own **per-session bwrap namespace** with per-sess
 - Session cleanup: session gitdir refs merged into shared gitdir, overlay upper saved, then session dirs removed when bwrap exits
 - GPU access opt-in via `--gpu` flag (two separate sandbox derivations)
 - CWD-based project detection: running `coding-cave` from inside a registered project dir auto-selects it; from an unregistered dir, prompts to add it
+- `cp` prefix semantics — three prefixes with strict separation: `<slug>:path` for project-relative paths only (slug must be a registered project), `cave:path` for the CWD project (auto-detected, same as slug: but without typing the name), `cave-root:path` for non-project cave paths (`~/path` for home, `/abs/path` for anything else, `/projects/` is rejected). No-session project writes go to `saved-upper/` (persists into the next session). No-session project reads check `saved-upper/` first, then fall back to the host source dir.
 
 ## CLI Commands
 
@@ -81,9 +82,11 @@ coding-cave pull [project] [--force]   pull commits from cave gitdir to host
 coding-cave push [project] [--force]   push host commits into cave gitdir
 coding-cave reset [project]            wipe overlay + gitdir to match host (no running sessions)
 coding-cave remove [project]           unregister a project and delete overlay data
-coding-cave cp <src>... <slug>:<path>  copy host files into a running session
-coding-cave cp [-f] <slug>:<path> <dest>  copy cave files out to host (prompts before overwrite)
-coding-cave cp <slug>:~/path <dest>    copy from cave home (no session needed)
+coding-cave cp <src>... <slug>:<path>     copy host files into project
+coding-cave cp <src>... cave:<path>       copy host files into CWD project
+coding-cave cp [-f] <slug>:<path> <dest>  copy project files to host (prompts before overwrite)
+coding-cave cp cave-root:~/path <dest>    copy from cave home
+coding-cave cp <src> cave-root:/tmp/path  copy into cave filesystem
 coding-cave move <slug> <new-path>     update a project's source path (and slug if dir name changed)
 coding-cave status [-a/--all]          show projects and running sessions
 coding-cave flake update [INPUT...]     update cave.nix flake inputs (all or specific)
