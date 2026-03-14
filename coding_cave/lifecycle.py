@@ -163,20 +163,30 @@ def start_session(project, command, gpu=False):
         nix_upper = _state.nix_overlay_dir() / "upper"
         nix_upper.mkdir(parents=True, exist_ok=True)
         # Remove stale upper entries that shadow host store paths.
-        # fuse-overlayfs copies up directories to the upper when nix
-        # touches them (chmod, xattr, etc).  The copy-up may be empty
-        # or marked opaque (via xattr), hiding the real contents in
-        # the lower layer.  Any upper entry for a path that also
-        # exists in the host's /nix/store is a stale artifact — nix
-        # store paths are immutable, so upper modifications are never
-        # intentional.  Cave-installed packages (via nix shell) only
-        # exist in the upper, so the host_path check preserves them.
+        # The only operation that makes an upper entry hide lower
+        # contents is rmdir+mkdir (creates opaque xattr).  chmod,
+        # setxattr, and file creation all merge with the lower layer.
+        # We don't yet know what triggers rmdir+mkdir on store paths,
+        # so log diagnostics when stale entries are found.
         import shutil
         for entry in os.scandir(str(nix_upper)):
             if not entry.is_dir(follow_symlinks=False):
                 continue
             host_path = Path("/nix/store") / entry.name
             if host_path.is_dir():
+                # Log what the stale entry looks like for debugging
+                try:
+                    contents = os.listdir(entry.path)
+                    xattrs = os.listxattr(entry.path)
+                    opaque = any("opaque" in x for x in xattrs)
+                    print(f"nix overlay: removing stale upper entry: "
+                          f"{entry.name} (contents={contents}, "
+                          f"opaque={opaque}, xattrs={xattrs})",
+                          file=sys.stderr)
+                except OSError:
+                    print(f"nix overlay: removing stale upper entry: "
+                          f"{entry.name} (could not inspect)",
+                          file=sys.stderr)
                 shutil.rmtree(entry.path)
         # Per-session work and merged dirs (clean FUSE cache each session)
         session_nix = _state.cave_data() / "session-overlays" / sid / "nix"
