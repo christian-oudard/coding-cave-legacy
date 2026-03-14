@@ -1757,3 +1757,59 @@ class TestInterleavedSync:
         lines = [l for l in log.strip().splitlines() if l]
         # Should have: initial + 3 cave rounds = 4 commits
         assert len(lines) == 4, f"Expected 4 commits, got {len(lines)}:\n{log}"
+
+
+class TestHostRewriteDetection:
+    """Pull detects when the HOST rewrote history since last sync.
+
+    This happens when another agent on the host amends a commit that
+    the cave has already built on top of.  Without detection, the pull
+    tries a normal rebase which hits conflicts on the rewritten files.
+    """
+
+    def test_host_rewrite_without_force_warns(self, pull_env):
+        """Host rewrites a synced commit → plain pull warns and refuses."""
+        env = pull_env
+
+        # Cave makes a commit, pull it
+        cave_commit(env, "cave work", content="cave\n")
+        wrapper.pull_project(env.slug)
+        assert (env.host / "file.txt").read_text() == "cave\n"
+
+        # Host rewrites the commit (amend on the host side)
+        (env.host / "file.txt").write_text("host rewrite\n")
+        _run("git", "-C", str(env.host), "add", ".")
+        _run("git", "-C", str(env.host), "commit", "--amend",
+             "-m", "rewritten by host")
+
+        # Cave makes another commit on top of old history
+        cave_commit(env, "more cave work", filename="new.txt", content="new\n")
+
+        # Pull should detect host rewrite and refuse
+        result = wrapper.pull_project(env.slug)
+        assert result is None  # refused, no pull happened
+
+        # Host should still have the rewritten version
+        assert (env.host / "file.txt").read_text() == "host rewrite\n"
+
+    def test_host_rewrite_with_force_succeeds(self, pull_env):
+        """Host rewrites → force pull rebases cave's new commits onto host."""
+        env = pull_env
+
+        # Cave makes a commit, pull it
+        cave_commit(env, "cave work", content="cave\n")
+        wrapper.pull_project(env.slug)
+
+        # Host rewrites the commit
+        (env.host / "file.txt").write_text("host rewrite\n")
+        _run("git", "-C", str(env.host), "add", ".")
+        _run("git", "-C", str(env.host), "commit", "--amend",
+             "-m", "rewritten by host")
+
+        # Cave makes another commit on a different file
+        cave_commit(env, "more cave work", filename="new.txt", content="new\n")
+
+        # Force pull should succeed — rebases cave's new commits onto host
+        wrapper.pull_project(env.slug, force=True)
+        assert (env.host / "file.txt").read_text() == "host rewrite\n"
+        assert (env.host / "new.txt").read_text() == "new\n"

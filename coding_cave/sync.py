@@ -317,6 +317,101 @@ def _pull_branch_current(slug, project_dir, gitdir_path, branch, cave_sha,
             capture_output=True, text=True, check=True,
         ).stdout.strip()
 
+    # Detect host-side history rewrite: host amended/squashed commits
+    # since last sync while cave built on top of the old history.
+    # last_synced is no longer an ancestor of host HEAD.
+    if last_synced and last_synced != host_head:
+        ls_ancestor = subprocess.run(
+            host_git + ["merge-base", "--is-ancestor", last_synced, "HEAD"],
+            capture_output=True,
+        )
+        if ls_ancestor.returncode != 0:
+            if not force:
+                print(f"Host rewrote history for {slug} since last sync.",
+                      file=sys.stderr)
+                subprocess.run(host_git + ["fetch", str(gitdir_path), cave_sha],
+                               capture_output=True)
+                old = _parse_log(host_git, f"{merge_base}..FETCH_HEAD")
+                new = _parse_log(host_git, f"{merge_base}..HEAD")
+                _print_rewrite_summary(old, new)
+                print(f"Run 'coding-cave pull --force' to adopt host's history.",
+                      file=sys.stderr)
+                return None
+
+            # With --force: rebase only cave commits AFTER last_synced
+            # onto the host's rewritten HEAD.  Commits up to last_synced
+            # are already represented in the host's rewritten history.
+            new_cave_count = subprocess.run(
+                host_git + ["rev-list", "--count",
+                    f"{last_synced}..FETCH_HEAD"],
+                capture_output=True, text=True,
+            )
+            new_count = (new_cave_count.stdout.strip()
+                         if new_cave_count.returncode == 0 else "?")
+
+            if new_count == "0":
+                # No new cave commits beyond the rewritten point —
+                # host's rewrite is all that changed.
+                print(f"Host rewrote history for {slug}, no new cave commits.",
+                      file=sys.stderr)
+                _sync_branch(gitdir_path, project_dir,
+                    subprocess.run(
+                        host_git + ["rev-parse", "HEAD"],
+                        capture_output=True, text=True, check=True,
+                    ).stdout.strip(), branch)
+                return subprocess.run(
+                    host_git + ["rev-parse", "HEAD"],
+                    capture_output=True, text=True, check=True,
+                ).stdout.strip()
+
+            stash_result = subprocess.run(
+                host_git + ["stash", "--include-untracked"],
+                capture_output=True, text=True,
+            )
+            stashed = (stash_result.returncode == 0
+                       and "No local changes" not in stash_result.stdout)
+
+            # Rebase only the new cave commits (after last_synced) onto host
+            subprocess.run(
+                host_git + ["branch", "-f", "_cave_pull", "FETCH_HEAD"],
+                check=True, capture_output=True)
+            rebase_cmd = host_git + [
+                "rebase", "--onto", branch, last_synced, "_cave_pull",
+                "--no-reapply-cherry-picks", "--empty=drop",
+            ]
+            result = subprocess.run(rebase_cmd, capture_output=True)
+            if result.returncode != 0:
+                subprocess.run(host_git + ["rebase", "--abort"],
+                               capture_output=True)
+                subprocess.run(host_git + ["checkout", branch],
+                               capture_output=True)
+                subprocess.run(host_git + ["branch", "-D", "_cave_pull"],
+                               capture_output=True)
+                if stashed:
+                    subprocess.run(host_git + ["stash", "pop"],
+                                   capture_output=True)
+                print(f"Rebase failed for {slug} after host rewrite.",
+                      file=sys.stderr)
+                return None
+
+            subprocess.run(host_git + ["checkout", branch],
+                           capture_output=True, check=True)
+            subprocess.run(host_git + ["merge", "--ff-only", "_cave_pull"],
+                           capture_output=True, check=True)
+            subprocess.run(host_git + ["branch", "-D", "_cave_pull"],
+                           capture_output=True)
+
+            if stashed:
+                subprocess.run(host_git + ["stash", "pop"],
+                               capture_output=True)
+
+            print(f"Pulled {new_count} new cave commit(s) for {slug} "
+                  f"(host rewrote history).", file=sys.stderr)
+            return subprocess.run(
+                host_git + ["rev-parse", "HEAD"],
+                capture_output=True, text=True, check=True,
+            ).stdout.strip()
+
     # Normal pull
     pre_head = subprocess.run(
         host_git + ["rev-parse", "HEAD"],
