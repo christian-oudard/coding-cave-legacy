@@ -1448,3 +1448,312 @@ class TestCleanupOrdering:
         wrapper.pull_project(env.slug)
         msg = _run("git", "-C", str(env.host), "log", "-1", "--format=%s").stdout.strip()
         assert msg == "better message"
+
+
+class TestPullConflict:
+    """Pull when host and cave have diverged with conflicting changes.
+
+    These test the rebase-on-pull paths including conflict detection,
+    cleanup of temporary state, and stash preservation.
+    """
+
+    def test_pull_with_diverged_non_conflicting(self, pull_env):
+        """Host and cave both commit on same branch, no conflict → rebase."""
+        env = pull_env
+
+        # Host makes a commit
+        (env.host / "host.txt").write_text("from host\n")
+        _run("git", "-C", str(env.host), "add", ".")
+        _run("git", "-C", str(env.host), "commit", "-m", "host work")
+
+        # Cave makes a commit (different file)
+        (env.cave / "cave.txt").write_text("from cave\n")
+        _cave_git(env, "add", "cave.txt")
+        _cave_git(env, "commit", "-m", "cave work")
+
+        wrapper.pull_project(env.slug)
+
+        # Both files should be present (cave rebased onto host)
+        assert (env.host / "host.txt").read_text() == "from host\n"
+        assert (env.host / "cave.txt").read_text() == "from cave\n"
+
+        # History should be linear (rebased, not merged)
+        log = _run("git", "-C", str(env.host), "log", "--oneline").stdout
+        assert "cave work" in log
+        assert "host work" in log
+
+    def test_pull_with_conflicting_changes_exits(self, pull_env, capsys):
+        """Host and cave both edit same file → pull exits with resolve instructions.
+
+        When the current branch has a conflict, pull leaves the rebase in progress
+        so the user can resolve manually. It prints instructions and exits.
+        """
+        env = pull_env
+
+        # Cave edits file.txt FIRST (diverges from initial)
+        (env.cave / "file.txt").write_text("line1 cave\nline2 cave\nline3 cave\n")
+        _cave_git(env, "add", "file.txt")
+        _cave_git(env, "commit", "-m", "cave edit")
+
+        # Host edits same file independently (also diverges from initial)
+        (env.host / "file.txt").write_text("line1 host\nline2 host\nline3 host\n")
+        _run("git", "-C", str(env.host), "add", ".")
+        _run("git", "-C", str(env.host), "commit", "-m", "host edit")
+
+        with pytest.raises(SystemExit):
+            wrapper.pull_project(env.slug)
+
+        # Rebase is left in progress for manual resolution
+        host_git_dir = env.host / ".git"
+        assert (host_git_dir / "rebase-merge").is_dir() or \
+               (host_git_dir / "rebase-apply").is_dir()
+
+        # User can abort to return to pre-conflict state
+        _run("git", "-C", str(env.host), "rebase", "--abort")
+        _run("git", "-C", str(env.host), "checkout", "main")
+        _run("git", "-C", str(env.host), "branch", "-D", "_cave_pull", check=False)
+        assert (env.host / "file.txt").read_text() == "line1 host\nline2 host\nline3 host\n"
+
+    def test_pull_conflict_stash_survives(self, pull_env):
+        """Pull with conflict keeps stash intact for after resolution.
+
+        When pull hits a conflict on the current branch, it leaves
+        the rebase in progress and keeps the stash. The user resolves
+        the conflict, then pops the stash to recover uncommitted work.
+        """
+        env = pull_env
+
+        # Cave edits file.txt FIRST
+        (env.cave / "file.txt").write_text("line1 cave\nline2 cave\nline3 cave\n")
+        _cave_git(env, "add", "file.txt")
+        _cave_git(env, "commit", "-m", "cave edit")
+
+        # Host edits same file independently
+        (env.host / "file.txt").write_text("line1 host\nline2 host\nline3 host\n")
+        _run("git", "-C", str(env.host), "add", ".")
+        _run("git", "-C", str(env.host), "commit", "-m", "host edit")
+
+        # Host has uncommitted work
+        (env.host / "uncommitted.txt").write_text("don't lose me\n")
+
+        with pytest.raises(SystemExit):
+            wrapper.pull_project(env.slug)
+
+        # Stash was created (pull instructions mention stash pop)
+        stash = _run("git", "-C", str(env.host), "stash", "list")
+        assert stash.stdout.strip() != ""
+
+        # Abort rebase, recover stash
+        _run("git", "-C", str(env.host), "rebase", "--abort")
+        _run("git", "-C", str(env.host), "checkout", "main")
+        _run("git", "-C", str(env.host), "branch", "-D", "_cave_pull", check=False)
+        _run("git", "-C", str(env.host), "stash", "pop")
+
+        # Uncommitted file recovered
+        assert (env.host / "uncommitted.txt").read_text() == "don't lose me\n"
+
+    def test_pull_non_current_branch_conflict_skips(self, pull_env):
+        """Conflict on non-current branch is skipped, not fatal."""
+        env = pull_env
+
+        # Create feature branch on both sides at initial commit
+        _run("git", "-C", str(env.host), "branch", "feature")
+        _run("git", "--git-dir", str(env.gitdir), "branch", "feature")
+        host_head = _head(env.host)
+        wrapper.sync_refs(env.gitdir, env.host, host_head, "feature")
+
+        # Cave commits on feature FIRST (diverges from initial)
+        _cave_git(env, "checkout", "feature")
+        (env.cave / "file.txt").write_text("line1 cave\nline2 cave\nline3 cave\n")
+        _cave_git(env, "add", "file.txt")
+        _cave_git(env, "commit", "-m", "cave feature edit")
+        _cave_git(env, "checkout", "main")
+
+        # Host commits on feature independently (also diverges from initial)
+        _run("git", "-C", str(env.host), "checkout", "feature")
+        (env.host / "file.txt").write_text("line1 host\nline2 host\nline3 host\n")
+        _run("git", "-C", str(env.host), "add", ".")
+        _run("git", "-C", str(env.host), "commit", "-m", "host feature edit")
+        host_feature_sha = _head(env.host)
+        _run("git", "-C", str(env.host), "checkout", "main")
+
+        # Also add a clean commit on main in cave
+        (env.cave / "main-work.txt").write_text("main\n")
+        _cave_git(env, "add", "main-work.txt")
+        _cave_git(env, "commit", "-m", "main work")
+
+        # Pull — feature conflict should be skipped, main should succeed
+        wrapper.pull_project(env.slug)
+
+        assert (env.host / "main-work.txt").read_text() == "main\n"
+        # Feature should still have host's version (cave's conflicting
+        # commit was skipped by plumbing rebase)
+        _run("git", "-C", str(env.host), "checkout", "feature")
+        assert _head(env.host) == host_feature_sha
+
+
+class TestInterleavedSync:
+    """Two sessions with interleaved live-syncs and pulls.
+
+    Real-world scenario: session A and B are both active. User pulls
+    periodically, triggering sync_live_sessions each time. Each sync
+    should correctly forward only new work without corrupting the other
+    session's state.
+    """
+
+    def _make_session(self, pull_env, tmp_path, sid):
+        env = pull_env
+        overlay_base = tmp_path / "session-overlays" / sid
+        overlay_base.mkdir(parents=True)
+        session_gitdir = wrapper.create_session_gitdir(env.slug, sid, overlay_base)
+
+        _run("git", "--git-dir", str(session_gitdir), "config",
+             "user.email", "host@test.com")
+        _run("git", "--git-dir", str(session_gitdir), "config",
+             "user.name", "Host User")
+
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+        (sessions_dir / f"{sid}.json").write_text(json.dumps({
+            "sid": sid, "project": env.slug,
+            "bwrap_pid": os.getpid(), "started": 0,
+        }))
+
+        workdir = tmp_path / f"work-{sid}"
+        workdir.mkdir()
+        _run("git", "--git-dir", str(session_gitdir), "--work-tree",
+             str(workdir), "checkout", "HEAD", "--", ".", check=False)
+        (workdir / ".git").write_text(f"gitdir: {session_gitdir}\n")
+        return session_gitdir, workdir
+
+    def _session_git(self, workdir, *args):
+        return _run("git", "-C", str(workdir), *args, check=False)
+
+    def test_interleaved_commits_and_pulls(self, pull_env, tmp_path):
+        """A commits → pull → B commits → pull → A commits → pull.
+
+        Each pull should pick up all new work without duplicates.
+        """
+        env = pull_env
+        _, work_a = self._make_session(env, tmp_path, "a")
+        _, work_b = self._make_session(env, tmp_path, "b")
+
+        # Round 1: A commits, pull
+        (work_a / "a1.txt").write_text("a1\n")
+        self._session_git(work_a, "add", "a1.txt")
+        self._session_git(work_a, "commit", "-m", "A round 1")
+
+        wrapper.pull_project(env.slug)
+        assert (env.host / "a1.txt").read_text() == "a1\n"
+
+        # Round 2: B commits, pull
+        (work_b / "b1.txt").write_text("b1\n")
+        self._session_git(work_b, "add", "b1.txt")
+        self._session_git(work_b, "commit", "-m", "B round 1")
+
+        wrapper.pull_project(env.slug)
+        assert (env.host / "a1.txt").read_text() == "a1\n"  # still there
+        assert (env.host / "b1.txt").read_text() == "b1\n"
+
+        # Round 3: A commits again, pull
+        (work_a / "a2.txt").write_text("a2\n")
+        self._session_git(work_a, "add", "a2.txt")
+        self._session_git(work_a, "commit", "-m", "A round 2")
+
+        wrapper.pull_project(env.slug)
+        assert (env.host / "a1.txt").read_text() == "a1\n"
+        assert (env.host / "b1.txt").read_text() == "b1\n"
+        assert (env.host / "a2.txt").read_text() == "a2\n"
+
+        # Verify history is clean (no duplicates)
+        log = _run("git", "-C", str(env.host), "log", "--oneline").stdout
+        assert log.count("A round 1") == 1
+        assert log.count("B round 1") == 1
+        assert log.count("A round 2") == 1
+
+    def test_interleaved_with_amend(self, pull_env, tmp_path):
+        """A commits → pull → A amends → pull picks up amend.
+
+        After pull syncs A's refs, A amends. Next pull should detect
+        the amend via ownership and adopt it.
+        """
+        env = pull_env
+        _, work_a = self._make_session(env, tmp_path, "a")
+
+        # A commits
+        (work_a / "a.txt").write_text("v1\n")
+        self._session_git(work_a, "add", "a.txt")
+        self._session_git(work_a, "commit", "-m", "A v1")
+
+        wrapper.pull_project(env.slug)
+        assert (env.host / "a.txt").read_text() == "v1\n"
+
+        # A amends
+        (work_a / "a.txt").write_text("v2\n")
+        self._session_git(work_a, "add", "a.txt")
+        self._session_git(work_a, "commit", "--amend", "-m", "A v2")
+
+        # Pull with force
+        wrapper.pull_project(env.slug, force=True)
+        assert (env.host / "a.txt").read_text() == "v2\n"
+
+    def test_push_between_session_commits(self, pull_env, tmp_path):
+        """Session A commits → pull → host pushes → A commits again → pull.
+
+        Tests the scenario where the cave gitdir gets updated by a push
+        while a session is still active.
+        """
+        env = pull_env
+        _, work_a = self._make_session(env, tmp_path, "a")
+
+        # Session commits
+        (work_a / "cave1.txt").write_text("cave1\n")
+        self._session_git(work_a, "add", "cave1.txt")
+        self._session_git(work_a, "commit", "-m", "cave round 1")
+
+        wrapper.pull_project(env.slug)
+        assert (env.host / "cave1.txt").read_text() == "cave1\n"
+
+        # Host makes a commit and pushes
+        (env.host / "host.txt").write_text("host\n")
+        _run("git", "-C", str(env.host), "add", ".")
+        _run("git", "-C", str(env.host), "commit", "-m", "host work")
+        wrapper.push_project(env.slug)
+
+        # Session continues working (doesn't know about host's push)
+        (work_a / "cave2.txt").write_text("cave2\n")
+        self._session_git(work_a, "add", "cave2.txt")
+        self._session_git(work_a, "commit", "-m", "cave round 2")
+
+        # Pull — should see both host's work and session's new work
+        wrapper.pull_project(env.slug)
+        assert (env.host / "host.txt").read_text() == "host\n"
+        assert (env.host / "cave1.txt").read_text() == "cave1\n"
+        assert (env.host / "cave2.txt").read_text() == "cave2\n"
+
+    def test_three_rounds_push_pull(self, pull_env, tmp_path):
+        """Three full push-pull cycles with a live session.
+
+        Ensures no accumulation of stale refs or duplicate commits.
+        """
+        env = pull_env
+        _, work_a = self._make_session(env, tmp_path, "a")
+
+        for i in range(3):
+            # Session commits
+            (work_a / f"cave{i}.txt").write_text(f"cave{i}\n")
+            self._session_git(work_a, "add", f"cave{i}.txt")
+            self._session_git(work_a, "commit", "-m", f"cave round {i}")
+
+            # Pull
+            wrapper.pull_project(env.slug)
+            assert (env.host / f"cave{i}.txt").read_text() == f"cave{i}\n"
+
+            # Push (host sync back)
+            wrapper.push_project(env.slug)
+
+        # Verify clean history
+        log = _run("git", "-C", str(env.host), "log", "--oneline").stdout
+        lines = [l for l in log.strip().splitlines() if l]
+        # Should have: initial + 3 cave rounds = 4 commits
+        assert len(lines) == 4, f"Expected 4 commits, got {len(lines)}:\n{log}"
