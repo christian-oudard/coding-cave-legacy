@@ -311,6 +311,9 @@ def _forward_refs(sid, session_gitdir, shared_gitdir, *, force=False):
             if rebased:
                 git_mod.git(shared_gitdir, "update-ref", ref, rebased,
                     capture_output=True)
+                # Mark session as synced so next cycle doesn't re-rebase.
+                git_mod.git(session_gitdir, "update-ref",
+                    f"refs/synced/{branch}", sha, capture_output=True)
             elif force:
                 # Final cleanup: force-update, back up old ref.
                 git_mod.git(shared_gitdir, "update-ref",

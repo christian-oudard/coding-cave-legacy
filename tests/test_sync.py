@@ -1004,6 +1004,54 @@ class TestSessionGitdir:
         # Shared HEAD should NOT have moved
         assert git_head(shared_gd, gitdir=True) == shared_after_push
 
+    def test_rebase_sync_then_resync_is_noop(
+            self, shared_project, tmp_path):
+        """After a successful rebase-sync, the next sync is a no-op.
+
+        Session commits on main, shared advances independently (push).
+        First sync rebases session's commits onto shared.  Second sync
+        should skip (refs/synced was set) rather than re-rebasing.
+        """
+        host, slug, projects_dir = shared_project
+        shared_gd = projects_dir / slug / "gitdir"
+
+        _, work_a, overlay_a = self._make_session(
+            tmp_path, slug, projects_dir, "a")
+        session_gd = overlay_a / f"gitdir-{slug}"
+
+        # Push a new commit to shared (simulating host push)
+        shared_work = tmp_path / "shared-work"
+        shared_work.mkdir()
+        git_run("git", "--git-dir", str(shared_gd), "--work-tree",
+                str(shared_work), "checkout", "HEAD", "--", ".")
+        (shared_work / "host.txt").write_text("from host\n")
+        env = {**os.environ, **GIT_ENV}
+        subprocess.run(
+            ["git", "--git-dir", str(shared_gd), "--work-tree",
+             str(shared_work), "add", "host.txt"],
+            capture_output=True, check=True, env=env,
+        )
+        subprocess.run(
+            ["git", "--git-dir", str(shared_gd), "--work-tree",
+             str(shared_work), "commit", "-m", "host push"],
+            capture_output=True, check=True, env=env,
+        )
+
+        # Session commits on different file (no conflict, rebase will succeed)
+        (work_a / "session.txt").write_text("from session\n")
+        cave_git(work_a, "add", "session.txt")
+        cave_git(work_a, "commit", "-m", "session work")
+
+        # First sync — rebases session onto shared
+        wrapper.forward_session_refs(slug, session_gd, shared_gd)
+        shared_after_first = git_head(shared_gd, gitdir=True)
+
+        # Second sync — should be a no-op (refs/synced prevents re-rebase)
+        wrapper.forward_session_refs(slug, session_gd, shared_gd)
+        shared_after_second = git_head(shared_gd, gitdir=True)
+
+        assert shared_after_first == shared_after_second
+
     def test_forward_refs_live_sync_handles_amendment(
             self, shared_project, tmp_path):
         """Live sync updates main in shared when session amends.
@@ -1730,7 +1778,7 @@ class TestSessionGitdir:
         assert result.returncode == 0
         assert (work_b / "file.txt").read_text() == "stashed\n"
 
-class TestSessionGitdir:
+class TestSessionSetup:
     """Test per-session gitdir: sessions work on real branches (e.g. main)."""
 
     @pytest.fixture
