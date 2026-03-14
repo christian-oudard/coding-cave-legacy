@@ -423,11 +423,17 @@ def cmd_flake_update(inputs):
     if not (user_env / "flake.nix").exists():
         print("No user environment to update.", file=sys.stderr)
         sys.exit(1)
+    lock_file = user_env / "flake.lock"
+    old_lock = lock_file.read_bytes() if lock_file.exists() else b""
     cmd = ["nix", "flake", "update"] + (inputs or [])
     r = subprocess.run(cmd, cwd=str(user_env))
     if r.returncode != 0:
         sys.exit(r.returncode)
-    print("Updated. Changes take effect on next cave session.", file=sys.stderr)
+    new_lock = lock_file.read_bytes() if lock_file.exists() else b""
+    if new_lock != old_lock:
+        print("Updated. Changes take effect on next cave session.", file=sys.stderr)
+    else:
+        print("Already up to date.", file=sys.stderr)
 
 
 def cmd_status(args):
