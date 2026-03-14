@@ -11,6 +11,20 @@ from pathlib import Path
 from . import _state, config, projects, sessions, git as git_mod, overlay, lifecycle, sync
 
 
+def _relative_age(started):
+    """Return a human-readable relative age string like '5m ago' or '2d3h ago'."""
+    age = int(time.time() - started)
+    if age < 60:
+        return f"{age}s ago"
+    if age < 3600:
+        return f"{age // 60}m ago"
+    if age < 86400:
+        h, m = divmod(age, 3600)
+        return f"{h}h{m // 60:02d}m ago"
+    d, rem = divmod(age, 86400)
+    return f"{d}d{rem // 3600}h ago"
+
+
 def _shell_exec_cmd(preferred_shell):
     """Return a shell command string that execs the preferred shell.
 
@@ -79,11 +93,11 @@ def cmd_shell(args, gpu=False):
         else:
             print("Running sessions:", file=sys.stderr)
             by_index = {}
-            for s in active_sessions:
-                started = time.strftime("%H:%M", time.localtime(s["started"]))
+            for s in sorted(active_sessions, key=lambda s: s.get("index", 0)):
+                ago = _relative_age(s["started"])
                 idx = s.get("index", "?")
                 by_index[str(idx)] = s
-                print(f"  [{idx}] [{started}] {s['sid']}  {s.get('project', '?')} (PID {s['bwrap_pid']})", file=sys.stderr)
+                print(f"  [{idx}] [{ago}] {s['sid']}  {s.get('project', '?')} (PID {s['bwrap_pid']})", file=sys.stderr)
             print(f"  [n] Start new session", file=sys.stderr)
             try:
                 choice = input("Join session: ").strip()
@@ -350,12 +364,12 @@ def _prompt_session(session_list):
     """Prompt user to select from multiple sessions."""
     print("Multiple sessions running:", file=sys.stderr)
     by_index = {}
-    for s in session_list:
-        started = time.strftime("%H:%M", time.localtime(s["started"]))
+    for s in sorted(session_list, key=lambda s: s.get("index", 0)):
+        ago = _relative_age(s["started"])
         idx = s.get("index", "?")
         proj = s.get("project", "?")
         by_index[str(idx)] = s
-        print(f"  [{idx}] [{started}] {proj}  PID {s['bwrap_pid']}", file=sys.stderr)
+        print(f"  [{idx}] [{ago}] {proj}  PID {s['bwrap_pid']}", file=sys.stderr)
     try:
         choice = input("Session: ").strip()
         return by_index[choice]
@@ -576,7 +590,7 @@ def cmd_status(args):
         print(f"  {slug}  <- {source}{tag}", file=sys.stderr)
 
         active_sessions = sessions.list_sessions(project=slug)
-        for s in active_sessions:
-            started = time.strftime("%H:%M", time.localtime(s["started"]))
+        for s in sorted(active_sessions, key=lambda s: s.get("index", 0)):
+            ago = _relative_age(s["started"])
             idx = s.get("index", "?")
-            print(f"    #{idx} [{started}] {s['sid']}  PID {s['bwrap_pid']}", file=sys.stderr)
+            print(f"    #{idx} [{ago}] {s['sid']}  PID {s['bwrap_pid']}", file=sys.stderr)
