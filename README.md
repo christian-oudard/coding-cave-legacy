@@ -28,7 +28,7 @@ claude-oauth-token = "<your-token>"
 ### Install
 
 ```bash
-nix profile install .
+nix profile add .
 ```
 
 ### Update after changes
