@@ -21,10 +21,26 @@ from pathlib import Path
 IPC_DIR = Path.home() / "ipc"
 
 
-def send(sock_path, message):
+def _sender_tag():
+    """Auto-detect sender identity from environment.
+
+    Inside a cave session: returns '[#N]' (session index).
+    Outside (host/user): returns '[user]'.
+    """
+    idx = os.environ.get("CODING_CAVE_SESSION_INDEX")
+    if idx:
+        return f"[#{idx}]"
+    return "[user]"
+
+
+def send(sock_path, message, tag=True):
+    if isinstance(message, bytes):
+        message = message.decode()
+    if tag:
+        message = f"{_sender_tag()} {message}"
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.connect(sock_path)
-    s.sendall(message.encode() if isinstance(message, str) else message)
+    s.sendall(message.encode())
     s.shutdown(socket.SHUT_WR)
     s.close()
 
@@ -60,6 +76,10 @@ def _format_age(started):
 
 
 def main():
+    raw = "--raw" in sys.argv
+    if raw:
+        sys.argv.remove("--raw")
+
     if len(sys.argv) < 2:
         print("Usage: cave-send <session-id> <message>", file=sys.stderr)
         print("       cave-send --list", file=sys.stderr)
@@ -101,7 +121,7 @@ def main():
             print("No message provided.", file=sys.stderr)
             sys.exit(1)
 
-    send(sock_path, message)
+    send(sock_path, message, tag=not raw)
 
 
 if __name__ == "__main__":

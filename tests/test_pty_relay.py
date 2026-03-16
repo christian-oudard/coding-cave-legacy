@@ -171,8 +171,29 @@ class TestPtyRelay:
 
 
 class TestCaveSend:
-    def test_send_injects_message(self, tmp_path):
-        """cave-send delivers a message to a running relay."""
+    def test_send_injects_tagged_message(self, tmp_path):
+        """cave-send delivers a tagged message to a running relay."""
+        sock = str(tmp_path / "test.sock")
+        script = tmp_path / "echo.sh"
+        script.write_text("#!/bin/bash\nread -r line; echo \"GOT:$line\"\n")
+        script.chmod(0o755)
+
+        relay = subprocess.Popen(
+            [sys.executable, RELAY, "--sock", sock, "--", str(script)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        assert _wait_for_socket(sock), "Socket never appeared"
+        env = {k: v for k, v in os.environ.items()
+               if k != "CODING_CAVE_SESSION_INDEX"}
+        subprocess.run(
+            [sys.executable, SEND, "--sock", sock, "hello from cave-send"],
+            check=True, env=env,
+        )
+        stdout, _ = relay.communicate(timeout=5)
+        assert b"GOT:[user] hello from cave-send" in stdout
+
+    def test_send_raw_skips_tag(self, tmp_path):
+        """--raw sends message without sender tag."""
         sock = str(tmp_path / "test.sock")
         script = tmp_path / "echo.sh"
         script.write_text("#!/bin/bash\nread -r line; echo \"GOT:$line\"\n")
@@ -184,11 +205,32 @@ class TestCaveSend:
         )
         assert _wait_for_socket(sock), "Socket never appeared"
         subprocess.run(
-            [sys.executable, SEND, "--sock", sock, "hello from cave-send"],
+            [sys.executable, SEND, "--raw", "--sock", sock, "no tag"],
             check=True,
         )
         stdout, _ = relay.communicate(timeout=5)
-        assert b"GOT:hello from cave-send" in stdout
+        assert b"GOT:no tag" in stdout
+        assert b"[user]" not in stdout
+
+    def test_send_agent_tag(self, tmp_path):
+        """Agent sessions are tagged with their session index."""
+        sock = str(tmp_path / "test.sock")
+        script = tmp_path / "echo.sh"
+        script.write_text("#!/bin/bash\nread -r line; echo \"GOT:$line\"\n")
+        script.chmod(0o755)
+
+        relay = subprocess.Popen(
+            [sys.executable, RELAY, "--sock", sock, "--", str(script)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        assert _wait_for_socket(sock), "Socket never appeared"
+        env = {**os.environ, "CODING_CAVE_SESSION_INDEX": "3"}
+        subprocess.run(
+            [sys.executable, SEND, "--sock", sock, "hi from agent"],
+            check=True, env=env,
+        )
+        stdout, _ = relay.communicate(timeout=5)
+        assert b"GOT:[#3] hi from agent" in stdout
 
     def test_send_via_pipe(self, tmp_path):
         """cave-send reads message from stdin when piped."""
@@ -202,13 +244,15 @@ class TestCaveSend:
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
         assert _wait_for_socket(sock), "Socket never appeared"
+        env = {k: v for k, v in os.environ.items()
+               if k != "CODING_CAVE_SESSION_INDEX"}
         subprocess.run(
             [sys.executable, SEND, "--sock", sock],
             input=b"piped message",
-            check=True,
+            check=True, env=env,
         )
         stdout, _ = relay.communicate(timeout=5)
-        assert b"GOT:piped message" in stdout
+        assert b"GOT:[user] piped message" in stdout
 
     def test_list_sessions(self, tmp_path, monkeypatch):
         """--list shows session IDs with metadata."""
