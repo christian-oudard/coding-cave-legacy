@@ -584,3 +584,84 @@ class TestCheckUnpulledWithRefsPulled:
         # Without refs/pulled, push should still detect unpulled commits
         with pytest.raises(SystemExit):
             wrapper.push_project(env.slug)
+
+
+class TestPushCleansUpStalePull:
+    """Push cleans up stale rebase state from a failed pull."""
+
+    def test_push_aborts_stale_rebase(self, push_env, capsys):
+        """Push with stale rebase in progress aborts it and pushes main."""
+        env = push_env
+
+        # Simulate stale rebase: create _cave_pull branch and rebase state
+        _run("git", "-C", str(env.host), "checkout", "-b", "_cave_pull")
+        rebase_dir = env.host / ".git" / "rebase-merge"
+        rebase_dir.mkdir()
+        # Create minimal rebase state files so git rebase --abort works
+        (rebase_dir / "head-name").write_text("refs/heads/_cave_pull")
+        orig_head = _head(env.host)
+        (rebase_dir / "orig-head").write_text(orig_head)
+        (rebase_dir / "onto").write_text(orig_head)
+
+        # Make a commit on the host's main branch to push
+        _run("git", "-C", str(env.host), "checkout", "main")
+        (env.host / "file.txt").write_text("updated\n")
+        _run("git", "-C", str(env.host), "add", ".")
+        _run("git", "-C", str(env.host), "commit", "-m", "host work")
+
+        capsys.readouterr()
+        wrapper.push_project(env.slug)
+        captured = capsys.readouterr()
+        assert "stale rebase" in captured.err.lower()
+        assert "dotfiles/_cave_pull" not in captured.err
+        # _cave_pull should be cleaned up
+        branches = _run("git", "-C", str(env.host), "branch",
+                         "--format=%(refname:short)")
+        assert "_cave_pull" not in branches.stdout
+
+    def test_push_switches_off_cave_pull_branch(self, push_env, capsys):
+        """Push on _cave_pull branch switches to main and pushes."""
+        env = push_env
+
+        # Create _cave_pull branch and switch to it
+        _run("git", "-C", str(env.host), "branch", "_cave_pull")
+        _run("git", "-C", str(env.host), "checkout", "_cave_pull")
+
+        # Make a commit on main (to have something to push)
+        _run("git", "-C", str(env.host), "checkout", "main")
+        (env.host / "file.txt").write_text("updated\n")
+        _run("git", "-C", str(env.host), "add", ".")
+        _run("git", "-C", str(env.host), "commit", "-m", "host work")
+        _run("git", "-C", str(env.host), "checkout", "_cave_pull")
+
+        capsys.readouterr()
+        wrapper.push_project(env.slug)
+        captured = capsys.readouterr()
+
+        # Should have pushed main, not _cave_pull
+        assert "test-project/main" in captured.err
+        assert "_cave_pull" not in captured.err or "stale" in captured.err.lower()
+
+    def test_push_skips_cave_pull_in_branches(self, push_env, capsys):
+        """Push doesn't push _cave_pull branch to cave gitdir."""
+        env = push_env
+
+        # Create _cave_pull branch with a different commit
+        _run("git", "-C", str(env.host), "checkout", "-b", "_cave_pull")
+        (env.host / "pull.txt").write_text("pull branch\n")
+        _run("git", "-C", str(env.host), "add", ".")
+        _run("git", "-C", str(env.host), "commit", "-m", "pull branch commit")
+        _run("git", "-C", str(env.host), "checkout", "main")
+
+        # Make a host commit on main
+        (env.host / "file.txt").write_text("updated\n")
+        _run("git", "-C", str(env.host), "add", ".")
+        _run("git", "-C", str(env.host), "commit", "-m", "host work")
+
+        capsys.readouterr()
+        wrapper.push_project(env.slug)
+        captured = capsys.readouterr()
+
+        # Should push main only, not _cave_pull
+        assert "test-project/main" in captured.err
+        assert "_cave_pull" not in captured.err or "stale" in captured.err.lower()

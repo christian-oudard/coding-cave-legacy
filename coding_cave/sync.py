@@ -114,6 +114,32 @@ def _print_rewrite_summary(old_entries, new_entries):
             print(f"  - {h} {subj}", file=sys.stderr)
 
 
+def _cleanup_stale_pull(host_git, project_dir, slug):
+    """Abort stale rebase and switch off _cave_pull if needed."""
+    host_git_dir = project_dir / ".git"
+    if ((host_git_dir / "rebase-merge").is_dir()
+            or (host_git_dir / "rebase-apply").is_dir()):
+        print(f"Aborting stale rebase in {slug}.", file=sys.stderr)
+        subprocess.run(host_git + ["rebase", "--abort"], capture_output=True)
+    cur_branch = subprocess.run(
+        host_git + ["rev-parse", "--abbrev-ref", "HEAD"],
+        capture_output=True, text=True,
+    )
+    if (cur_branch.returncode == 0
+            and cur_branch.stdout.strip() == "_cave_pull"):
+        branches = subprocess.run(
+            host_git + ["branch", "--format=%(refname:short)"],
+            capture_output=True, text=True,
+        )
+        for b in branches.stdout.strip().splitlines():
+            if b != "_cave_pull":
+                subprocess.run(host_git + ["checkout", b],
+                               capture_output=True)
+                break
+    subprocess.run(host_git + ["branch", "-D", "_cave_pull"],
+                   capture_output=True)
+
+
 def _get_branches(gitdir_path, *, bare=False):
     """Return {branch_name: sha} for all branches in a git repo.
 
@@ -731,29 +757,7 @@ def pull_project(slug, force=False):
 
     host_git = ["git", "-C", str(project_dir)] + git_mod.SAFE_GIT_OPTS
 
-    # Clean up stale rebase state
-    host_git_dir = project_dir / ".git"
-    if ((host_git_dir / "rebase-merge").is_dir()
-            or (host_git_dir / "rebase-apply").is_dir()):
-        print(f"Aborting stale rebase in {slug}.", file=sys.stderr)
-        subprocess.run(host_git + ["rebase", "--abort"], capture_output=True)
-    cur_branch = subprocess.run(
-        host_git + ["rev-parse", "--abbrev-ref", "HEAD"],
-        capture_output=True, text=True,
-    )
-    if (cur_branch.returncode == 0
-            and cur_branch.stdout.strip() == "_cave_pull"):
-        branches = subprocess.run(
-            host_git + ["branch", "--format=%(refname:short)"],
-            capture_output=True, text=True,
-        )
-        for b in branches.stdout.strip().splitlines():
-            if b != "_cave_pull":
-                subprocess.run(host_git + ["checkout", b],
-                               capture_output=True)
-                break
-    subprocess.run(host_git + ["branch", "-D", "_cave_pull"],
-                   capture_output=True)
+    _cleanup_stale_pull(host_git, project_dir, slug)
 
     branch_result = subprocess.run(
         host_git + ["rev-parse", "--abbrev-ref", "HEAD"],
@@ -956,8 +960,12 @@ def push_project(slug, force=False):
     sync_live_sessions(slug)
     git_mod.ensure_cave_remote(project_dir, gitdir_path)
 
+    host_git = ["git", "-C", str(project_dir)] + git_mod.SAFE_GIT_OPTS
+
+    _cleanup_stale_pull(host_git, project_dir, slug)
+
     branch_result = subprocess.run(
-        ["git", "-C", str(project_dir), "rev-parse", "--abbrev-ref", "HEAD"],
+        host_git + ["rev-parse", "--abbrev-ref", "HEAD"],
         capture_output=True, text=True,
     )
     if branch_result.returncode != 0:
@@ -967,6 +975,7 @@ def push_project(slug, force=False):
     current_branch = branch_result.stdout.strip()
 
     host_branches = _get_branches(project_dir)
+    host_branches.pop("_cave_pull", None)
     if not host_branches:
         print(f"Host repo has no commits for {slug} -- nothing to push.",
               file=sys.stderr)
