@@ -14,6 +14,7 @@ _CAVE_RUNTIME_VARS = {
     "CODING_CAVE_VERSION",
     "CODING_CAVE_PROJECT_PATH",
     "CODING_CAVE_SESSION_INDEX",
+    "CODING_CAVE_SESSION_ID",
 }
 
 
@@ -482,6 +483,7 @@ def start_session(project, command, gpu=False):
     os.environ["CODING_CAVE_PROJECT_PATH"] = loaded_projects.get(project, "")
     session_index = sessions._next_session_index(project)
     os.environ["CODING_CAVE_SESSION_INDEX"] = str(session_index)
+    os.environ["CODING_CAVE_SESSION_ID"] = sid
 
     binary = _state.SANDBOX_GPU_BIN if gpu else _state.SANDBOX_BIN
 

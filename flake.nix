@@ -17,6 +17,14 @@
     systemClaudeMd = ./system-claude.md;
     version = self.shortRev or self.dirtyShortRev or "dev";
 
+    # IPC: PTY relay and message sender (available inside cave)
+    ptyRelay = pkgs.writeShellScriptBin "pty-relay" ''
+      exec ${pkgs.python3}/bin/python3 ${./pty_relay.py} "$@"
+    '';
+    caveSend = pkgs.writeShellScriptBin "cave-send" ''
+      exec ${pkgs.python3}/bin/python3 ${./cave_send.py} "$@"
+    '';
+
     jailHome = "/home/cave-coder";
 
     baseCombinators = with jail.combinators; [
@@ -95,7 +103,7 @@
         fuse-overlayfs
         fuse3
         gnupg
-      ] ++ [ pkgs."poppler-utils" ]))
+      ] ++ [ pkgs."poppler-utils" ptyRelay caveSend ]))
       (set-env "TERMINFO_DIRS" "${pkgs.ncurses}/share/terminfo")
       (set-env "LOCALE_ARCHIVE" "${pkgs.glibcLocales}/lib/locale/locale-archive")
       (set-env "LANG" "en_US.UTF-8")
@@ -116,6 +124,7 @@
       (try-fwd-env "CODING_CAVE_PROXY_ADDR")
 
       # Session identity (runtime — visible to statusline and scripts)
+      (try-fwd-env "CODING_CAVE_SESSION_ID")
       (try-fwd-env "CODING_CAVE_SESSION_INDEX")
       (try-fwd-env "CODING_CAVE_PROJECT_PATH")
       # Setup-only: consumed in wrap-entry then unset
