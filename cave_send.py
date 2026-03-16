@@ -3,14 +3,14 @@
 
 Usage:
     cave-send <target> <message>
-    cave-send --sock <path> <message>
     echo "message" | cave-send <target>
     cave-send --list
 
 Target can be a session index (e.g. 4) or a full session ID.
 
-The message is injected into the target session's terminal as if
-typed by the user, followed by Enter (CR).
+Messages are routed through the sender's own relay, which stamps
+the sender identity (verified via SO_PEERCRED). The relay forwards
+to the target session's socket.
 """
 import json
 import os
@@ -23,25 +23,26 @@ from pathlib import Path
 IPC_DIR = Path.home() / "ipc"
 
 
-def _sender_tag():
-    """Auto-detect sender identity from environment."""
-    idx = os.environ.get("CODING_CAVE_SESSION_INDEX")
-    if idx:
-        proj = os.environ.get("CODING_CAVE_PROJECT_PATH", "")
-        proj = os.path.basename(proj) if proj else ""
-        if proj:
-            return f"{proj}#{idx}:"
-        return f"#{idx}:"
-    return "user:"
-
-
-def send(sock_path, message):
-    if isinstance(message, bytes):
-        message = message.decode()
-    message = f"{_sender_tag()} {message}"
+def send(target_sid, message):
+    """Send a message by forwarding through our own relay."""
+    my_sid = os.environ.get("CODING_CAVE_SESSION_ID")
+    if not my_sid:
+        # Outside a cave session (e.g. host user). Send directly.
+        target_sock = str(IPC_DIR / f"{target_sid}.sock")
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.connect(target_sock)
+        s.sendall(f"user: {message}".encode())
+        s.shutdown(socket.SHUT_WR)
+        s.close()
+        return
+    if my_sid == target_sid:
+        raise ValueError("Cannot send to yourself.")
+    # Route through own relay for verified sender tagging
+    my_sock = str(IPC_DIR / f"{my_sid}.sock")
+    payload = f"FWD {target_sid}\n{message}"
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.connect(sock_path)
-    s.sendall(message.encode())
+    s.connect(my_sock)
+    s.sendall(payload.encode())
     s.shutdown(socket.SHUT_WR)
     s.close()
 
@@ -109,44 +110,28 @@ def main():
             print("  No active sessions.")
         return
 
-    if sys.argv[1] == "--sock":
-        if len(sys.argv) < 3:
-            print("Usage: cave-send --sock <path> <message>", file=sys.stderr)
-            sys.exit(1)
-        sock_path = sys.argv[2]
-        if len(sys.argv) >= 4:
-            message = " ".join(sys.argv[3:])
-        elif not os.isatty(sys.stdin.fileno()):
-            message = sys.stdin.read()
-        else:
-            print("No message provided.", file=sys.stderr)
-            sys.exit(1)
+    target = sys.argv[1]
+    # Resolve target to session ID
+    sid, _ = resolve_index(target)
+    if sid is None and (target.startswith("#") or target.isdigit()):
+        print(f"No session with index {target}", file=sys.stderr)
+        sys.exit(1)
+    elif sid is None:
+        sid = target
+
+    if len(sys.argv) >= 3:
+        message = " ".join(sys.argv[2:])
+    elif not os.isatty(sys.stdin.fileno()):
+        message = sys.stdin.read()
     else:
-        target = sys.argv[1]
-        # Try index lookup first (bare number or #N)
-        sid, sock_path = resolve_index(target)
-        if sid is None and (target.startswith("#") or target.isdigit()):
-            print(f"No session with index {target}", file=sys.stderr)
-            sys.exit(1)
-        elif sid is None:
-            # Fall back to full session ID
-            sid = target
-            sock_path = str(IPC_DIR / f"{sid}.sock")
-        # Block self-send
-        my_sid = os.environ.get("CODING_CAVE_SESSION_ID", "")
-        if my_sid and sid == my_sid:
-            print("Cannot send to yourself.", file=sys.stderr)
-            sys.exit(1)
-        if len(sys.argv) >= 3:
-            message = " ".join(sys.argv[2:])
-        elif not os.isatty(sys.stdin.fileno()):
-            message = sys.stdin.read()
-        else:
-            print("No message provided.", file=sys.stderr)
-            sys.exit(1)
+        print("No message provided.", file=sys.stderr)
+        sys.exit(1)
 
     try:
-        send(sock_path, message)
+        send(sid, message)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
     except (ConnectionRefusedError, FileNotFoundError) as e:
         print(f"Failed to send: {e}", file=sys.stderr)
         sys.exit(1)

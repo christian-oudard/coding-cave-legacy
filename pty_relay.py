@@ -38,9 +38,63 @@ def _get_winsize(fd):
     return rows, cols
 
 
-def _handle_message(buf, master_fd):
-    """Inject message into the child's PTY, followed by CR."""
-    os.write(master_fd, bytes(buf) + b"\r")
+def _sender_tag():
+    """Build sender tag from this relay's session identity."""
+    idx = os.environ.get("CODING_CAVE_SESSION_INDEX", "")
+    proj = os.environ.get("CODING_CAVE_PROJECT_PATH", "")
+    proj = os.path.basename(proj) if proj else ""
+    if proj and idx:
+        return f"{proj}#{idx}:"
+    if idx:
+        return f"#{idx}:"
+    return "unknown:"
+
+
+def _is_local_peer(conn):
+    """Check if the peer is in the same PID namespace via SO_PEERCRED."""
+    try:
+        creds = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED,
+                                struct.calcsize("iII"))
+        pid, _, _ = struct.unpack("iII", creds)
+        return pid > 0
+    except OSError:
+        return False
+
+
+def _forward_message(target_sid, tagged_message):
+    """Forward a tagged message to the target session's socket."""
+    ipc_dir = os.path.join(os.environ.get("HOME", os.path.expanduser("~")), "ipc")
+    target_sock = os.path.join(ipc_dir, f"{target_sid}.sock")
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(5)
+        s.connect(target_sock)
+        s.sendall(tagged_message.encode())
+        s.shutdown(socket.SHUT_WR)
+        s.close()
+    except OSError:
+        pass
+
+
+def _handle_message(buf, master_fd, conn=None):
+    """Process an incoming message.
+
+    FWD messages from local peers (same PID namespace) are tagged with
+    verified sender identity and forwarded to the target session.
+    All other messages are injected into the PTY.
+    """
+    raw = bytes(buf)
+    if raw.startswith(b"FWD ") and conn is not None and _is_local_peer(conn):
+        # Forward request from a local process (same session)
+        newline = raw.find(b"\n", 4)
+        if newline == -1:
+            return
+        target_sid = raw[4:newline].decode()
+        message = raw[newline + 1:].decode()
+        tagged = f"{_sender_tag()} {message}"
+        _forward_message(target_sid, tagged)
+    else:
+        os.write(master_fd, raw + b"\r")
 
 
 def relay(child_argv, sock_path):
@@ -152,7 +206,7 @@ def relay(child_argv, sock_path):
                     else:
                         # Client closed. Process accumulated message.
                         if buf:
-                            _handle_message(buf, master_fd)
+                            _handle_message(buf, master_fd, conn)
                         conn.close()
                         del clients[fd]
 

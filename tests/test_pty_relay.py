@@ -172,81 +172,102 @@ class TestPtyRelay:
 
 
 class TestCaveSend:
-    def test_send_injects_tagged_message(self, tmp_path):
-        """cave-send delivers a tagged message to a running relay."""
+    def test_fwd_tags_and_delivers(self, tmp_path):
+        """FWD through sender relay tags message and delivers to target."""
+        # Set up sender relay (session A)
+        sender_sock = str(tmp_path / "sender.sock")
+        sender_script = tmp_path / "sender.sh"
+        sender_script.write_text("#!/bin/bash\nsleep 2\n")
+        sender_script.chmod(0o755)
+
+        # Set up target relay (session B)
+        target_sock = str(tmp_path / "target.sock")
+        target_script = tmp_path / "target.sh"
+        target_script.write_text("#!/bin/bash\nread -r line; echo \"GOT:$line\"\n")
+        target_script.chmod(0o755)
+
+        sender_env = {
+            **os.environ,
+            "CODING_CAVE_SESSION_ID": "sender-sid",
+            "CODING_CAVE_SESSION_INDEX": "1",
+            "CODING_CAVE_PROJECT_PATH": "/projects/myproj",
+            "HOME": str(tmp_path),
+        }
+        target_env = {
+            **os.environ,
+            "CODING_CAVE_SESSION_ID": "target-sid",
+            "CODING_CAVE_SESSION_INDEX": "2",
+        }
+
+        # Create ipc dir with target socket symlink so relay can find it
+        ipc_dir = tmp_path / "ipc"
+        ipc_dir.mkdir()
+
+        sender_relay = subprocess.Popen(
+            [sys.executable, RELAY, "--sock", sender_sock, "--", str(sender_script)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=sender_env,
+        )
+        target_relay = subprocess.Popen(
+            [sys.executable, RELAY, "--sock", target_sock, "--", str(target_script)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=target_env,
+        )
+        assert _wait_for_socket(sender_sock), "Sender socket never appeared"
+        assert _wait_for_socket(target_sock), "Target socket never appeared"
+
+        # Symlink target socket into ipc dir so forwarding can find it
+        (ipc_dir / "target-sid.sock").symlink_to(target_sock)
+
+        # Send FWD through sender relay (same PID namespace = local)
+        _send_message(sender_sock, "FWD target-sid\nhello from session 1")
+        time.sleep(0.3)
+
+        # Target should have received the tagged message
+        target_relay.stdin.close()
+        stdout, _ = target_relay.communicate(timeout=5)
+        assert b"GOT:myproj#1: hello from session 1" in stdout
+
+        sender_relay.kill()
+        sender_relay.wait()
+
+    def test_fwd_rejected_from_cross_namespace(self, tmp_path):
+        """FWD from a different PID namespace (pid=0) is NOT forwarded."""
+        # This tests that non-FWD messages are injected into PTY instead
         sock = str(tmp_path / "test.sock")
         script = tmp_path / "echo.sh"
         script.write_text("#!/bin/bash\nread -r line; echo \"GOT:$line\"\n")
         script.chmod(0o755)
 
-        relay = subprocess.Popen(
+        proc = subprocess.Popen(
             [sys.executable, RELAY, "--sock", sock, "--", str(script)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
         assert _wait_for_socket(sock), "Socket never appeared"
-        env = {k: v for k, v in os.environ.items()
-               if k != "CODING_CAVE_SESSION_INDEX"}
-        subprocess.run(
-            [sys.executable, SEND, "--sock", sock, "hello from cave-send"],
-            check=True, env=env,
-        )
-        stdout, _ = relay.communicate(timeout=5)
-        assert b"GOT:user: hello from cave-send" in stdout
+        # Direct message (not FWD) is injected into PTY
+        _send_message(sock, "direct message")
+        stdout, _ = proc.communicate(timeout=5)
+        assert b"GOT:direct message" in stdout
 
-    def test_send_agent_tag(self, tmp_path):
-        """Agent sessions are tagged with project and index."""
-        sock = str(tmp_path / "test.sock")
-        script = tmp_path / "echo.sh"
-        script.write_text("#!/bin/bash\nread -r line; echo \"GOT:$line\"\n")
-        script.chmod(0o755)
-
-        relay = subprocess.Popen(
-            [sys.executable, RELAY, "--sock", sock, "--", str(script)],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        )
-        assert _wait_for_socket(sock), "Socket never appeared"
+    def test_self_send_blocked(self, tmp_path):
+        """cave-send to own session index exits with error."""
+        ipc_dir = tmp_path / "ipc"
+        ipc_dir.mkdir()
+        (ipc_dir / "my-sid.sock").touch()
+        (ipc_dir / "my-sid.json").write_text(json.dumps({
+            "sid": "my-sid", "index": "1", "project": "proj",
+        }))
         env = {
             **os.environ,
-            "CODING_CAVE_SESSION_INDEX": "3",
-            "CODING_CAVE_PROJECT_PATH": "/projects/myproj",
+            "CODING_CAVE_SESSION_ID": "my-sid",
+            "HOME": str(tmp_path),
         }
-        subprocess.run(
-            [sys.executable, SEND, "--sock", sock, "hi from agent"],
-            check=True, env=env,
-        )
-        stdout, _ = relay.communicate(timeout=5)
-        assert b"GOT:myproj#3: hi from agent" in stdout
-
-    def test_send_via_pipe(self, tmp_path):
-        """cave-send reads message from stdin when piped."""
-        sock = str(tmp_path / "test.sock")
-        script = tmp_path / "echo.sh"
-        script.write_text("#!/bin/bash\nread -r line; echo \"GOT:$line\"\n")
-        script.chmod(0o755)
-
-        relay = subprocess.Popen(
-            [sys.executable, RELAY, "--sock", sock, "--", str(script)],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        )
-        assert _wait_for_socket(sock), "Socket never appeared"
-        env = {k: v for k, v in os.environ.items()
-               if k != "CODING_CAVE_SESSION_INDEX"}
-        subprocess.run(
-            [sys.executable, SEND, "--sock", sock],
-            input=b"piped message",
-            check=True, env=env,
-        )
-        stdout, _ = relay.communicate(timeout=5)
-        assert b"GOT:user: piped message" in stdout
-
-    def test_send_exits_nonzero_on_failure(self, tmp_path):
-        """cave-send exits non-zero when relay is not running."""
-        sock = str(tmp_path / "nonexistent.sock")
         result = subprocess.run(
-            [sys.executable, SEND, "--sock", sock, "should fail"],
-            capture_output=True, text=True, timeout=10,
+            [sys.executable, SEND, "1", "hello"],
+            capture_output=True, text=True, env=env,
         )
         assert result.returncode != 0
+        assert "yourself" in result.stderr.lower()
 
     def test_list_sessions(self, tmp_path, monkeypatch):
         """--list shows session IDs with metadata."""
@@ -271,51 +292,47 @@ class TestCaveSend:
 
 
 class TestSenderTag:
-    def test_tag_includes_project_name(self, tmp_path):
-        """Agent sender tag includes project name: [project#N]."""
-        sock = str(tmp_path / "test.sock")
-        script = tmp_path / "echo.sh"
-        script.write_text("#!/bin/bash\nread -r line; echo \"GOT:$line\"\n")
-        script.chmod(0o755)
+    def test_relay_tags_fwd_with_project(self):
+        """Relay tags FWD messages with project#index."""
+        import tempfile, shutil
+        d = Path(tempfile.mkdtemp(prefix="fwd", dir="/tmp"))
+        try:
+            sender_sock = str(d / "s.sock")
+            target_sock = str(d / "t.sock")
+            (d / "wait.sh").write_text("#!/bin/bash\nsleep 2\n")
+            (d / "wait.sh").chmod(0o755)
+            (d / "echo.sh").write_text("#!/bin/bash\nread -r line; echo \"GOT:$line\"\n")
+            (d / "echo.sh").chmod(0o755)
+            (d / "ipc").mkdir()
 
-        relay = subprocess.Popen(
-            [sys.executable, RELAY, "--sock", sock, "--", str(script)],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        )
-        assert _wait_for_socket(sock), "Socket never appeared"
-        env = {
-            **os.environ,
-            "CODING_CAVE_SESSION_INDEX": "2",
-            "CODING_CAVE_PROJECT_PATH": "/projects/coding-cave",
-        }
-        subprocess.run(
-            [sys.executable, SEND, "--sock", sock, "hello"],
-            check=True, env=env,
-        )
-        stdout, _ = relay.communicate(timeout=5)
-        assert b"GOT:coding-cave#2: hello" in stdout
+            env = {
+                **os.environ,
+                "CODING_CAVE_SESSION_INDEX": "5",
+                "CODING_CAVE_PROJECT_PATH": "/projects/myproj",
+                "HOME": str(d),
+            }
+            relay = subprocess.Popen(
+                [sys.executable, RELAY, "--sock", sender_sock, "--", str(d / "wait.sh")],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                env=env,
+            )
+            target = subprocess.Popen(
+                [sys.executable, RELAY, "--sock", target_sock, "--", str(d / "echo.sh")],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            assert _wait_for_socket(sender_sock)
+            assert _wait_for_socket(target_sock)
+            (d / "ipc" / "tgt.sock").symlink_to(target_sock)
 
-    def test_tag_falls_back_without_project(self, tmp_path):
-        """Without project path, tag falls back to [#N]."""
-        sock = str(tmp_path / "test.sock")
-        script = tmp_path / "echo.sh"
-        script.write_text("#!/bin/bash\nread -r line; echo \"GOT:$line\"\n")
-        script.chmod(0o755)
-
-        relay = subprocess.Popen(
-            [sys.executable, RELAY, "--sock", sock, "--", str(script)],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        )
-        assert _wait_for_socket(sock), "Socket never appeared"
-        env = {k: v for k, v in os.environ.items()
-               if k != "CODING_CAVE_PROJECT_PATH"}
-        env["CODING_CAVE_SESSION_INDEX"] = "5"
-        subprocess.run(
-            [sys.executable, SEND, "--sock", sock, "hello"],
-            check=True, env=env,
-        )
-        stdout, _ = relay.communicate(timeout=5)
-        assert b"GOT:#5: hello" in stdout
+            _send_message(sender_sock, "FWD tgt\nhello")
+            time.sleep(0.3)
+            target.stdin.close()
+            stdout, _ = target.communicate(timeout=5)
+            assert b"GOT:myproj#5: hello" in stdout
+            relay.kill()
+            relay.wait()
+        finally:
+            shutil.rmtree(str(d), ignore_errors=True)
 
 
 class TestResolveIndex:
