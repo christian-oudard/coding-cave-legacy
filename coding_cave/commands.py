@@ -363,18 +363,48 @@ def _find_cave_root(project=None):
 
 
 def _prompt_session(session_list):
-    """Prompt user to select from multiple sessions."""
+    """Prompt user to select from multiple sessions.
+
+    Groups sessions by project, sorted by most recent session per project.
+    Selection key is 'project #idx' (or just 'project' if only one session).
+    """
+    from collections import defaultdict
+
     print("Multiple sessions running:", file=sys.stderr)
-    by_index = {}
-    for s in sorted(session_list, key=lambda s: s.get("index", 0)):
-        ago = _relative_age(s["started"])
-        idx = s.get("index", "?")
-        proj = s.get("project", "?")
-        by_index[str(idx)] = s
-        print(f"  [{idx}] [{ago}] {proj}  PID {s['bwrap_pid']}", file=sys.stderr)
+
+    # Group by project
+    by_project = defaultdict(list)
+    for s in session_list:
+        by_project[s.get("project", "?")].append(s)
+
+    # Sort each project's sessions by index
+    for proj in by_project:
+        by_project[proj].sort(key=lambda s: s.get("index", 0))
+
+    # Sort projects by most recent session (newest first)
+    project_order = sorted(
+        by_project.keys(),
+        key=lambda p: max(s.get("started", 0) for s in by_project[p]),
+        reverse=True,
+    )
+
+    by_key = {}
+    for proj in project_order:
+        proj_sessions = by_project[proj]
+        multi = len(proj_sessions) > 1
+        for s in proj_sessions:
+            ago = _relative_age(s["started"])
+            idx = s.get("index", "?")
+            label = f"{proj} #{idx}" if multi else proj
+            by_key[label] = s
+            # Also allow bare project name when unambiguous
+            if not multi:
+                by_key[proj] = s
+            print(f"  {label}  [{ago}]  PID {s['bwrap_pid']}", file=sys.stderr)
+
     try:
         choice = input("Session: ").strip()
-        return by_index[choice]
+        return by_key[choice]
     except (KeyError, EOFError):
         print("Invalid choice.", file=sys.stderr)
         sys.exit(1)
