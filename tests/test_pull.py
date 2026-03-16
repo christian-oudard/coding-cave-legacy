@@ -1111,8 +1111,8 @@ class TestPostCommitHook:
         assert pushed.returncode == 0
         assert pushed.stdout.strip() == session_head
 
-    def test_hook_fails_silently_on_non_ff(self, pull_env, tmp_path):
-        """Post-commit hook fails silently when push is non-FF (after amend)."""
+    def test_hook_force_pushes_amend(self, pull_env, tmp_path):
+        """Post-commit hook force-pushes when session owns the branch (amend)."""
         env = pull_env
         gd, workdir = self._make_hooked_session(env, tmp_path, "hook3")
 
@@ -1123,22 +1123,22 @@ class TestPostCommitHook:
         first_sha = self._session_git(workdir, "rev-parse", "HEAD").stdout.strip()
         assert _head(env.gitdir, gitdir=True) == first_sha
 
-        # Amend — hook push fails (non-FF), but commit succeeds
+        # Amend — hook detects ownership and force-pushes
         (workdir / "new.txt").write_text("v2\n")
         self._session_git(workdir, "add", "new.txt")
         result = self._session_git(workdir, "commit", "--amend", "-m", "amended")
-        assert result.returncode == 0  # commit itself succeeds
+        assert result.returncode == 0
 
         amended_sha = self._session_git(workdir, "rev-parse", "HEAD").stdout.strip()
         assert amended_sha != first_sha
 
-        # Shared still at first_sha (hook push failed)
-        assert _head(env.gitdir, gitdir=True) == first_sha
+        # Shared should have the amended version (force-pushed)
+        assert _head(env.gitdir, gitdir=True) == amended_sha
 
-        # refs/pushed/main still at first_sha (not updated on failed push)
+        # refs/pushed/main updated to amended sha
         pushed = _run("git", "--git-dir", str(gd),
-                       "rev-parse", "refs/pushed/main", check=False)
-        assert pushed.stdout.strip() == first_sha
+                       "rev-parse", "--verify", "refs/pushed/main", check=False)
+        assert pushed.stdout.strip() == amended_sha
 
     def test_hook_fetches_shared_updates(self, pull_env, tmp_path):
         """Post-commit hook fetches from shared, so session sees other work."""
@@ -1600,10 +1600,10 @@ class TestCleanupOrdering:
         wrapper.merge_session_gitdirs("a", overlay_a)
         wrapper.merge_session_gitdirs("b", overlay_b)
 
-        # B's ref should be backed up (conflict, can't rebase)
-        backup = _run("git", "--git-dir", str(env.gitdir), "for-each-ref",
-                       "--format=%(refname)", "refs/sessions/b/", check=False)
-        assert "refs/sessions/b/main" in backup.stdout
+        # B's ref should be saved as a named branch (conflict, can't rebase)
+        backup = _run("git", "--git-dir", str(env.gitdir), "rev-parse",
+                       "refs/heads/main-cave-b", check=False)
+        assert backup.returncode == 0
 
         # Pull should succeed (main has one version, backup has the other)
         wrapper.pull_project(env.slug)

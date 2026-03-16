@@ -101,16 +101,40 @@ def create_session_gitdir(slug, sid, overlay_base):
     git_mod.git(session_gitdir, "config", "--add", "remote.shared.fetch",
         "+refs/remotes/host/*:refs/remotes/host/*", capture_output=True)
 
-    # Post-commit hook: push current branch to shared, fetch latest
+    # Post-commit hook: sync with shared like a developer pushing to origin.
+    # 1. Try FF push (common case: no other session modified shared)
+    # 2. If non-FF + we own the branch: force push (handles amends)
+    # 3. If non-FF + someone else modified shared: rebase + push
+    # 4. If rebase conflicts: abort, defer to cleanup
+    # Always fetch at the end to keep tracking refs current.
     hooks = session_gitdir / "hooks"
     if hooks.exists():
         shutil.rmtree(hooks)
     hooks.mkdir()
     (hooks / "post-commit").write_text(
         '#!/bin/bash\n'
+        '[ -n "$_CAVE_HOOK_RUNNING" ] && exit 0\n'
+        'export _CAVE_HOOK_RUNNING=1\n'
         'branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null) || exit 0\n'
-        'git push shared "$branch" 2>/dev/null &&\n'
-        '  git update-ref "refs/pushed/$branch" HEAD 2>/dev/null\n'
+        'if git push shared "$branch" 2>/dev/null; then\n'
+        '    git update-ref "refs/pushed/$branch" HEAD 2>/dev/null\n'
+        'else\n'
+        '    pushed_sha=$(git rev-parse --verify "refs/pushed/$branch" '
+        '2>/dev/null)\n'
+        '    git fetch shared 2>/dev/null\n'
+        '    shared_sha=$(git rev-parse --verify '
+        '"refs/remotes/shared/$branch" 2>/dev/null)\n'
+        '    if [ -n "$pushed_sha" ] && [ "$shared_sha" = "$pushed_sha" ]'
+        '; then\n'
+        '        git push shared +"$branch" 2>/dev/null &&\n'
+        '            git update-ref "refs/pushed/$branch" HEAD\n'
+        '    elif git rebase "shared/$branch" 2>/dev/null; then\n'
+        '        git push shared "$branch" 2>/dev/null &&\n'
+        '            git update-ref "refs/pushed/$branch" HEAD\n'
+        '    else\n'
+        '        git rebase --abort 2>/dev/null\n'
+        '    fi\n'
+        'fi\n'
         'git fetch shared 2>/dev/null\n'
         'exit 0\n'
     )
@@ -447,13 +471,18 @@ def _forward_refs(sid, session_gitdir, shared_gitdir, *, force=False,
                 git_mod.git(session_gitdir, "update-ref",
                     f"refs/synced/{branch}", sha, capture_output=True)
             elif force and branch not in protected_refs:
-                # Final cleanup: force-update, back up old ref.
+                # Diverged, can't rebase.  Save session's work on a
+                # visible named branch so `cav pull` picks it up
+                # naturally (refs/sessions/ was hidden and required
+                # manual rescue).  Keep shared ref unchanged.
+                short_sid = sid[:8] if len(sid) > 8 else sid
+                save_branch = f"{branch}-cave-{short_sid}"
                 git_mod.git(shared_gitdir, "update-ref",
-                    f"refs/sessions/{sid}/{branch}", existing_sha,
-                    capture_output=True)
-                git_mod.git(shared_gitdir, "update-ref", ref, sha,
+                    f"refs/heads/{save_branch}", sha,
                     capture_output=True)
                 protected_refs.add(branch)
+                print(f"Saved diverged {branch} as {save_branch}.",
+                      file=sys.stderr)
             else:
                 # Non-force live sync (push/status): can't rebase,
                 # skip.  Pull uses force=True so this path only fires

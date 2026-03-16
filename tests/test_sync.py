@@ -992,7 +992,7 @@ class TestSessionGitdir:
 
         # No backup ref should exist (that's a cleanup-only behavior)
         backup = git_run("git", "--git-dir", str(shared_gd),
-                         "rev-parse", "refs/sessions/sid-b/main")
+                         "rev-parse", "refs/heads/main-cave-sid-b")
         assert backup.returncode != 0
 
     def test_forward_session_refs_force_syncs_diverged(
@@ -1028,14 +1028,14 @@ class TestSessionGitdir:
         wrapper.forward_session_refs(slug, session_gd_b, shared_gd,
                                      sid="sid-b", force=True)
 
-        # Shared should now be at B's commit (force-updated)
-        assert git_head(shared_gd, gitdir=True) == session_b_sha
+        # Shared main unchanged (no force-update clobber)
+        assert git_head(shared_gd, gitdir=True) == shared_after_a
 
-        # Old ref should be backed up
+        # B's diverged work saved as a named branch
         backup = git_run("git", "--git-dir", str(shared_gd),
-                         "rev-parse", "refs/sessions/sid-b/main")
+                         "rev-parse", "refs/heads/main-cave-sid-b")
         assert backup.returncode == 0
-        assert backup.stdout.strip() == shared_after_a
+        assert backup.stdout.strip() == session_b_sha
 
     def test_forward_refs_skips_conflicting_diverge(
             self, shared_project, tmp_path):
@@ -2026,6 +2026,43 @@ class TestPullDoesNotUpdateCaveRefs:
         assert session_head == cave_head
 
 
+class TestPullCreatesNewBranches:
+    """Pull creates new branches on the host when they exist in the cave."""
+
+    def test_pull_creates_cave_branch_on_host(self, tmp_path):
+        slug = "test-project"
+        _state.set_cave_data(tmp_path)
+
+        host = tmp_path / "host"
+        host.mkdir()
+        git_run("git", "-C", str(host), "init", "-b", "main")
+        (host / "file.txt").write_text("initial\n")
+        git_run("git", "-C", str(host), "add", ".")
+        git_run("git", "-C", str(host), "commit", "-m", "initial")
+
+        projects_dir = _state.projects_dir()
+        proj_state = projects_dir / slug
+        proj_state.mkdir(parents=True)
+        wrapper.initialize_gitdir(slug, host)
+        gitdir = proj_state / "gitdir"
+        write_projects(tmp_path, {slug: str(host)})
+
+        # Create a new branch in the cave gitdir (simulates diverged session save)
+        git_run("git", "--git-dir", str(gitdir), "branch",
+                "main-cave-test", "HEAD")
+        (host / "extra.txt").write_text("extra\n")
+        git_run("git", "-C", str(host), "add", ".")
+        git_run("git", "-C", str(host), "commit", "-m", "host commit")
+
+        from coding_cave.sync import pull_project
+        pull_project(slug)
+
+        # New branch should exist on host
+        result = git_run("git", "-C", str(host), "rev-parse",
+                         "refs/heads/main-cave-test")
+        assert result.returncode == 0, "Cave branch should be created on host"
+
+
 class TestSessionSetup:
     """Test per-session gitdir: sessions work on real branches (e.g. main)."""
 
@@ -2112,9 +2149,9 @@ class TestSessionSetup:
         wrapper.merge_session_gitdirs("sid-a", overlay_a)
         wrapper.merge_session_gitdirs("sid-b", overlay_b)
 
-        # B's diverged ref backed up under refs/sessions/sid-b/main
+        # B's diverged ref backed up as named branch main-cave-sid-b
         ref = git_run("git", "--git-dir", str(shared_gd),
-                      "rev-parse", "refs/sessions/sid-b/main")
+                      "rev-parse", "refs/heads/main-cave-sid-b")
         assert ref.returncode == 0
 
     def test_forward_refs_updates_main_in_shared(self, shared_project, tmp_path):
@@ -2894,6 +2931,108 @@ class TestPullAheadMessage:
         assert "ahead" not in err
 
 
+class TestPostCommitHookSync:
+    """Test that the post-commit hook rebases onto shared when behind."""
+
+    @pytest.fixture
+    def shared_project(self, tmp_path):
+        slug = "test-project"
+        _state.set_cave_data(tmp_path)
+        projects_dir = _state.projects_dir()
+        (projects_dir / slug).mkdir(parents=True)
+
+        host = tmp_path / "host"
+        host.mkdir()
+        git_run("git", "init", "-b", "main", str(host))
+        (host / "file.txt").write_text("initial\n")
+        git_run("git", "-C", str(host), "add", ".")
+        git_run("git", "-C", str(host), "commit", "-m", "initial")
+
+        wrapper.initialize_gitdir(slug, host)
+        shared_gd = projects_dir / slug / "gitdir"
+        # Allow pushes to current branch (like lifecycle.py does)
+        git_run("git", "--git-dir", str(shared_gd), "config",
+                "receive.denyCurrentBranch", "ignore")
+        return host, slug, projects_dir
+
+    def _make_session(self, tmp_path, slug, projects_dir, name):
+        overlay_base = tmp_path / f"overlay-{name}"
+        overlay_base.mkdir()
+        session_gitdir = wrapper.create_session_gitdir(
+            slug, f"sid-{name}", overlay_base)
+        workdir = tmp_path / f"work-{name}"
+        workdir.mkdir()
+        # Fix shared remote to point to the test gitdir (not cave path)
+        shared_gd = projects_dir / slug / "gitdir"
+        git_run("git", "--git-dir", str(session_gitdir),
+                "remote", "set-url", "shared", str(shared_gd))
+        git_run("git", "--git-dir", str(session_gitdir),
+                "--work-tree", str(workdir),
+                "checkout", "HEAD", "--", ".")
+        make_cave_session(session_gitdir, workdir)
+        return session_gitdir, workdir, overlay_base
+
+    def test_hook_rebases_when_behind_shared(self, shared_project, tmp_path):
+        """When shared moves forward, post-commit hook rebases and pushes."""
+        _, slug, projects_dir = shared_project
+        shared_gd = projects_dir / slug / "gitdir"
+
+        gd_a, work_a, _ = self._make_session(
+            tmp_path, slug, projects_dir, "a")
+        gd_b, work_b, _ = self._make_session(
+            tmp_path, slug, projects_dir, "b")
+
+        # A commits and pushes (via hook)
+        (work_a / "a.txt").write_text("from A\n")
+        cave_git(work_a, "add", "a.txt")
+        cave_git(work_a, "commit", "-m", "commit A")
+
+        # Shared should have A's commit
+        shared_main = git_head(shared_gd, gitdir=True)
+        a_head = git_head(gd_a, gitdir=True)
+        assert shared_main == a_head
+
+        # B commits (hook tries to push, fails, should rebase onto A)
+        (work_b / "b.txt").write_text("from B\n")
+        cave_git(work_b, "add", "b.txt")
+        cave_git(work_b, "commit", "-m", "commit B")
+
+        # B's HEAD should now be rebased on top of A
+        b_head = git_head(gd_b, gitdir=True)
+        b_log = cave_git(work_b, "log", "--oneline")
+        assert "commit A" in b_log.stdout, "B should have A's commit after rebase"
+        assert "commit B" in b_log.stdout
+
+        # Shared should have both
+        shared_main = git_head(shared_gd, gitdir=True)
+        assert shared_main == b_head
+
+    def test_hook_force_pushes_amend(self, shared_project, tmp_path):
+        """When session amends its own commit, hook force-pushes."""
+        _, slug, projects_dir = shared_project
+        shared_gd = projects_dir / slug / "gitdir"
+
+        gd, work, _ = self._make_session(
+            tmp_path, slug, projects_dir, "test")
+
+        # Commit and push
+        (work / "a.txt").write_text("v1\n")
+        cave_git(work, "add", "a.txt")
+        cave_git(work, "commit", "-m", "add a")
+        original = git_head(gd, gitdir=True)
+        assert git_head(shared_gd, gitdir=True) == original
+
+        # Amend (hook should force-push since we own the branch)
+        (work / "a.txt").write_text("v2\n")
+        cave_git(work, "add", "a.txt")
+        cave_git(work, "commit", "--amend", "-m", "add a (amended)")
+        amended = git_head(gd, gitdir=True)
+        assert amended != original
+
+        # Shared should have the amended version
+        assert git_head(shared_gd, gitdir=True) == amended
+
+
 class TestPostRewriteHook:
     """Test that amend/rebase guard hooks block rewriting pulled commits."""
 
@@ -3121,7 +3260,7 @@ class TestForceCleanupBackupRef:
 
     def test_force_cleanup_creates_backup_ref(self, shared_project, tmp_path):
         """When cleanup force-updates a diverged ref, a backup is created
-        under refs/sessions/<sid>/<branch>.
+        as a named branch at refs/heads/<branch>-cave-<sid>.
         """
         host, slug, projects_dir = shared_project
         shared_gd = projects_dir / slug / "gitdir"
@@ -3144,15 +3283,19 @@ class TestForceCleanupBackupRef:
         wrapper.merge_session_gitdirs("sid-a", overlay_a)
         shared_after_a = git_head(shared_gd, gitdir=True)
 
-        # B cleanup — must force-update and create backup
+        # B cleanup — can't rebase, saves as named branch
+        session_b_sha = git_head(overlay_b / f"gitdir-{slug}", gitdir=True)
         wrapper.merge_session_gitdirs("sid-b", overlay_b)
 
-        # Backup ref should exist for session B
+        # Shared main unchanged (A's work stays)
+        assert git_head(shared_gd, gitdir=True) == shared_after_a
+
+        # B's diverged work saved as a named branch
         backup = git_run("git", "--git-dir", str(shared_gd),
-                         "rev-parse", "refs/sessions/sid-b/main")
+                         "rev-parse", "refs/heads/main-cave-sid-b")
         assert backup.returncode == 0, \
-            "Expected backup ref refs/sessions/sid-b/main"
-        assert backup.stdout.strip() == shared_after_a
+            "Expected backup branch refs/heads/main-cave-sid-b"
+        assert backup.stdout.strip() == session_b_sha
 
     def test_multi_branch_concurrent_sessions(self, shared_project, tmp_path):
         """Session A on main, Session B on develop — both merge cleanly."""
@@ -3189,11 +3332,11 @@ class TestForceCleanupBackupRef:
         assert main_sha == sha_a
         assert dev_sha == sha_b
 
-        # No backup refs — no conflicts
+        # No backup branches — no conflicts
         backup_a = git_run("git", "--git-dir", str(shared_gd),
-                           "rev-parse", "refs/sessions/sid-a/main")
+                           "rev-parse", "refs/heads/main-cave-sid-a")
         backup_b = git_run("git", "--git-dir", str(shared_gd),
-                           "rev-parse", "refs/sessions/sid-b/develop")
+                           "rev-parse", "refs/heads/develop-cave-sid-b")
         assert backup_a.returncode != 0
         assert backup_b.returncode != 0
 
