@@ -53,12 +53,20 @@ def _detect_gpg_agent_socket():
     return None
 
 
+def _onecli_ca_path():
+    """Find onecli CA cert: legacy ~/.onecli first, then XDG_DATA_HOME."""
+    legacy = Path("~/.onecli/gateway/ca.pem").expanduser()
+    if legacy.is_file():
+        return legacy
+    xdg = Path(os.environ.get("XDG_DATA_HOME", "~/.local/share")).expanduser()
+    return xdg / "onecli" / "gateway" / "ca.pem"
+
 def _setup_proxy(global_config):
     """Configure proxy env vars if [proxy] section exists. Returns True if proxy is active."""
     proxy = global_config.get("proxy", {})
     if proxy.get("onecli"):
         port = str(proxy.get("port", 10255))
-        ca_path = Path("~/.onecli/gateway/ca.pem").expanduser()
+        ca_path = _onecli_ca_path()
         os.environ["CODING_CAVE_PROXY_PORT"] = port
         if ca_path.is_file():
             os.environ["CODING_CAVE_PROXY_CA_CERT"] = str(ca_path.resolve())
