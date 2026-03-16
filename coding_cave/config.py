@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -68,6 +69,10 @@ def _gateway_listening(port):
         s.settimeout(0.5)
         return s.connect_ex(("127.0.0.1", port)) == 0
 
+def _gateway_pid_file():
+    from . import _state
+    return _state.cave_data() / "onecli-gateway.pid"
+
 def _start_gateway(port):
     """Start the onecli gateway in the background. Returns True if started or already running."""
     if _gateway_listening(port):
@@ -85,6 +90,7 @@ def _start_gateway(port):
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
+    _gateway_pid_file().write_text(str(proc.pid))
     # Wait for it to be ready
     for _ in range(20):
         if _gateway_listening(port):
@@ -92,6 +98,21 @@ def _start_gateway(port):
         time.sleep(0.25)
     print(f"onecli gateway failed to start (pid {proc.pid})", file=sys.stderr)
     return False
+
+def stop_gateway_if_idle():
+    """Kill the onecli gateway if no cave sessions remain."""
+    from . import sessions
+    if sessions.list_sessions():
+        return
+    pid_file = _gateway_pid_file()
+    if not pid_file.exists():
+        return
+    try:
+        pid = int(pid_file.read_text().strip())
+        os.kill(pid, signal.SIGTERM)
+    except (ValueError, ProcessLookupError, OSError):
+        pass
+    pid_file.unlink(missing_ok=True)
 
 def _setup_proxy(global_config):
     """Configure proxy env vars if [proxy] section exists. Returns True if proxy is active."""

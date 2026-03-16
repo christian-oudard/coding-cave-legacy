@@ -579,6 +579,7 @@ def start_session(project, command, gpu=False, reuse_index=False):
         sessions.save_last_index(project, session_index)
         sessions.cleanup_session(sid)
         sessions.update_pane_titles(project)
+        config.stop_gateway_if_idle()
         for merged in overlay_mounts:
             overlay.unmount_fuse(merged)
         # Unmount per-session nix overlay before rmtree since the

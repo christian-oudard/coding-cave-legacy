@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from coding_cave.config import _setup_proxy, setup_env
+from coding_cave.config import _setup_proxy, setup_env, stop_gateway_if_idle
 
 FLAKE_NIX = Path(__file__).parent.parent / "flake.nix"
 LIFECYCLE_PY = FLAKE_NIX.parent / "coding_cave" / "lifecycle.py"
@@ -108,6 +108,49 @@ class TestProxyConfig:
              patch("coding_cave.config._start_gateway", return_value=False):
             assert _setup_proxy(cfg) is False
             assert "CODING_CAVE_PROXY_PORT" not in os.environ
+
+
+class TestGatewayLifecycle:
+    """Tests for gateway start/stop lifecycle."""
+
+    def test_stop_kills_when_no_sessions(self, tmp_path):
+        """Gateway killed when no sessions remain."""
+        pid_file = tmp_path / "onecli-gateway.pid"
+        pid_file.write_text("99999")
+        with patch("coding_cave.config._gateway_pid_file", return_value=pid_file), \
+             patch("coding_cave.sessions.list_sessions", return_value=[]), \
+             patch("os.kill") as mock_kill:
+            stop_gateway_if_idle()
+            mock_kill.assert_called_once_with(99999, __import__("signal").SIGTERM)
+        assert not pid_file.exists()
+
+    def test_stop_skips_when_sessions_active(self, tmp_path):
+        """Gateway left running when sessions exist."""
+        pid_file = tmp_path / "onecli-gateway.pid"
+        pid_file.write_text("99999")
+        with patch("coding_cave.config._gateway_pid_file", return_value=pid_file), \
+             patch("coding_cave.sessions.list_sessions", return_value=[{"sid": "x"}]), \
+             patch("os.kill") as mock_kill:
+            stop_gateway_if_idle()
+            mock_kill.assert_not_called()
+        assert pid_file.exists()
+
+    def test_stop_cleans_stale_pid_file(self, tmp_path):
+        """PID file cleaned up even if process already dead."""
+        pid_file = tmp_path / "onecli-gateway.pid"
+        pid_file.write_text("99999")
+        with patch("coding_cave.config._gateway_pid_file", return_value=pid_file), \
+             patch("coding_cave.sessions.list_sessions", return_value=[]), \
+             patch("os.kill", side_effect=ProcessLookupError):
+            stop_gateway_if_idle()
+        assert not pid_file.exists()
+
+    def test_stop_noop_without_pid_file(self):
+        """No error when PID file doesn't exist."""
+        with patch("coding_cave.config._gateway_pid_file",
+                    return_value=Path("/tmp/nonexistent-pid-12345")), \
+             patch("coding_cave.sessions.list_sessions", return_value=[]):
+            stop_gateway_if_idle()  # should not raise
 
 
 class TestFlakeNixProxy:
