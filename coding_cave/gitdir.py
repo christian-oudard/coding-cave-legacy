@@ -124,8 +124,10 @@ def create_session_gitdir(slug, sid, overlay_base):
         'export _CAVE_HOOK_RUNNING=1\n'
         'branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null) || exit 0\n'
         # Try fast-forward push
+        'pushed_ok=0\n'
         'if git push shared "$branch" 2>/dev/null; then\n'
         '    git update-ref "refs/pushed/$branch" HEAD 2>/dev/null\n'
+        '    pushed_ok=1\n'
         'else\n'
         '    pushed_sha=$(git rev-parse --verify "refs/pushed/$branch" '
         '2>/dev/null)\n'
@@ -136,7 +138,8 @@ def create_session_gitdir(slug, sid, overlay_base):
         '    if [ -n "$pushed_sha" ] && [ "$shared_sha" = "$pushed_sha" ]'
         '; then\n'
         '        git push shared +"$branch" 2>/dev/null &&\n'
-        '            git update-ref "refs/pushed/$branch" HEAD\n'
+        '            git update-ref "refs/pushed/$branch" HEAD &&\n'
+        '            pushed_ok=1\n'
         '    else\n'
         # Shared has moved.  Rebase only our new commits onto shared.
         # Use refs/pushed (last successful push) or refs/init (session
@@ -146,7 +149,8 @@ def create_session_gitdir(slug, sid, overlay_base):
         '        if [ -n "$base" ] && git rebase --onto '
         '"shared/$branch" "$base" 2>/dev/null; then\n'
         '            git push shared "$branch" 2>/dev/null &&\n'
-        '                git update-ref "refs/pushed/$branch" HEAD\n'
+        '                git update-ref "refs/pushed/$branch" HEAD &&\n'
+        '                pushed_ok=1\n'
         '        else\n'
         '            git rebase --abort 2>/dev/null\n'
         '            echo >&2\n'
@@ -158,6 +162,12 @@ def create_session_gitdir(slug, sid, overlay_base):
         'git rebase shared/$branch" >&2\n'
         '        fi\n'
         '    fi\n'
+        'fi\n'
+        # Notify sibling sessions on the same project
+        'if [ "$pushed_ok" = 1 ] && command -v cave-send >/dev/null; then\n'
+        '    cave-send --all-project "Pushed to $branch, run: '
+        'git fetch shared && git rebase shared/$branch" '
+        '</dev/null 2>/dev/null &\n'
         'fi\n'
         'git fetch shared 2>/dev/null\n'
         'exit 0\n'

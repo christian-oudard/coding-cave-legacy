@@ -4,6 +4,7 @@
 Usage:
     cave-send <target> <message>
     echo "message" | cave-send <target>
+    cave-send --all-project <message>   # send to all sessions on same project
     cave-send --list
 
 Target can be a session index (e.g. 4) or a full session ID.
@@ -108,6 +109,34 @@ def main():
             print(f"  #{idx}  {proj}  {sid}  [{age}]{me}")
         if not sessions:
             print("  No active sessions.")
+        return
+
+    if sys.argv[1] == "--all-project":
+        if len(sys.argv) < 3:
+            print("Usage: cave-send --all-project <message>", file=sys.stderr)
+            sys.exit(1)
+        message = " ".join(sys.argv[2:])
+        my_sid = os.environ.get("CODING_CAVE_SESSION_ID", "")
+        my_meta = {}
+        for sid, meta in list_sessions():
+            if sid == my_sid:
+                my_meta = meta
+                break
+        my_project = my_meta.get("project")
+        if not my_project:
+            sys.exit(1)
+        sent = 0
+        for sid, meta in list_sessions():
+            if sid == my_sid:
+                continue
+            if meta.get("project") != my_project:
+                continue
+            try:
+                send(sid, message)
+                sent += 1
+            except (ValueError, ConnectionRefusedError,
+                    FileNotFoundError, OSError):
+                pass
         return
 
     target = sys.argv[1]

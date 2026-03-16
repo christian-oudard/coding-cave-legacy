@@ -1,5 +1,6 @@
 """Pull/push synchronization between host and cave."""
 import os
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -112,6 +113,39 @@ def _print_rewrite_summary(old_entries, new_entries):
     for h, tree, subj in old_entries:
         if h not in matched_old:
             print(f"  - {h} {subj}", file=sys.stderr)
+
+
+def _notify_sessions(slug, branches):
+    """Notify active sessions that shared refs were updated by the host.
+
+    Sends a message via the session's IPC socket (Unix domain socket in
+    the persistent cave home).  Sessions see it as a 'user:' message.
+    """
+    active = sessions.list_sessions(project=slug)
+    if not active:
+        return
+    ipc_dir = _state.cave_home() / "ipc"
+    if not ipc_dir.is_dir():
+        return
+    branch_str = ", ".join(branches)
+    message = (f"Host pushed new commits to {slug} ({branch_str}). "
+               f"Run: git fetch shared && git rebase shared/main")
+    for s in active:
+        sid = s.get("sid")
+        if not sid:
+            continue
+        sock_path = ipc_dir / f"{sid}.sock"
+        if not sock_path.exists():
+            continue
+        try:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.settimeout(1)
+            sock.connect(str(sock_path))
+            sock.sendall(f"user: {message}".encode())
+            sock.shutdown(socket.SHUT_WR)
+            sock.close()
+        except (ConnectionRefusedError, FileNotFoundError, OSError):
+            pass
 
 
 def _cleanup_stale_pull(host_git, project_dir, slug):
@@ -1010,6 +1044,7 @@ def push_project(slug, force=False):
         git_mod.finalize_sync(gitdir_path, project_dir)
         print(f"Force-pushed to {slug}/{current_branch} ({host_sha[:8]}).",
               file=sys.stderr)
+        _notify_sessions(slug, [current_branch])
         return
 
     # Push all branches, checking each for unpulled cave commits
@@ -1054,6 +1089,7 @@ def push_project(slug, force=False):
         for branch, sha in pushed_branches:
             print(f"Pushed to {slug}/{branch} ({sha[:8]}).",
                   file=sys.stderr)
+        _notify_sessions(slug, [b for b, _ in pushed_branches])
     elif not any_blocked:
         print(f"Already up to date.", file=sys.stderr)
 
