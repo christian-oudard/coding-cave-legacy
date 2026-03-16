@@ -38,6 +38,7 @@
         [ -e /dev/fuse ] && RUNTIME_ARGS+=(--dev-bind /dev/fuse /dev/fuse)
       '')
       (unsafe-add-raw-args "--symlink /bin/sh /bin/bash")
+      (unsafe-add-raw-args "--dir /usr/bin --symlink /bin/env /usr/bin/env")
       # zsh symlink added dynamically when user env includes zsh
       (set-env "SHELL" "/bin/bash")
       (set-env "CODING_CAVE_VERSION" version)
