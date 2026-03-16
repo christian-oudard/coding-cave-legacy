@@ -184,6 +184,11 @@ def main():
             # Fall back to full session ID
             sid = target
             sock_path = str(IPC_DIR / f"{sid}.sock")
+        # Block self-send
+        my_sid = os.environ.get("CODING_CAVE_SESSION_ID", "")
+        if my_sid and sid == my_sid:
+            print("Cannot send to yourself.", file=sys.stderr)
+            sys.exit(1)
         if len(sys.argv) >= 3:
             message = " ".join(sys.argv[2:])
         elif not os.isatty(sys.stdin.fileno()):
