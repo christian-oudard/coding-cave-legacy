@@ -471,17 +471,14 @@ def _forward_refs(sid, session_gitdir, shared_gitdir, *, force=False,
                 git_mod.git(session_gitdir, "update-ref",
                     f"refs/synced/{branch}", sha, capture_output=True)
             elif force and branch not in protected_refs:
-                # Diverged, can't rebase.  Save session's work on a
-                # visible named branch so `cav pull` picks it up
-                # naturally (refs/sessions/ was hidden and required
-                # manual rescue).  Keep shared ref unchanged.
-                short_sid = sid[:8] if len(sid) > 8 else sid
-                save_branch = f"{branch}-cave-{short_sid}"
-                git_mod.git(shared_gitdir, "update-ref",
-                    f"refs/heads/{save_branch}", sha,
-                    capture_output=True)
+                # Diverged, can't rebase.  With the improved post-commit
+                # hook, this means every commit since the conflict also
+                # failed to rebase.  The objects are already in the shared
+                # store (fetched above).  Just warn.
                 protected_refs.add(branch)
-                print(f"Saved diverged {branch} as {save_branch}.",
+                print(f"WARNING: session {sid[:8]} had commits on "
+                      f"{branch} that couldn't be rebased "
+                      f"(tip: {sha[:8]}).",
                       file=sys.stderr)
             else:
                 # Non-force live sync (push/status): can't rebase,

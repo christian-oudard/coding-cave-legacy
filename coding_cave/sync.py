@@ -562,15 +562,7 @@ def _pull_branch_other(slug, project_dir, gitdir_path, branch, cave_sha,
         capture_output=True, text=True,
     )
     if host_sha_result.returncode != 0:
-        # Branch exists in cave but not on host — create it.
-        subprocess.run(
-            host_git + ["fetch", str(gitdir_path), cave_sha],
-            capture_output=True)
-        subprocess.run(
-            host_git + ["update-ref", f"refs/heads/{branch}", cave_sha],
-            capture_output=True)
-        print(f"  Created {slug}/{branch} ({cave_sha[:8]})", file=sys.stderr)
-        return cave_sha
+        return None  # branch doesn't exist on host, skip
     host_sha = host_sha_result.stdout.strip()
 
     if host_sha == cave_sha:

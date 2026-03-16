@@ -1584,7 +1584,7 @@ class TestCleanupOrdering:
         assert (env.host / "b.txt").read_text() == "from B\n"
 
     def test_cleanup_with_conflicting_changes(self, pull_env, tmp_path):
-        """Two sessions edit the same file — second gets backed up."""
+        """Two sessions edit the same file — second warns, shared stays at A's version."""
         env = pull_env
         _, work_a, overlay_a = self._make_session_env(env, tmp_path, "a")
         _, work_b, overlay_b = self._make_session_env(env, tmp_path, "b")
@@ -1598,14 +1598,18 @@ class TestCleanupOrdering:
         self._session_git(work_b, "commit", "-m", "B's edit")
 
         wrapper.merge_session_gitdirs("a", overlay_a)
+        shared_after_a = _head(env.gitdir, gitdir=True)
         wrapper.merge_session_gitdirs("b", overlay_b)
 
-        # B's ref should be saved as a named branch (conflict, can't rebase)
+        # Shared main should stay at A's version (B's diverged work is not applied)
+        assert _head(env.gitdir, gitdir=True) == shared_after_a
+
+        # No backup ref for B
         backup = _run("git", "--git-dir", str(env.gitdir), "rev-parse",
                        "refs/heads/main-cave-b", check=False)
-        assert backup.returncode == 0
+        assert backup.returncode != 0
 
-        # Pull should succeed (main has one version, backup has the other)
+        # Pull should succeed (main has A's version)
         wrapper.pull_project(env.slug)
 
     def test_message_only_amend_during_cleanup(self, pull_env, tmp_path):
