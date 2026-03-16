@@ -6,11 +6,16 @@
       url = "github:sadjow/claude-code-nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    onecli = {
+      url = "github:christian-oudard/onecli";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
-  outputs = { self, nixpkgs, jail-nix, claude-code, ... }: let
+  outputs = { self, nixpkgs, jail-nix, claude-code, onecli, ... }: let
     pkgs = import nixpkgs { system = "x86_64-linux"; };
     jail = jail-nix.lib.init pkgs;
+    onecli-gateway-local = onecli.packages.x86_64-linux.gateway-local;
 
     defaultClaudeSettings = ./defaults/claude-settings.json;
     defaultStatusline = ./defaults/statusline.sh;
@@ -304,6 +309,9 @@ main()
     '';
 
   in {
-    packages.x86_64-linux.default = wrapper;
+    packages.x86_64-linux = {
+      default = wrapper;
+      inherit onecli-gateway-local;
+    };
   };
 }
