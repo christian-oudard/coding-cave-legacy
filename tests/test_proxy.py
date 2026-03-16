@@ -29,8 +29,8 @@ class TestProxyConfig:
                 _setup_proxy(cfg)
             assert os.environ.get("CODING_CAVE_PROXY_PORT") == "10255"
 
-    def test_no_oauth_token_when_proxy_enabled(self, tmp_path):
-        """CLAUDE_CODE_OAUTH_TOKEN is NOT set when proxy is configured."""
+    def test_oauth_token_forwarded_with_proxy(self, tmp_path):
+        """CLAUDE_CODE_OAUTH_TOKEN is still set when proxy is configured (temporary fallback)."""
         ca = tmp_path / "ca.pem"
         ca.write_text("--- cert ---")
         cfg = {
@@ -44,7 +44,7 @@ class TestProxyConfig:
                  patch("coding_cave.config._detect_gpg_agent_socket", return_value=None), \
                  patch("coding_cave.config.Path.expanduser", return_value=ca):
                 setup_env(cfg)
-            assert "CLAUDE_CODE_OAUTH_TOKEN" not in os.environ
+            assert os.environ.get("CLAUDE_CODE_OAUTH_TOKEN") == "secret-token"
 
     def test_oauth_token_set_without_proxy(self):
         """Backward compat: token IS set without proxy config."""

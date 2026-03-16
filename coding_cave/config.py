@@ -132,11 +132,12 @@ def _setup_proxy(global_config):
 def setup_env(global_config):
     """Set environment variables from global config."""
     proxy_enabled = _setup_proxy(global_config)
-    if not proxy_enabled:
-        # Only forward raw credentials when proxy is NOT configured
-        token = global_config.get("credentials", {}).get("claude-oauth-token")
-        if token:
-            os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = token
+    # Claude OAuth token is always forwarded — Claude Code needs it for its
+    # own auth, not as an HTTP API header the proxy could inject.
+    # TODO: once Anthropic API access goes through onecli, remove this.
+    token = global_config.get("credentials", {}).get("claude-oauth-token")
+    if token:
+        os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = token
 
     claude_md = Path.home() / ".config" / "coding-cave" / "CLAUDE.md"
     if claude_md.exists():
