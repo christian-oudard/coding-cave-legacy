@@ -1,4 +1,5 @@
 """Tests for PTY relay with UDS message injection."""
+import json
 import os
 import socket
 import subprocess
@@ -274,3 +275,123 @@ class TestCaveSend:
         assert "abc123" in result.stdout
         assert "myproj" in result.stdout
         assert "def456" in result.stdout
+
+
+class TestStructuredProtocol:
+    def test_json_frame_injects_body(self, tmp_path):
+        """JSON frame with 'body' injects only the body text."""
+        sock = str(tmp_path / "test.sock")
+        script = tmp_path / "echo.sh"
+        script.write_text("#!/bin/bash\nread -r line; echo \"GOT:$line\"\n")
+        script.chmod(0o755)
+
+        proc = subprocess.Popen(
+            [sys.executable, RELAY, "--sock", sock, "--", str(script)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        assert _wait_for_socket(sock), "Socket never appeared"
+        frame = json.dumps({"from": "test-sender", "body": "hello structured"})
+        _send_message(sock, frame)
+        stdout, _ = proc.communicate(timeout=5)
+        assert b"GOT:hello structured" in stdout
+
+    def test_json_frame_with_reply_to_sends_ack(self, tmp_path):
+        """JSON frame with 'reply_to' triggers a delivery ack."""
+        sock = str(tmp_path / "test.sock")
+        reply_sock_path = str(tmp_path / "reply.sock")
+
+        # Set up a listener on the reply socket
+        reply_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        reply_sock.bind(reply_sock_path)
+        reply_sock.listen(1)
+        reply_sock.settimeout(5)
+
+        script = tmp_path / "echo.sh"
+        script.write_text("#!/bin/bash\nread -r line; echo \"GOT:$line\"\n")
+        script.chmod(0o755)
+
+        env = {
+            **os.environ,
+            "CODING_CAVE_SESSION_ID": "test-receiver",
+            "CODING_CAVE_SESSION_INDEX": "7",
+        }
+        proc = subprocess.Popen(
+            [sys.executable, RELAY, "--sock", sock, "--", str(script)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=env,
+        )
+        assert _wait_for_socket(sock), "Socket never appeared"
+
+        frame = json.dumps({
+            "from": "test-sender",
+            "body": "ping",
+            "reply_to": reply_sock_path,
+        })
+        _send_message(sock, frame)
+
+        # Read the ack
+        conn, _ = reply_sock.accept()
+        ack_data = b""
+        while True:
+            chunk = conn.recv(4096)
+            if not chunk:
+                break
+            ack_data += chunk
+        conn.close()
+        reply_sock.close()
+
+        ack = json.loads(ack_data)
+        assert ack["type"] == "ack"
+        assert ack["from"] == "test-receiver"
+        assert ack["index"] == "7"
+
+        proc.communicate(timeout=5)
+
+    def test_raw_text_still_works(self, tmp_path):
+        """Plain text (non-JSON) is still injected as before."""
+        sock = str(tmp_path / "test.sock")
+        script = tmp_path / "echo.sh"
+        script.write_text("#!/bin/bash\nread -r line; echo \"GOT:$line\"\n")
+        script.chmod(0o755)
+
+        proc = subprocess.Popen(
+            [sys.executable, RELAY, "--sock", sock, "--", str(script)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        assert _wait_for_socket(sock), "Socket never appeared"
+        _send_message(sock, "plain text message")
+        stdout, _ = proc.communicate(timeout=5)
+        assert b"GOT:plain text message" in stdout
+
+    def test_invalid_json_treated_as_raw(self, tmp_path):
+        """Message starting with '{' but not valid JSON is injected raw."""
+        sock = str(tmp_path / "test.sock")
+        script = tmp_path / "echo.sh"
+        script.write_text("#!/bin/bash\nread -r line; echo \"GOT:$line\"\n")
+        script.chmod(0o755)
+
+        proc = subprocess.Popen(
+            [sys.executable, RELAY, "--sock", sock, "--", str(script)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        assert _wait_for_socket(sock), "Socket never appeared"
+        _send_message(sock, "{not valid json")
+        stdout, _ = proc.communicate(timeout=5)
+        assert b"GOT:{not valid json" in stdout
+
+    def test_no_reply_to_means_no_ack(self, tmp_path):
+        """JSON frame without 'reply_to' does not attempt any reply."""
+        sock = str(tmp_path / "test.sock")
+        script = tmp_path / "echo.sh"
+        script.write_text("#!/bin/bash\nread -r line; echo \"GOT:$line\"\n")
+        script.chmod(0o755)
+
+        proc = subprocess.Popen(
+            [sys.executable, RELAY, "--sock", sock, "--", str(script)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        assert _wait_for_socket(sock), "Socket never appeared"
+        frame = json.dumps({"body": "no reply expected"})
+        _send_message(sock, frame)
+        stdout, _ = proc.communicate(timeout=5)
+        assert b"GOT:no reply expected" in stdout

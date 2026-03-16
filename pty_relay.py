@@ -16,6 +16,7 @@ Protocol:
 import argparse
 import errno
 import fcntl
+import json
 import os
 import select
 import signal
@@ -35,6 +36,52 @@ def _get_winsize(fd):
     s = fcntl.ioctl(fd, termios.TIOCGWINSZ, b"\x00" * 8)
     rows, cols, _, _ = struct.unpack("HHHH", s)
     return rows, cols
+
+
+def _send_ack(reply_to):
+    """Send a delivery acknowledgment to the reply_to socket."""
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(2)
+        s.connect(reply_to)
+        ack = json.dumps({
+            "type": "ack",
+            "from": os.environ.get("CODING_CAVE_SESSION_ID", ""),
+            "index": os.environ.get("CODING_CAVE_SESSION_INDEX", ""),
+        }).encode()
+        s.sendall(ack)
+        s.shutdown(socket.SHUT_WR)
+        s.close()
+    except OSError:
+        pass
+
+
+def _handle_message(buf, master_fd):
+    """Process an incoming message buffer.
+
+    If the message is a JSON frame (starts with '{'), parse it:
+      - "body" is injected into the PTY
+      - "reply_to" (optional) gets a delivery ack
+    Otherwise, treat as raw text and inject directly.
+    """
+    raw = bytes(buf)
+    if raw.startswith(b"{"):
+        try:
+            frame = json.loads(raw)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            # Not valid JSON, treat as raw
+            os.write(master_fd, raw + b"\r")
+            return
+        body = frame.get("body", "")
+        if isinstance(body, str):
+            body = body.encode()
+        if body:
+            os.write(master_fd, body + b"\r")
+        reply_to = frame.get("reply_to")
+        if reply_to:
+            _send_ack(reply_to)
+    else:
+        os.write(master_fd, raw + b"\r")
 
 
 def relay(child_argv, sock_path):
@@ -144,9 +191,9 @@ def relay(child_argv, sock_path):
                     if data:
                         buf.extend(data)
                     else:
-                        # Client closed. Inject accumulated message.
+                        # Client closed. Process accumulated message.
                         if buf:
-                            os.write(master_fd, bytes(buf) + b"\r")
+                            _handle_message(buf, master_fd)
                         conn.close()
                         del clients[fd]
 
