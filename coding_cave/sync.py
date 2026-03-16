@@ -205,85 +205,12 @@ def _get_cave_branches(gitdir_path):
 
 
 def _rebase_plumbing(host_git, onto_sha, merge_base, cave_sha):
-    """Rebase commits (merge_base..cave_sha) onto onto_sha using plumbing.
+    """Rebase commits (merge_base..cave_sha) onto onto_sha using plumbing."""
+    def on_skip(_commit, subject):
+        print(f"  {subject} (already applied, skipping)", file=sys.stderr)
 
-    Uses merge-tree + commit-tree so it never touches the working tree.
-    Returns new tip SHA, or None on conflict/error.
-    """
-    commits_result = subprocess.run(
-        host_git + ["rev-list", "--reverse", f"{merge_base}..{cave_sha}"],
-        capture_output=True, text=True,
-    )
-    if commits_result.returncode != 0:
-        return None
-    commits = [c for c in commits_result.stdout.strip().splitlines() if c]
-    if not commits:
-        return None
-
-    parent = onto_sha
-    for commit in commits:
-        cp = subprocess.run(
-            host_git + ["rev-parse", f"{commit}^"],
-            capture_output=True, text=True,
-        )
-        if cp.returncode != 0:
-            return None
-        commit_parent = cp.stdout.strip()
-
-        merge = subprocess.run(
-            host_git + ["merge-tree", "--write-tree",
-                f"--merge-base={commit_parent}", parent, commit],
-            capture_output=True, text=True,
-        )
-        if merge.returncode != 0:
-            return None
-        merged_tree = merge.stdout.strip().splitlines()[0]
-
-        # Skip empty commits (tree unchanged) — happens when the commit's
-        # changes are already upstream, e.g. after an amend of a
-        # previously-pulled commit.
-        parent_tree = subprocess.run(
-            host_git + ["rev-parse", f"{parent}^{{tree}}"],
-            capture_output=True, text=True,
-        )
-        if parent_tree.returncode == 0 and parent_tree.stdout.strip() == merged_tree:
-            orig_msg = subprocess.run(
-                host_git + ["log", "-1", "--format=%s", commit],
-                capture_output=True, text=True,
-            )
-            msg = orig_msg.stdout.strip() if orig_msg.returncode == 0 else commit
-            print(f"  {msg} (already applied, skipping)",
-                  file=sys.stderr)
-            continue
-
-        info = subprocess.run(
-            host_git + ["log", "-1",
-                "--format=%an%n%ae%n%aI%n%cn%n%ce%n%cI%n%B", commit],
-            capture_output=True, text=True,
-        )
-        if info.returncode != 0:
-            return None
-        lines = info.stdout.rstrip("\n").split("\n", 6)
-        env = {
-            **os.environ,
-            "GIT_AUTHOR_NAME": lines[0],
-            "GIT_AUTHOR_EMAIL": lines[1],
-            "GIT_AUTHOR_DATE": lines[2],
-            "GIT_COMMITTER_NAME": lines[3],
-            "GIT_COMMITTER_EMAIL": lines[4],
-            "GIT_COMMITTER_DATE": lines[5],
-        }
-        message = lines[6] if len(lines) > 6 else ""
-        result = subprocess.run(
-            host_git + ["commit-tree", merged_tree, "-p", parent,
-                "-m", message],
-            capture_output=True, text=True, env=env,
-        )
-        if result.returncode != 0:
-            return None
-        parent = result.stdout.strip()
-
-    return parent
+    return git_mod.rebase_plumbing(
+        host_git, onto_sha, merge_base, cave_sha, on_skip=on_skip)
 
 
 def _sync_branch(gitdir_path, project_dir, host_sha, branch):

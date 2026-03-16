@@ -309,87 +309,19 @@ def _is_patch_upstream(gitdir, commit, merge_base, upstream_sha):
 
 
 def _rebase_commits(gitdir, shared_sha, session_sha, merge_base):
-    """Rebase session commits onto shared HEAD using three-way merge.
+    """Rebase session commits onto shared HEAD using plumbing.
 
-    For each commit in merge_base..session_sha, compute a three-way merge
-    (base=commit's parent, ours=current target, theirs=commit) using
-    git merge-tree --write-tree.  Returns the new tip SHA if all merges
-    succeed cleanly, None if any conflict.
+    Returns the new tip SHA if all merges succeed, None on conflict.
+    Uses patch-id to detect already-applied commits on conflict.
     """
-    if not merge_base:
-        return None
+    git_cmd = ["git", "--git-dir", str(gitdir)] + git_mod.SAFE_GIT_OPTS
 
-    # Collect session commits after merge_base (newest-first from log)
-    session_log = git_mod.git(gitdir, "log", "--format=%H",
-                      f"{merge_base}..{session_sha}",
-                      capture_output=True, text=True)
-    if session_log.returncode != 0:
-        return None
-    commits = [c for c in session_log.stdout.strip().splitlines() if c]
-    if not commits:
-        return None
-    commits.reverse()  # oldest-first
+    def on_conflict(commit):
+        return _is_patch_upstream(gitdir, commit, merge_base, shared_sha)
 
-    parent = shared_sha
-    for commit in commits:
-        # Get this commit's parent (for the merge base of the cherry-pick)
-        cp = git_mod.git(gitdir, "rev-parse", f"{commit}^",
-                 capture_output=True, text=True)
-        if cp.returncode != 0:
-            return None
-        commit_parent = cp.stdout.strip()
-
-        # Three-way merge: base=commit_parent, ours=parent, theirs=commit
-        merge = git_mod.git(gitdir, "merge-tree", "--write-tree",
-                    f"--merge-base={commit_parent}", parent, commit,
-                    capture_output=True, text=True)
-        if merge.returncode != 0:
-            # Conflict — check if this commit's patch is already upstream
-            # (equivalent to --no-reapply-cherry-picks in git rebase).
-            # Use patch-id to detect cherry-pick equivalence.
-            already_applied = _is_patch_upstream(
-                gitdir, commit, merge_base, shared_sha)
-            if already_applied:
-                continue
-            return None  # real conflict
-        merged_tree = merge.stdout.strip().splitlines()[0]
-
-        # Skip empty commits (tree unchanged) — happens when the commit's
-        # changes are already in the target, e.g. after an amend of a
-        # previously-merged session commit.
-        parent_tree = git_mod.git(gitdir, "rev-parse", f"{parent}^{{tree}}",
-                          capture_output=True, text=True)
-        if (parent_tree.returncode == 0
-                and parent_tree.stdout.strip() == merged_tree):
-            continue
-
-        # Preserve original author and committer info
-        info = git_mod.git(gitdir, "log", "-1",
-                   "--format=%an%n%ae%n%aI%n%cn%n%ce%n%cI%n%B", commit,
-                   capture_output=True, text=True)
-        if info.returncode != 0:
-            return None
-        lines = info.stdout.rstrip("\n").split("\n", 6)
-        env = {
-            **os.environ,
-            "GIT_AUTHOR_NAME": lines[0],
-            "GIT_AUTHOR_EMAIL": lines[1],
-            "GIT_AUTHOR_DATE": lines[2],
-            "GIT_COMMITTER_NAME": lines[3],
-            "GIT_COMMITTER_EMAIL": lines[4],
-            "GIT_COMMITTER_DATE": lines[5],
-        }
-        message = lines[6] if len(lines) > 6 else ""
-        result = subprocess.run(
-            ["git", "--git-dir", str(gitdir)] + git_mod.SAFE_GIT_OPTS +
-            ["commit-tree", merged_tree, "-p", parent, "-m", message],
-            capture_output=True, text=True, env=env,
-        )
-        if result.returncode != 0:
-            return None
-        parent = result.stdout.strip()
-
-    return parent
+    return git_mod.rebase_plumbing(
+        git_cmd, shared_sha, merge_base, session_sha,
+        on_conflict=on_conflict)
 
 
 def _ref_sha(gitdir, ref):

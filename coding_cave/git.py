@@ -2,6 +2,7 @@
 import os
 import shutil
 import subprocess
+import sys
 
 from . import _state
 
@@ -129,3 +130,101 @@ def find_tree_merge_base(git_cmd, host_tree):
         if tree_hash == host_tree:
             return commit_hash
     return None
+
+
+def rebase_plumbing(git_cmd, onto_sha, merge_base, source_sha, *,
+                    on_conflict=None, on_skip=None):
+    """Rebase commits (merge_base..source_sha) onto onto_sha using plumbing.
+
+    Uses merge-tree + commit-tree so it never touches the working tree.
+    Returns new tip SHA, or None on conflict/error.
+
+    git_cmd: command prefix list, e.g. ["git", "-C", path] or
+             ["git", "--git-dir", path] + SAFE_GIT_OPTS.
+    on_conflict(commit): called on merge conflict. Return True to skip
+        the commit (cherry-pick equivalent already applied), False/None
+        to abort the rebase.
+    on_skip(commit, subject): called when a commit produces an empty tree
+        (already applied). Informational only.
+    """
+    if not merge_base:
+        return None
+
+    result = subprocess.run(
+        git_cmd + ["rev-list", "--reverse", f"{merge_base}..{source_sha}"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return None
+    commits = [c for c in result.stdout.strip().splitlines() if c]
+    if not commits:
+        return None
+
+    parent = onto_sha
+    for commit in commits:
+        cp = subprocess.run(
+            git_cmd + ["rev-parse", f"{commit}^"],
+            capture_output=True, text=True,
+        )
+        if cp.returncode != 0:
+            return None
+        commit_parent = cp.stdout.strip()
+
+        merge = subprocess.run(
+            git_cmd + ["merge-tree", "--write-tree",
+                f"--merge-base={commit_parent}", parent, commit],
+            capture_output=True, text=True,
+        )
+        if merge.returncode != 0:
+            if on_conflict and on_conflict(commit):
+                continue
+            return None
+        merged_tree = merge.stdout.strip().splitlines()[0]
+
+        # Skip empty commits (tree unchanged), e.g. after an amend of a
+        # previously-applied commit.
+        parent_tree = subprocess.run(
+            git_cmd + ["rev-parse", f"{parent}^{{tree}}"],
+            capture_output=True, text=True,
+        )
+        if (parent_tree.returncode == 0
+                and parent_tree.stdout.strip() == merged_tree):
+            if on_skip:
+                msg = subprocess.run(
+                    git_cmd + ["log", "-1", "--format=%s", commit],
+                    capture_output=True, text=True,
+                )
+                subject = (msg.stdout.strip()
+                           if msg.returncode == 0 else commit)
+                on_skip(commit, subject)
+            continue
+
+        # Preserve original author and committer info
+        info = subprocess.run(
+            git_cmd + ["log", "-1",
+                "--format=%an%n%ae%n%aI%n%cn%n%ce%n%cI%n%B", commit],
+            capture_output=True, text=True,
+        )
+        if info.returncode != 0:
+            return None
+        lines = info.stdout.rstrip("\n").split("\n", 6)
+        env = {
+            **os.environ,
+            "GIT_AUTHOR_NAME": lines[0],
+            "GIT_AUTHOR_EMAIL": lines[1],
+            "GIT_AUTHOR_DATE": lines[2],
+            "GIT_COMMITTER_NAME": lines[3],
+            "GIT_COMMITTER_EMAIL": lines[4],
+            "GIT_COMMITTER_DATE": lines[5],
+        }
+        message = lines[6] if len(lines) > 6 else ""
+        ct = subprocess.run(
+            git_cmd + ["commit-tree", merged_tree, "-p", parent,
+                "-m", message],
+            capture_output=True, text=True, env=env,
+        )
+        if ct.returncode != 0:
+            return None
+        parent = ct.stdout.strip()
+
+    return parent

@@ -15,6 +15,7 @@ from .sessions import (  # noqa: F401
 from .git import (  # noqa: F401
     SAFE_GIT_OPTS, initialize_gitdir, ensure_cave_remote,
     mirror_origin_refs, finalize_sync, sync_refs, find_tree_merge_base,
+    rebase_plumbing,
 )
 from .git import git as safe_git  # noqa: F401  (don't shadow the git module)
 from .gitdir import (  # noqa: F401
