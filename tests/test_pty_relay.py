@@ -172,18 +172,6 @@ class TestPtyRelay:
 
 
 class TestCaveSend:
-    """Tests for cave-send CLI (uses structured JSON protocol with ack)."""
-
-    def _relay_env(self, **extra):
-        """Relay env with session identity for ack support."""
-        env = {
-            **os.environ,
-            "CODING_CAVE_SESSION_ID": "test-relay",
-            "CODING_CAVE_SESSION_INDEX": "9",
-        }
-        env.update(extra)
-        return env
-
     def test_send_injects_tagged_message(self, tmp_path):
         """cave-send delivers a tagged message to a running relay."""
         sock = str(tmp_path / "test.sock")
@@ -194,16 +182,14 @@ class TestCaveSend:
         relay = subprocess.Popen(
             [sys.executable, RELAY, "--sock", sock, "--", str(script)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            env=self._relay_env(),
         )
         assert _wait_for_socket(sock), "Socket never appeared"
         env = {k: v for k, v in os.environ.items()
                if k != "CODING_CAVE_SESSION_INDEX"}
-        result = subprocess.run(
+        subprocess.run(
             [sys.executable, SEND, "--sock", sock, "hello from cave-send"],
-            env=env, capture_output=True, timeout=10,
+            check=True, env=env,
         )
-        assert result.returncode == 0
         stdout, _ = relay.communicate(timeout=5)
         assert b"GOT:user: hello from cave-send" in stdout
 
@@ -217,14 +203,12 @@ class TestCaveSend:
         relay = subprocess.Popen(
             [sys.executable, RELAY, "--sock", sock, "--", str(script)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            env=self._relay_env(),
         )
         assert _wait_for_socket(sock), "Socket never appeared"
-        result = subprocess.run(
+        subprocess.run(
             [sys.executable, SEND, "--raw", "--sock", sock, "no tag"],
-            capture_output=True, timeout=10,
+            check=True,
         )
-        assert result.returncode == 0
         stdout, _ = relay.communicate(timeout=5)
         assert b"GOT:no tag" in stdout
         assert b"user:" not in stdout
@@ -239,7 +223,6 @@ class TestCaveSend:
         relay = subprocess.Popen(
             [sys.executable, RELAY, "--sock", sock, "--", str(script)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            env=self._relay_env(),
         )
         assert _wait_for_socket(sock), "Socket never appeared"
         env = {
@@ -247,11 +230,10 @@ class TestCaveSend:
             "CODING_CAVE_SESSION_INDEX": "3",
             "CODING_CAVE_PROJECT_PATH": "/projects/myproj",
         }
-        result = subprocess.run(
+        subprocess.run(
             [sys.executable, SEND, "--sock", sock, "hi from agent"],
-            env=env, capture_output=True, timeout=10,
+            check=True, env=env,
         )
-        assert result.returncode == 0
         stdout, _ = relay.communicate(timeout=5)
         assert b"GOT:myproj#3: hi from agent" in stdout
 
@@ -265,17 +247,15 @@ class TestCaveSend:
         relay = subprocess.Popen(
             [sys.executable, RELAY, "--sock", sock, "--", str(script)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            env=self._relay_env(),
         )
         assert _wait_for_socket(sock), "Socket never appeared"
         env = {k: v for k, v in os.environ.items()
                if k != "CODING_CAVE_SESSION_INDEX"}
-        result = subprocess.run(
+        subprocess.run(
             [sys.executable, SEND, "--sock", sock],
             input=b"piped message",
-            env=env, capture_output=True, timeout=10,
+            check=True, env=env,
         )
-        assert result.returncode == 0
         stdout, _ = relay.communicate(timeout=5)
         assert b"GOT:user: piped message" in stdout
 
@@ -308,126 +288,6 @@ class TestCaveSend:
         assert "abc123" in result.stdout
         assert "myproj" in result.stdout
         assert "def456" in result.stdout
-
-
-class TestStructuredProtocol:
-    def test_json_frame_injects_body(self, tmp_path):
-        """JSON frame with 'body' injects only the body text."""
-        sock = str(tmp_path / "test.sock")
-        script = tmp_path / "echo.sh"
-        script.write_text("#!/bin/bash\nread -r line; echo \"GOT:$line\"\n")
-        script.chmod(0o755)
-
-        proc = subprocess.Popen(
-            [sys.executable, RELAY, "--sock", sock, "--", str(script)],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        )
-        assert _wait_for_socket(sock), "Socket never appeared"
-        frame = json.dumps({"from": "test-sender", "body": "hello structured"})
-        _send_message(sock, frame)
-        stdout, _ = proc.communicate(timeout=5)
-        assert b"GOT:hello structured" in stdout
-
-    def test_json_frame_with_reply_to_sends_ack(self, tmp_path):
-        """JSON frame with 'reply_to' triggers a delivery ack."""
-        sock = str(tmp_path / "test.sock")
-        reply_sock_path = str(tmp_path / "reply.sock")
-
-        # Set up a listener on the reply socket
-        reply_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        reply_sock.bind(reply_sock_path)
-        reply_sock.listen(1)
-        reply_sock.settimeout(5)
-
-        script = tmp_path / "echo.sh"
-        script.write_text("#!/bin/bash\nread -r line; echo \"GOT:$line\"\n")
-        script.chmod(0o755)
-
-        env = {
-            **os.environ,
-            "CODING_CAVE_SESSION_ID": "test-receiver",
-            "CODING_CAVE_SESSION_INDEX": "7",
-        }
-        proc = subprocess.Popen(
-            [sys.executable, RELAY, "--sock", sock, "--", str(script)],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            env=env,
-        )
-        assert _wait_for_socket(sock), "Socket never appeared"
-
-        frame = json.dumps({
-            "from": "test-sender",
-            "body": "ping",
-            "reply_to": reply_sock_path,
-        })
-        _send_message(sock, frame)
-
-        # Read the ack
-        conn, _ = reply_sock.accept()
-        ack_data = b""
-        while True:
-            chunk = conn.recv(4096)
-            if not chunk:
-                break
-            ack_data += chunk
-        conn.close()
-        reply_sock.close()
-
-        ack = json.loads(ack_data)
-        assert ack["type"] == "ack"
-        assert ack["from"] == "test-receiver"
-        assert ack["index"] == "7"
-
-        proc.communicate(timeout=5)
-
-    def test_raw_text_still_works(self, tmp_path):
-        """Plain text (non-JSON) is still injected as before."""
-        sock = str(tmp_path / "test.sock")
-        script = tmp_path / "echo.sh"
-        script.write_text("#!/bin/bash\nread -r line; echo \"GOT:$line\"\n")
-        script.chmod(0o755)
-
-        proc = subprocess.Popen(
-            [sys.executable, RELAY, "--sock", sock, "--", str(script)],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        )
-        assert _wait_for_socket(sock), "Socket never appeared"
-        _send_message(sock, "plain text message")
-        stdout, _ = proc.communicate(timeout=5)
-        assert b"GOT:plain text message" in stdout
-
-    def test_invalid_json_treated_as_raw(self, tmp_path):
-        """Message starting with '{' but not valid JSON is injected raw."""
-        sock = str(tmp_path / "test.sock")
-        script = tmp_path / "echo.sh"
-        script.write_text("#!/bin/bash\nread -r line; echo \"GOT:$line\"\n")
-        script.chmod(0o755)
-
-        proc = subprocess.Popen(
-            [sys.executable, RELAY, "--sock", sock, "--", str(script)],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        )
-        assert _wait_for_socket(sock), "Socket never appeared"
-        _send_message(sock, "{not valid json")
-        stdout, _ = proc.communicate(timeout=5)
-        assert b"GOT:{not valid json" in stdout
-
-    def test_no_reply_to_means_no_ack(self, tmp_path):
-        """JSON frame without 'reply_to' does not attempt any reply."""
-        sock = str(tmp_path / "test.sock")
-        script = tmp_path / "echo.sh"
-        script.write_text("#!/bin/bash\nread -r line; echo \"GOT:$line\"\n")
-        script.chmod(0o755)
-
-        proc = subprocess.Popen(
-            [sys.executable, RELAY, "--sock", sock, "--", str(script)],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        )
-        assert _wait_for_socket(sock), "Socket never appeared"
-        frame = json.dumps({"body": "no reply expected"})
-        _send_message(sock, frame)
-        stdout, _ = proc.communicate(timeout=5)
-        assert b"GOT:no reply expected" in stdout
 
 
 class TestSenderTag:
@@ -520,55 +380,7 @@ class TestResolveIndex:
         assert sock is None
 
 
-class TestDeliveryAck:
-    def test_send_returns_ack(self, tmp_path):
-        """send() returns ack dict from relay."""
-        sock = str(tmp_path / "test.sock")
-        script = tmp_path / "echo.sh"
-        script.write_text("#!/bin/bash\nread -r line; echo \"GOT:$line\"\n")
-        script.chmod(0o755)
-
-        env = {
-            **os.environ,
-            "CODING_CAVE_SESSION_ID": "receiver-2",
-            "CODING_CAVE_SESSION_INDEX": "3",
-        }
-        relay = subprocess.Popen(
-            [sys.executable, RELAY, "--sock", sock, "--", str(script)],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            env=env,
-        )
-        assert _wait_for_socket(sock), "Socket never appeared"
-
-        sys.path.insert(0, str(Path(__file__).parent.parent))
-        import cave_send
-        ack = cave_send.send(sock, "test ack", tag=False)
-        relay.communicate(timeout=5)
-
-        assert ack is not None
-        assert ack["type"] == "ack"
-        assert ack["from"] == "receiver-2"
-        assert ack["index"] == "3"
-
-    def test_send_returns_none_on_timeout(self, tmp_path):
-        """send() returns None when no ack arrives."""
-        sock_path = str(tmp_path / "dummy.sock")
-        dummy = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        dummy.bind(sock_path)
-        dummy.listen(1)
-
-        sys.path.insert(0, str(Path(__file__).parent.parent))
-        import cave_send
-        old_timeout = cave_send.ACK_TIMEOUT
-        cave_send.ACK_TIMEOUT = 0.5
-        try:
-            ack = cave_send.send(sock_path, "hello", tag=False)
-        finally:
-            cave_send.ACK_TIMEOUT = old_timeout
-            dummy.close()
-
-        assert ack is None
-
+class TestSendByIndex:
     def test_send_by_index_not_found(self, tmp_path):
         """cave-send 99 exits with error when no session has that index."""
         result = subprocess.run(
