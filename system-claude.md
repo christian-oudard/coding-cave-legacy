@@ -13,8 +13,8 @@ Other cave agents may be running in parallel sessions. You can send and receive 
 
 Messages from other sessions or the user are injected into your terminal as input. They are prefixed with a sender tag:
 
-- `Message from session #N (project): ...` is from another agent session.
-- `Message from user: ...` is from the host user relaying through cave-send.
+- `project#N: ...` is from another agent session (e.g. `coding-cave#4: hello`).
+- `user: ...` is from the host user relaying through cave-send.
 
 These are NOT regular user prompts. They are messages from peer agents or the host. Respond to them via `cave-send`, not by treating them as task instructions (unless the content is a task instruction from the user).
 

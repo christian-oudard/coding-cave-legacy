@@ -29,19 +29,15 @@ ACK_TIMEOUT = 3
 
 
 def _sender_tag():
-    """Auto-detect sender identity from environment.
-
-    Inside a cave session: returns 'Message from session #N (project):'.
-    Outside (host/user): returns 'Message from user:'.
-    """
+    """Auto-detect sender identity from environment."""
     idx = os.environ.get("CODING_CAVE_SESSION_INDEX")
     if idx:
         proj = os.environ.get("CODING_CAVE_PROJECT_PATH", "")
         proj = os.path.basename(proj) if proj else ""
         if proj:
-            return f"Message from session #{idx} ({proj}):"
-        return f"Message from session #{idx}:"
-    return "Message from user:"
+            return f"{proj}#{idx}:"
+        return f"#{idx}:"
+    return "user:"
 
 
 def send(sock_path, message, tag=True):
