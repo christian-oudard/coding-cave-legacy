@@ -2895,7 +2895,7 @@ class TestPullAheadMessage:
 
 
 class TestPostRewriteHook:
-    """Test that the post-rewrite hook blocks amending pulled commits."""
+    """Test that amend/rebase guard hooks block rewriting pulled commits."""
 
     @pytest.fixture
     def shared_project(self, tmp_path):
@@ -3030,6 +3030,61 @@ class TestPostRewriteHook:
         log = cave_git(work, "log", "--oneline")
         assert "update a" in log.stdout
         assert (work / "a.txt").read_text() == "v2\n"
+
+
+    def test_amend_blocked_before_commit_created(self, shared_project, tmp_path):
+        """prepare-commit-msg blocks amend before the commit object exists."""
+        _, slug, projects_dir = shared_project
+        gd, work, _ = self._make_session(
+            tmp_path, slug, projects_dir, "test")
+
+        (work / "a.txt").write_text("v1\n")
+        cave_git(work, "add", "a.txt")
+        cave_git(work, "commit", "-m", "add a")
+        sha_a = cave_git(work, "rev-parse", "HEAD").stdout.strip()
+        cave_git(work, "update-ref", "refs/remotes/host/main", sha_a)
+
+        # Count objects before amend attempt
+        obj_before = cave_git(
+            work, "rev-list", "--all", "--count").stdout.strip()
+
+        # Try to amend
+        (work / "a.txt").write_text("v2\n")
+        cave_git(work, "add", "a.txt")
+        cave_git(work, "commit", "--amend", "-m", "amended a")
+
+        # No new commit object should have been created
+        obj_after = cave_git(
+            work, "rev-list", "--all", "--count").stdout.strip()
+        assert obj_before == obj_after, (
+            "prepare-commit-msg should block before creating a commit")
+
+    def test_rebase_pulled_commit_blocked(self, shared_project, tmp_path):
+        """Rebasing a pulled commit is blocked by pre-rebase hook."""
+        _, slug, projects_dir = shared_project
+        gd, work, _ = self._make_session(
+            tmp_path, slug, projects_dir, "test")
+
+        # Make commit A on main (pulled)
+        (work / "a.txt").write_text("v1\n")
+        cave_git(work, "add", "a.txt")
+        cave_git(work, "commit", "-m", "add a")
+        sha_a = cave_git(work, "rev-parse", "HEAD").stdout.strip()
+        cave_git(work, "update-ref", "refs/remotes/host/main", sha_a)
+
+        # Create a feature branch from before A, with a different commit
+        initial = cave_git(work, "rev-list", "--max-parents=0",
+                           "HEAD").stdout.strip()
+        cave_git(work, "branch", "feature", initial)
+        cave_git(work, "checkout", "feature")
+        (work / "x.txt").write_text("x\n")
+        cave_git(work, "add", "x.txt")
+        cave_git(work, "commit", "-m", "add x")
+
+        # Try to rebase main onto feature: replays A (pulled) onto feature
+        result = cave_git(work, "rebase", "feature", "main")
+
+        assert "already pulled" in result.stderr
 
 
 class TestForceCleanupBackupRef:

@@ -116,9 +116,65 @@ def create_session_gitdir(slug, sid, overlay_base):
     )
     os.chmod(hooks / "post-commit", 0o755)
 
-    # Post-rewrite hook: block amending/rebasing commits already pulled
-    # to the host.  Uses refs/remotes/host/* (fetched from shared gitdir)
-    # to detect pulled commits.  Cannot be bypassed with --no-verify.
+    # --- Amend/rebase guards ---
+    # Three layers of protection against rewriting pulled commits:
+    #   1. prepare-commit-msg: blocks amend BEFORE it happens (primary)
+    #   2. pre-rebase: blocks rebase of pulled commits
+    #   3. post-rewrite: undoes rewrites that slip through (fallback)
+    # All use refs/remotes/host/* to detect pulled commits.
+
+    # Layer 1: prepare-commit-msg blocks amend before commit is created.
+    # Detects --amend via /proc/$PPID/cmdline (Linux-specific).
+    # Not bypassed by --no-verify.
+    (hooks / "prepare-commit-msg").write_text(
+        '#!/bin/bash\n'
+        'parent_cmd=$(tr "\\0" " " < /proc/$PPID/cmdline 2>/dev/null)\n'
+        'echo "$parent_cmd" | grep -q -- "--amend" || exit 0\n'
+        'head_sha=$(git rev-parse HEAD 2>/dev/null) || exit 0\n'
+        'pulled_refs=$(git for-each-ref --format="%(objectname)" '
+        'refs/remotes/host/ 2>/dev/null)\n'
+        '[ -z "$pulled_refs" ] && exit 0\n'
+        'for pulled in $pulled_refs; do\n'
+        '    if git merge-base --is-ancestor "$head_sha" "$pulled" '
+        '2>/dev/null; then\n'
+        '        echo >&2\n'
+        '        echo "ERROR: Cannot amend. commit '
+        '${head_sha:0:8} was already pulled to the host." >&2\n'
+        '        echo "Create a new commit instead." >&2\n'
+        '        exit 1\n'
+        '    fi\n'
+        'done\n'
+        'exit 0\n'
+    )
+    os.chmod(hooks / "prepare-commit-msg", 0o755)
+
+    # Layer 2: pre-rebase blocks rebase of pulled commits.
+    # Bypassed by --no-verify, but post-rewrite catches that.
+    (hooks / "pre-rebase").write_text(
+        '#!/bin/bash\n'
+        'upstream=$1\n'
+        'branch=${2:-HEAD}\n'
+        'pulled_refs=$(git for-each-ref --format="%(objectname)" '
+        'refs/remotes/host/ 2>/dev/null)\n'
+        '[ -z "$pulled_refs" ] && exit 0\n'
+        'for commit in $(git rev-list "$upstream..$branch" 2>/dev/null); do\n'
+        '    for pulled in $pulled_refs; do\n'
+        '        if git merge-base --is-ancestor "$commit" "$pulled" '
+        '2>/dev/null; then\n'
+        '            echo >&2\n'
+        '            echo "ERROR: Cannot rebase. commit '
+        '${commit:0:8} was already pulled to the host." >&2\n'
+        '            echo "Create new commits instead." >&2\n'
+        '            exit 1\n'
+        '        fi\n'
+        '    done\n'
+        'done\n'
+        'exit 0\n'
+    )
+    os.chmod(hooks / "pre-rebase", 0o755)
+
+    # Layer 3: post-rewrite undoes rewrites that slip past layers 1-2.
+    # Cannot be bypassed with --no-verify.
     (hooks / "post-rewrite").write_text(
         '#!/bin/bash\n'
         'action=$1\n'
@@ -130,10 +186,9 @@ def create_session_gitdir(slug, sid, overlay_base):
         '        if git merge-base --is-ancestor "$old_sha" "$pulled" '
         '2>/dev/null; then\n'
         '            echo >&2\n'
-        '            echo "ERROR: Cannot $action — commit '
+        '            echo "ERROR: Cannot $action. commit '
         '${old_sha:0:8} was already pulled to the host." >&2\n'
-        '            echo "Create a new commit instead of '
-        'rewriting." >&2\n'
+        '            echo "Create a new commit instead." >&2\n'
         '            if [ "$action" = "amend" ]; then\n'
         '                git reset --soft "$old_sha" 2>/dev/null\n'
         '            else\n'
