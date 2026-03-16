@@ -2,12 +2,9 @@
 import hashlib
 import json
 import os
-import shutil
 import signal
-import socket
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 try:
@@ -67,22 +64,89 @@ def _onecli_ca_path():
 
 def _gateway_listening(port):
     """Check if the onecli gateway is already listening."""
+    import socket
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.settimeout(0.5)
         return s.connect_ex(("127.0.0.1", port)) == 0
 
 def _gateway_pid_file():
+    from . import _state
     return _state.cave_data() / "onecli-gateway.pid"
+
+def _onecli_config_dir():
+    """Find onecli config dir: legacy ~/.onecli first, then XDG_CONFIG_HOME."""
+    legacy = Path("~/.onecli").expanduser()
+    if legacy.is_dir():
+        return legacy
+    xdg = Path(os.environ.get("XDG_CONFIG_HOME", "~/.config")).expanduser()
+    return xdg / "onecli"
+
+def _gateway_config_changed():
+    """Check if onecli config has been modified since the gateway started."""
+    pid_file = _gateway_pid_file()
+    if not pid_file.exists():
+        return False
+    pid_mtime = pid_file.stat().st_mtime
+    config_dir = _onecli_config_dir()
+    for path in [config_dir / "rules.toml", config_dir / "secrets"]:
+        if not path.exists():
+            continue
+        if path.is_file() and path.stat().st_mtime > pid_mtime:
+            return True
+        if path.is_dir():
+            for f in path.iterdir():
+                if f.is_file() and f.stat().st_mtime > pid_mtime:
+                    return True
+    return False
+
+def _kill_gateway():
+    """Kill the running gateway process."""
+    pid_file = _gateway_pid_file()
+    if not pid_file.exists():
+        return
+    try:
+        pid = int(pid_file.read_text().strip())
+        os.kill(pid, signal.SIGTERM)
+        # Wait briefly for clean shutdown
+        import time
+        for _ in range(10):
+            try:
+                os.kill(pid, 0)
+                time.sleep(0.1)
+            except ProcessLookupError:
+                break
+    except (ValueError, ProcessLookupError, OSError):
+        pass
+    pid_file.unlink(missing_ok=True)
+
+def _reload_gateway():
+    """Send SIGHUP to the running gateway to reload config."""
+    pid_file = _gateway_pid_file()
+    if not pid_file.exists():
+        return False
+    try:
+        pid = int(pid_file.read_text().strip())
+        os.kill(pid, signal.SIGHUP)
+        # Update pid file mtime so we don't re-signal until next change
+        pid_file.touch()
+        return True
+    except (ValueError, ProcessLookupError, OSError):
+        return False
 
 def _start_gateway(port):
     """Start the onecli gateway in the background. Returns True if started or already running."""
     if _gateway_listening(port):
+        if _gateway_config_changed():
+            print("onecli config changed, reloading gateway...", file=sys.stderr)
+            _reload_gateway()
         return True
+    from . import _state
     binary = _state.GATEWAY_LOCAL_BIN
     if binary.startswith("@") or not Path(binary).exists():
         print(f"onecli gateway binary not found: {binary}", file=sys.stderr)
         print("Run 'nix build' to include the onecli gateway.", file=sys.stderr)
         return False
+    import subprocess, time
     proc = subprocess.Popen(
         [binary, "--local", "--port", str(port)],
         stdout=subprocess.DEVNULL,
@@ -100,18 +164,10 @@ def _start_gateway(port):
 
 def stop_gateway_if_idle():
     """Kill the onecli gateway if no cave sessions remain."""
-    from . import sessions as _sessions
-    if _sessions.list_sessions():
+    from . import sessions
+    if sessions.list_sessions():
         return
-    pid_file = _gateway_pid_file()
-    if not pid_file.exists():
-        return
-    try:
-        pid = int(pid_file.read_text().strip())
-        os.kill(pid, signal.SIGTERM)
-    except (ValueError, ProcessLookupError, OSError):
-        pass
-    pid_file.unlink(missing_ok=True)
+    _kill_gateway()
 
 def _setup_proxy(global_config):
     """Configure proxy env vars if [proxy] section exists. Returns True if proxy is active."""
@@ -194,6 +250,7 @@ def setup_env(global_config):
         # Discover host nvim wrapper's nix store path so the cave uses the
         # same binary (with its plugins, LUA_PATH, etc.) instead of the bare
         # cave neovim.  The nix store is available in the cave via overlay.
+        import shutil
         host_nvim = shutil.which("nvim")
         if host_nvim:
             resolved = str(Path(host_nvim).resolve())

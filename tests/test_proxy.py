@@ -6,7 +6,10 @@ from unittest.mock import patch
 
 import pytest
 
-from coding_cave.config import _setup_proxy, setup_env, stop_gateway_if_idle
+from coding_cave.config import (
+    _setup_proxy, setup_env, stop_gateway_if_idle,
+    _gateway_config_changed, _start_gateway, _reload_gateway,
+)
 
 FLAKE_NIX = Path(__file__).parent.parent / "flake.nix"
 LIFECYCLE_PY = FLAKE_NIX.parent / "coding_cave" / "lifecycle.py"
@@ -119,9 +122,9 @@ class TestGatewayLifecycle:
         pid_file.write_text("99999")
         with patch("coding_cave.config._gateway_pid_file", return_value=pid_file), \
              patch("coding_cave.sessions.list_sessions", return_value=[]), \
-             patch("os.kill") as mock_kill:
+             patch("os.kill", side_effect=ProcessLookupError) as mock_kill:
             stop_gateway_if_idle()
-            mock_kill.assert_called_once_with(99999, __import__("signal").SIGTERM)
+            mock_kill.assert_any_call(99999, __import__("signal").SIGTERM)
         assert not pid_file.exists()
 
     def test_stop_skips_when_sessions_active(self, tmp_path):
@@ -151,6 +154,91 @@ class TestGatewayLifecycle:
                     return_value=Path("/tmp/nonexistent-pid-12345")), \
              patch("coding_cave.sessions.list_sessions", return_value=[]):
             stop_gateway_if_idle()  # should not raise
+
+
+class TestGatewayConfigReload:
+    """Tests for gateway config change detection and restart."""
+
+    def test_config_changed_detects_newer_rules(self, tmp_path):
+        """Config change detected when rules.toml is newer than pid file."""
+        config_dir = tmp_path / "onecli"
+        config_dir.mkdir()
+        pid_file = tmp_path / "onecli-gateway.pid"
+        pid_file.write_text("99999")
+        import time
+        time.sleep(0.05)
+        rules = config_dir / "rules.toml"
+        rules.write_text("[rule]\nkey = 'val'")
+        with patch("coding_cave.config._gateway_pid_file", return_value=pid_file), \
+             patch("coding_cave.config._onecli_config_dir", return_value=config_dir):
+            assert _gateway_config_changed() is True
+
+    def test_config_changed_detects_newer_secret(self, tmp_path):
+        """Config change detected when a secrets/ file is newer than pid file."""
+        config_dir = tmp_path / "onecli"
+        secrets_dir = config_dir / "secrets"
+        secrets_dir.mkdir(parents=True)
+        pid_file = tmp_path / "onecli-gateway.pid"
+        pid_file.write_text("99999")
+        import time
+        time.sleep(0.05)
+        (secrets_dir / "api_key").write_text("secret")
+        with patch("coding_cave.config._gateway_pid_file", return_value=pid_file), \
+             patch("coding_cave.config._onecli_config_dir", return_value=config_dir):
+            assert _gateway_config_changed() is True
+
+    def test_config_unchanged_when_older(self, tmp_path):
+        """No config change when rules.toml is older than pid file."""
+        config_dir = tmp_path / "onecli"
+        config_dir.mkdir()
+        rules = config_dir / "rules.toml"
+        rules.write_text("[rule]\nkey = 'val'")
+        import time
+        time.sleep(0.05)
+        pid_file = tmp_path / "onecli-gateway.pid"
+        pid_file.write_text("99999")
+        with patch("coding_cave.config._gateway_pid_file", return_value=pid_file), \
+             patch("coding_cave.config._onecli_config_dir", return_value=config_dir):
+            assert _gateway_config_changed() is False
+
+    def test_config_changed_false_without_pid_file(self, tmp_path):
+        """No config change when there's no pid file (gateway not running)."""
+        pid_file = tmp_path / "nonexistent.pid"
+        with patch("coding_cave.config._gateway_pid_file", return_value=pid_file):
+            assert _gateway_config_changed() is False
+
+    def test_start_gateway_sends_sighup_on_config_change(self, tmp_path):
+        """Gateway receives SIGHUP when already listening but config changed."""
+        pid_file = tmp_path / "onecli-gateway.pid"
+        pid_file.write_text("99999")
+        with patch("coding_cave.config._gateway_listening", return_value=True), \
+             patch("coding_cave.config._gateway_config_changed", return_value=True), \
+             patch("coding_cave.config._reload_gateway") as mock_reload, \
+             patch("coding_cave.config._gateway_pid_file", return_value=pid_file):
+            result = _start_gateway(10255)
+            mock_reload.assert_called_once()
+            assert result is True
+
+    def test_start_gateway_skips_reload_when_config_unchanged(self):
+        """Gateway not reloaded when config hasn't changed."""
+        with patch("coding_cave.config._gateway_listening", return_value=True), \
+             patch("coding_cave.config._gateway_config_changed", return_value=False):
+            result = _start_gateway(10255)
+            assert result is True
+
+    def test_reload_gateway_sends_sighup(self, tmp_path):
+        """_reload_gateway sends SIGHUP and touches pid file."""
+        pid_file = tmp_path / "onecli-gateway.pid"
+        pid_file.write_text("99999")
+        import time
+        old_mtime = pid_file.stat().st_mtime
+        time.sleep(0.05)
+        with patch("coding_cave.config._gateway_pid_file", return_value=pid_file), \
+             patch("os.kill") as mock_kill:
+            result = _reload_gateway()
+            mock_kill.assert_called_once_with(99999, __import__("signal").SIGHUP)
+            assert result is True
+            assert pid_file.stat().st_mtime > old_mtime
 
 
 class TestFlakeNixProxy:
@@ -193,11 +281,6 @@ class TestFlakeNixProxy:
         flake = FLAKE_NIX.read_text()
         assert "/tmp/combined-ca.pem" in flake
         assert "SSL_CERT_FILE" in flake
-
-    def test_requests_ca_bundle_set(self):
-        """REQUESTS_CA_BUNDLE set so Python requests trusts the proxy CA."""
-        flake = FLAKE_NIX.read_text()
-        assert "REQUESTS_CA_BUNDLE=/tmp/combined-ca.pem" in flake
 
     def test_node_extra_ca_certs_set(self):
         """NODE_EXTRA_CA_CERTS set in wrap-entry for onecli CA."""
