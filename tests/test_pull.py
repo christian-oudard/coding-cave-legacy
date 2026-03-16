@@ -176,6 +176,88 @@ class TestPullForceRequired:
         assert (env.host / "file.txt").read_text() == "v3\n"
         assert _log_count(env.host) == 3  # initial + amended + next
 
+    def test_reset_without_force_is_noop(self, pull_env):
+        """Cave resets behind host -> plain pull ignores."""
+        env = pull_env
+
+        cave_commit(env, "A", content="A\n")
+        cave_commit(env, "B", content="B\n")
+        wrapper.pull_project(env.slug)
+        host_head = _head(env.host)
+        assert _log_count(env.host) == 3  # initial + A + B
+
+        # Cave resets back to initial
+        initial = _run("git", "--git-dir", str(env.gitdir),
+                        "rev-list", "--max-parents=0", "HEAD").stdout.strip()
+        _run("git", "--git-dir", str(env.gitdir),
+             "update-ref", "refs/heads/main", initial)
+
+        wrapper.pull_project(env.slug)
+        assert _head(env.host) == host_head  # unchanged
+
+    def test_reset_with_force(self, pull_env):
+        """Cave resets behind host -> pull --force adopts cave's version."""
+        env = pull_env
+
+        cave_commit(env, "A", content="A\n")
+        cave_commit(env, "B", content="B\n")
+        wrapper.pull_project(env.slug)
+        assert _log_count(env.host) == 3  # initial + A + B
+
+        # Cave resets back to initial
+        initial = _run("git", "--git-dir", str(env.gitdir),
+                        "rev-list", "--max-parents=0", "HEAD").stdout.strip()
+        _run("git", "--git-dir", str(env.gitdir),
+             "update-ref", "refs/heads/main", initial)
+
+        wrapper.pull_project(env.slug, force=True)
+        assert _head(env.host) == initial
+        assert _log_count(env.host) == 1  # just initial
+
+    def test_reset_with_force_then_normal_commit(self, pull_env):
+        """After force-pulling a reset, normal commits still work."""
+        env = pull_env
+
+        cave_commit(env, "A", content="A\n")
+        wrapper.pull_project(env.slug)
+
+        # Cave resets to initial
+        initial = _run("git", "--git-dir", str(env.gitdir),
+                        "rev-list", "--max-parents=0", "HEAD").stdout.strip()
+        _run("git", "--git-dir", str(env.gitdir),
+             "update-ref", "refs/heads/main", initial)
+
+        wrapper.pull_project(env.slug, force=True)
+        assert _head(env.host) == initial
+
+        # New commit after reset pulls normally
+        cave_commit(env, "C", content="C\n")
+        wrapper.pull_project(env.slug)
+        assert (env.host / "file.txt").read_text() == "C\n"
+        assert _log_count(env.host) == 2  # initial + C
+
+    def test_reset_with_force_preserves_uncommitted(self, pull_env):
+        """Force-pulling a reset stashes and restores uncommitted changes."""
+        env = pull_env
+
+        cave_commit(env, "A", content="A\n")
+        wrapper.pull_project(env.slug)
+
+        # Host has uncommitted changes
+        (env.host / "local.txt").write_text("uncommitted\n")
+        _run("git", "-C", str(env.host), "add", "local.txt")
+
+        # Cave resets to initial
+        initial = _run("git", "--git-dir", str(env.gitdir),
+                        "rev-list", "--max-parents=0", "HEAD").stdout.strip()
+        _run("git", "--git-dir", str(env.gitdir),
+             "update-ref", "refs/heads/main", initial)
+
+        wrapper.pull_project(env.slug, force=True)
+        assert _head(env.host) == initial
+        # Uncommitted file should be restored from stash
+        assert (env.host / "local.txt").read_text() == "uncommitted\n"
+
 
 class TestPullNormal:
     """Normal pull: fresh commits without history rewriting."""

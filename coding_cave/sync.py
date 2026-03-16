@@ -332,7 +332,31 @@ def _pull_branch_current(slug, project_dir, gitdir_path, branch, cave_sha,
     ).stdout.strip()
 
     if count == "0":
-        return None
+        if not force:
+            return None
+        # Cave was reset behind host.  Force-adopt cave's version.
+        # This loses host-only commits -- that's what --force means.
+        host_count = subprocess.run(
+            host_git + ["rev-list", "--count", f"{merge_base}..HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        if host_count == "0":
+            return None  # truly identical
+        stash_result = subprocess.run(
+            host_git + ["stash", "--include-untracked"],
+            capture_output=True, text=True,
+        )
+        did_stash = stash_result.returncode == 0 and "No local changes" not in stash_result.stdout
+        subprocess.run(
+            host_git + ["reset", "--hard", cave_sha], check=True,
+            capture_output=True,
+        )
+        print(f"Force-pulled {slug}/{branch} (cave reset {host_count} commit(s) behind host):",
+              file=sys.stderr)
+        print(f"  {host_head[:8]} -> {cave_sha[:8]}", file=sys.stderr)
+        if did_stash:
+            _stash_pop_or_warn(host_git, project_dir)
+        return cave_sha
 
     # Detect history rewrite: cave amended/squashed commits since last sync.
     if (last_synced and last_synced == host_head

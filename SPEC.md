@@ -156,7 +156,7 @@ Without `--force`, pull warns, shows what changed, and exits:
 
 Amended commits show `old_hash -> new_hash`, new commits show `+`.
 
-With `--force`, pull adopts the cave's history directly (`reset --hard`) rather than rebasing. This preserves commit hashes that may already exist on a remote, keeping the host fast-forwardable from its tracking branch.
+With `--force`, pull adopts the cave's history directly (`reset --hard`) rather than rebasing. This handles all forms of history rewriting: amends, squashes, and resets (where the cave branch is behind the host). This preserves commit hashes that may already exist on a remote, keeping the host fast-forwardable from its tracking branch.
 
 ### Preserving remote-pushed history
 
