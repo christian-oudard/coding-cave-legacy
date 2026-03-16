@@ -77,11 +77,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1773690783,
-        "narHash": "sha256-OvhfcQXHhsWJ1JdTR4RL+D3pk3+s0UWhAx3VUHwqR4s=",
+        "lastModified": 1773697188,
+        "narHash": "sha256-PXLoAaS3+v2TYFxXAJav490a7y0IkSbQ8jZmYQ1PEYU=",
         "owner": "christian-oudard",
         "repo": "onecli",
-        "rev": "6d65dac795ff17210da06988a24cf3de6b463901",
+        "rev": "aea1689d76237f51dab96af50e1c7b14365369ee",
         "type": "github"
       },
       "original": {
