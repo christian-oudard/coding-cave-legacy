@@ -63,7 +63,8 @@ def write_session(cave_data, sid, project, pid=None):
 
 @pytest.fixture(autouse=True)
 def _reset_cave_data():
-    """Reset cave_data after every test."""
+    """Reset cave_data and suppress cave-send after every test."""
+    os.environ["CODING_CAVE_NO_SEND"] = "1"
     yield
     _state.set_cave_data(None)
 
@@ -82,10 +83,6 @@ def cave_env(tmp_path):
                 "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"):
         old_env[var] = os.environ.pop(var, None)
 
-    # Suppress cave-send in post-commit hooks so tests don't
-    # spam real sessions with notifications.
-    os.environ["CODING_CAVE_NO_SEND"] = "1"
-
     yield SimpleNamespace(
         cave_data=cave_data,
         projects_dir=cave_data / "projects",
@@ -94,7 +91,6 @@ def cave_env(tmp_path):
         tmp_path=tmp_path,
     )
 
-    os.environ.pop("CODING_CAVE_NO_SEND", None)
     for var, val in old_env.items():
         if val is not None:
             os.environ[var] = val
