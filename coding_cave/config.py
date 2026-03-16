@@ -85,7 +85,7 @@ def _start_gateway(port):
         return False
     import subprocess, time
     proc = subprocess.Popen(
-        [binary, "--port", str(port)],
+        [binary, "--local", "--port", str(port)],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,

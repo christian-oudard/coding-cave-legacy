@@ -15,7 +15,7 @@
   outputs = { self, nixpkgs, jail-nix, claude-code, onecli, ... }: let
     pkgs = import nixpkgs { system = "x86_64-linux"; };
     jail = jail-nix.lib.init pkgs;
-    onecli-gateway-local = onecli.packages.x86_64-linux.gateway-local;
+    onecli-gateway = onecli.packages.x86_64-linux.gateway-standalone;
 
     defaultClaudeSettings = ./defaults/claude-settings.json;
     defaultStatusline = ./defaults/statusline.sh;
@@ -269,7 +269,7 @@
     codingCaveState = pkgs.replaceVars ./coding_cave/_state.py {
       SANDBOX_BIN = "${sandbox}/bin/coding-cave";
       SANDBOX_GPU_BIN = "${sandboxGpu}/bin/coding-cave";
-      GATEWAY_LOCAL_BIN = "${onecli-gateway-local}/bin/onecli-gateway-local";
+      GATEWAY_LOCAL_BIN = "${onecli-gateway}/bin/onecli-gateway";
       VERSION = version;
     };
     codingCavePkg = pkgs.runCommand "coding-cave-pkg" {} ''
@@ -312,7 +312,7 @@ main()
   in {
     packages.x86_64-linux = {
       default = wrapper;
-      inherit onecli-gateway-local;
+      inherit onecli-gateway;
     };
   };
 }
