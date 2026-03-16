@@ -48,7 +48,7 @@ if [ -n "$persist_file" ]; then
     fi
 fi
 
-line="Coding Cave #${CODING_CAVE_SESSION_INDEX:-?} ${CODING_CAVE_PROJECT_PATH:-?}/"
+line="coding-cave#${CODING_CAVE_SESSION_INDEX:-?} ${CODING_CAVE_PROJECT_PATH:-?}/"
 if [ -n "$persist" ]; then
     line="$line [$persist]"
 fi
