@@ -1022,8 +1022,11 @@ def push_project(slug, force=False):
         host_sha = host_branches.get(current_branch)
         if not host_sha:
             return
-        # Warn if overwriting cave commits from sessions
         cave_sha = cave_branches.get(current_branch)
+        if cave_sha == host_sha:
+            print(f"Already up to date.", file=sys.stderr)
+            return
+        # Warn if overwriting cave commits from sessions
         if cave_sha and cave_sha != host_sha:
             count = _check_unpulled(
                 gitdir_path, project_dir, cave_sha, host_sha,
