@@ -2,9 +2,12 @@
 import hashlib
 import json
 import os
+import shutil
 import signal
+import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 try:
@@ -64,26 +67,22 @@ def _onecli_ca_path():
 
 def _gateway_listening(port):
     """Check if the onecli gateway is already listening."""
-    import socket
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.settimeout(0.5)
         return s.connect_ex(("127.0.0.1", port)) == 0
 
 def _gateway_pid_file():
-    from . import _state
     return _state.cave_data() / "onecli-gateway.pid"
 
 def _start_gateway(port):
     """Start the onecli gateway in the background. Returns True if started or already running."""
     if _gateway_listening(port):
         return True
-    from . import _state
     binary = _state.GATEWAY_LOCAL_BIN
     if binary.startswith("@") or not Path(binary).exists():
         print(f"onecli gateway binary not found: {binary}", file=sys.stderr)
         print("Run 'nix build' to include the onecli gateway.", file=sys.stderr)
         return False
-    import subprocess, time
     proc = subprocess.Popen(
         [binary, "--local", "--port", str(port)],
         stdout=subprocess.DEVNULL,
@@ -101,8 +100,8 @@ def _start_gateway(port):
 
 def stop_gateway_if_idle():
     """Kill the onecli gateway if no cave sessions remain."""
-    from . import sessions
-    if sessions.list_sessions():
+    from . import sessions as _sessions
+    if _sessions.list_sessions():
         return
     pid_file = _gateway_pid_file()
     if not pid_file.exists():
@@ -195,7 +194,6 @@ def setup_env(global_config):
         # Discover host nvim wrapper's nix store path so the cave uses the
         # same binary (with its plugins, LUA_PATH, etc.) instead of the bare
         # cave neovim.  The nix store is available in the cave via overlay.
-        import shutil
         host_nvim = shutil.which("nvim")
         if host_nvim:
             resolved = str(Path(host_nvim).resolve())

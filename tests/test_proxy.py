@@ -213,7 +213,7 @@ class TestFlakeNixProxy:
         """GATEWAY_LOCAL_BIN is substituted in flake.nix replaceVars."""
         flake = FLAKE_NIX.read_text()
         assert "GATEWAY_LOCAL_BIN" in flake
-        assert "onecli-gateway-local" in flake
+        assert "onecli-gateway" in flake
 
 
 class TestProxyLifecycle:

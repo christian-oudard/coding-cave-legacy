@@ -595,8 +595,8 @@ def cmd_cp(srcs, dest, recursive=False, force=False):
         print("  coding-cave cp <file>... <slug>:<path>        host -> project", file=sys.stderr)
         print("  coding-cave cp <file>... cave:<path>          host -> CWD project", file=sys.stderr)
         print("  coding-cave cp <slug>:<path> <dest>           project -> host", file=sys.stderr)
-        print("  coding-cave cp cave-root:~/path <dest>        cave home -> host", file=sys.stderr)
-        print("  coding-cave cp <file>... cave-root:/tmp/path  host -> cave filesystem", file=sys.stderr)
+        print("  coding-cave cp <slug>:~/path <dest>           cave home -> host", file=sys.stderr)
+        print("  coding-cave cp <file>... <slug>:/tmp/path     host -> cave filesystem", file=sys.stderr)
         sys.exit(1)
 
 
