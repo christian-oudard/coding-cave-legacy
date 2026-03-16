@@ -558,13 +558,20 @@ def start_session(project, command, gpu=False):
             pass
         raise SystemExit(128 + signum)
 
+    # bwrap uses --new-session (setsid), so processes inside don't receive
+    # SIGWINCH from the terminal.  Forward it to all descendants.
+    def _forward_winch(_signum, _frame):
+        _signal_descendants(proc.pid, signal.SIGWINCH)
+
     prev_term = signal.signal(signal.SIGTERM, _exit_on_signal)
     prev_hup = signal.signal(signal.SIGHUP, _exit_on_signal)
+    prev_winch = signal.signal(signal.SIGWINCH, _forward_winch)
     try:
         ret = wait_for_child(proc.pid)
     finally:
         signal.signal(signal.SIGTERM, prev_term)
         signal.signal(signal.SIGHUP, prev_hup)
+        signal.signal(signal.SIGWINCH, prev_winch)
         gitdir.merge_session_gitdirs(sid, overlay_base)
         sessions.cleanup_session(sid)
         sessions.update_pane_titles(project)
@@ -621,6 +628,27 @@ def wait_for_child(proc_pid):
                 return 128 + os.WTERMSIG(status)
     except KeyboardInterrupt:
         return 130
+
+
+def _signal_descendants(pid, signum):
+    """Send signum to all descendant processes of pid via /proc walk."""
+    for entry in os.scandir("/proc"):
+        if not entry.name.isdigit():
+            continue
+        try:
+            stat = Path(entry.path, "stat").read_text()
+            close_paren = stat.rfind(")")
+            fields = stat[close_paren + 2:].split()
+            ppid = int(fields[1])
+            if ppid == pid:
+                child_pid = int(entry.name)
+                try:
+                    os.kill(child_pid, signum)
+                except OSError:
+                    pass
+                _signal_descendants(child_pid, signum)
+        except (FileNotFoundError, ValueError, PermissionError, IndexError):
+            continue
 
 
 def find_bwrap_child(bwrap_pid):
@@ -694,4 +722,14 @@ def enter_session(session_info, shell_type, workdir=None):
         nsenter_shell_script(shell_cmd, workdir or "/projects"),
     ], env=nsenter_env)
 
-    sys.exit(wait_for_child(proc.pid))
+    # nsenter enters the bwrap PID namespace, so the shell's host-side PID
+    # may not be in the terminal's foreground process group.  Forward SIGWINCH.
+    def _forward_winch(_signum, _frame):
+        _signal_descendants(proc.pid, signal.SIGWINCH)
+
+    prev_winch = signal.signal(signal.SIGWINCH, _forward_winch)
+    try:
+        ret = wait_for_child(proc.pid)
+    finally:
+        signal.signal(signal.SIGWINCH, prev_winch)
+    sys.exit(ret)
