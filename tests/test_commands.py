@@ -91,29 +91,29 @@ class TestSessionTracking:
 class TestCmdAdd:
     def test_add_new_project(self, cave_env):
         repo = make_repo(cave_env.tmp_path / "my-project")
-        wrapper.cmd_add([str(repo)])
+        wrapper.cmd_add(str(repo))
         projects = wrapper.load_projects()
         assert "my-project" in projects
 
     def test_add_creates_gitdir(self, cave_env):
         repo = make_repo(cave_env.tmp_path / "my-project")
-        wrapper.cmd_add([str(repo)])
+        wrapper.cmd_add(str(repo))
         assert (cave_env.projects_dir / "my-project" / "gitdir").is_dir()
 
     def test_add_already_registered(self, cave_env, capsys):
         repo = make_repo(cave_env.tmp_path / "my-project")
-        wrapper.cmd_add([str(repo)])
-        wrapper.cmd_add([str(repo)])
+        wrapper.cmd_add(str(repo))
+        wrapper.cmd_add(str(repo))
         assert "already in the coding cave" in capsys.readouterr().err
 
     def test_add_nonexistent_dir(self, cave_env):
         with pytest.raises(SystemExit):
-            wrapper.cmd_add(["/nonexistent/path"])
+            wrapper.cmd_add("/nonexistent/path")
 
     def test_add_inits_git_if_needed(self, cave_env):
         plain_dir = cave_env.tmp_path / "no-git"
         plain_dir.mkdir()
-        wrapper.cmd_add([str(plain_dir)])
+        wrapper.cmd_add(str(plain_dir))
         assert (plain_dir / ".git").is_dir()
 
 
@@ -122,31 +122,31 @@ class TestCmdAdd:
 class TestCmdRemove:
     def test_remove_project(self, cave_env):
         repo = make_repo(cave_env.tmp_path / "my-project")
-        wrapper.cmd_add([str(repo)])
+        wrapper.cmd_add(str(repo))
         assert "my-project" in wrapper.load_projects()
 
-        wrapper.cmd_remove(["my-project"])
+        wrapper.cmd_remove("my-project")
         assert "my-project" not in wrapper.load_projects()
         assert not (cave_env.projects_dir / "my-project").exists()
 
     def test_remove_unknown_exits(self, cave_env):
         with pytest.raises(SystemExit):
-            wrapper.cmd_remove(["nonexistent"])
+            wrapper.cmd_remove("nonexistent")
 
     def test_remove_with_running_session_exits(self, cave_env):
         repo = make_repo(cave_env.tmp_path / "my-project")
-        wrapper.cmd_add([str(repo)])
+        wrapper.cmd_add(str(repo))
         wrapper.register_session("s1", "my-project", os.getpid())
 
         with pytest.raises(SystemExit):
-            wrapper.cmd_remove(["my-project"])
+            wrapper.cmd_remove("my-project")
         assert "my-project" in wrapper.load_projects()
 
     def test_remove_from_cwd(self, cave_env, monkeypatch):
         repo = make_repo(cave_env.tmp_path / "my-project")
-        wrapper.cmd_add([str(repo)])
+        wrapper.cmd_add(str(repo))
         monkeypatch.chdir(repo)
-        wrapper.cmd_remove([])
+        wrapper.cmd_remove()
         assert "my-project" not in wrapper.load_projects()
 
 
@@ -155,7 +155,7 @@ class TestCmdRemove:
 class TestCmdMove:
     def test_move_project(self, cave_env):
         repo = make_repo(cave_env.tmp_path / "old-name")
-        wrapper.cmd_add([str(repo)])
+        wrapper.cmd_add(str(repo))
         assert "old-name" in wrapper.load_projects()
 
         new_dir = cave_env.tmp_path / "new-name"
@@ -169,7 +169,7 @@ class TestCmdMove:
 
     def test_move_renames_state_dir(self, cave_env):
         repo = make_repo(cave_env.tmp_path / "old-name")
-        wrapper.cmd_add([str(repo)])
+        wrapper.cmd_add(str(repo))
         assert (cave_env.projects_dir / "old-name").exists()
 
         new_dir = cave_env.tmp_path / "new-name"
@@ -185,22 +185,22 @@ class TestCmdMove:
 
     def test_move_to_nonexistent_dir_exits(self, cave_env):
         repo = make_repo(cave_env.tmp_path / "proj")
-        wrapper.cmd_add([str(repo)])
+        wrapper.cmd_add(str(repo))
         with pytest.raises(SystemExit):
             wrapper.cmd_move("proj", "/nonexistent/path")
 
     def test_move_slug_conflict_exits(self, cave_env):
         repo_a = make_repo(cave_env.tmp_path / "proj-a")
         repo_b = make_repo(cave_env.tmp_path / "proj-b")
-        wrapper.cmd_add([str(repo_a)])
-        wrapper.cmd_add([str(repo_b)])
+        wrapper.cmd_add(str(repo_a))
+        wrapper.cmd_add(str(repo_b))
 
         with pytest.raises(SystemExit):
             wrapper.cmd_move("proj-a", str(repo_b))
 
     def test_move_with_running_session_exits(self, cave_env):
         repo = make_repo(cave_env.tmp_path / "proj")
-        wrapper.cmd_add([str(repo)])
+        wrapper.cmd_add(str(repo))
         wrapper.register_session("s1", "proj", os.getpid())
 
         with pytest.raises(SystemExit):
@@ -210,7 +210,7 @@ class TestCmdMove:
         subdir = cave_env.tmp_path / "dir1"
         subdir.mkdir()
         repo = make_repo(subdir / "proj")
-        wrapper.cmd_add([str(repo)])
+        wrapper.cmd_add(str(repo))
 
         new_parent = cave_env.tmp_path / "dir2"
         new_parent.mkdir()
@@ -227,31 +227,31 @@ class TestCmdMove:
 class TestCmdReset:
     def test_reset_recreates_gitdir(self, cave_env):
         repo = make_repo(cave_env.tmp_path / "proj")
-        wrapper.cmd_add([str(repo)])
+        wrapper.cmd_add(str(repo))
         gitdir = cave_env.projects_dir / "proj" / "gitdir"
         assert gitdir.is_dir()
 
         (gitdir / "marker").write_text("old")
 
-        wrapper.cmd_reset(["proj"])
+        wrapper.cmd_reset("proj")
         assert gitdir.is_dir()
         assert not (gitdir / "marker").exists()
 
     def test_reset_with_running_session_exits(self, cave_env):
         repo = make_repo(cave_env.tmp_path / "proj")
-        wrapper.cmd_add([str(repo)])
+        wrapper.cmd_add(str(repo))
         wrapper.register_session("s1", "proj", os.getpid())
 
         with pytest.raises(SystemExit):
-            wrapper.cmd_reset(["proj"])
+            wrapper.cmd_reset("proj")
 
     def test_reset_unknown_exits(self, cave_env):
         with pytest.raises(SystemExit):
-            wrapper.cmd_reset(["nonexistent"])
+            wrapper.cmd_reset("nonexistent")
 
     def test_reset_warns_unpulled(self, cave_env, monkeypatch):
         repo = make_repo(cave_env.tmp_path / "proj")
-        wrapper.cmd_add([str(repo)])
+        wrapper.cmd_add(str(repo))
 
         gitdir = cave_env.projects_dir / "proj" / "gitdir"
         cave_work = cave_env.tmp_path / "cave-work"
@@ -274,7 +274,7 @@ class TestCmdReset:
         )
 
         monkeypatch.setattr("builtins.input", lambda _: "n")
-        wrapper.cmd_reset(["proj"])
+        wrapper.cmd_reset("proj")
 
         head = subprocess.run(
             ["git", "--git-dir", str(gitdir), "rev-parse", "HEAD"],
@@ -284,9 +284,9 @@ class TestCmdReset:
 
     def test_reset_from_cwd(self, cave_env, monkeypatch):
         repo = make_repo(cave_env.tmp_path / "proj")
-        wrapper.cmd_add([str(repo)])
+        wrapper.cmd_add(str(repo))
         monkeypatch.chdir(repo)
-        wrapper.cmd_reset([])
+        wrapper.cmd_reset()
 
 
 # --- project_sync_status ---
@@ -294,13 +294,13 @@ class TestCmdReset:
 class TestProjectSyncStatus:
     def test_synced(self, cave_env):
         repo = make_repo(cave_env.tmp_path / "proj")
-        wrapper.cmd_add([str(repo)])
+        wrapper.cmd_add(str(repo))
         status = wrapper.project_sync_status("proj", str(repo))
         assert status == ""
 
     def test_to_pull(self, cave_env):
         repo = make_repo(cave_env.tmp_path / "proj")
-        wrapper.cmd_add([str(repo)])
+        wrapper.cmd_add(str(repo))
 
         gitdir = cave_env.projects_dir / "proj" / "gitdir"
         cave_work = cave_env.tmp_path / "cave-work"
@@ -327,7 +327,7 @@ class TestProjectSyncStatus:
 
     def test_to_push(self, cave_env):
         repo = make_repo(cave_env.tmp_path / "proj")
-        wrapper.cmd_add([str(repo)])
+        wrapper.cmd_add(str(repo))
 
         (repo / "new.txt").write_text("host\n")
         git_run("git", "-C", str(repo), "add", ".")
@@ -338,7 +338,7 @@ class TestProjectSyncStatus:
 
     def test_missing_project_dir(self, cave_env):
         repo = make_repo(cave_env.tmp_path / "proj")
-        wrapper.cmd_add([str(repo)])
+        wrapper.cmd_add(str(repo))
         import shutil
         shutil.rmtree(repo)
         status = wrapper.project_sync_status("proj", str(repo))
@@ -346,7 +346,7 @@ class TestProjectSyncStatus:
 
     def test_no_gitdir(self, cave_env):
         repo = make_repo(cave_env.tmp_path / "proj")
-        wrapper.cmd_add([str(repo)])
+        wrapper.cmd_add(str(repo))
         import shutil
         shutil.rmtree(cave_env.projects_dir / "proj" / "gitdir")
         status = wrapper.project_sync_status("proj", str(repo))
@@ -355,7 +355,7 @@ class TestProjectSyncStatus:
     def test_session_commit_shows_to_pull(self, cave_env):
         """Commits only in a session gitdir should show as 'to pull'."""
         repo = make_repo(cave_env.tmp_path / "proj")
-        wrapper.cmd_add([str(repo)])
+        wrapper.cmd_add(str(repo))
 
         # Register a live session
         sid = "test-session"

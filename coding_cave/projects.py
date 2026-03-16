@@ -85,10 +85,10 @@ def cave_workdir(project):
     return f"/projects/{project}/{rel}" if str(rel) != "." else f"/projects/{project}"
 
 
-def resolve_slug(args):
-    """Resolve a project slug from CLI args or CWD. Returns slug or None."""
-    if args:
-        return args[0]
+def resolve_slug(slug=None):
+    """Resolve a project slug or detect from CWD. Returns slug or None."""
+    if slug:
+        return slug
     cwd = Path.cwd().resolve()
     for slug, source in load_projects().items():
         if cwd == Path(source).resolve() or cwd.is_relative_to(Path(source).resolve()):

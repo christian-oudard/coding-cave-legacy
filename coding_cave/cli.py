@@ -79,27 +79,17 @@ def main():
     elif parsed.command == "shell":
         commands.cmd_shell(claude_args, gpu=parsed.gpu)
     elif parsed.command == "add":
-        commands.cmd_add([parsed.dir] if parsed.dir else [])
+        commands.cmd_add(directory=parsed.dir)
     elif parsed.command == "status":
-        commands.cmd_status(["--all"] if parsed.all else [])
+        commands.cmd_status(show_all=parsed.all)
     elif parsed.command == "pull":
-        args = []
-        if parsed.project:
-            args.append(parsed.project)
-        if parsed.force:
-            args.append("--force")
-        commands.cmd_pull(args)
+        commands.cmd_pull(slug=parsed.project, force=parsed.force)
     elif parsed.command == "push":
-        args = []
-        if parsed.project:
-            args.append(parsed.project)
-        if parsed.force:
-            args.append("--force")
-        commands.cmd_push(args)
+        commands.cmd_push(slug=parsed.project, force=parsed.force)
     elif parsed.command == "reset":
-        commands.cmd_reset([parsed.project] if parsed.project else [])
+        commands.cmd_reset(slug=parsed.project)
     elif parsed.command == "remove":
-        commands.cmd_remove([parsed.project] if parsed.project else [])
+        commands.cmd_remove(slug=parsed.project)
     elif parsed.command == "cp":
         if len(parsed.paths) < 2:
             print("Usage: coding-cave cp <src>... <dest>", file=sys.stderr)

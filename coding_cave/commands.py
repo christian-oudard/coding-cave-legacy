@@ -132,9 +132,9 @@ def cmd_shell(args, gpu=False):
     lifecycle.start_session(project, command, gpu=gpu)
 
 
-def cmd_add(args):
-    if args:
-        project_dir = Path(args[0]).resolve()
+def cmd_add(directory=None):
+    if directory:
+        project_dir = Path(directory).resolve()
     else:
         project_dir = Path.cwd().resolve()
 
@@ -156,8 +156,8 @@ def cmd_add(args):
     print(f"Added {slug} to the coding cave.", file=sys.stderr)
 
 
-def cmd_remove(args):
-    slug = projects.resolve_slug(args)
+def cmd_remove(slug=None):
+    slug = projects.resolve_slug(slug)
     if slug is None:
         print("No project specified and CWD is not a registered project.", file=sys.stderr)
         sys.exit(1)
@@ -220,8 +220,8 @@ def cmd_move(old_slug, new_path):
     print(f"Moved {old_slug} -> {new_slug} ({new_path})", file=sys.stderr)
 
 
-def cmd_reset(args):
-    slug = projects.resolve_slug(args)
+def cmd_reset(slug=None):
+    slug = projects.resolve_slug(slug)
     if slug is None:
         print("No project specified and CWD is not a registered project.", file=sys.stderr)
         sys.exit(1)
@@ -283,12 +283,8 @@ def cmd_reset(args):
     print(f"Reset overlay for {slug}. Next session will see current host state.", file=sys.stderr)
 
 
-def cmd_pull(args):
-    force = "--force" in args
-    args = [a for a in args if a != "--force"]
-
-    if args:
-        slug = args[0]
+def cmd_pull(slug=None, force=False):
+    if slug:
         loaded_projects = projects.load_projects()
         if slug not in loaded_projects and sync.find_unsynced_project(slug):
             sync.pull_cave_project(slug)
@@ -296,22 +292,19 @@ def cmd_pull(args):
         sync.pull_project(slug, force=force)
         return
 
-    slug = projects.resolve_slug([])
+    slug = projects.resolve_slug()
     if slug:
         sync.pull_project(slug, force=force)
     else:
         print("Not in a project folder. Specify a project or cd into one.", file=sys.stderr)
 
 
-def cmd_push(args):
-    force = "--force" in args
-    args = [a for a in args if a != "--force"]
-
-    if args:
-        sync.push_project(args[0], force=force)
+def cmd_push(slug=None, force=False):
+    if slug:
+        sync.push_project(slug, force=force)
         return
 
-    slug = projects.resolve_slug([])
+    slug = projects.resolve_slug()
     if slug:
         sync.push_project(slug, force=force)
         return
@@ -628,9 +621,8 @@ def cmd_flake_update(inputs):
         print("Already up to date.", file=sys.stderr)
 
 
-def cmd_status(args):
+def cmd_status(show_all=False):
     overlay.clean_stale_session_overlays()
-    show_all = "--all" in args or "-a" in args
 
     print(f"coding-cave {_state.VERSION}", file=sys.stderr)
 
