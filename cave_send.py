@@ -44,8 +44,8 @@ def send(sock_path, message, tag=True):
     """Send a message to a session's PTY relay.
 
     Uses the structured JSON protocol with a temporary reply socket
-    for delivery acknowledgment. Returns the ack dict if the relay
-    supports it, None otherwise. Connection failure raises.
+    for delivery acknowledgment. Returns the ack dict on success,
+    None on timeout/failure.
     """
     if isinstance(message, bytes):
         message = message.decode()
@@ -65,26 +65,23 @@ def send(sock_path, message, tag=True):
             "body": message,
             "reply_to": reply_path,
         })
-        # Connect and send. Let connection errors propagate.
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         s.connect(sock_path)
         s.sendall(frame.encode())
         s.shutdown(socket.SHUT_WR)
         s.close()
 
-        # Wait for ack. Timeout is not an error (old relays don't ack).
-        try:
-            conn, _ = reply_sock.accept()
-            ack_data = b""
-            while True:
-                chunk = conn.recv(4096)
-                if not chunk:
-                    break
-                ack_data += chunk
-            conn.close()
-            return json.loads(ack_data)
-        except (socket.timeout, json.JSONDecodeError):
-            return None
+        conn, _ = reply_sock.accept()
+        ack_data = b""
+        while True:
+            chunk = conn.recv(4096)
+            if not chunk:
+                break
+            ack_data += chunk
+        conn.close()
+        return json.loads(ack_data)
+    except (socket.timeout, OSError, json.JSONDecodeError):
+        return None
     finally:
         reply_sock.close()
         try:
@@ -198,9 +195,12 @@ def main():
             sys.exit(1)
 
     try:
-        send(sock_path, message, tag=not raw)
+        ack = send(sock_path, message, tag=not raw)
     except (ConnectionRefusedError, FileNotFoundError) as e:
         print(f"Failed to send: {e}", file=sys.stderr)
+        sys.exit(1)
+    if not ack or not isinstance(ack, dict) or ack.get("type") != "ack":
+        print("No ack (timeout)", file=sys.stderr)
         sys.exit(1)
 
 
