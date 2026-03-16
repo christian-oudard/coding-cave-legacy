@@ -29,7 +29,7 @@ Sessions work directly on real branches (e.g. `main`, `develop`), not on private
 
 On cleanup (`merge_session_gitdirs`), `_forward_refs(force=True)` forwards all branch refs into the shared gitdir. Diverged refs that can't be rebased are force-updated with backup under `refs/sessions/<sid>/`.
 
-During live sync (`sync_live_sessions`), `forward_session_refs` calls `_forward_refs(force=False)` for each running session. Diverged refs that can't be rebased are skipped (picked up on final cleanup).
+During live sync (`sync_live_sessions`), `forward_session_refs` calls `_forward_refs` for each running session. `pull` passes `force=True` so diverged refs are force-updated with backup (same as cleanup), making all session commits immediately available. `push` and `status` pass `force=False`, skipping diverged refs.
 
 `cav shell` joins a running agent's namespace via `nsenter`, giving the user direct access to that agent's in-progress files for inspection, testing, and debugging.
 
@@ -86,7 +86,7 @@ There are two distinct operations that move refs from session gitdirs to the sha
 4. **Fast-forward** → update shared, record `refs/synced`.
 5. **Session behind shared** → skip.
 6. **Session owns branch** → session wins. Ownership = `existing_sha in (init, synced, pushed)`. Handles amend, amend + new commits, squash, message-only amend, any rewrite — regardless of whether trees match.
-7. **Diverged, session doesn't own** → try rebase (`_rebase_commits`). If rebase succeeds, update shared. If fails: skip during live sync, force-update with backup during cleanup.
+7. **Diverged, session doesn't own** → try rebase (`_rebase_commits`). If rebase succeeds, update shared. If fails: force-update with backup when called from `pull` (force=True) or cleanup, skip when called from `push`/`status` (force=False).
 
 Ownership is the central mechanism. It answers: "has any other source (push, other session) modified shared since this session last knew about it?" Three independent signals, any one sufficient:
 
@@ -94,14 +94,14 @@ Ownership is the central mechanism. It answers: "has any other source (push, oth
 - `refs/synced/<branch>` — session ref at last successful `_forward_refs` sync. If `refs/synced` == current shared ref, no one else has modified the branch since the last sync.
 - `refs/pushed/<branch>` — session ref at last successful post-commit hook push. If `refs/pushed` == current shared ref, this session's hook was the last to update shared. Bridges the gap between hook pushes and `_forward_refs` syncs — without it, the hook moves shared past `refs/init`, `refs/synced` doesn't exist yet, and the ownership check fails even though the session is the sole authority.
 
-Safety invariant: a session can only replace a shared ref when it can prove no other source has modified it. If another source modified shared (none of the three signals match), _forward_refs either rebases (preserving both sides' work) or force-updates with backup (cleanup only, no data loss).
+Safety invariant: a session can only replace a shared ref when it can prove no other source has modified it. If another source modified shared (none of the three signals match), _forward_refs either rebases (preserving both sides' work) or force-updates with backup (no data loss). Force-update is used during cleanup and pull (user explicitly wants the data), while push/status skip diverged refs.
 
 Safety constraints:
 
 - **Read-only from the session's perspective**: `_forward_refs` must not modify the session gitdir in any way visible to the running agent. In practice, it writes `refs/synced` (internal bookkeeping, not visible to normal git operations) and temporarily rewrites alternates (restored immediately after). The running agent is unlikely to observe these, and the agent's git operations don't depend on them.
 - **Never clobber new content**: only replace shared refs when the session is the sole authority (ownership proven) or via rebase (preserving both sides).
 
-**Cleanup** (`merge_session_gitdirs`): called when a session exits. Uses the same `_forward_refs` logic. The only difference: when rebase fails and ownership is unproven, cleanup force-updates shared and backs up the old ref under `refs/sessions/<sid>/`. Live sync skips instead.
+**Cleanup** (`merge_session_gitdirs`): called when a session exits. Uses the same `_forward_refs` logic with `force=True`. When rebase fails and ownership is unproven, force-updates shared and backs up the old ref under `refs/sessions/<sid>/`.
 
 #### Scenario analysis
 

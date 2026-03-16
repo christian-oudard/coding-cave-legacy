@@ -385,15 +385,16 @@ def _forward_refs(sid, session_gitdir, shared_gitdir, *, force=False):
                 git_mod.git(shared_gitdir, "update-ref", ref, sha,
                     capture_output=True)
             else:
-                # Live sync: can't rebase, warn so pull doesn't
-                # silently hide unsynced session work.
+                # Non-force live sync (push/status): can't rebase,
+                # skip.  Pull uses force=True so this path only fires
+                # for push/status where we don't want to clobber.
                 count = git_mod.git(shared_gitdir, "rev-list", "--count",
                     f"{mb}..{sha}" if mb else f"{existing_sha}..{sha}",
                     capture_output=True, text=True)
                 n = (count.stdout.strip()
                      if count.returncode == 0 else "?")
                 print(f"Session has {n} commit(s) on {branch} that "
-                      f"diverged from shared (will sync on exit).",
+                      f"diverged from shared (use 'pull' to force-sync).",
                       file=sys.stderr)
 
     # Also fetch tags
@@ -418,12 +419,17 @@ def _forward_refs(sid, session_gitdir, shared_gitdir, *, force=False):
                 shutil.copy2(src_log, dst_log)
 
 
-def forward_session_refs(slug, session_gitdir, shared_gitdir):
-    """Forward refs from a live session into the shared gitdir (safe).
+def forward_session_refs(slug, session_gitdir, shared_gitdir, *,
+                         sid=None, force=False):
+    """Forward refs from a live session into the shared gitdir.
 
     Called by sync_live_sessions during pull/push.  Temporarily rewrites
     alternates to host path for git operations, then restores cave path.
-    Never force-updates -- diverged refs are skipped.
+
+    When force=False (default, used by push/status): diverged refs that
+    can't be rebased are skipped.
+    When force=True (used by pull): diverged refs are force-updated with
+    backup, same as final cleanup.
     """
     alt_file = session_gitdir / "objects" / "info" / "alternates"
     cave_path = None
@@ -431,7 +437,7 @@ def forward_session_refs(slug, session_gitdir, shared_gitdir):
         cave_path = alt_file.read_text().strip()
         _atomic_write(alt_file, f"{shared_gitdir / 'objects'}\n")
 
-    _forward_refs(None, session_gitdir, shared_gitdir, force=False)
+    _forward_refs(sid, session_gitdir, shared_gitdir, force=force)
 
     # Restore cave-internal alternates path
     if cave_path is not None:

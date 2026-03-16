@@ -22,11 +22,15 @@ def _stash_pop_or_warn(host_git, project_dir):
                 print(f"  {line}", file=sys.stderr)
 
 
-def sync_live_sessions(slug):
+def sync_live_sessions(slug, *, force=False):
     """Forward refs from running sessions into the shared gitdir.
 
     Uses forward_session_refs which handles alternates rewrite/restore
-    internally and never force-updates refs.
+    internally.
+
+    When force=True (used by pull): diverged refs that can't be rebased
+    are force-updated with backup.  When force=False (default): diverged
+    refs are skipped.
     """
     shared_gitdir = _state.projects_dir() / slug / "gitdir"
     if not shared_gitdir.is_dir():
@@ -36,7 +40,8 @@ def sync_live_sessions(slug):
         overlay_base = _state.cave_data() / "session-overlays" / sid
         session_gitdir = overlay_base / f"gitdir-{slug}"
         if session_gitdir.is_dir():
-            gitdir.forward_session_refs(slug, session_gitdir, shared_gitdir)
+            gitdir.forward_session_refs(slug, session_gitdir, shared_gitdir,
+                                        sid=sid, force=force)
 
 
 def _clear_session_synced_refs(slug, branch):
@@ -653,7 +658,7 @@ def pull_project(slug, force=False):
               file=sys.stderr)
         sys.exit(1)
 
-    sync_live_sessions(slug)
+    sync_live_sessions(slug, force=True)
     git_mod.ensure_cave_remote(project_dir, gitdir_path)
 
     host_git = ["git", "-C", str(project_dir)] + git_mod.SAFE_GIT_OPTS

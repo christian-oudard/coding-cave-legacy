@@ -995,6 +995,48 @@ class TestSessionGitdir:
                          "rev-parse", "refs/sessions/sid-b/main")
         assert backup.returncode != 0
 
+    def test_forward_session_refs_force_syncs_diverged(
+            self, shared_project, tmp_path):
+        """forward_session_refs with force=True syncs diverged refs.
+
+        When called from pull (force=True), diverged refs that can't be
+        rebased are force-updated with backup, making them immediately
+        available instead of deferring to session exit.
+        """
+        host, slug, projects_dir = shared_project
+        shared_gd = projects_dir / slug / "gitdir"
+
+        _, work_a, overlay_a = self._make_session(tmp_path, slug, projects_dir, "a")
+        _, work_b, overlay_b = self._make_session(tmp_path, slug, projects_dir, "b")
+
+        # Both sessions commit on main (same file, different content = diverge)
+        (work_a / "file.txt").write_text("version A\n")
+        cave_git(work_a, "add", "file.txt")
+        cave_git(work_a, "commit", "-m", "commit A")
+
+        (work_b / "file.txt").write_text("version B\n")
+        cave_git(work_b, "add", "file.txt")
+        cave_git(work_b, "commit", "-m", "commit B")
+
+        # A merges first (cleanup), advancing shared
+        wrapper.merge_session_gitdirs("sid-a", overlay_a)
+        shared_after_a = git_head(shared_gd, gitdir=True)
+
+        # Force-sync B (as pull would) — should update shared with backup
+        session_gd_b = overlay_b / f"gitdir-{slug}"
+        session_b_sha = git_head(session_gd_b, gitdir=True)
+        wrapper.forward_session_refs(slug, session_gd_b, shared_gd,
+                                     sid="sid-b", force=True)
+
+        # Shared should now be at B's commit (force-updated)
+        assert git_head(shared_gd, gitdir=True) == session_b_sha
+
+        # Old ref should be backed up
+        backup = git_run("git", "--git-dir", str(shared_gd),
+                         "rev-parse", "refs/sessions/sid-b/main")
+        assert backup.returncode == 0
+        assert backup.stdout.strip() == shared_after_a
+
     def test_forward_refs_skips_conflicting_diverge(
             self, shared_project, tmp_path):
         """Conflicting diverge is skipped during live sync.
