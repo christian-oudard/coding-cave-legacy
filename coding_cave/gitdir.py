@@ -111,11 +111,19 @@ def create_session_gitdir(slug, sid, overlay_base):
     if hooks.exists():
         shutil.rmtree(hooks)
     hooks.mkdir()
+    # Post-commit hook: push/pull semantics with shared gitdir.
+    #
+    # On every commit, try to push to shared (fast-forward).  If shared
+    # has moved (host pushed, or another session committed), rebase only
+    # our new commits (since refs/pushed or refs/init) onto shared, then
+    # push.  This is the session-side integration point — equivalent to
+    # "git pull --rebase && git push" in a normal workflow.
     (hooks / "post-commit").write_text(
         '#!/bin/bash\n'
         '[ -n "$_CAVE_HOOK_RUNNING" ] && exit 0\n'
         'export _CAVE_HOOK_RUNNING=1\n'
         'branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null) || exit 0\n'
+        # Try fast-forward push
         'if git push shared "$branch" 2>/dev/null; then\n'
         '    git update-ref "refs/pushed/$branch" HEAD 2>/dev/null\n'
         'else\n'
@@ -124,15 +132,24 @@ def create_session_gitdir(slug, sid, overlay_base):
         '    git fetch shared 2>/dev/null\n'
         '    shared_sha=$(git rev-parse --verify '
         '"refs/remotes/shared/$branch" 2>/dev/null)\n'
+        # Shared hasn't moved since our last push — we amended/rebased.
         '    if [ -n "$pushed_sha" ] && [ "$shared_sha" = "$pushed_sha" ]'
         '; then\n'
         '        git push shared +"$branch" 2>/dev/null &&\n'
         '            git update-ref "refs/pushed/$branch" HEAD\n'
-        '    elif git rebase "shared/$branch" 2>/dev/null; then\n'
-        '        git push shared "$branch" 2>/dev/null &&\n'
-        '            git update-ref "refs/pushed/$branch" HEAD\n'
         '    else\n'
-        '        git rebase --abort 2>/dev/null\n'
+        # Shared has moved.  Rebase only our new commits onto shared.
+        # Use refs/pushed (last successful push) or refs/init (session
+        # start point) as the base — never rebase old diverged history.
+        '        base=${pushed_sha:-$(git rev-parse --verify '
+        '"refs/init/$branch" 2>/dev/null)}\n'
+        '        if [ -n "$base" ] && git rebase --onto '
+        '"shared/$branch" "$base" 2>/dev/null; then\n'
+        '            git push shared "$branch" 2>/dev/null &&\n'
+        '                git update-ref "refs/pushed/$branch" HEAD\n'
+        '        else\n'
+        '            git rebase --abort 2>/dev/null\n'
+        '        fi\n'
         '    fi\n'
         'fi\n'
         'git fetch shared 2>/dev/null\n'

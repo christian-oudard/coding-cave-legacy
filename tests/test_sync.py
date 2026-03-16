@@ -2998,6 +2998,62 @@ class TestPostCommitHookSync:
         # Shared should have the amended version
         assert git_head(shared_gd, gitdir=True) == amended
 
+    def test_hook_rebases_after_host_push_diverges_history(
+            self, shared_project, tmp_path):
+        """Host pushes amended history, session commits on old base.
+
+        Session's post-commit hook should rebase only the new commits
+        (not the old diverged history) onto shared.
+        """
+        host, slug, projects_dir = shared_project
+        shared_gd = projects_dir / slug / "gitdir"
+
+        gd, work, _ = self._make_session(
+            tmp_path, slug, projects_dir, "test")
+
+        # Session makes two commits and pushes them
+        (work / "a.txt").write_text("v1\n")
+        cave_git(work, "add", "a.txt")
+        cave_git(work, "commit", "-m", "first commit")
+        (work / "b.txt").write_text("v1\n")
+        cave_git(work, "add", "b.txt")
+        cave_git(work, "commit", "-m", "second commit")
+        pushed = git_head(gd, gitdir=True)
+        assert git_head(shared_gd, gitdir=True) == pushed
+
+        # Host amends: squashes both into one (simulates cav push --force)
+        # Directly update shared gitdir to simulate host pushing amended history
+        git_run("git", "-C", str(host), "fetch", str(shared_gd), "main")
+        git_run("git", "-C", str(host), "checkout", "FETCH_HEAD", "--", ".")
+        git_run("git", "-C", str(host), "add", ".")
+        git_run("git", "-C", str(host), "commit", "-m", "squashed by host")
+        host_sha = git_head(host)
+        # Push host's amended version to shared (overwriting session's history)
+        git_run("git", "--git-dir", str(shared_gd),
+                "fetch", str(host), "main")
+        git_run("git", "--git-dir", str(shared_gd),
+                "update-ref", "refs/heads/main", host_sha)
+
+        # Session makes a new commit on its OLD history (diverged from shared)
+        (work / "c.txt").write_text("new work\n")
+        cave_git(work, "add", "c.txt")
+        cave_git(work, "commit", "-m", "new session work")
+
+        # Hook should have rebased "new session work" onto host's squashed commit
+        session_log = cave_git(work, "log", "--oneline")
+        assert "squashed by host" in session_log.stdout, \
+            "Session should have host's commit after auto-rebase"
+        assert "new session work" in session_log.stdout
+        # The old "first commit" and "second commit" should be gone
+        # (they were before refs/pushed, so not rebased)
+        assert "first commit" not in session_log.stdout
+        assert "second commit" not in session_log.stdout
+
+        # Shared should have both
+        shared_head = git_head(shared_gd, gitdir=True)
+        session_head = git_head(gd, gitdir=True)
+        assert shared_head == session_head
+
 
 class TestPostRewriteHook:
     """Test that amend/rebase guard hooks block rewriting pulled commits."""
