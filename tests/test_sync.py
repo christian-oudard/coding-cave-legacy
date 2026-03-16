@@ -3054,6 +3054,39 @@ class TestPostCommitHookSync:
         session_head = git_head(gd, gitdir=True)
         assert shared_head == session_head
 
+    def test_hook_warns_on_conflict(self, shared_project, tmp_path):
+        """When auto-rebase conflicts, hook warns and keeps local commit."""
+        host, slug, projects_dir = shared_project
+        shared_gd = projects_dir / slug / "gitdir"
+
+        gd_a, work_a, _ = self._make_session(
+            tmp_path, slug, projects_dir, "a")
+        gd_b, work_b, _ = self._make_session(
+            tmp_path, slug, projects_dir, "b")
+
+        # A edits file.txt and pushes
+        (work_a / "file.txt").write_text("A's version\n")
+        cave_git(work_a, "add", "file.txt")
+        cave_git(work_a, "commit", "-m", "A edits file")
+        assert git_head(shared_gd, gitdir=True) == git_head(gd_a, gitdir=True)
+
+        # B edits the same file differently (will conflict)
+        (work_b / "file.txt").write_text("B's version\n")
+        cave_git(work_b, "add", "file.txt")
+        result = cave_git(work_b, "commit", "-m", "B edits file")
+
+        # B's commit should succeed (post-commit can't block it)
+        assert result.returncode == 0
+        assert "B edits file" in cave_git(work_b, "log", "--oneline").stdout
+
+        # But B should see the warning
+        assert "WARNING" in result.stderr or "conflict" in result.stderr.lower()
+
+        # B's commit should NOT be in shared (rebase failed)
+        shared_head = git_head(shared_gd, gitdir=True)
+        assert shared_head == git_head(gd_a, gitdir=True), \
+            "Shared should still be at A's commit (B's rebase failed)"
+
 
 class TestPostRewriteHook:
     """Test that amend/rebase guard hooks block rewriting pulled commits."""
