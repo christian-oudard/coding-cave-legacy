@@ -56,19 +56,14 @@ def _detect_gpg_agent_socket():
 def _setup_proxy(global_config):
     """Configure proxy env vars if [proxy] section exists. Returns True if proxy is active."""
     proxy = global_config.get("proxy", {})
-    url = proxy.get("url")
-    if not url:
-        return False
-    from urllib.parse import urlparse
-    parsed = urlparse(url)
-    port = parsed.port or 10255
-    os.environ["CODING_CAVE_PROXY_PORT"] = str(port)
-    ca_cert = proxy.get("ca-cert")
-    if ca_cert:
-        ca_path = Path(ca_cert).expanduser()
+    if proxy.get("onecli"):
+        port = str(proxy.get("port", 10255))
+        ca_path = Path("~/.onecli/gateway/ca.pem").expanduser()
+        os.environ["CODING_CAVE_PROXY_PORT"] = port
         if ca_path.is_file():
             os.environ["CODING_CAVE_PROXY_CA_CERT"] = str(ca_path.resolve())
-    return True
+        return True
+    return False
 
 
 def setup_env(global_config):

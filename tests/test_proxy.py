@@ -15,27 +15,31 @@ LIFECYCLE_PY = FLAKE_NIX.parent / "coding_cave" / "lifecycle.py"
 class TestProxyConfig:
     """Config tests for _setup_proxy and setup_env proxy interaction."""
 
-    def test_proxy_env_set_when_configured(self):
-        """setup_env sets CODING_CAVE_PROXY_PORT when [proxy] is configured."""
-        cfg = {"proxy": {"url": "http://localhost:10255"}}
-        env = {}
-        with patch.dict(os.environ, env, clear=False):
+    def test_onecli_proxy_sets_default_port(self, tmp_path):
+        """onecli = true sets port 10255 by default."""
+        ca = tmp_path / "ca.pem"
+        ca.write_text("--- cert ---")
+        cfg = {"proxy": {"onecli": True}}
+        with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("CODING_CAVE_PROXY_PORT", None)
-            _setup_proxy(cfg)
+            with patch("coding_cave.config.Path.expanduser", return_value=ca):
+                _setup_proxy(cfg)
             assert os.environ.get("CODING_CAVE_PROXY_PORT") == "10255"
 
-    def test_no_oauth_token_when_proxy_enabled(self):
+    def test_no_oauth_token_when_proxy_enabled(self, tmp_path):
         """CLAUDE_CODE_OAUTH_TOKEN is NOT set when proxy is configured."""
+        ca = tmp_path / "ca.pem"
+        ca.write_text("--- cert ---")
         cfg = {
-            "proxy": {"url": "http://localhost:10255"},
+            "proxy": {"onecli": True},
             "credentials": {"claude-oauth-token": "secret-token"},
         }
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
             os.environ.pop("CODING_CAVE_PROXY_PORT", None)
-            # Mock out the parts of setup_env that touch the filesystem
             with patch("coding_cave.config._git_config", return_value=None), \
-                 patch("coding_cave.config._detect_gpg_agent_socket", return_value=None):
+                 patch("coding_cave.config._detect_gpg_agent_socket", return_value=None), \
+                 patch("coding_cave.config.Path.expanduser", return_value=ca):
                 setup_env(cfg)
             assert "CLAUDE_CODE_OAUTH_TOKEN" not in os.environ
 
@@ -50,28 +54,31 @@ class TestProxyConfig:
                 setup_env(cfg)
             assert os.environ.get("CLAUDE_CODE_OAUTH_TOKEN") == "secret-token"
 
-    def test_proxy_custom_port(self):
-        """Port is extracted from URL."""
-        cfg = {"proxy": {"url": "http://localhost:8080"}}
-        with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("CODING_CAVE_PROXY_PORT", None)
-            _setup_proxy(cfg)
-            assert os.environ.get("CODING_CAVE_PROXY_PORT") == "8080"
-
-    def test_proxy_ca_cert_set(self, tmp_path):
-        """CA cert path set when file exists."""
+    def test_onecli_custom_port(self, tmp_path):
+        """Port can be overridden."""
         ca = tmp_path / "ca.pem"
         ca.write_text("--- cert ---")
-        cfg = {"proxy": {"url": "http://localhost:10255", "ca-cert": str(ca)}}
+        cfg = {"proxy": {"onecli": True, "port": 8080}}
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("CODING_CAVE_PROXY_PORT", None)
+            with patch("coding_cave.config.Path.expanduser", return_value=ca):
+                _setup_proxy(cfg)
+            assert os.environ.get("CODING_CAVE_PROXY_PORT") == "8080"
+
+    def test_onecli_ca_cert_from_default_path(self, tmp_path):
+        """CA cert loaded from ~/.onecli/gateway/ca.pem."""
+        ca = tmp_path / "ca.pem"
+        ca.write_text("--- cert ---")
+        cfg = {"proxy": {"onecli": True}}
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("CODING_CAVE_PROXY_CA_CERT", None)
-            _setup_proxy(cfg)
+            with patch("coding_cave.config.Path.expanduser", return_value=ca):
+                _setup_proxy(cfg)
             assert os.environ.get("CODING_CAVE_PROXY_CA_CERT") == str(ca.resolve())
 
-    def test_proxy_ca_cert_missing_file_skipped(self, tmp_path):
-        """CA cert not set for missing files."""
-        cfg = {"proxy": {"url": "http://localhost:10255",
-                         "ca-cert": str(tmp_path / "nonexistent.pem")}}
+    def test_onecli_ca_cert_missing_skipped(self):
+        """CA cert not set when gateway hasn't generated it yet."""
+        cfg = {"proxy": {"onecli": True}}
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("CODING_CAVE_PROXY_CA_CERT", None)
             _setup_proxy(cfg)
@@ -81,7 +88,7 @@ class TestProxyConfig:
         """_setup_proxy returns False when no proxy configured."""
         assert _setup_proxy({}) is False
         assert _setup_proxy({"proxy": {}}) is False
-        assert _setup_proxy({"proxy": {"url": ""}}) is False
+        assert _setup_proxy({"proxy": {"onecli": False}}) is False
 
 
 class TestFlakeNixProxy:
