@@ -24,11 +24,15 @@ IPC_DIR = Path.home() / "ipc"
 def _sender_tag():
     """Auto-detect sender identity from environment.
 
-    Inside a cave session: returns '[#N]' (session index).
+    Inside a cave session: returns '[project#N]' (project + session index).
     Outside (host/user): returns '[user]'.
     """
     idx = os.environ.get("CODING_CAVE_SESSION_INDEX")
     if idx:
+        proj = os.environ.get("CODING_CAVE_PROJECT_PATH", "")
+        proj = os.path.basename(proj) if proj else ""
+        if proj:
+            return f"[{proj}#{idx}]"
         return f"[#{idx}]"
     return "[user]"
 
@@ -43,6 +47,18 @@ def send(sock_path, message, tag=True):
     s.sendall(message.encode())
     s.shutdown(socket.SHUT_WR)
     s.close()
+
+
+def resolve_index(index):
+    """Resolve a session index (e.g. '4' or '#4') to (sid, sock_path).
+
+    Returns (sid, sock_path) or (None, None) if not found.
+    """
+    index = str(index).lstrip("#")
+    for sid, meta in list_sessions():
+        if meta.get("index") == index:
+            return sid, str(IPC_DIR / f"{sid}.sock")
+    return None, None
 
 
 def list_sessions():
@@ -93,7 +109,9 @@ def main():
             proj = meta.get("project", "?")
             age = _format_age(meta.get("started"))
             me = " (me)" if sid == my_sid else ""
-            print(f"  #{idx}  {proj}  {sid}  [{age}]{me}")
+            task = meta.get("task", "")
+            task_str = f"  {task}" if task else ""
+            print(f"  #{idx}  {proj}  {sid}  [{age}]{me}{task_str}")
         if not sessions:
             print("  No active sessions.")
         return

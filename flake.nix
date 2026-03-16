@@ -24,6 +24,9 @@
     caveSend = pkgs.writeShellScriptBin "cave-send" ''
       exec ${pkgs.python3}/bin/python3 ${./cave_send.py} "$@"
     '';
+    caveStatus = pkgs.writeShellScriptBin "cave-status" ''
+      exec ${pkgs.python3}/bin/python3 ${./cave_status.py} "$@"
+    '';
 
     jailHome = "/home/cave-coder";
 
@@ -103,7 +106,7 @@
         fuse-overlayfs
         fuse3
         gnupg
-      ] ++ [ pkgs."poppler-utils" ptyRelay caveSend ]))
+      ] ++ [ pkgs."poppler-utils" ptyRelay caveSend caveStatus ]))
       (set-env "TERMINFO_DIRS" "${pkgs.ncurses}/share/terminfo")
       (set-env "LOCALE_ARCHIVE" "${pkgs.glibcLocales}/lib/locale/locale-archive")
       (set-env "LANG" "en_US.UTF-8")

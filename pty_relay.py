@@ -56,10 +56,27 @@ def _send_ack(reply_to):
         pass
 
 
-def _handle_message(buf, master_fd):
+def _update_meta(meta_path, updates):
+    """Merge updates into the sidecar metadata file."""
+    meta = {}
+    try:
+        with open(meta_path) as f:
+            meta = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pass
+    meta.update(updates)
+    try:
+        with open(meta_path, "w") as f:
+            json.dump(meta, f)
+    except OSError:
+        pass
+
+
+def _handle_message(buf, master_fd, meta_path=None):
     """Process an incoming message buffer.
 
     If the message is a JSON frame (starts with '{'), parse it:
+      - "type": "meta_update" updates the sidecar metadata (no PTY injection)
       - "body" is injected into the PTY
       - "reply_to" (optional) gets a delivery ack
     Otherwise, treat as raw text and inject directly.
@@ -71,6 +88,13 @@ def _handle_message(buf, master_fd):
         except (json.JSONDecodeError, UnicodeDecodeError):
             # Not valid JSON, treat as raw
             os.write(master_fd, raw + b"\r")
+            return
+        # Metadata update: modify sidecar JSON, no PTY injection
+        if frame.get("type") == "meta_update" and meta_path:
+            _update_meta(meta_path, frame.get("fields", {}))
+            reply_to = frame.get("reply_to")
+            if reply_to:
+                _send_ack(reply_to)
             return
         body = frame.get("body", "")
         if isinstance(body, str):
@@ -84,11 +108,13 @@ def _handle_message(buf, master_fd):
         os.write(master_fd, raw + b"\r")
 
 
-def relay(child_argv, sock_path):
+def relay(child_argv, sock_path, meta_path=None):
     """Run child in a PTY, forward I/O, accept UDS message injection.
 
     Returns the child's exit code.
     """
+    if meta_path is None:
+        meta_path = _meta_path(sock_path)
     master_fd, slave_fd = os.openpty()
     stdin_fd = sys.stdin.fileno()
     stdout_fd = sys.stdout.fileno()
@@ -193,7 +219,7 @@ def relay(child_argv, sock_path):
                     else:
                         # Client closed. Process accumulated message.
                         if buf:
-                            _handle_message(buf, master_fd)
+                            _handle_message(buf, master_fd, meta_path)
                         conn.close()
                         del clients[fd]
 

@@ -12,6 +12,7 @@ import pytest
 
 RELAY = str(Path(__file__).parent.parent / "pty_relay.py")
 SEND = str(Path(__file__).parent.parent / "cave_send.py")
+STATUS = str(Path(__file__).parent.parent / "cave_status.py")
 
 
 def _wait_for_socket(sock_path, timeout=5):
@@ -214,7 +215,7 @@ class TestCaveSend:
         assert b"[user]" not in stdout
 
     def test_send_agent_tag(self, tmp_path):
-        """Agent sessions are tagged with their session index."""
+        """Agent sessions are tagged with project and index."""
         sock = str(tmp_path / "test.sock")
         script = tmp_path / "echo.sh"
         script.write_text("#!/bin/bash\nread -r line; echo \"GOT:$line\"\n")
@@ -225,13 +226,17 @@ class TestCaveSend:
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
         assert _wait_for_socket(sock), "Socket never appeared"
-        env = {**os.environ, "CODING_CAVE_SESSION_INDEX": "3"}
+        env = {
+            **os.environ,
+            "CODING_CAVE_SESSION_INDEX": "3",
+            "CODING_CAVE_PROJECT_PATH": "/projects/myproj",
+        }
         subprocess.run(
             [sys.executable, SEND, "--sock", sock, "hi from agent"],
             check=True, env=env,
         )
         stdout, _ = relay.communicate(timeout=5)
-        assert b"GOT:[#3] hi from agent" in stdout
+        assert b"GOT:[myproj#3] hi from agent" in stdout
 
     def test_send_via_pipe(self, tmp_path):
         """cave-send reads message from stdin when piped."""
@@ -395,3 +400,260 @@ class TestStructuredProtocol:
         _send_message(sock, frame)
         stdout, _ = proc.communicate(timeout=5)
         assert b"GOT:no reply expected" in stdout
+
+
+class TestMetaUpdate:
+    def test_meta_update_modifies_sidecar(self, tmp_path):
+        """meta_update frame updates the sidecar JSON without PTY injection."""
+        sock = str(tmp_path / "test.sock")
+        meta = tmp_path / "test.json"
+        script = tmp_path / "wait.sh"
+        # Script waits briefly then exits. No read, so any PTY injection would be ignored.
+        script.write_text("#!/bin/bash\nsleep 0.5\n")
+        script.chmod(0o755)
+
+        env = {
+            **os.environ,
+            "CODING_CAVE_SESSION_ID": "meta-test",
+            "CODING_CAVE_SESSION_INDEX": "9",
+            "CODING_CAVE_PROJECT_PATH": "/projects/testproj",
+        }
+        proc = subprocess.Popen(
+            [sys.executable, RELAY, "--sock", sock, "--", str(script)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=env,
+        )
+        assert _wait_for_socket(sock), "Socket never appeared"
+
+        # Send meta_update
+        frame = json.dumps({"type": "meta_update", "fields": {"task": "testing comms"}})
+        _send_message(sock, frame)
+        time.sleep(0.1)
+
+        # Verify sidecar was updated
+        data = json.loads(meta.read_text())
+        assert data["task"] == "testing comms"
+        # Original fields should still be there
+        assert data["index"] == "9"
+        assert data["project"] == "testproj"
+
+        proc.communicate(timeout=5)
+
+    def test_meta_update_does_not_inject_pty(self, tmp_path):
+        """meta_update frame should NOT inject anything into the PTY."""
+        sock = str(tmp_path / "test.sock")
+        script = tmp_path / "check.sh"
+        # Read with timeout. If nothing arrives, print EMPTY.
+        script.write_text(
+            "#!/bin/bash\n"
+            "read -t 1 -r line && echo \"GOT:$line\" || echo EMPTY\n"
+        )
+        script.chmod(0o755)
+
+        env = {
+            **os.environ,
+            "CODING_CAVE_SESSION_ID": "meta-test2",
+            "CODING_CAVE_SESSION_INDEX": "5",
+            "CODING_CAVE_PROJECT_PATH": "/projects/testproj",
+        }
+        proc = subprocess.Popen(
+            [sys.executable, RELAY, "--sock", sock, "--", str(script)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=env,
+        )
+        assert _wait_for_socket(sock), "Socket never appeared"
+
+        frame = json.dumps({"type": "meta_update", "fields": {"task": "stealth update"}})
+        _send_message(sock, frame)
+
+        stdout, _ = proc.communicate(timeout=5)
+        assert b"EMPTY" in stdout
+        assert b"GOT:" not in stdout
+
+    def test_meta_update_with_ack(self, tmp_path):
+        """meta_update with reply_to sends ack back."""
+        sock = str(tmp_path / "test.sock")
+        reply_sock_path = str(tmp_path / "reply.sock")
+
+        reply_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        reply_sock.bind(reply_sock_path)
+        reply_sock.listen(1)
+        reply_sock.settimeout(5)
+
+        script = tmp_path / "wait.sh"
+        script.write_text("#!/bin/bash\nsleep 0.5\n")
+        script.chmod(0o755)
+
+        env = {
+            **os.environ,
+            "CODING_CAVE_SESSION_ID": "ack-meta-test",
+            "CODING_CAVE_SESSION_INDEX": "3",
+            "CODING_CAVE_PROJECT_PATH": "/projects/testproj",
+        }
+        proc = subprocess.Popen(
+            [sys.executable, RELAY, "--sock", sock, "--", str(script)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=env,
+        )
+        assert _wait_for_socket(sock), "Socket never appeared"
+
+        frame = json.dumps({
+            "type": "meta_update",
+            "fields": {"task": "ack test"},
+            "reply_to": reply_sock_path,
+        })
+        _send_message(sock, frame)
+
+        conn, _ = reply_sock.accept()
+        ack_data = b""
+        while True:
+            chunk = conn.recv(4096)
+            if not chunk:
+                break
+            ack_data += chunk
+        conn.close()
+        reply_sock.close()
+
+        ack = json.loads(ack_data)
+        assert ack["type"] == "ack"
+        assert ack["from"] == "ack-meta-test"
+
+        proc.communicate(timeout=5)
+
+
+class TestSenderTag:
+    def test_tag_includes_project_name(self, tmp_path):
+        """Agent sender tag includes project name: [project#N]."""
+        sock = str(tmp_path / "test.sock")
+        script = tmp_path / "echo.sh"
+        script.write_text("#!/bin/bash\nread -r line; echo \"GOT:$line\"\n")
+        script.chmod(0o755)
+
+        relay = subprocess.Popen(
+            [sys.executable, RELAY, "--sock", sock, "--", str(script)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        assert _wait_for_socket(sock), "Socket never appeared"
+        env = {
+            **os.environ,
+            "CODING_CAVE_SESSION_INDEX": "2",
+            "CODING_CAVE_PROJECT_PATH": "/projects/coding-cave",
+        }
+        subprocess.run(
+            [sys.executable, SEND, "--sock", sock, "hello"],
+            check=True, env=env,
+        )
+        stdout, _ = relay.communicate(timeout=5)
+        assert b"GOT:[coding-cave#2] hello" in stdout
+
+    def test_tag_falls_back_without_project(self, tmp_path):
+        """Without project path, tag falls back to [#N]."""
+        sock = str(tmp_path / "test.sock")
+        script = tmp_path / "echo.sh"
+        script.write_text("#!/bin/bash\nread -r line; echo \"GOT:$line\"\n")
+        script.chmod(0o755)
+
+        relay = subprocess.Popen(
+            [sys.executable, RELAY, "--sock", sock, "--", str(script)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        assert _wait_for_socket(sock), "Socket never appeared"
+        env = {k: v for k, v in os.environ.items()
+               if k != "CODING_CAVE_PROJECT_PATH"}
+        env["CODING_CAVE_SESSION_INDEX"] = "5"
+        subprocess.run(
+            [sys.executable, SEND, "--sock", sock, "hello"],
+            check=True, env=env,
+        )
+        stdout, _ = relay.communicate(timeout=5)
+        assert b"GOT:[#5] hello" in stdout
+
+
+class TestResolveIndex:
+    def test_resolve_existing_index(self, tmp_path, monkeypatch):
+        """resolve_index finds session by index number."""
+        ipc_dir = tmp_path / "ipc"
+        ipc_dir.mkdir()
+        (ipc_dir / "sid-aaa.sock").touch()
+        (ipc_dir / "sid-aaa.json").write_text(json.dumps({
+            "sid": "sid-aaa", "index": "4", "project": "myproj",
+        }))
+        sys.path.insert(0, str(Path(__file__).parent.parent))
+        import cave_send
+        monkeypatch.setattr(cave_send, "IPC_DIR", ipc_dir)
+        sid, sock = cave_send.resolve_index("4")
+        assert sid == "sid-aaa"
+        assert sock.endswith("sid-aaa.sock")
+
+    def test_resolve_with_hash_prefix(self, tmp_path, monkeypatch):
+        """resolve_index handles '#4' format."""
+        ipc_dir = tmp_path / "ipc"
+        ipc_dir.mkdir()
+        (ipc_dir / "sid-bbb.sock").touch()
+        (ipc_dir / "sid-bbb.json").write_text(json.dumps({
+            "sid": "sid-bbb", "index": "2", "project": "proj",
+        }))
+        sys.path.insert(0, str(Path(__file__).parent.parent))
+        import cave_send
+        monkeypatch.setattr(cave_send, "IPC_DIR", ipc_dir)
+        sid, _ = cave_send.resolve_index("#2")
+        assert sid == "sid-bbb"
+
+    def test_resolve_missing_returns_none(self, tmp_path, monkeypatch):
+        """resolve_index returns (None, None) for unknown index."""
+        ipc_dir = tmp_path / "ipc"
+        ipc_dir.mkdir()
+        sys.path.insert(0, str(Path(__file__).parent.parent))
+        import cave_send
+        monkeypatch.setattr(cave_send, "IPC_DIR", ipc_dir)
+        sid, sock = cave_send.resolve_index("99")
+        assert sid is None
+        assert sock is None
+
+
+class TestCaveStatus:
+    def test_status_updates_metadata(self):
+        """cave-status sends a meta_update that modifies the sidecar."""
+        import tempfile
+        # Use /tmp directly for short socket paths (AF_UNIX limit)
+        home = tempfile.mkdtemp(prefix="cs", dir="/tmp")
+        try:
+            home = Path(home)
+            ipc_dir = home / "ipc"
+            ipc_dir.mkdir()
+            sock = str(ipc_dir / "st.sock")
+            meta = ipc_dir / "st.json"
+            script = home / "w.sh"
+            script.write_text("#!/bin/bash\nsleep 0.8\n")
+            script.chmod(0o755)
+
+            env = {
+                **os.environ,
+                "CODING_CAVE_SESSION_ID": "st",
+                "CODING_CAVE_SESSION_INDEX": "1",
+                "CODING_CAVE_PROJECT_PATH": "/projects/demo",
+                "HOME": str(home),
+            }
+
+            proc = subprocess.Popen(
+                [sys.executable, RELAY, "--sock", sock, "--", str(script)],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                env=env,
+            )
+            assert _wait_for_socket(sock), "Socket never appeared"
+
+            result = subprocess.run(
+                [sys.executable, STATUS, "improving comms"],
+                capture_output=True, text=True, env=env,
+            )
+            assert result.returncode == 0
+            assert "improving comms" in result.stdout
+
+            time.sleep(0.1)
+            data = json.loads(meta.read_text())
+            assert data["task"] == "improving comms"
+
+            proc.communicate(timeout=5)
+        finally:
+            import shutil
+            shutil.rmtree(str(home), ignore_errors=True)
