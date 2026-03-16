@@ -10,22 +10,17 @@ Usage:
 Target can be a session index (e.g. 4) or a full session ID.
 
 The message is injected into the target session's terminal as if
-typed by the user, followed by Enter (CR). Uses the structured JSON
-protocol with delivery acknowledgment. Exits 0 on delivery, non-zero
-on failure.
+typed by the user, followed by Enter (CR).
 """
 import json
 import os
 import socket
 import sys
-import tempfile
 import time
 from pathlib import Path
 
 
 IPC_DIR = Path.home() / "ipc"
-
-ACK_TIMEOUT = 3
 
 
 def _sender_tag():
@@ -41,57 +36,15 @@ def _sender_tag():
 
 
 def send(sock_path, message, tag=True):
-    """Send a message to a session's PTY relay.
-
-    Uses the structured JSON protocol with a temporary reply socket
-    for delivery acknowledgment. Returns the ack dict on success,
-    None on timeout/failure.
-    """
     if isinstance(message, bytes):
         message = message.decode()
     if tag:
         message = f"{_sender_tag()} {message}"
-
-    reply_dir = tempfile.mkdtemp(prefix="cave-ack-")
-    reply_path = os.path.join(reply_dir, "reply.sock")
-    reply_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    try:
-        reply_sock.bind(reply_path)
-        reply_sock.listen(1)
-        reply_sock.settimeout(ACK_TIMEOUT)
-
-        frame = json.dumps({
-            "from": _sender_tag(),
-            "body": message,
-            "reply_to": reply_path,
-        })
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.connect(sock_path)
-        s.sendall(frame.encode())
-        s.shutdown(socket.SHUT_WR)
-        s.close()
-
-        conn, _ = reply_sock.accept()
-        ack_data = b""
-        while True:
-            chunk = conn.recv(4096)
-            if not chunk:
-                break
-            ack_data += chunk
-        conn.close()
-        return json.loads(ack_data)
-    except (socket.timeout, OSError, json.JSONDecodeError):
-        return None
-    finally:
-        reply_sock.close()
-        try:
-            os.unlink(reply_path)
-        except FileNotFoundError:
-            pass
-        try:
-            os.rmdir(reply_dir)
-        except OSError:
-            pass
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.connect(sock_path)
+    s.sendall(message.encode())
+    s.shutdown(socket.SHUT_WR)
+    s.close()
 
 
 def resolve_index(index):
@@ -198,12 +151,9 @@ def main():
             sys.exit(1)
 
     try:
-        ack = send(sock_path, message, tag=not raw)
+        send(sock_path, message, tag=not raw)
     except (ConnectionRefusedError, FileNotFoundError) as e:
         print(f"Failed to send: {e}", file=sys.stderr)
-        sys.exit(1)
-    if not ack or not isinstance(ack, dict) or ack.get("type") != "ack":
-        print("No ack (timeout)", file=sys.stderr)
         sys.exit(1)
 
 
