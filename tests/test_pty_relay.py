@@ -206,7 +206,7 @@ class TestCaveSend:
         )
         assert result.returncode == 0
         stdout, _ = relay.communicate(timeout=5)
-        assert b"GOT:[user] hello from cave-send" in stdout
+        assert b"GOT:Message from user: hello from cave-send" in stdout
 
     def test_send_raw_skips_tag(self, tmp_path):
         """--raw sends message without sender tag."""
@@ -228,7 +228,7 @@ class TestCaveSend:
         assert result.returncode == 0
         stdout, _ = relay.communicate(timeout=5)
         assert b"GOT:no tag" in stdout
-        assert b"[user]" not in stdout
+        assert b"Message from" not in stdout
 
     def test_send_agent_tag(self, tmp_path):
         """Agent sessions are tagged with project and index."""
@@ -254,7 +254,7 @@ class TestCaveSend:
         )
         assert result.returncode == 0
         stdout, _ = relay.communicate(timeout=5)
-        assert b"GOT:[myproj#3] hi from agent" in stdout
+        assert b"GOT:Message from session #3 (myproj): hi from agent" in stdout
 
     def test_send_via_pipe(self, tmp_path):
         """cave-send reads message from stdin when piped."""
@@ -278,7 +278,7 @@ class TestCaveSend:
         )
         assert result.returncode == 0
         stdout, _ = relay.communicate(timeout=5)
-        assert b"GOT:[user] piped message" in stdout
+        assert b"GOT:Message from user: piped message" in stdout
 
     def test_send_exits_nonzero_on_failure(self, tmp_path):
         """cave-send exits non-zero when relay is not running."""
@@ -573,7 +573,7 @@ class TestSenderTag:
             check=True, env=env,
         )
         stdout, _ = relay.communicate(timeout=5)
-        assert b"GOT:[coding-cave#2] hello" in stdout
+        assert b"GOT:Message from session #2 (coding-cave): hello" in stdout
 
     def test_tag_falls_back_without_project(self, tmp_path):
         """Without project path, tag falls back to [#N]."""
@@ -595,7 +595,7 @@ class TestSenderTag:
             check=True, env=env,
         )
         stdout, _ = relay.communicate(timeout=5)
-        assert b"GOT:[#5] hello" in stdout
+        assert b"GOT:Message from session #5: hello" in stdout
 
 
 class TestResolveIndex:
