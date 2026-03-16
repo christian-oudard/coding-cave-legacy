@@ -365,8 +365,8 @@ def _find_cave_root(project=None):
 def _prompt_session(session_list):
     """Prompt user to select from multiple sessions.
 
-    Groups sessions by project, sorted by most recent session per project.
-    Selection key is 'project #idx' (or just 'project' if only one session).
+    Groups sessions by project (most recent first), with per-project numbering.
+    Each line gets a sequential number for easy selection.
     """
     from collections import defaultdict
 
@@ -389,18 +389,17 @@ def _prompt_session(session_list):
     )
 
     by_key = {}
+    n = 0
     for proj in project_order:
         proj_sessions = by_project[proj]
         multi = len(proj_sessions) > 1
         for s in proj_sessions:
+            n += 1
             ago = _relative_age(s["started"])
             idx = s.get("index", "?")
             label = f"{proj} #{idx}" if multi else proj
-            by_key[label] = s
-            # Also allow bare project name when unambiguous
-            if not multi:
-                by_key[proj] = s
-            print(f"  {label}  [{ago}]  PID {s['bwrap_pid']}", file=sys.stderr)
+            by_key[str(n)] = s
+            print(f"  {n}) {label}  [{ago}]", file=sys.stderr)
 
     try:
         choice = input("Session: ").strip()
