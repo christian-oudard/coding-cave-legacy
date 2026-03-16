@@ -164,7 +164,8 @@ def create_session_gitdir(slug, sid, overlay_base):
         '    fi\n'
         'fi\n'
         # Notify sibling sessions on the same project
-        'if [ "$pushed_ok" = 1 ] && command -v cave-send >/dev/null; then\n'
+        'if [ "$pushed_ok" = 1 ] && [ -z "$CODING_CAVE_NO_SEND" ] '
+        '&& command -v cave-send >/dev/null; then\n'
         '    cave-send --all-project "Pushed to $branch, run: '
         'git fetch shared && git rebase shared/$branch" '
         '</dev/null 2>/dev/null &\n'
