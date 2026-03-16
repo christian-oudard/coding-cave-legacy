@@ -86,25 +86,32 @@ def _parse_log(git_cmd, range_spec):
 
 
 def _print_rewrite_summary(old_entries, new_entries):
-    """Print summary of amended vs new commits."""
+    """Print summary of amended, added, and dropped commits."""
     old_by_subject = {}
     old_by_tree = {}
+    matched_old = set()
     for h, tree, subj in old_entries:
         old_by_subject[subj] = h
         old_by_tree[tree] = (h, subj)
     for h, tree, subj in new_entries:
         old_h = old_by_subject.pop(subj, None)
         if old_h and old_h != h:
+            matched_old.add(old_h)
             print(f"  amend {old_h} -> {h} {subj}", file=sys.stderr)
             old_by_tree.pop(tree, None)
         elif old_h:
+            matched_old.add(old_h)
             print(f"  {h} {subj}", file=sys.stderr)
             old_by_tree.pop(tree, None)
         elif tree in old_by_tree:
             old_h, old_subj = old_by_tree.pop(tree)
+            matched_old.add(old_h)
             print(f"  amend {old_h} -> {h} {subj}", file=sys.stderr)
         else:
             print(f"  + {h} {subj}", file=sys.stderr)
+    for h, tree, subj in old_entries:
+        if h not in matched_old:
+            print(f"  - {h} {subj}", file=sys.stderr)
 
 
 def _get_branches(gitdir_path, *, bare=False):
@@ -420,6 +427,36 @@ def _pull_branch_current(slug, project_dir, gitdir_path, branch, cave_sha,
             capture_output=True,
         )
         if ls_ancestor.returncode != 0:
+            # Check if host just rolled back (host HEAD is still an
+            # ancestor of last_synced).  This is safe to pull without
+            # --force: the host went backwards, the cave moved forward.
+            host_behind = subprocess.run(
+                host_git + ["merge-base", "--is-ancestor", "HEAD", last_synced],
+                capture_output=True,
+            )
+            if host_behind.returncode == 0:
+                stash_result = subprocess.run(
+                    host_git + ["stash", "--include-untracked"],
+                    capture_output=True, text=True,
+                )
+                stashed = (stash_result.returncode == 0
+                           and "No local changes" not in stash_result.stdout)
+                subprocess.run(
+                    host_git + ["reset", "--hard", "FETCH_HEAD"],
+                    check=True, capture_output=True,
+                )
+                if stashed:
+                    _stash_pop_or_warn(host_git, project_dir)
+                entries = _parse_log(host_git, f"{host_head}..HEAD")
+                print(f"Pulled {slug} ({len(entries)} commit(s), "
+                      f"host was behind last sync).", file=sys.stderr)
+                for h, tree, subj in entries:
+                    print(f"  {h} {subj}", file=sys.stderr)
+                return subprocess.run(
+                    host_git + ["rev-parse", "HEAD"],
+                    capture_output=True, text=True, check=True,
+                ).stdout.strip()
+
             if not force:
                 print(f"Host rewrote history for {slug} since last sync.",
                       file=sys.stderr)

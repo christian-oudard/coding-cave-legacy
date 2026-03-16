@@ -2083,6 +2083,87 @@ class TestHostRewriteDetection:
         assert (env.host / "new.txt").read_text() == "new\n"
 
 
+class TestHostRolledBack:
+    """Host rolled back (checkout HEAD~1) then cave amended.
+
+    This is NOT a host rewrite. The host went backwards, the cave moved
+    forward. Pull should adopt cave's version without --force.
+    """
+
+    def test_host_rollback_pulls_without_force(self, pull_env, capsys):
+        """Host rolls back, cave amends. Pull adopts cave's version."""
+        env = pull_env
+
+        # Cave makes two commits, pull them
+        cave_commit(env, "first cave commit", content="first\n")
+        cave_commit(env, "broken commit", content="broken\n")
+        wrapper.pull_project(env.slug)
+        assert (env.host / "file.txt").read_text() == "broken\n"
+
+        # Host rolls back one commit
+        _run("git", "-C", str(env.host), "reset", "--hard", "HEAD~1")
+        assert (env.host / "file.txt").read_text() == "first\n"
+
+        # Cave amends: drop "first cave commit", rewrite "broken commit"
+        _cave_git(env, "reset", "--soft", "HEAD~2")
+        (env.cave / "file.txt").write_text("fixed\n")
+        _cave_git(env, "add", "file.txt")
+        _cave_git(env, "commit", "-m", "fixed commit")
+
+        # Pull should succeed without --force
+        capsys.readouterr()
+        wrapper.pull_project(env.slug)
+        assert (env.host / "file.txt").read_text() == "fixed\n"
+
+        captured = capsys.readouterr()
+        assert "behind last sync" in captured.err
+        assert "rewrote" not in captured.err
+
+    def test_host_rollback_preserves_uncommitted(self, pull_env):
+        """Host rolls back with uncommitted changes, pull preserves them."""
+        env = pull_env
+
+        cave_commit(env, "cave work", content="cave\n")
+        wrapper.pull_project(env.slug)
+
+        # Host rolls back and has uncommitted changes to a different file
+        _run("git", "-C", str(env.host), "reset", "--hard", "HEAD~1")
+        (env.host / "other.txt").write_text("uncommitted\n")
+        _run("git", "-C", str(env.host), "add", "other.txt")
+
+        # Cave amends its commit
+        cave_commit(env, "amended cave work", content="amended\n", amend=True)
+
+        wrapper.pull_project(env.slug)
+        assert (env.host / "file.txt").read_text() == "amended\n"
+        # Uncommitted changes should be restored via stash
+        assert (env.host / "other.txt").read_text() == "uncommitted\n"
+
+    def test_actual_host_rewrite_still_requires_force(self, pull_env, capsys):
+        """Host rolls back AND makes new commits. Still requires --force."""
+        env = pull_env
+
+        cave_commit(env, "cave work", content="cave\n")
+        wrapper.pull_project(env.slug)
+
+        # Host rolls back AND makes a new commit (actual rewrite)
+        _run("git", "-C", str(env.host), "reset", "--hard", "HEAD~1")
+        (env.host / "file.txt").write_text("host new work\n")
+        _run("git", "-C", str(env.host), "add", ".")
+        _run("git", "-C", str(env.host), "commit", "-m", "host diverged")
+
+        # Cave also makes a new commit
+        cave_commit(env, "more cave work", filename="new.txt", content="new\n")
+
+        # Pull should still require --force (genuine divergence)
+        capsys.readouterr()
+        wrapper.pull_project(env.slug)
+        captured = capsys.readouterr()
+        assert "rewrote history" in captured.err
+        # Host should NOT have the cave's new file (refused)
+        assert not (env.host / "new.txt").exists()
+
+
 class TestPullStashPopFailure:
     """Stash pop failures produce a warning instead of silent data loss."""
 
