@@ -35,11 +35,10 @@ def _sender_tag():
     return "user:"
 
 
-def send(sock_path, message, tag=True):
+def send(sock_path, message):
     if isinstance(message, bytes):
         message = message.decode()
-    if tag:
-        message = f"{_sender_tag()} {message}"
+    message = f"{_sender_tag()} {message}"
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.connect(sock_path)
     s.sendall(message.encode())
@@ -90,10 +89,6 @@ def _format_age(started):
 
 
 def main():
-    raw = "--raw" in sys.argv
-    if raw:
-        sys.argv.remove("--raw")
-
     if len(sys.argv) < 2:
         print("Usage: cave-send <target> <message>", file=sys.stderr)
         print("       cave-send --list", file=sys.stderr)
@@ -151,7 +146,7 @@ def main():
             sys.exit(1)
 
     try:
-        send(sock_path, message, tag=not raw)
+        send(sock_path, message)
     except (ConnectionRefusedError, FileNotFoundError) as e:
         print(f"Failed to send: {e}", file=sys.stderr)
         sys.exit(1)

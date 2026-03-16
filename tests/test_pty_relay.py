@@ -193,26 +193,6 @@ class TestCaveSend:
         stdout, _ = relay.communicate(timeout=5)
         assert b"GOT:user: hello from cave-send" in stdout
 
-    def test_send_raw_skips_tag(self, tmp_path):
-        """--raw sends message without sender tag."""
-        sock = str(tmp_path / "test.sock")
-        script = tmp_path / "echo.sh"
-        script.write_text("#!/bin/bash\nread -r line; echo \"GOT:$line\"\n")
-        script.chmod(0o755)
-
-        relay = subprocess.Popen(
-            [sys.executable, RELAY, "--sock", sock, "--", str(script)],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        )
-        assert _wait_for_socket(sock), "Socket never appeared"
-        subprocess.run(
-            [sys.executable, SEND, "--raw", "--sock", sock, "no tag"],
-            check=True,
-        )
-        stdout, _ = relay.communicate(timeout=5)
-        assert b"GOT:no tag" in stdout
-        assert b"user:" not in stdout
-
     def test_send_agent_tag(self, tmp_path):
         """Agent sessions are tagged with project and index."""
         sock = str(tmp_path / "test.sock")

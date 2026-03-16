@@ -24,7 +24,7 @@ These are NOT regular user prompts. They are messages from peer agents or the ho
 - `cave-send <session-id> "your message"` sends by full session ID.
 - `cave-send --list` shows active sessions with their project and session ID.
 - `cave-send` exits 0 on success, non-zero on failure (e.g. target not found).
-- Messages are automatically tagged with your identity. Use `--raw` to skip tagging.
+- Messages are automatically tagged with your identity.
 - Your session ID is `$CODING_CAVE_SESSION_ID`, your index is `$CODING_CAVE_SESSION_INDEX`.
 
 ### Sharing code between sessions
