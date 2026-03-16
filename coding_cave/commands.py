@@ -413,33 +413,39 @@ def cmd_cp(srcs, dest, recursive=False, force=False):
     """Copy files between host and a running cave session."""
 
     def resolve_cave_path(spec):
-        """Parse cave path spec. Returns (cave_abs_path, is_home) or (None, False).
+        """Parse cave path spec. Returns (cave_abs_path, is_home, project) or (None, False, None).
 
         Three prefixes:
-          cave:path  — CWD project (auto-detected), relative paths
-          slug:path  — specific project by name, relative paths
+          cave:path  — CWD project (auto-detected)
+          slug:path  — specific project by name
           cave-root:path  — cave home (~/path) or absolute non-project paths
+
+        Relative paths under cave:/slug: resolve to /projects/<slug>/path.
+        Absolute paths under cave:/slug: resolve as-is but keep the project
+        hint for session selection (e.g. cave:/tmp/file picks the CWD
+        project's session).
 
         cave_abs_path is the absolute path inside the cave filesystem.
         is_home=True means the path can be accessed directly via cave_home()
         without a running session.
+        project is the slug hint for session selection (None for cave-root:).
         """
         if ":" not in spec:
-            return None, False
+            return None, False, None
         prefix, _, path = spec.partition(":")
 
         if prefix == "cave-root":
             # cave-root: — home or absolute non-project paths
             if path.startswith("~/") or path == "~":
                 expanded = f"{_state.JAIL_HOME}/{path[2:]}" if path != "~" else _state.JAIL_HOME
-                return expanded, True
+                return expanded, True, None
             if path == _state.JAIL_HOME or path.startswith(_state.JAIL_HOME + "/"):
-                return path, True
+                return path, True, None
             if path.startswith("/"):
                 if path == "/projects" or path.startswith("/projects/"):
                     print("Use <slug>:<path> to access project files.", file=sys.stderr)
                     sys.exit(1)
-                return path, False
+                return path, False, None
             print("cave-root: requires ~/path or /absolute/path.", file=sys.stderr)
             sys.exit(1)
 
@@ -456,18 +462,18 @@ def cmd_cp(srcs, dest, recursive=False, force=False):
                 sys.exit(1)
             prefix = slug
 
-        # slug: — project-relative paths only
+        # slug: — must be a registered project
         if prefix not in projects.load_projects():
             print(f"Unknown project: {prefix}", file=sys.stderr)
             sys.exit(1)
         if path.startswith("~"):
             print(f"Use cave-root:{path} to access cave home.", file=sys.stderr)
             sys.exit(1)
+        # Absolute path — use as-is but keep project hint for session selection
         if path.startswith("/"):
-            print(f"Use cave-root:{path} to access non-project paths.", file=sys.stderr)
-            sys.exit(1)
+            return path, False, prefix
         rel = path or "."
-        return (f"/projects/{prefix}/{rel}" if rel != "." else f"/projects/{prefix}"), False
+        return (f"/projects/{prefix}/{rel}" if rel != "." else f"/projects/{prefix}"), False, prefix
 
     def _check_boundary(resolved, boundary, label):
         """Exit if resolved path escapes boundary directory."""
@@ -477,7 +483,7 @@ def cmd_cp(srcs, dest, recursive=False, force=False):
             print(f"Path escapes {label}: {resolved}", file=sys.stderr)
             sys.exit(1)
 
-    def cave_host_path(cave_path, is_home, writing=False):
+    def cave_host_path(cave_path, is_home, project=None, writing=False):
         """Map a cave-absolute path to a host filesystem path.
 
         Home paths use cave_home() directly (no session needed).
@@ -496,21 +502,23 @@ def cmd_cp(srcs, dest, recursive=False, force=False):
             _check_boundary(result, home, "cave home")
             return result
 
-        # Extract project hint from path
-        m = re.match(r'^/projects/([^/]+)', cave_path)
-        project_hint = m.group(1) if m else None
+        # Use explicit project hint, or extract from path
+        if not project:
+            m = re.match(r'^/projects/([^/]+)', cave_path)
+            project = m.group(1) if m else None
 
-        root = _find_cave_root(project=project_hint)
+        root = _find_cave_root(project=project)
         if root is not None:
             # /proc/pid/root paths are sandboxed by the kernel namespace —
             # symlinks and .. resolve within the cave's mount namespace.
             return root / cave_path.lstrip("/")
 
         # No session — use saved-upper for writes, saved-upper then
-        # host source for reads.
-        if project_hint:
-            rel = cave_path[len(f"/projects/{project_hint}"):]
-            saved_upper = _state.projects_dir() / project_hint / "saved-upper"
+        # host source for reads.  Only for project-relative paths.
+        project_prefix = f"/projects/{project}" if project else None
+        if project_prefix and (cave_path == project_prefix or cave_path.startswith(project_prefix + "/")):
+            rel = cave_path[len(project_prefix):]
+            saved_upper = _state.projects_dir() / project / "saved-upper"
 
             if writing:
                 saved_upper.mkdir(parents=True, exist_ok=True)
@@ -527,8 +535,8 @@ def cmd_cp(srcs, dest, recursive=False, force=False):
 
             # Fall back to host source (the overlay lower layer)
             all_projects = projects.load_projects()
-            if project_hint in all_projects:
-                host_source = Path(all_projects[project_hint])
+            if project in all_projects:
+                host_source = Path(all_projects[project])
                 result = (host_source / rel.lstrip("/")).resolve() if rel else host_source.resolve()
                 _check_boundary(result, host_source, "project dir")
                 return result
@@ -537,12 +545,12 @@ def cmd_cp(srcs, dest, recursive=False, force=False):
         sys.exit(1)
 
     # Determine direction: host->cave or cave->host
-    dest_cave, dest_home = resolve_cave_path(dest)
-    src_cave, src_home = resolve_cave_path(srcs[0]) if len(srcs) == 1 else (None, False)
+    dest_cave, dest_home, dest_proj = resolve_cave_path(dest)
+    src_cave, src_home, src_proj = resolve_cave_path(srcs[0]) if len(srcs) == 1 else (None, False, None)
 
     if dest_cave:
         # host -> cave: cp <host-files>... <slug>:<cave-path>
-        cave_dest = cave_host_path(dest_cave, dest_home, writing=True)
+        cave_dest = cave_host_path(dest_cave, dest_home, project=dest_proj, writing=True)
         cave_dest.parent.mkdir(parents=True, exist_ok=True)
         for src in srcs:
             src_path_obj = Path(src).resolve()
@@ -564,7 +572,7 @@ def cmd_cp(srcs, dest, recursive=False, force=False):
             print(f"  {src} -> {dest}", file=sys.stderr)
     elif src_cave:
         # cave -> host: cp <slug>:<cave-path> <host-dest>
-        cave_src = cave_host_path(src_cave, src_home)
+        cave_src = cave_host_path(src_cave, src_home, project=src_proj)
         if cave_src.is_symlink():
             print(f"Refusing to copy symlink from cave: {srcs[0]}", file=sys.stderr)
             sys.exit(1)
