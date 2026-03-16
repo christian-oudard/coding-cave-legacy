@@ -298,14 +298,19 @@ class TestCpCavePrefix:
 
 
 class TestCpAbsoluteCavePaths:
-    """slug: only accepts relative paths, absolute paths are rejected."""
+    """slug: accepts both relative and absolute paths."""
 
-    def test_slug_absolute_project_path_rejected(self, cp_env):
-        """slug:/projects/<slug>/... is rejected."""
+    def test_slug_absolute_path_works(self, cp_env):
+        """slug:/tmp/file resolves inside the session namespace."""
         e = cp_env
+        tmp = e.cave_root / "tmp"
+        tmp.mkdir(exist_ok=True)
+        (tmp / "data.txt").write_text("from /tmp\n")
         dest = e.tmp_path / "out.txt"
-        with pytest.raises(SystemExit):
-            wrapper.cmd_cp([f"{e.slug}:/projects/{e.slug}/deep/file.txt"], str(dest))
+
+        wrapper.cmd_cp([f"{e.slug}:/tmp/data.txt"], str(dest))
+
+        assert dest.read_text() == "from /tmp\n"
 
     def test_relative_path_works(self, cp_env):
         e = cp_env
@@ -393,7 +398,7 @@ class TestCpClobberProtection:
 
 
 class TestCpTildeExpansion:
-    """~ in cave paths resolves to the persistent home directory via cave-root: prefix."""
+    """~ in cave paths resolves to the persistent home directory."""
 
     def test_tilde_copy_from_home(self, cp_env):
         e = cp_env
@@ -402,7 +407,7 @@ class TestCpTildeExpansion:
         (home / "notes.txt").write_text("from home\n")
         dest = e.tmp_path / "notes.txt"
 
-        wrapper.cmd_cp(["cave-root:~/notes.txt"], str(dest))
+        wrapper.cmd_cp([f"{e.slug}:~/notes.txt"], str(dest))
 
         assert dest.read_text() == "from home\n"
 
@@ -413,7 +418,7 @@ class TestCpTildeExpansion:
         src = e.tmp_path / "upload.txt"
         src.write_text("to home\n")
 
-        wrapper.cmd_cp([str(src)], "cave-root:~/upload.txt")
+        wrapper.cmd_cp([str(src)], f"{e.slug}:~/upload.txt")
 
         assert (home / "upload.txt").read_text() == "to home\n"
 
@@ -425,7 +430,7 @@ class TestCpTildeExpansion:
         (subdir / "file.txt").write_text("deep\n")
         dest = e.tmp_path / "file.txt"
 
-        wrapper.cmd_cp(["cave-root:~/deep/dir/file.txt"], str(dest))
+        wrapper.cmd_cp([f"{e.slug}:~/deep/dir/file.txt"], str(dest))
 
         assert dest.read_text() == "deep\n"
 
@@ -441,7 +446,7 @@ class TestCpTildeExpansion:
         (home / "orphan.txt").write_text("no session\n")
         dest = e.tmp_path / "orphan.txt"
 
-        wrapper.cmd_cp(["cave-root:~/orphan.txt"], str(dest))
+        wrapper.cmd_cp([f"{e.slug}:~/orphan.txt"], str(dest))
 
         assert dest.read_text() == "no session\n"
 
@@ -453,7 +458,7 @@ class TestCpTildeExpansion:
         (home / "abs.txt").write_text("absolute\n")
         dest = e.tmp_path / "abs.txt"
 
-        wrapper.cmd_cp(["cave-root:/home/cave-coder/abs.txt"], str(dest))
+        wrapper.cmd_cp([f"{e.slug}:/home/cave-coder/abs.txt"], str(dest))
 
         assert dest.read_text() == "absolute\n"
 
@@ -466,17 +471,10 @@ class TestCpTildeExpansion:
         (subdir / "two.txt").write_text("2\n")
         dest = e.tmp_path / "mydir"
 
-        wrapper.cmd_cp(["cave-root:~/mydir"], str(dest), recursive=True)
+        wrapper.cmd_cp([f"{e.slug}:~/mydir"], str(dest), recursive=True)
 
         assert (dest / "one.txt").read_text() == "1\n"
         assert (dest / "two.txt").read_text() == "2\n"
-
-    def test_slug_tilde_rejected(self, cp_env):
-        """slug:~/path is rejected — must use cave-root:~/path."""
-        e = cp_env
-        dest = e.tmp_path / "out.txt"
-        with pytest.raises(SystemExit):
-            wrapper.cmd_cp([f"{e.slug}:~/notes.txt"], str(dest))
 
 
 class TestCpCrossProject:
@@ -529,7 +527,7 @@ class TestCpCrossProject:
 
 
 class TestCpArbitraryPaths:
-    """cave-root: prefix accesses arbitrary cave filesystem paths via /proc/pid/root."""
+    """Absolute paths via slug: access arbitrary cave filesystem paths."""
 
     def test_copy_from_tmp(self, cp_env):
         e = cp_env
@@ -538,7 +536,7 @@ class TestCpArbitraryPaths:
         (tmp / "data.txt").write_text("from /tmp\n")
         dest = e.tmp_path / "out.txt"
 
-        wrapper.cmd_cp(["cave-root:/tmp/data.txt"], str(dest))
+        wrapper.cmd_cp([f"{e.slug}:/tmp/data.txt"], str(dest))
 
         assert dest.read_text() == "from /tmp\n"
 
@@ -549,7 +547,7 @@ class TestCpArbitraryPaths:
         src = e.tmp_path / "upload.txt"
         src.write_text("to /tmp\n")
 
-        wrapper.cmd_cp([str(src)], "cave-root:/tmp/upload.txt")
+        wrapper.cmd_cp([str(src)], f"{e.slug}:/tmp/upload.txt")
 
         assert (tmp / "upload.txt").read_text() == "to /tmp\n"
 
@@ -561,7 +559,7 @@ class TestCpArbitraryPaths:
         (src_dir / "b.txt").write_text("b\n")
         dest = e.tmp_path / "mydir"
 
-        wrapper.cmd_cp(["cave-root:/tmp/mydir"], str(dest), recursive=True)
+        wrapper.cmd_cp([f"{e.slug}:/tmp/mydir"], str(dest), recursive=True)
 
         assert (dest / "a.txt").read_text() == "a\n"
         assert (dest / "b.txt").read_text() == "b\n"
@@ -569,7 +567,7 @@ class TestCpArbitraryPaths:
     def test_nonexistent_arbitrary_path_exits(self, cp_env):
         e = cp_env
         with pytest.raises(SystemExit):
-            wrapper.cmd_cp(["cave-root:/tmp/nonexistent"], str(e.tmp_path / "out"))
+            wrapper.cmd_cp([f"{e.slug}:/tmp/nonexistent"], str(e.tmp_path / "out"))
 
     def test_nix_store_path(self, cp_env):
         e = cp_env
@@ -578,23 +576,9 @@ class TestCpArbitraryPaths:
         (store_path / "tool").write_text("#!/bin/sh\n")
         dest = e.tmp_path / "tool"
 
-        wrapper.cmd_cp(["cave-root:/nix/store/abc-pkg/bin/tool"], str(dest))
+        wrapper.cmd_cp([f"{e.slug}:/nix/store/abc-pkg/bin/tool"], str(dest))
 
         assert dest.read_text() == "#!/bin/sh\n"
-
-    def test_slug_absolute_path_rejected(self, cp_env):
-        """slug:/abs/path is rejected — must use cave-root:/abs/path."""
-        e = cp_env
-        dest = e.tmp_path / "out.txt"
-        with pytest.raises(SystemExit):
-            wrapper.cmd_cp([f"{e.slug}:/tmp/data.txt"], str(dest))
-
-    def test_cave_root_projects_path_rejected(self, cp_env):
-        """cave-root:/projects/... is rejected — must use slug:path."""
-        e = cp_env
-        dest = e.tmp_path / "out.txt"
-        with pytest.raises(SystemExit):
-            wrapper.cmd_cp([f"cave-root:/projects/{e.slug}/file.txt"], str(dest))
 
 
 class TestCpNoColonSyntax:
@@ -845,7 +829,7 @@ class TestCpPathTraversal:
 
         dest = e.tmp_path / "stolen.txt"
         with pytest.raises(SystemExit):
-            wrapper.cmd_cp(["cave-root:~/../../outside.txt"], str(dest), force=True)
+            wrapper.cmd_cp([f"{e.slug}:~/../../outside.txt"], str(dest), force=True)
         assert not dest.exists()
 
     def test_tilde_dotdot_write_blocked(self, cp_env):
@@ -858,7 +842,7 @@ class TestCpPathTraversal:
         payload.write_text("escaped!\n")
 
         with pytest.raises(SystemExit):
-            wrapper.cmd_cp([str(payload)], "cave-root:~/../../outside.txt")
+            wrapper.cmd_cp([str(payload)], f"{e.slug}:~/../../outside.txt")
 
     def test_fallback_dotdot_blocked(self, cp_env, monkeypatch):
         """.. traversal in sessionless fallback to host source is rejected."""

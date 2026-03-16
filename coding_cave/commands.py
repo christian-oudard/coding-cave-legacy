@@ -415,39 +415,23 @@ def cmd_cp(srcs, dest, recursive=False, force=False):
     def resolve_cave_path(spec):
         """Parse cave path spec. Returns (cave_abs_path, is_home, project) or (None, False, None).
 
-        Three prefixes:
+        Two prefixes:
           cave:path  — CWD project (auto-detected)
           slug:path  — specific project by name
-          cave-root:path  — cave home (~/path) or absolute non-project paths
 
-        Relative paths under cave:/slug: resolve to /projects/<slug>/path.
-        Absolute paths under cave:/slug: resolve as-is but keep the project
-        hint for session selection (e.g. cave:/tmp/file picks the CWD
-        project's session).
+        Path types:
+          relative  — project-relative, resolves to /projects/<slug>/path
+          ~/path    — cave home, no session needed (is_home=True)
+          /abs/path — absolute cave path, uses project hint for session selection
 
         cave_abs_path is the absolute path inside the cave filesystem.
         is_home=True means the path can be accessed directly via cave_home()
         without a running session.
-        project is the slug hint for session selection (None for cave-root:).
+        project is the slug hint for session selection.
         """
         if ":" not in spec:
             return None, False, None
         prefix, _, path = spec.partition(":")
-
-        if prefix == "cave-root":
-            # cave-root: — home or absolute non-project paths
-            if path.startswith("~/") or path == "~":
-                expanded = f"{_state.JAIL_HOME}/{path[2:]}" if path != "~" else _state.JAIL_HOME
-                return expanded, True, None
-            if path == _state.JAIL_HOME or path.startswith(_state.JAIL_HOME + "/"):
-                return path, True, None
-            if path.startswith("/"):
-                if path == "/projects" or path.startswith("/projects/"):
-                    print("Use <slug>:<path> to access project files.", file=sys.stderr)
-                    sys.exit(1)
-                return path, False, None
-            print("cave-root: requires ~/path or /absolute/path.", file=sys.stderr)
-            sys.exit(1)
 
         if prefix == "cave":
             # cave: — CWD project, resolve slug from CWD
@@ -466,10 +450,13 @@ def cmd_cp(srcs, dest, recursive=False, force=False):
         if prefix not in projects.load_projects():
             print(f"Unknown project: {prefix}", file=sys.stderr)
             sys.exit(1)
-        if path.startswith("~"):
-            print(f"Use cave-root:{path} to access cave home.", file=sys.stderr)
-            sys.exit(1)
-        # Absolute path — use as-is but keep project hint for session selection
+        # ~/path — cave home, no session needed
+        if path.startswith("~/") or path == "~":
+            expanded = f"{_state.JAIL_HOME}/{path[2:]}" if path != "~" else _state.JAIL_HOME
+            return expanded, True, prefix
+        if path == _state.JAIL_HOME or path.startswith(_state.JAIL_HOME + "/"):
+            return path, True, prefix
+        # Absolute path — use as-is with project hint for session selection
         if path.startswith("/"):
             return path, False, prefix
         rel = path or "."
