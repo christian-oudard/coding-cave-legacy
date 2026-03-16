@@ -269,6 +269,7 @@
     codingCaveState = pkgs.replaceVars ./coding_cave/_state.py {
       SANDBOX_BIN = "${sandbox}/bin/coding-cave";
       SANDBOX_GPU_BIN = "${sandboxGpu}/bin/coding-cave";
+      GATEWAY_LOCAL_BIN = "${onecli-gateway-local}/bin/onecli-gateway-local";
       VERSION = version;
     };
     codingCavePkg = pkgs.runCommand "coding-cave-pkg" {} ''

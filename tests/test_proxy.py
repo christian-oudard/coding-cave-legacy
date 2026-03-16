@@ -11,6 +11,9 @@ from coding_cave.config import _setup_proxy, setup_env
 FLAKE_NIX = Path(__file__).parent.parent / "flake.nix"
 LIFECYCLE_PY = FLAKE_NIX.parent / "coding_cave" / "lifecycle.py"
 
+# All config tests mock _start_gateway — no real gateway needed.
+MOCK_GATEWAY = patch("coding_cave.config._start_gateway", return_value=True)
+
 
 class TestProxyConfig:
     """Config tests for _setup_proxy and setup_env proxy interaction."""
@@ -20,7 +23,7 @@ class TestProxyConfig:
         ca = tmp_path / "ca.pem"
         ca.write_text("--- cert ---")
         cfg = {"proxy": {"onecli": True}}
-        with patch.dict(os.environ, {}, clear=False):
+        with patch.dict(os.environ, {}, clear=False), MOCK_GATEWAY:
             os.environ.pop("CODING_CAVE_PROXY_PORT", None)
             with patch("coding_cave.config.Path.expanduser", return_value=ca):
                 _setup_proxy(cfg)
@@ -34,7 +37,7 @@ class TestProxyConfig:
             "proxy": {"onecli": True},
             "credentials": {"claude-oauth-token": "secret-token"},
         }
-        with patch.dict(os.environ, {}, clear=False):
+        with patch.dict(os.environ, {}, clear=False), MOCK_GATEWAY:
             os.environ.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
             os.environ.pop("CODING_CAVE_PROXY_PORT", None)
             with patch("coding_cave.config._git_config", return_value=None), \
@@ -59,7 +62,7 @@ class TestProxyConfig:
         ca = tmp_path / "ca.pem"
         ca.write_text("--- cert ---")
         cfg = {"proxy": {"onecli": True, "port": 8080}}
-        with patch.dict(os.environ, {}, clear=False):
+        with patch.dict(os.environ, {}, clear=False), MOCK_GATEWAY:
             os.environ.pop("CODING_CAVE_PROXY_PORT", None)
             with patch("coding_cave.config.Path.expanduser", return_value=ca):
                 _setup_proxy(cfg)
@@ -70,7 +73,7 @@ class TestProxyConfig:
         ca = tmp_path / "ca.pem"
         ca.write_text("--- cert ---")
         cfg = {"proxy": {"onecli": True}}
-        with patch.dict(os.environ, {}, clear=False):
+        with patch.dict(os.environ, {}, clear=False), MOCK_GATEWAY:
             os.environ.pop("CODING_CAVE_PROXY_CA_CERT", None)
             with patch("coding_cave.config.Path.expanduser", return_value=ca):
                 _setup_proxy(cfg)
@@ -79,7 +82,7 @@ class TestProxyConfig:
     def test_onecli_ca_cert_missing_skipped(self):
         """CA cert not set when gateway hasn't generated it yet."""
         cfg = {"proxy": {"onecli": True}}
-        with patch.dict(os.environ, {}, clear=False):
+        with patch.dict(os.environ, {}, clear=False), MOCK_GATEWAY:
             os.environ.pop("CODING_CAVE_PROXY_CA_CERT", None)
             _setup_proxy(cfg)
             assert "CODING_CAVE_PROXY_CA_CERT" not in os.environ
@@ -89,6 +92,22 @@ class TestProxyConfig:
         assert _setup_proxy({}) is False
         assert _setup_proxy({"proxy": {}}) is False
         assert _setup_proxy({"proxy": {"onecli": False}}) is False
+
+    def test_gateway_started_when_not_running(self):
+        """_setup_proxy calls _start_gateway with the configured port."""
+        cfg = {"proxy": {"onecli": True}}
+        with patch.dict(os.environ, {}, clear=False), \
+             patch("coding_cave.config._start_gateway", return_value=True) as mock_start:
+            _setup_proxy(cfg)
+            mock_start.assert_called_once_with(10255)
+
+    def test_proxy_returns_false_when_gateway_fails(self):
+        """_setup_proxy returns False if gateway can't start."""
+        cfg = {"proxy": {"onecli": True}}
+        with patch.dict(os.environ, {}, clear=False), \
+             patch("coding_cave.config._start_gateway", return_value=False):
+            assert _setup_proxy(cfg) is False
+            assert "CODING_CAVE_PROXY_PORT" not in os.environ
 
 
 class TestFlakeNixProxy:
@@ -146,6 +165,12 @@ class TestFlakeNixProxy:
         # Verify it's in the unset statement (same line group)
         unset_match = re.search(r"unset\s+.*CODING_CAVE_PROXY_ADDR", flake, re.DOTALL)
         assert unset_match, "CODING_CAVE_PROXY_ADDR should be in the unset statement"
+
+    def test_gateway_local_bin_substituted(self):
+        """GATEWAY_LOCAL_BIN is substituted in flake.nix replaceVars."""
+        flake = FLAKE_NIX.read_text()
+        assert "GATEWAY_LOCAL_BIN" in flake
+        assert "onecli-gateway-local" in flake
 
 
 class TestProxyLifecycle:

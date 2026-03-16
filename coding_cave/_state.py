@@ -3,6 +3,7 @@ from pathlib import Path
 
 SANDBOX_BIN = "@SANDBOX_BIN@"
 SANDBOX_GPU_BIN = "@SANDBOX_GPU_BIN@"
+GATEWAY_LOCAL_BIN = "@GATEWAY_LOCAL_BIN@"
 VERSION = "@VERSION@"
 
 JAIL_HOME = "/home/cave-coder"

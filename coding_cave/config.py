@@ -61,13 +61,47 @@ def _onecli_ca_path():
     xdg = Path(os.environ.get("XDG_DATA_HOME", "~/.local/share")).expanduser()
     return xdg / "onecli" / "gateway" / "ca.pem"
 
+def _gateway_listening(port):
+    """Check if the onecli gateway is already listening."""
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.5)
+        return s.connect_ex(("127.0.0.1", port)) == 0
+
+def _start_gateway(port):
+    """Start the onecli gateway in the background. Returns True if started or already running."""
+    if _gateway_listening(port):
+        return True
+    from . import _state
+    binary = _state.GATEWAY_LOCAL_BIN
+    if binary.startswith("@") or not Path(binary).exists():
+        print(f"onecli gateway binary not found: {binary}", file=sys.stderr)
+        print("Run 'nix build' to include the onecli gateway.", file=sys.stderr)
+        return False
+    import subprocess, time
+    proc = subprocess.Popen(
+        [binary, "--port", str(port)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    # Wait for it to be ready
+    for _ in range(20):
+        if _gateway_listening(port):
+            return True
+        time.sleep(0.25)
+    print(f"onecli gateway failed to start (pid {proc.pid})", file=sys.stderr)
+    return False
+
 def _setup_proxy(global_config):
     """Configure proxy env vars if [proxy] section exists. Returns True if proxy is active."""
     proxy = global_config.get("proxy", {})
     if proxy.get("onecli"):
-        port = str(proxy.get("port", 10255))
+        port = int(proxy.get("port", 10255))
+        if not _start_gateway(port):
+            return False
         ca_path = _onecli_ca_path()
-        os.environ["CODING_CAVE_PROXY_PORT"] = port
+        os.environ["CODING_CAVE_PROXY_PORT"] = str(port)
         if ca_path.is_file():
             os.environ["CODING_CAVE_PROXY_CA_CERT"] = str(ca_path.resolve())
         return True
