@@ -126,10 +126,13 @@ def create_session_gitdir(slug, sid, overlay_base):
     # Layer 1: prepare-commit-msg blocks amend before commit is created.
     # Detects --amend via /proc/$PPID/cmdline (Linux-specific).
     # Not bypassed by --no-verify.
+    # Fetches from shared first to close the race window where the user
+    # runs `cav pull` after the session's last commit but before amend.
     (hooks / "prepare-commit-msg").write_text(
         '#!/bin/bash\n'
         'parent_cmd=$(tr "\\0" " " < /proc/$PPID/cmdline 2>/dev/null)\n'
         'echo "$parent_cmd" | grep -q -- "--amend" || exit 0\n'
+        'git fetch shared 2>/dev/null\n'
         'head_sha=$(git rev-parse HEAD 2>/dev/null) || exit 0\n'
         'pulled_refs=$(git for-each-ref --format="%(objectname)" '
         'refs/remotes/host/ 2>/dev/null)\n'
@@ -150,10 +153,12 @@ def create_session_gitdir(slug, sid, overlay_base):
 
     # Layer 2: pre-rebase blocks rebase of pulled commits.
     # Bypassed by --no-verify, but post-rewrite catches that.
+    # Fetches from shared to get latest pulled refs (same race as layer 1).
     (hooks / "pre-rebase").write_text(
         '#!/bin/bash\n'
         'upstream=$1\n'
         'branch=${2:-HEAD}\n'
+        'git fetch shared 2>/dev/null\n'
         'pulled_refs=$(git for-each-ref --format="%(objectname)" '
         'refs/remotes/host/ 2>/dev/null)\n'
         '[ -z "$pulled_refs" ] && exit 0\n'
@@ -175,9 +180,11 @@ def create_session_gitdir(slug, sid, overlay_base):
 
     # Layer 3: post-rewrite undoes rewrites that slip past layers 1-2.
     # Cannot be bypassed with --no-verify.
+    # Fetches from shared to get latest pulled refs (same race as layer 1).
     (hooks / "post-rewrite").write_text(
         '#!/bin/bash\n'
         'action=$1\n'
+        'git fetch shared 2>/dev/null\n'
         'pulled_refs=$(git for-each-ref --format="%(objectname)" '
         'refs/remotes/host/ 2>/dev/null)\n'
         '[ -z "$pulled_refs" ] && exit 0\n'
@@ -334,7 +341,8 @@ def _ref_sha(gitdir, ref):
     return r.stdout.strip() if r.returncode == 0 else None
 
 
-def _forward_refs(sid, session_gitdir, shared_gitdir, *, force=False):
+def _forward_refs(sid, session_gitdir, shared_gitdir, *, force=False,
+                  protected_refs=None):
     """Forward branch refs from a session gitdir into the shared gitdir.
 
     Handles fast-forwards, re-authoring detection, rebase-onto-reauthored,
@@ -346,7 +354,13 @@ def _forward_refs(sid, session_gitdir, shared_gitdir, *, force=False):
 
     When force=True (final cleanup): force-updates diverged refs and backs
     up the old shared ref under refs/sessions/<sid>/<branch>.
+
+    protected_refs: set of branch names that another session already
+    force-updated in this sync cycle.  Force-update is suppressed for
+    these to prevent last-writer-wins races.
     """
+    if protected_refs is None:
+        protected_refs = set()
     result = git_mod.git(session_gitdir, "for-each-ref",
                  "--format=%(refname) %(objectname)", "refs/heads/",
                  capture_output=True, text=True)
@@ -432,13 +446,14 @@ def _forward_refs(sid, session_gitdir, shared_gitdir, *, force=False):
                 # Mark session as synced so next cycle doesn't re-rebase.
                 git_mod.git(session_gitdir, "update-ref",
                     f"refs/synced/{branch}", sha, capture_output=True)
-            elif force:
+            elif force and branch not in protected_refs:
                 # Final cleanup: force-update, back up old ref.
                 git_mod.git(shared_gitdir, "update-ref",
                     f"refs/sessions/{sid}/{branch}", existing_sha,
                     capture_output=True)
                 git_mod.git(shared_gitdir, "update-ref", ref, sha,
                     capture_output=True)
+                protected_refs.add(branch)
             else:
                 # Non-force live sync (push/status): can't rebase,
                 # skip.  Pull uses force=True so this path only fires
@@ -475,7 +490,7 @@ def _forward_refs(sid, session_gitdir, shared_gitdir, *, force=False):
 
 
 def forward_session_refs(slug, session_gitdir, shared_gitdir, *,
-                         sid=None, force=False):
+                         sid=None, force=False, protected_refs=None):
     """Forward refs from a live session into the shared gitdir.
 
     Called by sync_live_sessions during pull/push.  Temporarily rewrites
@@ -485,6 +500,10 @@ def forward_session_refs(slug, session_gitdir, shared_gitdir, *,
     can't be rebased are skipped.
     When force=True (used by pull): diverged refs are force-updated with
     backup, same as final cleanup.
+
+    protected_refs: shared set tracking branches already force-updated
+    in this sync cycle.  Prevents last-writer-wins when multiple sessions
+    have diverged refs for the same branch.
     """
     alt_file = session_gitdir / "objects" / "info" / "alternates"
     cave_path = None
@@ -492,7 +511,8 @@ def forward_session_refs(slug, session_gitdir, shared_gitdir, *,
         cave_path = alt_file.read_text().strip()
         _atomic_write(alt_file, f"{shared_gitdir / 'objects'}\n")
 
-    _forward_refs(sid, session_gitdir, shared_gitdir, force=force)
+    _forward_refs(sid, session_gitdir, shared_gitdir, force=force,
+                  protected_refs=protected_refs)
 
     # Restore cave-internal alternates path
     if cave_path is not None:

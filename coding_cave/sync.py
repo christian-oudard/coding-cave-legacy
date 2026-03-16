@@ -31,17 +31,24 @@ def sync_live_sessions(slug, *, force=False):
     When force=True (used by pull): diverged refs that can't be rebased
     are force-updated with backup.  When force=False (default): diverged
     refs are skipped.
+
+    A shared protected_refs set prevents last-writer-wins races: once a
+    branch is force-updated by one session, other sessions in the same
+    cycle cannot force-update it (they fall back to skip, same as
+    force=False).
     """
     shared_gitdir = _state.projects_dir() / slug / "gitdir"
     if not shared_gitdir.is_dir():
         return
+    protected_refs = set()
     for session in sessions.list_sessions():
         sid = session["sid"]
         overlay_base = _state.cave_data() / "session-overlays" / sid
         session_gitdir = overlay_base / f"gitdir-{slug}"
         if session_gitdir.is_dir():
             gitdir.forward_session_refs(slug, session_gitdir, shared_gitdir,
-                                        sid=sid, force=force)
+                                        sid=sid, force=force,
+                                        protected_refs=protected_refs)
 
 
 def _clear_session_synced_refs(slug, branch):
