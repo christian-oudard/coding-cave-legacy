@@ -156,9 +156,7 @@ def main():
             proj = meta.get("project", "?")
             age = _format_age(meta.get("started"))
             me = " (me)" if sid == my_sid else ""
-            task = meta.get("task", "")
-            task_str = f"  {task}" if task else ""
-            print(f"  #{idx}  {proj}  {sid}  [{age}]{me}{task_str}")
+            print(f"  #{idx}  {proj}  {sid}  [{age}]{me}")
         if not sessions:
             print("  No active sessions.")
         return

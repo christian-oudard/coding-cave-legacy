@@ -24,9 +24,6 @@
     caveSend = pkgs.writeShellScriptBin "cave-send" ''
       exec ${pkgs.python3}/bin/python3 ${./cave_send.py} "$@"
     '';
-    caveStatus = pkgs.writeShellScriptBin "cave-status" ''
-      exec ${pkgs.python3}/bin/python3 ${./cave_status.py} "$@"
-    '';
 
     jailHome = "/home/cave-coder";
 
