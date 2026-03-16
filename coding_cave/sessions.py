@@ -22,6 +22,26 @@ def _next_session_index(project):
     return i
 
 
+def save_last_index(project, index):
+    """Persist the session index for reuse on resume/continue."""
+    path = _state.projects_dir() / project / "last-session-index"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(str(index))
+
+
+def pop_last_index(project):
+    """Load and consume the saved session index. Returns int or None."""
+    path = _state.projects_dir() / project / "last-session-index"
+    if not path.exists():
+        return None
+    try:
+        index = int(path.read_text().strip())
+        path.unlink()
+        return index
+    except (ValueError, OSError):
+        return None
+
+
 def register_session(sid, project, bwrap_pid, index=None):
     """Register a running session."""
     _state.sessions_dir().mkdir(parents=True, exist_ok=True)

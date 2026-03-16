@@ -67,7 +67,8 @@ def cmd_agent(args, gpu=False, continue_session=False, resume=None, claude_args=
         f"cd {workdir} && exec {relay_cmd}",
     ]
 
-    lifecycle.start_session(project, command, gpu=gpu)
+    lifecycle.start_session(project, command, gpu=gpu,
+                            reuse_index=continue_session or resume is not None)
 
 
 def cmd_shell(args, gpu=False):

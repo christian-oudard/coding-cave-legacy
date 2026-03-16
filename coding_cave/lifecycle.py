@@ -152,7 +152,7 @@ def _build_mirror_args():
     return args
 
 
-def start_session(project, command, gpu=False):
+def start_session(project, command, gpu=False, reuse_index=False):
     """Start a new bwrap session with per-session overlays."""
     _state.cave_data().mkdir(parents=True, exist_ok=True)
     sid = sessions.session_id()
@@ -481,7 +481,8 @@ def start_session(project, command, gpu=False):
             f.write(arg.encode() + b"\0")
     os.environ["CODING_CAVE_BWRAP_ARGS"] = str(args_file)
     os.environ["CODING_CAVE_PROJECT_PATH"] = loaded_projects.get(project, "")
-    session_index = sessions._next_session_index(project)
+    saved_index = sessions.pop_last_index(project) if reuse_index else None
+    session_index = saved_index or sessions._next_session_index(project)
     os.environ["CODING_CAVE_SESSION_INDEX"] = str(session_index)
     os.environ["CODING_CAVE_SESSION_ID"] = sid
 
@@ -575,6 +576,7 @@ def start_session(project, command, gpu=False):
         signal.signal(signal.SIGHUP, prev_hup)
         signal.signal(signal.SIGWINCH, prev_winch)
         gitdir.merge_session_gitdirs(sid, overlay_base)
+        sessions.save_last_index(project, session_index)
         sessions.cleanup_session(sid)
         sessions.update_pane_titles(project)
         for merged in overlay_mounts:
