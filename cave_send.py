@@ -2,23 +2,30 @@
 """Send a message to a cave session's PTY relay via Unix domain socket.
 
 Usage:
-    cave-send <session-id> <message>
+    cave-send <target> <message>
     cave-send --sock <path> <message>
-    echo "message" | cave-send <session-id>
+    echo "message" | cave-send <target>
     cave-send --list
 
+Target can be a session index (e.g. 4) or a full session ID.
+
 The message is injected into the target session's terminal as if
-typed by the user, followed by Enter (CR).
+typed by the user, followed by Enter (CR). Uses the structured JSON
+protocol with delivery acknowledgment. Exits 0 on delivery, non-zero
+on failure.
 """
 import json
 import os
 import socket
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 
 IPC_DIR = Path.home() / "ipc"
+
+ACK_TIMEOUT = 3
 
 
 def _sender_tag():
@@ -38,15 +45,57 @@ def _sender_tag():
 
 
 def send(sock_path, message, tag=True):
+    """Send a message to a session's PTY relay.
+
+    Uses the structured JSON protocol with a temporary reply socket
+    for delivery acknowledgment. Returns the ack dict on success,
+    None on timeout/failure.
+    """
     if isinstance(message, bytes):
         message = message.decode()
     if tag:
         message = f"{_sender_tag()} {message}"
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.connect(sock_path)
-    s.sendall(message.encode())
-    s.shutdown(socket.SHUT_WR)
-    s.close()
+
+    reply_dir = tempfile.mkdtemp(prefix="cave-ack-")
+    reply_path = os.path.join(reply_dir, "reply.sock")
+    reply_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        reply_sock.bind(reply_path)
+        reply_sock.listen(1)
+        reply_sock.settimeout(ACK_TIMEOUT)
+
+        frame = json.dumps({
+            "from": _sender_tag(),
+            "body": message,
+            "reply_to": reply_path,
+        })
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.connect(sock_path)
+        s.sendall(frame.encode())
+        s.shutdown(socket.SHUT_WR)
+        s.close()
+
+        conn, _ = reply_sock.accept()
+        ack_data = b""
+        while True:
+            chunk = conn.recv(4096)
+            if not chunk:
+                break
+            ack_data += chunk
+        conn.close()
+        return json.loads(ack_data)
+    except (socket.timeout, OSError, json.JSONDecodeError):
+        return None
+    finally:
+        reply_sock.close()
+        try:
+            os.unlink(reply_path)
+        except FileNotFoundError:
+            pass
+        try:
+            os.rmdir(reply_dir)
+        except OSError:
+            pass
 
 
 def resolve_index(index):
@@ -97,8 +146,10 @@ def main():
         sys.argv.remove("--raw")
 
     if len(sys.argv) < 2:
-        print("Usage: cave-send <session-id> <message>", file=sys.stderr)
+        print("Usage: cave-send <target> <message>", file=sys.stderr)
         print("       cave-send --list", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("Target: session index (e.g. 4) or full session ID", file=sys.stderr)
         sys.exit(1)
 
     if sys.argv[1] == "--list":
@@ -129,8 +180,16 @@ def main():
             print("No message provided.", file=sys.stderr)
             sys.exit(1)
     else:
-        sid = sys.argv[1]
-        sock_path = str(IPC_DIR / f"{sid}.sock")
+        target = sys.argv[1]
+        # Try index lookup first (bare number or #N)
+        sid, sock_path = resolve_index(target)
+        if sid is None and (target.startswith("#") or target.isdigit()):
+            print(f"No session with index {target}", file=sys.stderr)
+            sys.exit(1)
+        elif sid is None:
+            # Fall back to full session ID
+            sid = target
+            sock_path = str(IPC_DIR / f"{sid}.sock")
         if len(sys.argv) >= 3:
             message = " ".join(sys.argv[2:])
         elif not os.isatty(sys.stdin.fileno()):
@@ -139,7 +198,14 @@ def main():
             print("No message provided.", file=sys.stderr)
             sys.exit(1)
 
-    send(sock_path, message, tag=not raw)
+    try:
+        ack = send(sock_path, message, tag=not raw)
+    except (ConnectionRefusedError, FileNotFoundError) as e:
+        print(f"Failed to send: {e}", file=sys.stderr)
+        sys.exit(1)
+    if not ack or not isinstance(ack, dict) or ack.get("type") != "ack":
+        print("No ack (timeout)", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

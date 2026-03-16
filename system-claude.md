@@ -11,7 +11,7 @@ Other cave agents may be running in parallel sessions. You can send messages to 
 
 - `cave-send --list` shows active sessions with their project, session ID, and current task.
 - `cave-send <session-id> "your message"` sends a message to that session.
-- `cave-send #N "your message"` sends by session index (e.g. `cave-send #4 "hello"`).
+- `cave-send N "your message"` sends by session index (e.g. `cave-send 4 "hello"`).
 - `cave-send` blocks until delivery is confirmed. Exit code 0 = delivered, non-zero = failed.
 - Messages are automatically tagged with your identity: `[project#N]` for agents, `[user]` for the host. Use `--raw` to skip tagging.
 - `cave-status "working on X"` sets your session's status, visible in `cave-send --list`.
