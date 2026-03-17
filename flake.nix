@@ -226,6 +226,8 @@
             # Combined bundle for tools that use SSL_CERT_FILE (curl, Python, etc.)
             cat /etc/ssl/certs/ca-bundle.crt /etc/onecli-ca.pem > /tmp/combined-ca.pem
             export SSL_CERT_FILE=/tmp/combined-ca.pem
+            # Python requests uses certifi by default, ignoring SSL_CERT_FILE
+            export REQUESTS_CA_BUNDLE=/tmp/combined-ca.pem
             # NODE_EXTRA_CA_CERTS is additive — only needs the extra cert
             export NODE_EXTRA_CA_CERTS=/etc/onecli-ca.pem
           fi

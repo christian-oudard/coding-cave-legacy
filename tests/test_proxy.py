@@ -282,6 +282,11 @@ class TestFlakeNixProxy:
         assert "/tmp/combined-ca.pem" in flake
         assert "SSL_CERT_FILE" in flake
 
+    def test_requests_ca_bundle_set(self):
+        """REQUESTS_CA_BUNDLE set so Python requests trusts the proxy CA."""
+        flake = FLAKE_NIX.read_text()
+        assert "REQUESTS_CA_BUNDLE=/tmp/combined-ca.pem" in flake
+
     def test_node_extra_ca_certs_set(self):
         """NODE_EXTRA_CA_CERTS set in wrap-entry for onecli CA."""
         flake = FLAKE_NIX.read_text()
