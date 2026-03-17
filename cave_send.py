@@ -1,58 +1,142 @@
 #!/usr/bin/env python3
-"""Send a message to a cave session's PTY relay via Unix domain socket.
+"""Inter-session messaging for coding-cave.
 
 Usage:
-    cave-send <target> <message>
+    cave-send <target> <message>      send a message
     echo "message" | cave-send <target>
-    cave-send --all-project <message>   # send to all sessions on same project
-    cave-send --list
+    cave-send --all-project <message> send to all sessions on same project
+    cave-send --list                  list active sessions
+    cave-send hook                    Claude Code hook (reads queue, delivers)
 
 Target can be a session index (e.g. 4) or a full session ID.
 
-Messages are routed through the sender's own relay, which stamps
-the sender identity (verified via SO_PEERCRED). The relay forwards
-to the target session's socket.
+Messages are written to ~/ipc/messages/<target-sid>.jsonl. The hook
+subcommand, registered on Stop/UserPromptSubmit/PostToolUse, reads
+and delivers them.
 """
+import fcntl
 import json
 import os
-import socket
 import sys
 import time
 from pathlib import Path
 
 
 IPC_DIR = Path.home() / "ipc"
+MSG_DIR = IPC_DIR / "messages"
+
+
+# --- send ---
+
+def _sender_tag():
+    """Build sender tag from environment."""
+    idx = os.environ.get("CODING_CAVE_SESSION_INDEX", "")
+    proj = os.environ.get("CODING_CAVE_PROJECT_PATH", "")
+    proj = os.path.basename(proj) if proj else ""
+    if not idx:
+        return "user:"
+    if proj:
+        return f"{proj}#{idx}:"
+    return f"#{idx}:"
 
 
 def send(target_sid, message):
-    """Send a message by forwarding through our own relay."""
+    """Send a message by writing to the target's queue file."""
     my_sid = os.environ.get("CODING_CAVE_SESSION_ID")
-    if not my_sid:
-        # Outside a cave session (e.g. host user). Send directly.
-        target_sock = str(IPC_DIR / f"{target_sid}.sock")
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.connect(target_sock)
-        s.sendall(f"user: {message}".encode())
-        s.shutdown(socket.SHUT_WR)
-        s.close()
-        return
     if my_sid == target_sid:
         raise ValueError("Cannot send to yourself.")
-    # Route through own relay for verified sender tagging
-    my_sock = str(IPC_DIR / f"{my_sid}.sock")
-    payload = f"FWD {target_sid}\n{message}"
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.connect(my_sock)
-    s.sendall(payload.encode())
-    s.shutdown(socket.SHUT_WR)
-    s.close()
+    MSG_DIR.mkdir(parents=True, exist_ok=True)
+    entry = json.dumps({
+        "sender": _sender_tag(),
+        "message": message,
+        "ts": time.time(),
+    })
+    path = MSG_DIR / f"{target_sid}.jsonl"
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        os.write(fd, (entry + "\n").encode())
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
+
+# --- hook ---
+
+def _read_and_clear(path):
+    """Atomically read and clear the message queue file."""
+    try:
+        fd = os.open(path, os.O_RDWR)
+    except FileNotFoundError:
+        return []
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        data = b""
+        while True:
+            chunk = os.read(fd, 4096)
+            if not chunk:
+                break
+            data += chunk
+        if not data:
+            return []
+        os.ftruncate(fd, 0)
+        os.lseek(fd, 0, os.SEEK_SET)
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+    messages = []
+    for line in data.decode().splitlines():
+        line = line.strip()
+        if line:
+            try:
+                messages.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+    return messages
+
+
+def _format_messages(messages):
+    """Format messages for injection into Claude's context."""
+    parts = []
+    for msg in messages:
+        sender = msg.get("sender", "unknown")
+        text = msg.get("message", "")
+        parts.append(f"{sender} {text}")
+    return "\n".join(parts)
+
+
+def hook():
+    """Claude Code hook entry point. Reads stdin for hook event JSON."""
+    sid = os.environ.get("CODING_CAVE_SESSION_ID", "")
+    if not sid:
+        sys.exit(0)
+    path = str(MSG_DIR / f"{sid}.jsonl")
+
+    messages = _read_and_clear(path)
+    if not messages:
+        sys.exit(0)
+
+    formatted = _format_messages(messages)
+    hook_input = json.loads(sys.stdin.read()) if not sys.stdin.isatty() else {}
+    event = hook_input.get("hook_event_name", "")
+
+    if event == "Stop":
+        # Block the stop so Claude processes the messages immediately.
+        json.dump({"decision": "block", "reason": formatted}, sys.stdout)
+        sys.exit(0)
+    else:
+        # PostToolUse exit 2: stderr shown to user, tool already ran.
+        # UserPromptSubmit exit 1: stderr shown to user, prompt proceeds.
+        # (exit 2 would block the prompt, exit 0 is invisible to user)
+        print(formatted, file=sys.stderr)
+        sys.exit(2 if event == "PostToolUse" else 1)
+
+
+# --- session listing ---
 
 def resolve_index(index):
-    """Resolve a session index (e.g. '4' or '#4') to (sid, sock_path).
-
-    Returns (sid, sock_path) or (None, None) if not found.
-    """
+    """Resolve a session index (e.g. '4' or '#4') to (sid, sock_path)."""
     index = str(index).lstrip("#")
     for sid, meta in list_sessions():
         if meta.get("index") == index:
@@ -90,13 +174,18 @@ def _format_age(started):
     return f"{h}h{m // 60:02d}m"
 
 
+# --- main ---
+
 def main():
     if len(sys.argv) < 2:
         print("Usage: cave-send <target> <message>", file=sys.stderr)
+        print("       cave-send hook", file=sys.stderr)
         print("       cave-send --list", file=sys.stderr)
-        print("", file=sys.stderr)
-        print("Target: session index (e.g. 4) or full session ID", file=sys.stderr)
         sys.exit(1)
+
+    if sys.argv[1] == "hook":
+        hook()
+        return
 
     if sys.argv[1] == "--list":
         sessions = list_sessions()
@@ -125,7 +214,6 @@ def main():
         my_project = my_meta.get("project")
         if not my_project:
             sys.exit(1)
-        sent = 0
         for sid, meta in list_sessions():
             if sid == my_sid:
                 continue
@@ -133,14 +221,11 @@ def main():
                 continue
             try:
                 send(sid, message)
-                sent += 1
-            except (ValueError, ConnectionRefusedError,
-                    FileNotFoundError, OSError):
+            except (ValueError, OSError):
                 pass
         return
 
     target = sys.argv[1]
-    # Resolve target to session ID
     sid, _ = resolve_index(target)
     if sid is None and (target.startswith("#") or target.isdigit()):
         print(f"No session with index {target}", file=sys.stderr)
@@ -161,7 +246,7 @@ def main():
     except ValueError as e:
         print(str(e), file=sys.stderr)
         sys.exit(1)
-    except (ConnectionRefusedError, FileNotFoundError) as e:
+    except OSError as e:
         print(f"Failed to send: {e}", file=sys.stderr)
         sys.exit(1)
 

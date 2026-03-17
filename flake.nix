@@ -22,7 +22,7 @@
     systemClaudeMd = ./system-claude.md;
     version = self.shortRev or self.dirtyShortRev or "dev";
 
-    # IPC: PTY relay and message sender (available inside cave)
+    # IPC: PTY relay, message sender, and hook (available inside cave)
     ptyRelay = pkgs.writeShellScriptBin "pty-relay" ''
       exec ${pkgs.python3}/bin/python3 ${./pty_relay.py} "$@"
     '';
