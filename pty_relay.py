@@ -24,6 +24,7 @@ import socket
 import struct
 import sys
 import termios
+import time
 import tty
 
 
@@ -76,25 +77,26 @@ def _forward_message(target_sid, tagged_message):
         pass
 
 
-def _handle_message(buf, master_fd, conn=None):
+def _handle_message(buf, conn=None):
     """Process an incoming message.
 
     FWD messages from local peers (same PID namespace) are tagged with
     verified sender identity and forwarded to the target session.
-    All other messages are injected into the PTY.
+    Returns bytes to inject into PTY, or None if handled (FWD).
     """
     raw = bytes(buf)
     if raw.startswith(b"FWD ") and conn is not None and _is_local_peer(conn):
         # Forward request from a local process (same session)
         newline = raw.find(b"\n", 4)
         if newline == -1:
-            return
+            return None
         target_sid = raw[4:newline].decode()
         message = raw[newline + 1:].decode()
         tagged = f"{_sender_tag()} {message}"
         _forward_message(target_sid, tagged)
+        return None
     else:
-        os.write(master_fd, raw + b"\r")
+        return raw
 
 
 def relay(child_argv, sock_path):
@@ -159,12 +161,26 @@ def relay(child_argv, sock_path):
     clients = {}
     exit_code = 1
 
+    # Message queue: hold incoming messages until stdin is idle.
+    # CAVE_MSG_DELAY=0 disables queuing (immediate injection).
+    msg_queue = []
+    last_stdin_time = 0.0  # monotonic; 0 = never typed, so idle from start
+    inject_delay = float(os.environ.get("CAVE_MSG_DELAY", "2.0"))
+
     try:
         while True:
             rfds = [stdin_fd, master_fd, sock.fileno()]
             rfds.extend(clients.keys())
+
+            # Compute select timeout: wake promptly when queued messages
+            # become eligible for injection.
+            timeout = 0.5
+            if msg_queue and inject_delay > 0:
+                remaining = inject_delay - (time.monotonic() - last_stdin_time)
+                timeout = max(0, min(timeout, remaining))
+
             try:
-                readable, _, _ = select.select(rfds, [], [], 0.5)
+                readable, _, _ = select.select(rfds, [], [], timeout)
             except OSError as e:
                 if e.errno == errno.EINTR:
                     continue
@@ -178,6 +194,7 @@ def relay(child_argv, sock_path):
                         data = b""
                     if data:
                         os.write(master_fd, data)
+                        last_stdin_time = time.monotonic()
 
                 elif fd == master_fd:
                     try:
@@ -206,9 +223,22 @@ def relay(child_argv, sock_path):
                     else:
                         # Client closed. Process accumulated message.
                         if buf:
-                            _handle_message(buf, master_fd, conn)
+                            inject = _handle_message(buf, conn)
+                            if inject is not None:
+                                if inject_delay <= 0:
+                                    os.write(master_fd, inject + b"\r")
+                                else:
+                                    msg_queue.append(inject)
+                                    os.write(stdout_fd, b"\a")
                         conn.close()
                         del clients[fd]
+
+            # Drain queued messages once stdin has been idle long enough.
+            if msg_queue and inject_delay > 0:
+                if (time.monotonic() - last_stdin_time) >= inject_delay:
+                    for msg in msg_queue:
+                        os.write(master_fd, msg + b"\r")
+                    msg_queue.clear()
 
             # Reap child (non-blocking)
             try:

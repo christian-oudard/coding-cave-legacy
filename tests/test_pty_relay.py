@@ -171,6 +171,53 @@ class TestPtyRelay:
         assert not meta.exists(), "Metadata file not cleaned up"
 
 
+class TestMessageQueuing:
+    def test_message_delayed_during_typing(self, tmp_path):
+        """Messages are held while stdin is active, delivered after idle."""
+        sock = str(tmp_path / "test.sock")
+        script = tmp_path / "echo.sh"
+        # Read two lines: first from stdin, second from injected message
+        script.write_text("#!/bin/bash\nread -r a; read -r b; echo \"$a|$b\"\n")
+        script.chmod(0o755)
+
+        env = {**os.environ, "CAVE_MSG_DELAY": "1.0"}
+        proc = subprocess.Popen(
+            [sys.executable, RELAY, "--sock", sock, "--", str(script)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=env,
+        )
+        assert _wait_for_socket(sock), "Socket never appeared"
+
+        # Simulate typing (stdin activity)
+        proc.stdin.write(b"typed\r")
+        proc.stdin.flush()
+        # Send a message while "typing" just happened
+        _send_message(sock, "injected")
+        # The message should be queued, not yet delivered.
+        # After the delay expires (1s), it injects.
+        stdout, _ = proc.communicate(timeout=5)
+        assert b"typed|injected" in stdout
+
+    def test_bell_on_queued_message(self, tmp_path):
+        """Terminal bell is written to stdout when a message is queued."""
+        sock = str(tmp_path / "test.sock")
+        script = tmp_path / "echo.sh"
+        script.write_text("#!/bin/bash\nread -r line; echo \"GOT:$line\"\n")
+        script.chmod(0o755)
+
+        env = {**os.environ, "CAVE_MSG_DELAY": "0.5"}
+        proc = subprocess.Popen(
+            [sys.executable, RELAY, "--sock", sock, "--", str(script)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=env,
+        )
+        assert _wait_for_socket(sock), "Socket never appeared"
+        _send_message(sock, "hello")
+        stdout, _ = proc.communicate(timeout=5)
+        assert b"\a" in stdout  # bell character
+        assert b"GOT:hello" in stdout
+
+
 class TestCaveSend:
     def test_fwd_tags_and_delivers(self, tmp_path):
         """FWD through sender relay tags message and delivers to target."""

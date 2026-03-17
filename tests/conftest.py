@@ -65,6 +65,7 @@ def write_session(cave_data, sid, project, pid=None):
 def _reset_cave_data():
     """Reset cave_data and suppress cave-send after every test."""
     os.environ["CODING_CAVE_NO_SEND"] = "1"
+    os.environ["CAVE_MSG_DELAY"] = "0"  # disable message queuing in tests
     yield
     _state.set_cave_data(None)
 
