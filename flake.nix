@@ -106,7 +106,8 @@
         fuse-overlayfs
         fuse3
         gnupg
-      ] ++ [ pkgs."poppler-utils" caveSend ]))
+      ] ++ [ pkgs."poppler-utils" pkgs.stdenv.cc.cc.lib caveSend ]))
+      (set-env "LD_LIBRARY_PATH" "${pkgs.stdenv.cc.cc.lib}/lib")
       (set-env "TERMINFO_DIRS" "${pkgs.ncurses}/share/terminfo")
       (set-env "LOCALE_ARCHIVE" "${pkgs.glibcLocales}/lib/locale/locale-archive")
       (set-env "LANG" "en_US.UTF-8")
@@ -257,7 +258,7 @@
           RUNTIME_ARGS+=(--ro-bind "$NVIDIA_BIN" "$NVIDIA_BIN")
           RUNTIME_ARGS+=(--symlink "$NVIDIA_BIN/nvidia-smi" /bin/nvidia-smi)
         fi
-        RUNTIME_ARGS+=(--setenv LD_LIBRARY_PATH "/run/opengl-driver/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}")
+        RUNTIME_ARGS+=(--setenv LD_LIBRARY_PATH "/run/opengl-driver/lib:${pkgs.stdenv.cc.cc.lib}/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}")
       '')
     ];
 

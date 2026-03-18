@@ -480,6 +480,66 @@ def _sync_nix_db():
         if load.returncode != 0:
             raise RuntimeError(f"nix-store --load-db failed: {load.stderr}")
 
+    _sync_drv_outputs()
+
+
+def _sync_drv_outputs():
+    """Register missing DerivationOutputs entries in the nix DB.
+
+    On overlayfs, derivation .drv files and their output paths may both be
+    registered as valid, but the drv->output mapping in the DerivationOutputs
+    table can be missing. This causes 'requires non-existent output' errors
+    during nix build.
+    """
+    import json
+    import sqlite3
+
+    db_path = "/nix/var/nix/db/db.sqlite"
+    db = sqlite3.connect(db_path)
+    cur = db.cursor()
+
+    # Find all .drv paths that have no DerivationOutputs entry
+    cur.execute("""
+        SELECT VP.id, VP.path FROM ValidPaths VP
+        WHERE VP.path LIKE '%.drv'
+        AND VP.id NOT IN (SELECT DISTINCT drv FROM DerivationOutputs)
+    """)
+    orphan_drvs = cur.fetchall()
+    if not orphan_drvs:
+        db.close()
+        return
+
+    fixed = 0
+    for drv_id, drv_path in orphan_drvs:
+        try:
+            r = subprocess.run(
+                ["nix", "derivation", "show", drv_path],
+                capture_output=True, text=True, timeout=10,
+            )
+            if r.returncode != 0:
+                continue
+            data = json.loads(r.stdout)
+            detail = list(data.values())[0]
+            for out_name, out_info in detail.get("outputs", {}).items():
+                out_path = out_info.get("path", "")
+                if not out_path:
+                    continue
+                check = subprocess.run(
+                    ["nix-store", "--check-validity", out_path],
+                    capture_output=True, timeout=5,
+                )
+                if check.returncode == 0:
+                    cur.execute(
+                        "INSERT INTO DerivationOutputs (drv, id, path) VALUES (?, ?, ?)",
+                        (drv_id, out_name, out_path),
+                    )
+                    fixed += 1
+        except Exception:
+            continue
+
+    db.commit()
+    db.close()
+
 
 class TestNixBuild:
     """Integration tests: nix build and built binary verification.
