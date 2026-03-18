@@ -1,356 +1,106 @@
 #!/usr/bin/env python3
-"""PTY relay with Unix domain socket for message injection.
+"""Session wrapper: register IPC metadata, exec child, clean up on exit.
 
-Sits between the terminal and a child process, forwarding all I/O
-transparently. Accepts connections on a Unix domain socket; messages
-received are injected into the child's PTY as if typed by the user.
+Replaces the old PTY relay. Messages are now delivered via Claude Code
+hooks (cave-send hook), so PTY injection is no longer needed. This
+wrapper just manages session metadata for cave-send --list discovery.
 
 Usage:
-    pty-relay --sock /path/to/sock -- command [args...]
+    pty-relay -- command [args...]
 
-Protocol:
-    Client connects to the UDS, sends the message as raw bytes,
-    then closes (or shutdown(SHUT_WR)). The relay appends CR and
-    writes to the child's PTY master.
+Writes ~/ipc/<sid>.json with session metadata and ~/ipc/<sid>.pid with
+the child PID. Cleans up both on exit.
 """
-import argparse
-import errno
-import fcntl
 import json
 import os
-import select
 import signal
-import socket
-import struct
 import sys
-import termios
 import time
-import tty
 
 
-def _set_winsize(fd, rows, cols):
-    fcntl.ioctl(fd, termios.TIOCSWINSZ,
-                struct.pack("HHHH", rows, cols, 0, 0))
+def _meta_path():
+    sid = os.environ.get("CODING_CAVE_SESSION_ID", "")
+    if not sid:
+        return None, None
+    ipc_dir = os.path.join(os.environ.get("HOME", ""), "ipc")
+    return (
+        os.path.join(ipc_dir, f"{sid}.json"),
+        os.path.join(ipc_dir, f"{sid}.pid"),
+    )
 
 
-def _get_winsize(fd):
-    s = fcntl.ioctl(fd, termios.TIOCGWINSZ, b"\x00" * 8)
-    rows, cols, _, _ = struct.unpack("HHHH", s)
-    return rows, cols
-
-
-def _sender_tag():
-    """Build sender tag from this relay's session identity."""
-    idx = os.environ.get("CODING_CAVE_SESSION_INDEX", "")
-    proj = os.environ.get("CODING_CAVE_PROJECT_PATH", "")
-    proj = os.path.basename(proj) if proj else ""
-    if proj and idx:
-        return f"{proj}#{idx}:"
-    if idx:
-        return f"#{idx}:"
-    return "unknown:"
-
-
-def _is_local_peer(conn):
-    """Check if the peer is in the same PID namespace via SO_PEERCRED."""
-    try:
-        creds = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED,
-                                struct.calcsize("iII"))
-        pid, _, _ = struct.unpack("iII", creds)
-        return pid > 0
-    except OSError:
-        return False
-
-
-def _forward_message(target_sid, tagged_message):
-    """Forward a tagged message to the target session's socket."""
-    ipc_dir = os.path.join(os.environ.get("HOME", os.path.expanduser("~")), "ipc")
-    target_sock = os.path.join(ipc_dir, f"{target_sid}.sock")
-    try:
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(5)
-        s.connect(target_sock)
-        s.sendall(tagged_message.encode())
-        s.shutdown(socket.SHUT_WR)
-        s.close()
-    except OSError:
-        pass
-
-
-def _handle_message(buf, conn=None):
-    """Process an incoming message.
-
-    FWD messages from local peers (same PID namespace) are tagged with
-    verified sender identity and forwarded to the target session.
-    Returns bytes to inject into PTY, or None if handled (FWD).
-    """
-    raw = bytes(buf)
-    if raw.startswith(b"FWD ") and conn is not None and _is_local_peer(conn):
-        # Forward request from a local process (same session)
-        newline = raw.find(b"\n", 4)
-        if newline == -1:
-            return None
-        target_sid = raw[4:newline].decode()
-        message = raw[newline + 1:].decode()
-        tagged = f"{_sender_tag()} {message}"
-        _forward_message(target_sid, tagged)
-        return None
-    else:
-        return raw
-
-
-def relay(child_argv, sock_path):
-    """Run child in a PTY, forward I/O, accept UDS message injection.
-
-    Returns the child's exit code.
-    """
-    master_fd, slave_fd = os.openpty()
-    stdin_fd = sys.stdin.fileno()
-    stdout_fd = sys.stdout.fileno()
-    stdin_is_tty = os.isatty(stdin_fd)
-
-    if stdin_is_tty:
-        try:
-            rows, cols = _get_winsize(stdin_fd)
-            _set_winsize(slave_fd, rows, cols)
-        except OSError:
-            pass
-
-    pid = os.fork()
-    if pid == 0:
-        os.close(master_fd)
-        os.setsid()
-        fcntl.ioctl(slave_fd, termios.TIOCSCTTY, 0)
-        os.dup2(slave_fd, 0)
-        os.dup2(slave_fd, 1)
-        os.dup2(slave_fd, 2)
-        if slave_fd > 2:
-            os.close(slave_fd)
-        os.execvp(child_argv[0], child_argv)
-        os._exit(127)
-
-    os.close(slave_fd)
-
-    # UDS listener
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    try:
-        os.unlink(sock_path)
-    except FileNotFoundError:
-        pass
-    os.makedirs(os.path.dirname(sock_path), exist_ok=True)
-    sock.bind(sock_path)
-    sock.listen(5)
-    sock.setblocking(False)
-
-    old_attrs = None
-    if stdin_is_tty:
-        old_attrs = termios.tcgetattr(stdin_fd)
-        tty.setraw(stdin_fd)
-
-    def on_winch(_sig, _frame):
-        try:
-            rows, cols = _get_winsize(stdin_fd)
-            _set_winsize(master_fd, rows, cols)
-            os.kill(pid, signal.SIGWINCH)
-        except OSError:
-            pass
-
-    prev_winch = signal.signal(signal.SIGWINCH, on_winch)
-
-    # UDS client tracking: fd -> (socket_obj, buffer)
-    clients = {}
-    exit_code = 1
-
-    # Message queue: hold incoming messages until stdin is idle.
-    # CAVE_MSG_DELAY=0 disables queuing (immediate injection).
-    msg_queue = []
-    last_stdin_time = 0.0  # monotonic; 0 = never typed, so idle from start
-    inject_delay = float(os.environ.get("CAVE_MSG_DELAY", "2.0"))
-
-    try:
-        while True:
-            rfds = [stdin_fd, master_fd, sock.fileno()]
-            rfds.extend(clients.keys())
-
-            # Compute select timeout: wake promptly when queued messages
-            # become eligible for injection.
-            timeout = 0.5
-            if msg_queue and inject_delay > 0:
-                remaining = inject_delay - (time.monotonic() - last_stdin_time)
-                timeout = max(0, min(timeout, remaining))
-
-            try:
-                readable, _, _ = select.select(rfds, [], [], timeout)
-            except OSError as e:
-                if e.errno == errno.EINTR:
-                    continue
-                raise
-
-            for fd in readable:
-                if fd == stdin_fd:
-                    try:
-                        data = os.read(fd, 4096)
-                    except OSError:
-                        data = b""
-                    if data:
-                        os.write(master_fd, data)
-                        last_stdin_time = time.monotonic()
-
-                elif fd == master_fd:
-                    try:
-                        data = os.read(fd, 4096)
-                    except OSError:
-                        data = b""
-                    if data:
-                        os.write(stdout_fd, data)
-
-                elif fd == sock.fileno():
-                    try:
-                        conn, _ = sock.accept()
-                        conn.setblocking(False)
-                        clients[conn.fileno()] = (conn, bytearray())
-                    except OSError:
-                        pass
-
-                elif fd in clients:
-                    conn, buf = clients[fd]
-                    try:
-                        data = conn.recv(4096)
-                    except OSError:
-                        data = b""
-                    if data:
-                        buf.extend(data)
-                    else:
-                        # Client closed. Process accumulated message.
-                        if buf:
-                            inject = _handle_message(buf, conn)
-                            if inject is not None:
-                                if inject_delay <= 0:
-                                    os.write(master_fd, inject + b"\r")
-                                else:
-                                    msg_queue.append(inject)
-                                    os.write(stdout_fd, b"\a")
-                        conn.close()
-                        del clients[fd]
-
-            # Drain queued messages once stdin has been idle long enough.
-            if msg_queue and inject_delay > 0:
-                if (time.monotonic() - last_stdin_time) >= inject_delay:
-                    for msg in msg_queue:
-                        os.write(master_fd, msg + b"\r")
-                    msg_queue.clear()
-
-            # Reap child (non-blocking, detect stops for Ctrl+Z)
-            try:
-                wpid, status = os.waitpid(pid, os.WNOHANG | os.WUNTRACED)
-            except ChildProcessError:
-                break
-            if wpid != 0:
-                if os.WIFSTOPPED(status):
-                    # Child suspended (e.g. Claude Code's Ctrl+Z handler).
-                    # We can't propagate the stop through bwrap/pasta to
-                    # the host shell, so immediately resume the child.
-                    os.kill(pid, signal.SIGCONT)
-                    continue
-                elif os.WIFEXITED(status):
-                    exit_code = os.WEXITSTATUS(status)
-                elif os.WIFSIGNALED(status):
-                    exit_code = 128 + os.WTERMSIG(status)
-                # Drain remaining PTY output
-                while True:
-                    try:
-                        r, _, _ = select.select([master_fd], [], [], 0.1)
-                        if not r:
-                            break
-                        data = os.read(master_fd, 4096)
-                        if not data:
-                            break
-                        os.write(stdout_fd, data)
-                    except OSError:
-                        break
-                break
-
-    finally:
-        signal.signal(signal.SIGWINCH, prev_winch)
-        if old_attrs is not None:
-            try:
-                termios.tcsetattr(stdin_fd, termios.TCSADRAIN, old_attrs)
-            except termios.error:
-                pass
-        try:
-            os.close(master_fd)
-        except OSError:
-            pass
-        for conn, _ in clients.values():
-            conn.close()
-        sock.close()
-        try:
-            os.unlink(sock_path)
-        except FileNotFoundError:
-            pass
-
-    return exit_code
-
-
-def _meta_path(sock_path):
-    """Sidecar metadata file path: same stem, .json extension."""
-    base = sock_path.rsplit(".", 1)[0] if "." in sock_path else sock_path
-    return base + ".json"
-
-
-def _write_meta(sock_path):
-    """Write session metadata from environment variables."""
-    import json, time
+def _write_meta(meta_path, pid_path, child_pid):
+    os.makedirs(os.path.dirname(meta_path), exist_ok=True)
     meta = {
         "sid": os.environ.get("CODING_CAVE_SESSION_ID", ""),
         "index": os.environ.get("CODING_CAVE_SESSION_INDEX", ""),
         "project": os.path.basename(
             os.environ.get("CODING_CAVE_PROJECT_PATH", "")),
         "started": time.time(),
+        "pid": child_pid,
     }
-    path = _meta_path(sock_path)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as f:
+    with open(meta_path, "w") as f:
         json.dump(meta, f)
+    with open(pid_path, "w") as f:
+        f.write(str(child_pid))
 
 
-def _remove_meta(sock_path):
-    try:
-        os.unlink(_meta_path(sock_path))
-    except FileNotFoundError:
-        pass
-
-
-def _default_sock_path():
-    """Derive socket path from CODING_CAVE_SESSION_ID."""
-    sid = os.environ.get("CODING_CAVE_SESSION_ID")
-    if sid:
-        return os.path.join(os.path.expanduser("~"), "ipc", f"{sid}.sock")
-    return None
+def _remove_meta(meta_path, pid_path):
+    for p in (meta_path, pid_path):
+        try:
+            os.unlink(p)
+        except FileNotFoundError:
+            pass
 
 
 def main():
-    parser = argparse.ArgumentParser(description="PTY relay with UDS injection")
-    parser.add_argument("--sock", default=None,
-                        help="Unix socket path (default: ~/ipc/$CODING_CAVE_SESSION_ID.sock)")
-    parser.add_argument("command", nargs=argparse.REMAINDER)
-    args = parser.parse_args()
+    # Parse: pty-relay -- command [args...]
+    argv = sys.argv[1:]
+    if argv and argv[0] == "--":
+        argv = argv[1:]
+    # Accept and ignore --sock for backwards compat
+    if len(argv) >= 2 and argv[0] == "--sock":
+        argv = argv[2:]
+        if argv and argv[0] == "--":
+            argv = argv[1:]
+    if not argv:
+        print("Usage: pty-relay -- command [args...]", file=sys.stderr)
+        sys.exit(1)
 
-    cmd = args.command
-    if cmd and cmd[0] == "--":
-        cmd = cmd[1:]
-    if not cmd:
-        parser.error("no command specified")
+    meta_path, pid_path = _meta_path()
 
-    sock_path = args.sock or _default_sock_path()
-    if not sock_path:
-        parser.error("--sock required (CODING_CAVE_SESSION_ID not set)")
+    # Fork so we can write metadata with the child's PID and wait for it.
+    pid = os.fork()
+    if pid == 0:
+        # Child: exec the command directly on the terminal.
+        os.execvp(argv[0], argv)
+        os._exit(127)
 
-    _write_meta(sock_path)
+    # Parent: write metadata and wait.
+    if meta_path:
+        _write_meta(meta_path, pid_path, pid)
+
+    # Forward signals to child
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, lambda s, f: os.kill(pid, s))
+
+    exit_code = 1
     try:
-        sys.exit(relay(cmd, sock_path))
+        while True:
+            wpid, status = os.waitpid(pid, 0)
+            if wpid == pid:
+                if os.WIFEXITED(status):
+                    exit_code = os.WEXITSTATUS(status)
+                elif os.WIFSIGNALED(status):
+                    exit_code = 128 + os.WTERMSIG(status)
+                break
+    except ChildProcessError:
+        pass
     finally:
-        _remove_meta(sock_path)
+        if meta_path:
+            _remove_meta(meta_path, pid_path)
+
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":

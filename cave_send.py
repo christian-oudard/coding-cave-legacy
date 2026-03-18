@@ -149,39 +149,42 @@ def resolve_index(index):
             if started >= best_started:
                 best_sid, best_started = sid, started
     if best_sid:
-        return best_sid, str(IPC_DIR / f"{best_sid}.sock")
+        return best_sid, str(IPC_DIR / f"{best_sid}.json")
     return None, None
 
 
-def list_sessions():
-    """Return list of (sid, metadata_dict) for sessions with active sockets.
+def _pid_alive(pid):
+    """Check if a PID is alive (within same PID namespace)."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, PermissionError):
+        return False
 
-    Stale sockets (connection refused) are cleaned up automatically.
+
+def list_sessions():
+    """Return list of (sid, metadata_dict) for active sessions.
+
+    Sessions are discovered via ~/ipc/<sid>.json metadata files.
+    Stale entries (dead PID) are cleaned up automatically.
     """
     if not IPC_DIR.is_dir():
         return []
     sessions = []
-    for sock_path in IPC_DIR.glob("*.sock"):
-        sid = sock_path.stem
-        # Probe the socket to check if the relay is alive
-        import socket as _socket
-        s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
-        s.settimeout(1)
+    for meta_path in IPC_DIR.glob("*.json"):
+        sid = meta_path.stem
         try:
-            s.connect(str(sock_path))
-            s.close()
-        except (ConnectionRefusedError, OSError):
-            # Stale socket, clean up
-            sock_path.unlink(missing_ok=True)
-            sock_path.with_suffix(".json").unlink(missing_ok=True)
+            meta = json.loads(meta_path.read_text())
+        except (json.JSONDecodeError, OSError):
             continue
-        meta_path = sock_path.with_suffix(".json")
-        meta = {}
-        if meta_path.exists():
-            try:
-                meta = json.loads(meta_path.read_text())
-            except (json.JSONDecodeError, OSError):
-                pass
+        # Check liveness via PID
+        pid = meta.get("pid")
+        if pid and not _pid_alive(pid):
+            # Stale session, clean up
+            meta_path.unlink(missing_ok=True)
+            pid_path = meta_path.with_suffix(".pid")
+            pid_path.unlink(missing_ok=True)
+            continue
         sessions.append((sid, meta))
     return sessions
 
