@@ -307,20 +307,8 @@ def cmd_push(slug=None, force=False):
     slug = projects.resolve_slug()
     if slug:
         sync.push_project(slug, force=force)
-        return
-
-    all_projects = projects.list_projects()
-    if not all_projects:
-        print("No projects in the cave.", file=sys.stderr)
-        return
-    failed = []
-    for slug, _ in all_projects:
-        try:
-            sync.push_project(slug, force=force)
-        except SystemExit:
-            failed.append(slug)
-    if failed:
-        print(f"Push failed for: {', '.join(failed)}", file=sys.stderr)
+    else:
+        print("Not in a project folder. Specify a project or cd into one.", file=sys.stderr)
 
 
 def _find_cave_root(project=None):
