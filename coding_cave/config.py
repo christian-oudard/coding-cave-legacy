@@ -338,7 +338,7 @@ SKILL_EOF
       ${{pkgs.lib.concatStringsSep "\\n" (pkgs.lib.mapAttrsToList (relPath: content:
         let
           safeName = builtins.replaceStrings ["/"] ["-"] relPath;
-          fileStore = builtins.toFile "cave-file-${{safeName}}" content;
+          fileStore = pkgs.writeText "cave-file-${{safeName}}" content;
         in ''
           mkdir -p $out/files/$(dirname "${{relPath}}")
           cp ${{fileStore}} $out/files/${{relPath}}
