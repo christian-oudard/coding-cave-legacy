@@ -236,8 +236,8 @@ def _setup_nix_store(sid, inside_cave):
                 src.close()
             else:
                 _merge_nix_db(host_nix_db, cave_nix_db)
-        except sqlite3.Error as exc:
-            print(f"WARNING: nix DB sync failed: {exc}", file=sys.stderr)
+        except sqlite3.Error:
+            pass
     if cave_nix_db.exists():
         os.environ["CODING_CAVE_NIX_DB_DIR"] = str(nix_db_dir)
 
@@ -418,8 +418,7 @@ def _mount_project_overlays(sid, overlay_base, loaded_projects):
                 )
         # Rewrite alternates from host path to cave path
         if session_gitdir:
-            gitdir._atomic_write(
-                session_gitdir / "objects" / "info" / "alternates",
+            (session_gitdir / "objects" / "info" / "alternates").write_text(
                 f"/projects/.shared-objects/{slug}\n")
 
     return overlay_mounts, bwrap_args
@@ -496,7 +495,7 @@ def _save_overlay_uppers(overlay_base, loaded_projects):
             pass
 
 
-def start_session(project, command, gpu=False, reuse_index=False, mounted_projects=None):
+def start_session(project, command, gpu=False, reuse_index=False, mounted_projects=None, port=None):
     """Start a new bwrap session with per-session overlays.
 
     mounted_projects: dict of slug->source to mount. If None, mounts all.
@@ -573,7 +572,7 @@ def start_session(project, command, gpu=False, reuse_index=False, mounted_projec
             pasta_args = [
                 "pasta", "--quiet", "--config-net",
                 "--map-host-loopback", loopback_addr,
-                "-T", proxy_port, "-U", "none",
+                "-T", proxy_port,
             ]
         else:
             # Disable gateway->host-loopback mapping (pasta maps it by default,
@@ -581,8 +580,17 @@ def start_session(project, command, gpu=False, reuse_index=False, mounted_projec
             pasta_args = [
                 "pasta", "--quiet", "--config-net",
                 "--map-host-loopback", "192.0.2.1",
-                "-T", "none", "-U", "none",
+                "-T", "none",
             ]
+        # --port: expose cave ports on host. "auto" = pasta auto-detection,
+        # comma-separated ports = explicit list, None = no forwarding.
+        if port == "auto":
+            pass  # omit -t, let pasta auto-detect
+        elif port:
+            pasta_args += ["-t", port]
+        else:
+            pasta_args += ["-t", "none"]
+        pasta_args += ["-u", "none", "-U", "none"]
         proc = subprocess.Popen(
             pasta_args + ["--", binary] + command,
             start_new_session=False,

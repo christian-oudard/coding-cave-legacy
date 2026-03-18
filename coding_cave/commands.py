@@ -39,7 +39,7 @@ def _shell_exec_cmd(preferred_shell):
     )
 
 
-def cmd_agent(args, gpu=False, continue_session=False, resume=None, claude_args=None, projects_flag=None):
+def cmd_agent(args, gpu=False, continue_session=False, resume=None, claude_args=None, projects_flag=None, port=None):
     """Start a new agent session."""
     global_config = config.load_global_config()
     config.setup_env(global_config)
@@ -61,19 +61,19 @@ def cmd_agent(args, gpu=False, continue_session=False, resume=None, claude_args=
     if claude_args:
         claude_parts.extend(claude_args)
     claude_cmd = shlex.join(claude_parts)
-    wrapper_cmd = f"session-wrapper -- {claude_cmd}"
+    relay_cmd = f"pty-relay -- {claude_cmd}"
     command = [
         "--", "/bin/bash", "-c",
-        f"cd {workdir} && exec {wrapper_cmd}",
+        f"cd {workdir} && exec {relay_cmd}",
     ]
 
     mounted = projects.parse_project_filter(projects_flag, project)
     lifecycle.start_session(project, command, gpu=gpu,
                             reuse_index=continue_session or resume is not None,
-                            mounted_projects=mounted)
+                            mounted_projects=mounted, port=port)
 
 
-def cmd_shell(args, gpu=False, projects_flag=None):
+def cmd_shell(args, gpu=False, projects_flag=None, port=None):
     """Enter cave with a shell -- join existing session or start new."""
     global_config = config.load_global_config()
     config.setup_env(global_config)
@@ -132,7 +132,7 @@ def cmd_shell(args, gpu=False, projects_flag=None):
         ]
 
     mounted = projects.parse_project_filter(projects_flag, project)
-    lifecycle.start_session(project, command, gpu=gpu, mounted_projects=mounted)
+    lifecycle.start_session(project, command, gpu=gpu, mounted_projects=mounted, port=port)
 
 
 def cmd_add(directory=None):
@@ -310,8 +310,17 @@ def cmd_push(slug=None, force=False):
     slug = projects.resolve_slug()
     if slug:
         sync.push_project(slug, force=force)
-    else:
-        print("Not in a project folder. Specify a project or cd into one.", file=sys.stderr)
+        return
+
+    all_projects = projects.list_projects()
+    if not all_projects:
+        print("No projects in the cave.", file=sys.stderr)
+        return
+    for slug, _ in all_projects:
+        try:
+            sync.push_project(slug, force=force)
+        except SystemExit:
+            pass
 
 
 def _find_cave_root(project=None):
