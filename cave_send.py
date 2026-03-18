@@ -153,20 +153,34 @@ def resolve_index(index):
     return None, None
 
 
-def _pid_alive(pid):
-    """Check if a PID is alive (within same PID namespace)."""
+def _session_alive(lock_path):
+    """Check if a session is alive by trying a non-blocking flock.
+
+    If we can acquire the lock, the session is dead (lock was released).
+    If EWOULDBLOCK, the session is alive (holding the lock).
+    """
     try:
-        os.kill(pid, 0)
-        return True
-    except (ProcessLookupError, PermissionError):
+        fd = os.open(str(lock_path), os.O_RDONLY)
+    except FileNotFoundError:
         return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        # Got the lock, session is dead. Release it.
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    except BlockingIOError:
+        # Lock held by another process, session is alive.
+        return True
+    finally:
+        os.close(fd)
 
 
 def list_sessions():
     """Return list of (sid, metadata_dict) for active sessions.
 
     Sessions are discovered via ~/ipc/<sid>.json metadata files.
-    Stale entries (dead PID) are cleaned up automatically.
+    Liveness is checked via flock on ~/ipc/<sid>.lock.
+    Stale entries are cleaned up automatically.
     """
     if not IPC_DIR.is_dir():
         return []
@@ -177,13 +191,11 @@ def list_sessions():
             meta = json.loads(meta_path.read_text())
         except (json.JSONDecodeError, OSError):
             continue
-        # Check liveness via PID
-        pid = meta.get("pid")
-        if pid and not _pid_alive(pid):
+        lock_path = meta_path.with_suffix(".lock")
+        if not _session_alive(lock_path):
             # Stale session, clean up
             meta_path.unlink(missing_ok=True)
-            pid_path = meta_path.with_suffix(".pid")
-            pid_path.unlink(missing_ok=True)
+            lock_path.unlink(missing_ok=True)
             continue
         sessions.append((sid, meta))
     return sessions

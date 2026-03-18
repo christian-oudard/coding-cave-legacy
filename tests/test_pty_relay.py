@@ -43,7 +43,7 @@ class TestSessionWrapper:
         }
         ipc_dir = tmp_path / "ipc"
         meta_path = ipc_dir / f"{sid}.json"
-        pid_path = ipc_dir / f"{sid}.pid"
+        lock_path = ipc_dir / f"{sid}.lock"
 
         proc = subprocess.Popen(
             [sys.executable, RELAY, "--", "bash", "-c", "sleep 0.3"],
@@ -60,14 +60,13 @@ class TestSessionWrapper:
         assert data["sid"] == sid
         assert data["index"] == "7"
         assert data["project"] == "myproject"
-        assert "pid" in data
-        assert pid_path.exists()
+        assert lock_path.exists()
 
         proc.wait(timeout=5)
         assert proc.returncode == 0
         # Cleaned up
         assert not meta_path.exists(), "Metadata not cleaned up"
-        assert not pid_path.exists(), "PID file not cleaned up"
+        assert not lock_path.exists(), "Lock file not cleaned up"
 
     def test_ignores_sock_flag(self, tmp_path):
         """--sock is accepted and ignored for backwards compat."""
@@ -88,16 +87,25 @@ class TestSessionWrapper:
         assert "hello" in proc.stdout
 
 
+def _hold_lock(lock_path):
+    """Acquire an exclusive flock, returning the fd (keep open to hold)."""
+    import fcntl
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT, 0o644)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd
+
+
 class TestCaveSend:
     def test_list_sessions_finds_active(self, tmp_path):
-        """list_sessions finds sessions with live PIDs."""
+        """list_sessions finds sessions with held locks."""
         ipc_dir = tmp_path / "ipc"
         ipc_dir.mkdir()
-        # Write metadata with our own PID (guaranteed alive)
         (ipc_dir / "live-sid.json").write_text(json.dumps({
             "sid": "live-sid", "index": "1", "project": "proj",
-            "started": time.time(), "pid": os.getpid(),
+            "started": time.time(),
         }))
+        lock_fd = _hold_lock(ipc_dir / "live-sid.lock")
         sys.path.insert(0, str(Path(__file__).parent.parent))
         import cave_send
         old_ipc = cave_send.IPC_DIR
@@ -108,16 +116,18 @@ class TestCaveSend:
             assert "live-sid" in sids
         finally:
             cave_send.IPC_DIR = old_ipc
+            os.close(lock_fd)
 
     def test_list_sessions_cleans_stale(self, tmp_path):
-        """list_sessions removes entries with dead PIDs."""
+        """list_sessions removes entries with no held lock."""
         ipc_dir = tmp_path / "ipc"
         ipc_dir.mkdir()
-        # Write metadata with a definitely-dead PID
         (ipc_dir / "dead-sid.json").write_text(json.dumps({
             "sid": "dead-sid", "index": "1", "project": "proj",
-            "started": time.time(), "pid": 999999999,
+            "started": time.time(),
         }))
+        # Create lock file but don't hold it
+        (ipc_dir / "dead-sid.lock").touch()
         sys.path.insert(0, str(Path(__file__).parent.parent))
         import cave_send
         old_ipc = cave_send.IPC_DIR
@@ -125,7 +135,6 @@ class TestCaveSend:
         try:
             sessions = cave_send.list_sessions()
             assert len(sessions) == 0
-            # File should be cleaned up
             assert not (ipc_dir / "dead-sid.json").exists()
         finally:
             cave_send.IPC_DIR = old_ipc
@@ -136,19 +145,22 @@ class TestCaveSend:
         ipc_dir.mkdir()
         (ipc_dir / "my-sid.json").write_text(json.dumps({
             "sid": "my-sid", "index": "1", "project": "proj",
-            "pid": os.getpid(),
         }))
+        lock_fd = _hold_lock(ipc_dir / "my-sid.lock")
         env = {
             **os.environ,
             "CODING_CAVE_SESSION_ID": "my-sid",
             "HOME": str(tmp_path),
         }
-        result = subprocess.run(
-            [sys.executable, SEND, "1", "hello"],
-            capture_output=True, text=True, env=env,
-        )
-        assert result.returncode != 0
-        assert "yourself" in result.stderr.lower()
+        try:
+            result = subprocess.run(
+                [sys.executable, SEND, "1", "hello"],
+                capture_output=True, text=True, env=env,
+            )
+            assert result.returncode != 0
+            assert "yourself" in result.stderr.lower()
+        finally:
+            os.close(lock_fd)
 
     def test_list_shows_sessions(self, tmp_path):
         """--list shows session metadata."""
@@ -156,15 +168,19 @@ class TestCaveSend:
         ipc_dir.mkdir()
         (ipc_dir / "abc123.json").write_text(json.dumps({
             "sid": "abc123", "index": "1", "project": "myproj",
-            "started": time.time() - 120, "pid": os.getpid(),
+            "started": time.time() - 120,
         }))
-        result = subprocess.run(
-            [sys.executable, SEND, "--list"],
-            capture_output=True, text=True,
-            env={**os.environ, "HOME": str(tmp_path)},
-        )
-        assert "abc123" in result.stdout
-        assert "myproj" in result.stdout
+        lock_fd = _hold_lock(ipc_dir / "abc123.lock")
+        try:
+            result = subprocess.run(
+                [sys.executable, SEND, "--list"],
+                capture_output=True, text=True,
+                env={**os.environ, "HOME": str(tmp_path)},
+            )
+            assert "abc123" in result.stdout
+            assert "myproj" in result.stdout
+        finally:
+            os.close(lock_fd)
 
     def test_resolve_prefers_newest(self, tmp_path):
         """resolve_index picks newest session when indices collide."""
@@ -173,12 +189,14 @@ class TestCaveSend:
         # Two sessions with same index, different start times
         (ipc_dir / "old-sid.json").write_text(json.dumps({
             "sid": "old-sid", "index": "1", "project": "proj",
-            "started": 1000, "pid": os.getpid(),
+            "started": 1000,
         }))
         (ipc_dir / "new-sid.json").write_text(json.dumps({
             "sid": "new-sid", "index": "1", "project": "proj",
-            "started": 2000, "pid": os.getpid(),
+            "started": 2000,
         }))
+        lock_fd1 = _hold_lock(ipc_dir / "old-sid.lock")
+        lock_fd2 = _hold_lock(ipc_dir / "new-sid.lock")
         sys.path.insert(0, str(Path(__file__).parent.parent))
         import cave_send
         old_ipc = cave_send.IPC_DIR
@@ -188,3 +206,5 @@ class TestCaveSend:
             assert sid == "new-sid"
         finally:
             cave_send.IPC_DIR = old_ipc
+            os.close(lock_fd1)
+            os.close(lock_fd2)
