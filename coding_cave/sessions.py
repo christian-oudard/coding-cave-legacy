@@ -42,7 +42,7 @@ def pop_last_index(project):
         return None
 
 
-def register_session(sid, project, bwrap_pid, index=None):
+def register_session(sid, project, bwrap_pid, index=None, mounted_projects=None):
     """Register a running session."""
     _state.sessions_dir().mkdir(parents=True, exist_ok=True)
     if index is None:
@@ -54,6 +54,8 @@ def register_session(sid, project, bwrap_pid, index=None):
         "started": int(time.time()),
         "index": index,
     }
+    if mounted_projects is not None:
+        info["mounted_projects"] = sorted(mounted_projects)
     tmux_pane = os.environ.get("TMUX_PANE")
     if tmux_pane:
         info["tmux_pane"] = tmux_pane

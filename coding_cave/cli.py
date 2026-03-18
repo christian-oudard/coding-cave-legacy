@@ -14,12 +14,15 @@ def build_parser():
     parser.add_argument("--gpu", action="store_true", help="enable GPU access")
     parser.add_argument("-c", "--continue", action="store_true", dest="continue_session", help="continue most recent conversation")
     parser.add_argument("-r", "--resume", nargs="?", const=True, default=None, metavar="SESSION_ID", help="resume a conversation by session ID, or interactive picker")
+    parser.add_argument("-p", "--projects", default=None, metavar="SLUGS", help="projects to mount: 'all', or comma-separated slugs (default: CWD project only)")
     sub = parser.add_subparsers(dest="command")
 
     p_agent = sub.add_parser("agent", help="start a new agent session")
     p_agent.add_argument("-c", "--continue", action="store_true", dest="continue_session", help="continue most recent conversation")
     p_agent.add_argument("-r", "--resume", nargs="?", const=True, default=None, metavar="SESSION_ID", help="resume a conversation by session ID, or interactive picker")
-    sub.add_parser("shell", help="start a shell or join a running session")
+    p_agent.add_argument("-p", "--projects", default=None, metavar="SLUGS", help="projects to mount: 'all', or comma-separated slugs (default: CWD project only)")
+    p_shell = sub.add_parser("shell", help="start a shell or join a running session")
+    p_shell.add_argument("-p", "--projects", default=None, metavar="SLUGS", help="projects to mount: 'all', or comma-separated slugs (default: CWD project only)")
 
     p_add = sub.add_parser("add", help="register a project")
     p_add.add_argument("dir", nargs="?", help="directory to add (default: CWD)")
@@ -73,11 +76,11 @@ def main():
     parsed = parser.parse_args(argv)
 
     if parsed.command is None:
-        commands.cmd_agent([], gpu=parsed.gpu, continue_session=parsed.continue_session, resume=parsed.resume, claude_args=claude_args)
+        commands.cmd_agent([], gpu=parsed.gpu, continue_session=parsed.continue_session, resume=parsed.resume, claude_args=claude_args, projects_flag=parsed.projects)
     elif parsed.command == "agent":
-        commands.cmd_agent([], gpu=parsed.gpu, continue_session=parsed.continue_session, resume=parsed.resume, claude_args=claude_args)
+        commands.cmd_agent([], gpu=parsed.gpu, continue_session=parsed.continue_session, resume=parsed.resume, claude_args=claude_args, projects_flag=parsed.projects)
     elif parsed.command == "shell":
-        commands.cmd_shell(claude_args, gpu=parsed.gpu)
+        commands.cmd_shell(claude_args, gpu=parsed.gpu, projects_flag=parsed.projects)
     elif parsed.command == "add":
         commands.cmd_add(directory=parsed.dir)
     elif parsed.command == "status":

@@ -75,8 +75,8 @@ Each agent session runs in its own **per-session bwrap namespace** with per-sess
 ## CLI Commands
 
 ```
-coding-cave [--gpu] [-c] [-r [SID]]   start new agent session (-c continue, -r resume)
-coding-cave shell [--gpu]              start shell or join running session
+coding-cave [--gpu] [-p SLUGS] [-c] [-r [SID]]  start new agent session (-c continue, -r resume)
+coding-cave shell [--gpu] [-p SLUGS]             start shell or join running session
 coding-cave add [dir]                  register a project (default: CWD)
 coding-cave pull [project] [--force]   pull commits from cave gitdir to host
 coding-cave push [project] [--force]   push host commits into cave gitdir
@@ -92,6 +92,8 @@ coding-cave status [-a/--all]          show projects and running sessions
 coding-cave flake update [INPUT...]     update cave.nix flake inputs (all or specific)
 coding-cave help                       show usage help
 ```
+
+`-p SLUGS` controls which projects are mounted: omit for CWD project only, `all` for every registered project, or comma-separated slugs (e.g. `-p foo,bar`). The CWD project is always included.
 
 Each invocation starts a new bwrap process that exits when the agent/shell exits.
 

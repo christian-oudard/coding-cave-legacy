@@ -94,3 +94,27 @@ def resolve_slug(slug=None):
         if cwd == Path(source).resolve() or cwd.is_relative_to(Path(source).resolve()):
             return slug
     return None
+
+
+def parse_project_filter(value, primary_project):
+    """Parse --projects flag into a filtered project dict.
+
+    Returns the subset of load_projects() to mount:
+      None or "all" -> all registered projects
+      "foo,bar"     -> primary + named slugs
+
+    The primary project is always included.
+    """
+    all_projects = load_projects()
+    if value is not None and value.strip().lower() == "all":
+        return all_projects
+    if value is None:
+        return {k: v for k, v in all_projects.items() if k == primary_project}
+
+    slugs = {s.strip() for s in value.split(",") if s.strip()}
+    slugs.add(primary_project)
+    unknown = slugs - set(all_projects)
+    if unknown:
+        print(f"Unknown project(s): {', '.join(sorted(unknown))}", file=sys.stderr)
+        sys.exit(1)
+    return {k: v for k, v in all_projects.items() if k in slugs}

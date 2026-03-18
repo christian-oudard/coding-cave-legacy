@@ -39,7 +39,7 @@ def _shell_exec_cmd(preferred_shell):
     )
 
 
-def cmd_agent(args, gpu=False, continue_session=False, resume=None, claude_args=None):
+def cmd_agent(args, gpu=False, continue_session=False, resume=None, claude_args=None, projects_flag=None):
     """Start a new agent session."""
     global_config = config.load_global_config()
     config.setup_env(global_config)
@@ -67,11 +67,13 @@ def cmd_agent(args, gpu=False, continue_session=False, resume=None, claude_args=
         f"cd {workdir} && exec {wrapper_cmd}",
     ]
 
+    mounted = projects.parse_project_filter(projects_flag, project)
     lifecycle.start_session(project, command, gpu=gpu,
-                            reuse_index=continue_session or resume is not None)
+                            reuse_index=continue_session or resume is not None,
+                            mounted_projects=mounted)
 
 
-def cmd_shell(args, gpu=False):
+def cmd_shell(args, gpu=False, projects_flag=None):
     """Enter cave with a shell -- join existing session or start new."""
     global_config = config.load_global_config()
     config.setup_env(global_config)
@@ -129,7 +131,8 @@ def cmd_shell(args, gpu=False):
             f"cd {workdir} && {shell_cmd}",
         ]
 
-    lifecycle.start_session(project, command, gpu=gpu)
+    mounted = projects.parse_project_filter(projects_flag, project)
+    lifecycle.start_session(project, command, gpu=gpu, mounted_projects=mounted)
 
 
 def cmd_add(directory=None):
@@ -314,24 +317,31 @@ def cmd_push(slug=None, force=False):
 def _find_cave_root(project=None):
     """Find the root filesystem of a running cave session via /proc/<pid>/root.
 
-    If project is given, prefers sessions for that project (auto-selects if
-    exactly one). Falls back to any running session since all projects are
-    mounted in every session. Returns None if no sessions are running.
+    If project is given, selects a session that has it mounted (checks
+    mounted_projects in session metadata). Returns None if no sessions
+    are running or none have the project mounted.
     """
     all_sessions = sessions.list_sessions()
     if not all_sessions:
         return None
 
     if project:
-        proj_sessions = [s for s in all_sessions if s.get("project") == project]
-        if len(proj_sessions) == 1:
-            session_info = proj_sessions[0]
-        elif len(proj_sessions) > 1:
-            session_info = _prompt_session(proj_sessions)
+        # Filter to sessions that have this project mounted
+        has_project = [s for s in all_sessions
+                       if project in s.get("mounted_projects", [s.get("project")])]
+        if not has_project:
+            return None
+        if len(has_project) == 1:
+            session_info = has_project[0]
         else:
-            # No sessions for this project — any session will do
-            # (all projects are mounted in every session)
-            session_info = all_sessions[0]
+            # Prefer sessions where this is the primary project
+            primary = [s for s in has_project if s.get("project") == project]
+            if len(primary) == 1:
+                session_info = primary[0]
+            elif primary:
+                session_info = _prompt_session(primary)
+            else:
+                session_info = _prompt_session(has_project)
     elif len(all_sessions) == 1:
         session_info = all_sessions[0]
     else:

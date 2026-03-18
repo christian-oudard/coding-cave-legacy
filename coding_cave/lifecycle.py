@@ -496,8 +496,11 @@ def _save_overlay_uppers(overlay_base, loaded_projects):
             pass
 
 
-def start_session(project, command, gpu=False, reuse_index=False):
-    """Start a new bwrap session with per-session overlays."""
+def start_session(project, command, gpu=False, reuse_index=False, mounted_projects=None):
+    """Start a new bwrap session with per-session overlays.
+
+    mounted_projects: dict of slug->source to mount. If None, mounts all.
+    """
     _state.cave_data().mkdir(parents=True, exist_ok=True)
     sid = sessions.session_id()
 
@@ -512,14 +515,14 @@ def start_session(project, command, gpu=False, reuse_index=False):
     nix_merged = _setup_nix_store(sid, inside_cave)
     os.environ["CODING_CAVE_NIX_MERGED"] = nix_merged
 
-    # Ensure gitdirs exist for all projects
-    for slug, source in projects.load_projects().items():
+    loaded_projects = mounted_projects if mounted_projects is not None else projects.load_projects()
+
+    # Ensure gitdirs exist for mounted projects
+    for slug, source in loaded_projects.items():
         gitdir_path = _state.projects_dir() / slug / "gitdir"
         if not gitdir_path.exists() and (Path(source) / ".git").is_dir():
             print(f"Syncing {slug}...", file=sys.stderr)
         git_mod.initialize_gitdir(slug, Path(source))
-
-    loaded_projects = projects.load_projects()
 
     # Assemble bwrap args from all sources
     bwrap_args = _build_mirror_args()
@@ -586,7 +589,8 @@ def start_session(project, command, gpu=False, reuse_index=False):
             env=bwrap_env,
         )
 
-    sessions.register_session(sid, project, proc.pid, index=session_index)
+    sessions.register_session(sid, project, proc.pid, index=session_index,
+                              mounted_projects=list(loaded_projects.keys()))
     sessions.update_pane_titles(project)
     print("Started coding-cave.", file=sys.stderr)
 

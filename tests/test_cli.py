@@ -8,6 +8,7 @@ import pytest
 import wrapper
 from coding_cave import _state
 from coding_cave.commands import _shell_exec_cmd
+from coding_cave.projects import parse_project_filter
 from tests.conftest import write_projects
 
 
@@ -290,3 +291,91 @@ class TestProjectRequired:
             wrapper.cmd_shell(None)
         assert exc_info.value.code == 1
         assert "No project" in capsys.readouterr().err
+
+
+class TestProjectsArg:
+    """Test --projects / -p argument parsing."""
+
+    def test_default_is_none(self):
+        parsed, _ = parse([])
+        assert parsed.projects is None
+
+    def test_short_flag(self):
+        parsed, _ = parse(["-p", "all"])
+        assert parsed.projects == "all"
+
+    def test_long_flag(self):
+        parsed, _ = parse(["--projects", "all"])
+        assert parsed.projects == "all"
+
+    def test_equals_syntax(self):
+        parsed, _ = parse(["--projects=foo,bar"])
+        assert parsed.projects == "foo,bar"
+
+    def test_short_equals_syntax(self):
+        parsed, _ = parse(["-p=foo,bar"])
+        assert parsed.projects == "foo,bar"
+
+    def test_comma_separated(self):
+        parsed, _ = parse(["-p", "a,b,c"])
+        assert parsed.projects == "a,b,c"
+
+    def test_on_agent_subcommand(self):
+        parsed, _ = parse(["agent", "-p", "all"])
+        assert parsed.projects == "all"
+
+    def test_on_shell_subcommand(self):
+        parsed, _ = parse(["shell", "-p", "foo,bar"])
+        assert parsed.projects == "foo,bar"
+
+
+class TestParseProjectFilter:
+    """Test parse_project_filter logic."""
+
+    def test_none_returns_primary_only(self, tmp_path):
+        _state.set_cave_data(tmp_path / "cave-data")
+        write_projects(tmp_path / "cave-data", {"a": "/a", "b": "/b", "c": "/c"})
+        result = parse_project_filter(None, "a")
+        assert result == {"a": "/a"}
+
+    def test_all_returns_all(self, tmp_path):
+        _state.set_cave_data(tmp_path / "cave-data")
+        write_projects(tmp_path / "cave-data", {"a": "/a", "b": "/b"})
+        result = parse_project_filter("all", "a")
+        assert result == {"a": "/a", "b": "/b"}
+
+    def test_all_case_insensitive(self, tmp_path):
+        _state.set_cave_data(tmp_path / "cave-data")
+        write_projects(tmp_path / "cave-data", {"a": "/a", "b": "/b"})
+        result = parse_project_filter("ALL", "a")
+        assert result == {"a": "/a", "b": "/b"}
+
+    def test_single_extra(self, tmp_path):
+        _state.set_cave_data(tmp_path / "cave-data")
+        write_projects(tmp_path / "cave-data", {"a": "/a", "b": "/b", "c": "/c"})
+        result = parse_project_filter("b", "a")
+        assert result == {"a": "/a", "b": "/b"}
+
+    def test_comma_separated(self, tmp_path):
+        _state.set_cave_data(tmp_path / "cave-data")
+        write_projects(tmp_path / "cave-data", {"a": "/a", "b": "/b", "c": "/c"})
+        result = parse_project_filter("b,c", "a")
+        assert result == {"a": "/a", "b": "/b", "c": "/c"}
+
+    def test_spaces_around_commas(self, tmp_path):
+        _state.set_cave_data(tmp_path / "cave-data")
+        write_projects(tmp_path / "cave-data", {"a": "/a", "b": "/b", "c": "/c"})
+        result = parse_project_filter("b, c", "a")
+        assert result == {"a": "/a", "b": "/b", "c": "/c"}
+
+    def test_primary_always_included(self, tmp_path):
+        _state.set_cave_data(tmp_path / "cave-data")
+        write_projects(tmp_path / "cave-data", {"a": "/a", "b": "/b"})
+        result = parse_project_filter("b", "a")
+        assert "a" in result
+
+    def test_unknown_slug_exits(self, tmp_path):
+        _state.set_cave_data(tmp_path / "cave-data")
+        write_projects(tmp_path / "cave-data", {"a": "/a"})
+        with pytest.raises(SystemExit):
+            parse_project_filter("nonexistent", "a")
