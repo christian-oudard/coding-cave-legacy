@@ -158,7 +158,18 @@ def _build_mirror_args():
         args += ["--ro-bind", nvim_config, f"{_state.JAIL_HOME}/.config/nvim"]
     nvim_data = os.environ.get("CODING_CAVE_NVIM_DATA", "")
     if nvim_data and Path(nvim_data).is_dir():
-        args += ["--ro-bind", nvim_data, f"{_state.JAIL_HOME}/.local/share/nvim"]
+        nvim_cave = f"{_state.JAIL_HOME}/.local/share/nvim"
+        persistent_nvim_data = _state.cave_data() / "nvim-data"
+        persistent_nvim_data.mkdir(parents=True, exist_ok=True)
+        args += ["--bind", str(persistent_nvim_data), nvim_cave]
+        host_nvim = Path(nvim_data)
+        for item in sorted(host_nvim.iterdir()):
+            if item.is_dir():
+                args += ["--ro-bind", str(item), f"{nvim_cave}/{item.name}"]
+            elif item.is_file():
+                dest = persistent_nvim_data / item.name
+                if not dest.exists():
+                    shutil.copy2(str(item), str(dest))
     nvim_host_bin = os.environ.get("CODING_CAVE_NVIM_HOST_BIN", "")
     if nvim_host_bin:
         local_bin = _state.cave_home() / ".local" / "bin"
