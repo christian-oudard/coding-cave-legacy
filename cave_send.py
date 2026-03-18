@@ -96,26 +96,13 @@ def _read_and_clear(path):
     return messages
 
 
-def _format_age(started):
-    if not started:
-        return "?"
-    age = int(time.time() - started)
-    if age < 60:
-        return f"{age}s"
-    if age < 3600:
-        return f"{age // 60}m"
-    h, m = divmod(age, 3600)
-    return f"{h}h{m // 60:02d}m"
-
-
 def _format_messages(messages):
     """Format messages for injection into Claude's context."""
     parts = []
     for msg in messages:
         sender = msg.get("sender", "unknown")
         text = msg.get("message", "")
-        age = _format_age(msg.get("ts"))
-        parts.append(f"[{age} ago] {sender} {text}")
+        parts.append(f"{sender} {text}")
     return "\n".join(parts)
 
 
@@ -149,18 +136,25 @@ def hook():
 # --- session listing ---
 
 def resolve_index(index):
-    """Resolve a session index (e.g. '4' or '#4') to (sid, sock_path).
+    """Resolve a session index (e.g. '4' or '#4') to (sid, meta_path).
 
-    When multiple sessions share the same index (stale + fresh),
-    returns the newest one by start time.
+    Only matches sessions on the same project as the sender.
+    When multiple sessions share the same index, returns the newest.
     """
     index = str(index).lstrip("#")
+    my_project = os.path.basename(
+        os.environ.get("CODING_CAVE_PROJECT_PATH", ""))
     best_sid, best_started = None, 0
     for sid, meta in list_sessions():
-        if meta.get("index") == index:
-            started = meta.get("started", 0)
-            if started >= best_started:
-                best_sid, best_started = sid, started
+        if meta.get("index") != index:
+            continue
+        # Filter by project when sender is inside a cave session.
+        # Host-originated sends (no project) can reach any session.
+        if my_project and meta.get("project", my_project) != my_project:
+            continue
+        started = meta.get("started", 0)
+        if started >= best_started:
+            best_sid, best_started = sid, started
     if best_sid:
         return best_sid, str(IPC_DIR / f"{best_sid}.json")
     return None, None
@@ -229,6 +223,17 @@ def main():
         return
 
     if sys.argv[1] == "--list":
+        def _format_age(started):
+            if not started:
+                return "?"
+            age = int(time.time() - started)
+            if age < 60:
+                return f"{age}s"
+            if age < 3600:
+                return f"{age // 60}m"
+            h, m = divmod(age, 3600)
+            return f"{h}h{m // 60:02d}m"
+
         sessions = list_sessions()
         my_sid = os.environ.get("CODING_CAVE_SESSION_ID", "")
         for sid, meta in sorted(sessions, key=lambda s: s[1].get("index", "")):

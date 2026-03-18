@@ -23,7 +23,7 @@
     version = self.shortRev or self.dirtyShortRev or "dev";
 
     # IPC: session wrapper and message sender (available inside cave)
-    ptyRelay = pkgs.writeShellScriptBin "pty-relay" ''
+    sessionWrapper = pkgs.writeShellScriptBin "session-wrapper" ''
       exec ${pkgs.python3}/bin/python3 ${./session_wrapper.py} "$@"
     '';
     caveSend = pkgs.writeShellScriptBin "cave-send" ''
@@ -108,7 +108,7 @@
         fuse-overlayfs
         fuse3
         gnupg
-      ] ++ [ pkgs."poppler-utils" ptyRelay caveSend ]))
+      ] ++ [ pkgs."poppler-utils" sessionWrapper caveSend ]))
       (set-env "TERMINFO_DIRS" "${pkgs.ncurses}/share/terminfo")
       (set-env "LOCALE_ARCHIVE" "${pkgs.glibcLocales}/lib/locale/locale-archive")
       (set-env "LANG" "en_US.UTF-8")

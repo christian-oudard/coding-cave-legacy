@@ -108,7 +108,7 @@ class TestQueueBasedSend:
         ipc_dir.mkdir()
         target_sid = "target-sid"
         (ipc_dir / f"{target_sid}.json").write_text(json.dumps({
-            "sid": target_sid, "index": "2", "project": "proj",
+            "sid": target_sid, "index": "2", "project": "myproj",
         }))
         # Hold lock so list_sessions finds it
         lock_fd = os.open(str(ipc_dir / f"{target_sid}.lock"),
@@ -147,7 +147,7 @@ class TestQueueBasedSend:
                           os.O_WRONLY | os.O_CREAT, 0o644)
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
         env = {k: v for k, v in os.environ.items()
-               if not k.startswith("CODING_CAVE_SESSION")}
+               if not k.startswith("CODING_CAVE")}
         env["HOME"] = str(tmp_path)
         try:
             result = subprocess.run(

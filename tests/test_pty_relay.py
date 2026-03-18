@@ -162,6 +162,7 @@ class TestCaveSend:
         env = {
             **os.environ,
             "CODING_CAVE_SESSION_ID": "my-sid",
+            "CODING_CAVE_PROJECT_PATH": "/projects/proj",
             "HOME": str(tmp_path),
         }
         try:
@@ -213,10 +214,16 @@ class TestCaveSend:
         import cave_send
         old_ipc = cave_send.IPC_DIR
         cave_send.IPC_DIR = ipc_dir
+        old_proj = os.environ.get("CODING_CAVE_PROJECT_PATH")
+        os.environ["CODING_CAVE_PROJECT_PATH"] = "/projects/proj"
         try:
             sid, _ = cave_send.resolve_index("1")
             assert sid == "new-sid"
         finally:
             cave_send.IPC_DIR = old_ipc
+            if old_proj is not None:
+                os.environ["CODING_CAVE_PROJECT_PATH"] = old_proj
+            else:
+                os.environ.pop("CODING_CAVE_PROJECT_PATH", None)
             os.close(lock_fd1)
             os.close(lock_fd2)
