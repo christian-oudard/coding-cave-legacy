@@ -1,6 +1,7 @@
 """Tests for PTY relay with UDS message injection."""
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -169,6 +170,32 @@ class TestPtyRelay:
         proc.communicate(timeout=5)
         # Metadata should be cleaned up after exit
         assert not meta.exists(), "Metadata file not cleaned up"
+
+
+    def test_child_stop_resumed(self, tmp_path):
+        """When child sends SIGSTOP, relay detects and resumes it."""
+        sock = str(tmp_path / "test.sock")
+        # Child sends SIGSTOP (not SIGTSTP, which is discarded in
+        # orphaned process groups) after writing a marker.
+        script = tmp_path / "stopper.py"
+        script.write_text(
+            "import os, signal, sys\n"
+            "sys.stdout.write('BEFORE_STOP\\n')\n"
+            "sys.stdout.flush()\n"
+            "os.kill(os.getpid(), signal.SIGSTOP)\n"
+            "sys.stdout.write('AFTER_RESUME\\n')\n"
+            "sys.stdout.flush()\n"
+        )
+
+        proc = subprocess.Popen(
+            [sys.executable, RELAY, "--sock", sock, "--",
+             sys.executable, str(script)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        stdout, _ = proc.communicate(timeout=5)
+        assert proc.returncode == 0
+        assert b"BEFORE_STOP" in stdout
+        assert b"AFTER_RESUME" in stdout
 
 
 class TestMessageQueuing:

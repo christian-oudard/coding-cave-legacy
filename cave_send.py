@@ -136,22 +136,46 @@ def hook():
 # --- session listing ---
 
 def resolve_index(index):
-    """Resolve a session index (e.g. '4' or '#4') to (sid, sock_path)."""
+    """Resolve a session index (e.g. '4' or '#4') to (sid, sock_path).
+
+    When multiple sessions share the same index (stale + fresh),
+    returns the newest one by start time.
+    """
     index = str(index).lstrip("#")
+    best_sid, best_started = None, 0
     for sid, meta in list_sessions():
         if meta.get("index") == index:
-            return sid, str(IPC_DIR / f"{sid}.sock")
+            started = meta.get("started", 0)
+            if started >= best_started:
+                best_sid, best_started = sid, started
+    if best_sid:
+        return best_sid, str(IPC_DIR / f"{best_sid}.sock")
     return None, None
 
 
 def list_sessions():
-    """Return list of (sid, metadata_dict) for sessions with active sockets."""
+    """Return list of (sid, metadata_dict) for sessions with active sockets.
+
+    Stale sockets (connection refused) are cleaned up automatically.
+    """
     if not IPC_DIR.is_dir():
         return []
     sessions = []
-    for sock in IPC_DIR.glob("*.sock"):
-        sid = sock.stem
-        meta_path = sock.with_suffix(".json")
+    for sock_path in IPC_DIR.glob("*.sock"):
+        sid = sock_path.stem
+        # Probe the socket to check if the relay is alive
+        import socket as _socket
+        s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        s.settimeout(1)
+        try:
+            s.connect(str(sock_path))
+            s.close()
+        except (ConnectionRefusedError, OSError):
+            # Stale socket, clean up
+            sock_path.unlink(missing_ok=True)
+            sock_path.with_suffix(".json").unlink(missing_ok=True)
+            continue
+        meta_path = sock_path.with_suffix(".json")
         meta = {}
         if meta_path.exists():
             try:

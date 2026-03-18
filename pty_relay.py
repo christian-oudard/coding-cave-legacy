@@ -240,13 +240,19 @@ def relay(child_argv, sock_path):
                         os.write(master_fd, msg + b"\r")
                     msg_queue.clear()
 
-            # Reap child (non-blocking)
+            # Reap child (non-blocking, detect stops for Ctrl+Z)
             try:
-                wpid, status = os.waitpid(pid, os.WNOHANG)
+                wpid, status = os.waitpid(pid, os.WNOHANG | os.WUNTRACED)
             except ChildProcessError:
                 break
             if wpid != 0:
-                if os.WIFEXITED(status):
+                if os.WIFSTOPPED(status):
+                    # Child suspended (e.g. Claude Code's Ctrl+Z handler).
+                    # We can't propagate the stop through bwrap/pasta to
+                    # the host shell, so immediately resume the child.
+                    os.kill(pid, signal.SIGCONT)
+                    continue
+                elif os.WIFEXITED(status):
                     exit_code = os.WEXITSTATUS(status)
                 elif os.WIFSIGNALED(status):
                     exit_code = 128 + os.WTERMSIG(status)

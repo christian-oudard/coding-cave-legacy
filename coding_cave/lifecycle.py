@@ -244,33 +244,6 @@ def _setup_nix_store(sid, inside_cave):
     return nix_merged
 
 
-_CAVE_SEND_HOOK = {"type": "command", "command": "cave-send hook"}
-_CAVE_SEND_HOOK_EVENTS = ("Stop", "PostToolUse")
-
-
-def _inject_cave_send_hooks(settings):
-    """Ensure cave-send hook is registered on IPC-relevant hook events.
-
-    Appends a cave-send hook entry to each event's hook list if not already
-    present, preserving any user-configured hooks.
-    """
-    hooks = settings.setdefault("hooks", {})
-    for event in _CAVE_SEND_HOOK_EVENTS:
-        entries = hooks.setdefault(event, [])
-        # Find or create the catch-all matcher group (matcher "")
-        group = None
-        for entry in entries:
-            if entry.get("matcher", "") == "":
-                group = entry
-                break
-        if group is None:
-            group = {"matcher": "", "hooks": []}
-            entries.append(group)
-        hook_list = group.setdefault("hooks", [])
-        if not any(h.get("command") == "cave-send hook" for h in hook_list):
-            hook_list.append(dict(_CAVE_SEND_HOOK))
-
-
 def _apply_user_env(user_env):
     """Apply user environment from cave.nix.
 
@@ -299,8 +272,7 @@ def _apply_user_env(user_env):
             user = {}
         if user:
             existing.update(user)
-        _inject_cave_send_hooks(existing)
-        settings_file.write_text(json.dumps(existing, indent=2))
+            settings_file.write_text(json.dumps(existing, indent=2))
 
     args = []
 
