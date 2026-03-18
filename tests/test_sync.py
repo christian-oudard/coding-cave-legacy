@@ -995,13 +995,13 @@ class TestSessionGitdir:
                          "rev-parse", "refs/heads/main-cave-sid-b")
         assert backup.returncode != 0
 
-    def test_forward_session_refs_force_backs_up_diverged(
+    def test_forward_session_refs_force_syncs_diverged(
             self, shared_project, tmp_path):
-        """forward_session_refs with force=True backs up and leaves shared unchanged.
+        """forward_session_refs with force=True warns and leaves shared unchanged.
 
         When called from pull (force=True), diverged refs that can't be
-        rebased are backed up to refs/sessions/<sid>/<branch>. Shared stays
-        at the last-merged value.
+        rebased emit a warning to stderr. Shared stays at the last-merged
+        value; no backup ref is created.
         """
         host, slug, projects_dir = shared_project
         shared_gd = projects_dir / slug / "gitdir"
@@ -1017,13 +1017,12 @@ class TestSessionGitdir:
         (work_b / "file.txt").write_text("version B\n")
         cave_git(work_b, "add", "file.txt")
         cave_git(work_b, "commit", "-m", "commit B")
-        b_sha = cave_git(work_b, "rev-parse", "HEAD").stdout.strip()
 
         # A merges first (cleanup), advancing shared
         wrapper.merge_session_gitdirs("sid-a", overlay_a)
         shared_after_a = git_head(shared_gd, gitdir=True)
 
-        # Force-sync B (as pull would) — can't rebase, backs up and leaves shared alone
+        # Force-sync B (as pull would) — can't rebase, warns and leaves shared alone
         session_gd_b = overlay_b / f"gitdir-{slug}"
         wrapper.forward_session_refs(slug, session_gd_b, shared_gd,
                                      sid="sid-b", force=True)
@@ -1031,11 +1030,10 @@ class TestSessionGitdir:
         # Shared main unchanged (B's diverged work does not clobber A's)
         assert git_head(shared_gd, gitdir=True) == shared_after_a
 
-        # Backup ref should exist with B's tip
+        # No backup ref should exist
         backup = git_run("git", "--git-dir", str(shared_gd),
-                         "rev-parse", "refs/sessions/sid-b/main")
-        assert backup.returncode == 0
-        assert backup.stdout.strip() == b_sha
+                         "rev-parse", "refs/heads/main-cave-sid-b")
+        assert backup.returncode != 0
 
     def test_forward_refs_skips_conflicting_diverge(
             self, shared_project, tmp_path):
@@ -2094,13 +2092,13 @@ class TestSessionSetup:
         wrapper.merge_session_gitdirs("sid-ff", overlay)
         assert git_head(shared_gd, gitdir=True) == sha
 
-    def test_cleanup_diverged_backs_up(self, shared_project, tmp_path):
-        """Two sessions with conflicting changes: second backs up and shared stays at A."""
+    def test_cleanup_diverged_warns_no_backup(self, shared_project, tmp_path):
+        """Two sessions with conflicting changes: second warns and shared stays at A."""
         _, slug, projects_dir = shared_project
         shared_gd = projects_dir / slug / "gitdir"
 
         _, work_a, overlay_a = self._make_session(tmp_path, slug, projects_dir, "a")
-        gd_b, work_b, overlay_b = self._make_session(tmp_path, slug, projects_dir, "b")
+        _, work_b, overlay_b = self._make_session(tmp_path, slug, projects_dir, "b")
 
         (work_a / "file.txt").write_text("version A\n")
         cave_git(work_a, "add", "file.txt")
@@ -2109,7 +2107,6 @@ class TestSessionSetup:
         (work_b / "file.txt").write_text("version B\n")
         cave_git(work_b, "add", "file.txt")
         cave_git(work_b, "commit", "-m", "B's edit")
-        b_sha = cave_git(work_b, "rev-parse", "HEAD").stdout.strip()
 
         wrapper.merge_session_gitdirs("sid-a", overlay_a)
         shared_after_a = git_head(shared_gd, gitdir=True)
@@ -2118,11 +2115,10 @@ class TestSessionSetup:
         # Shared main should still be at A's commit (B's diverged work is not applied)
         assert git_head(shared_gd, gitdir=True) == shared_after_a
 
-        # Backup ref should exist with B's tip
+        # No backup ref should exist
         ref = git_run("git", "--git-dir", str(shared_gd),
-                      "rev-parse", "refs/sessions/sid-b/main")
-        assert ref.returncode == 0
-        assert ref.stdout.strip() == b_sha
+                      "rev-parse", "refs/heads/main-cave-sid-b")
+        assert ref.returncode != 0
 
     def test_forward_refs_updates_main_in_shared(self, shared_project, tmp_path):
         """forward_session_refs updates main in shared."""
@@ -2489,6 +2485,152 @@ class TestSavedUpper:
         wrapper.reset_project_overlay(slug)
 
         assert not saved.exists()
+
+
+    def test_committed_files_stripped_from_upper(self, tmp_path):
+        """Files matching HEAD are removed from saved upper on exit.
+
+        The overlay upper accumulates all file writes, including committed
+        ones.  _strip_committed_from_upper removes files whose blob matches
+        HEAD so committed changes don't create phantom diffs.
+        """
+        slug = "test-project"
+        _state.set_cave_data(tmp_path)
+        projects_dir = _state.projects_dir()
+        (projects_dir / slug).mkdir(parents=True)
+
+        # Host repo with initial commit
+        host = tmp_path / "host"
+        host.mkdir()
+        git_run("git", "init", "-b", "main", str(host))
+        (host / "tracked.txt").write_text("original\n")
+        git_run("git", "-C", str(host), "add", ".")
+        git_run("git", "-C", str(host), "commit", "-m", "initial")
+
+        wrapper.initialize_gitdir(slug, host)
+
+        # Create session gitdir
+        overlay_base = tmp_path / "overlay"
+        overlay_base.mkdir()
+        session_gitdir = wrapper.create_session_gitdir(slug, "test-sid", overlay_base)
+
+        # Simulate a session that committed a change to tracked.txt.
+        # First make the commit in the session gitdir.
+        env = {**os.environ, **GIT_ENV}
+        blob = subprocess.run(
+            ["git", "--git-dir", str(session_gitdir), "hash-object", "-w",
+             "--stdin"],
+            input="committed edit\n", capture_output=True, text=True,
+            check=True,
+        ).stdout.strip()
+        head_tree = subprocess.run(
+            ["git", "--git-dir", str(session_gitdir), "rev-parse", "HEAD^{tree}"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        ls_tree = subprocess.run(
+            ["git", "--git-dir", str(session_gitdir), "ls-tree", head_tree],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        new_tree_input = ls_tree.replace(
+            ls_tree.split("\t")[0].split()[-1], blob)
+        new_tree = subprocess.run(
+            ["git", "--git-dir", str(session_gitdir), "mktree"],
+            input=new_tree_input, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        head = subprocess.run(
+            ["git", "--git-dir", str(session_gitdir), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        new_commit = subprocess.run(
+            ["git", "--git-dir", str(session_gitdir),
+             "commit-tree", new_tree, "-p", head, "-m", "cave edit"],
+            capture_output=True, text=True, check=True, env=env,
+        ).stdout.strip()
+        subprocess.run(
+            ["git", "--git-dir", str(session_gitdir),
+             "update-ref", "refs/heads/main", new_commit],
+            capture_output=True, check=True,
+        )
+
+        # Build an upper with:
+        #   tracked.txt  = matches HEAD (committed, should be stripped)
+        #   untracked.txt = not in HEAD (uncommitted, should be kept)
+        upper = overlay_base / f"{slug}-upper"
+        upper.mkdir(exist_ok=True)
+        (upper / "tracked.txt").write_text("committed edit\n")
+        (upper / "untracked.txt").write_text("uncommitted work\n")
+
+        from coding_cave.lifecycle import _strip_committed_from_upper
+        _strip_committed_from_upper(upper, session_gitdir)
+
+        assert not (upper / "tracked.txt").exists(), \
+            "committed file should be stripped"
+        assert (upper / "untracked.txt").read_text() == "uncommitted work\n", \
+            "untracked file should be preserved"
+
+    def test_uncommitted_modifications_kept(self, tmp_path):
+        """Files that differ from HEAD are kept in saved upper."""
+        slug = "test-project"
+        _state.set_cave_data(tmp_path)
+        projects_dir = _state.projects_dir()
+        (projects_dir / slug).mkdir(parents=True)
+
+        host = tmp_path / "host"
+        host.mkdir()
+        git_run("git", "init", "-b", "main", str(host))
+        (host / "file.txt").write_text("original\n")
+        git_run("git", "-C", str(host), "add", ".")
+        git_run("git", "-C", str(host), "commit", "-m", "initial")
+
+        wrapper.initialize_gitdir(slug, host)
+
+        overlay_base = tmp_path / "overlay"
+        overlay_base.mkdir()
+        session_gitdir = wrapper.create_session_gitdir(slug, "test-sid", overlay_base)
+
+        # Upper has a modified file that differs from HEAD (uncommitted)
+        upper = overlay_base / f"{slug}-upper"
+        upper.mkdir(exist_ok=True)
+        (upper / "file.txt").write_text("uncommitted change\n")
+
+        from coding_cave.lifecycle import _strip_committed_from_upper
+        _strip_committed_from_upper(upper, session_gitdir)
+
+        assert (upper / "file.txt").read_text() == "uncommitted change\n", \
+            "uncommitted modification should be preserved"
+
+    def test_all_committed_upper_not_saved(self, tmp_path):
+        """When all files in upper match HEAD, nothing is saved."""
+        slug = "test-project"
+        _state.set_cave_data(tmp_path)
+        projects_dir = _state.projects_dir()
+        (projects_dir / slug).mkdir(parents=True)
+
+        host = tmp_path / "host"
+        host.mkdir()
+        git_run("git", "init", "-b", "main", str(host))
+        (host / "file.txt").write_text("content\n")
+        git_run("git", "-C", str(host), "add", ".")
+        git_run("git", "-C", str(host), "commit", "-m", "initial")
+
+        wrapper.initialize_gitdir(slug, host)
+
+        overlay_base = tmp_path / "overlay"
+        overlay_base.mkdir()
+        session_gitdir = wrapper.create_session_gitdir(slug, "test-sid", overlay_base)
+
+        # Upper has a file matching HEAD (committed) + .git
+        upper = overlay_base / f"{slug}-upper"
+        upper.mkdir(exist_ok=True)
+        (upper / ".git").write_text("gitdir: /projects/.gitdirs/test-project\n")
+        (upper / "file.txt").write_text("content\n")
+
+        from coding_cave.lifecycle import _save_overlay_uppers
+        _save_overlay_uppers(overlay_base, {slug: str(host)})
+
+        saved = projects_dir / slug / "saved-upper"
+        assert not saved.exists(), \
+            "fully committed upper should not be saved"
 
 
 class TestSavedIndex:
@@ -3317,10 +3459,10 @@ class TestForceCleanupBackupRef:
         make_cave_session(session_gitdir, workdir)
         return session_gitdir, workdir, overlay_base
 
-    def test_force_cleanup_backs_up_diverged(self, shared_project, tmp_path):
-        """When cleanup encounters a diverged ref, it backs up and leaves shared unchanged.
+    def test_force_cleanup_warns_no_backup(self, shared_project, tmp_path):
+        """When cleanup encounters a diverged ref, it warns and leaves shared unchanged.
 
-        Backup ref created at refs/sessions/<sid>/<branch>. Shared stays at A's value.
+        No backup branch is created. Shared stays at A's value.
         """
         host, slug, projects_dir = shared_project
         shared_gd = projects_dir / slug / "gitdir"
@@ -3338,23 +3480,21 @@ class TestForceCleanupBackupRef:
         (work_b / "file.txt").write_text("version B\n")
         cave_git(work_b, "add", "file.txt")
         cave_git(work_b, "commit", "-m", "commit B")
-        b_sha = cave_git(work_b, "rev-parse", "HEAD").stdout.strip()
 
         # A merges first (cleanup)
         wrapper.merge_session_gitdirs("sid-a", overlay_a)
         shared_after_a = git_head(shared_gd, gitdir=True)
 
-        # B cleanup — can't rebase, backs up and leaves shared alone
+        # B cleanup — can't rebase, warns and leaves shared alone
         wrapper.merge_session_gitdirs("sid-b", overlay_b)
 
         # Shared main unchanged (A's work stays)
         assert git_head(shared_gd, gitdir=True) == shared_after_a
 
-        # Backup ref should exist with B's tip
+        # No backup ref should exist
         backup = git_run("git", "--git-dir", str(shared_gd),
-                         "rev-parse", "refs/sessions/sid-b/main")
-        assert backup.returncode == 0
-        assert backup.stdout.strip() == b_sha
+                         "rev-parse", "refs/heads/main-cave-sid-b")
+        assert backup.returncode != 0
 
     def test_multi_branch_concurrent_sessions(self, shared_project, tmp_path):
         """Session A on main, Session B on develop — both merge cleanly."""

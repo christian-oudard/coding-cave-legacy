@@ -158,18 +158,7 @@ def _build_mirror_args():
         args += ["--ro-bind", nvim_config, f"{_state.JAIL_HOME}/.config/nvim"]
     nvim_data = os.environ.get("CODING_CAVE_NVIM_DATA", "")
     if nvim_data and Path(nvim_data).is_dir():
-        nvim_cave = f"{_state.JAIL_HOME}/.local/share/nvim"
-        persistent_nvim_data = _state.cave_data() / "nvim-data"
-        persistent_nvim_data.mkdir(parents=True, exist_ok=True)
-        args += ["--bind", str(persistent_nvim_data), nvim_cave]
-        host_nvim = Path(nvim_data)
-        for item in sorted(host_nvim.iterdir()):
-            if item.is_dir():
-                args += ["--ro-bind", str(item), f"{nvim_cave}/{item.name}"]
-            elif item.is_file():
-                dest = persistent_nvim_data / item.name
-                if not dest.exists():
-                    shutil.copy2(str(item), str(dest))
+        args += ["--ro-bind", nvim_data, f"{_state.JAIL_HOME}/.local/share/nvim"]
     nvim_host_bin = os.environ.get("CODING_CAVE_NVIM_HOST_BIN", "")
     if nvim_host_bin:
         local_bin = _state.cave_home() / ".local" / "bin"
@@ -483,17 +472,79 @@ def _build_credential_args():
     return args
 
 
+def _strip_committed_from_upper(upper, session_gitdir):
+    """Remove files from the overlay upper that already match HEAD.
+
+    The overlay upper accumulates all file writes during a session,
+    including files that were committed.  Stripping committed files
+    prevents phantom diffs on the next session start.
+    """
+    head = git_mod.git(session_gitdir, "rev-parse", "HEAD",
+                       capture_output=True, text=True)
+    if head.returncode != 0:
+        return
+    ls_tree = git_mod.git(session_gitdir, "ls-tree", "-r",
+                          head.stdout.strip(),
+                          capture_output=True, text=True)
+    if ls_tree.returncode != 0:
+        return
+
+    # Build path -> blob hash map from HEAD tree.
+    head_blobs = {}
+    for line in ls_tree.stdout.splitlines():
+        if not line:
+            continue
+        meta, path = line.split("\t", 1)
+        parts = meta.split()
+        if len(parts) >= 3:
+            head_blobs[path] = parts[2]
+
+    # Remove files whose content matches HEAD.
+    for root, dirs, files in os.walk(upper):
+        for fname in files:
+            fpath = Path(root) / fname
+            rel = str(fpath.relative_to(upper))
+            if rel == ".git":
+                continue
+            # Keep non-regular files (whiteouts, symlinks, etc.)
+            if not fpath.is_file():
+                continue
+            if rel not in head_blobs:
+                continue  # untracked, keep
+            h = subprocess.run(
+                ["git", "hash-object", str(fpath)],
+                capture_output=True, text=True,
+            )
+            if h.returncode == 0 and h.stdout.strip() == head_blobs[rel]:
+                fpath.unlink()
+
+    # Clean up empty directories (bottom-up).
+    for root, _dirs, _files in os.walk(upper, topdown=False):
+        if root == str(upper):
+            continue
+        try:
+            Path(root).rmdir()
+        except OSError:
+            pass
+
+
 def _save_overlay_uppers(overlay_base, loaded_projects):
     """Save overlay uppers for session continuity.
 
     Preserves uncommitted changes, untracked files, and deletions.
     Must be called after unmount and before rmtree.  Skips uppers
     that only contain .git to avoid clobbering concurrent sessions.
+    Strips files that match HEAD so committed changes don't create
+    phantom diffs on the next session start.
     """
     for slug in loaded_projects:
         upper = overlay_base / f"{slug}-upper"
         if not upper.is_dir():
             continue
+        # Strip committed files before checking emptiness.
+        session_gitdir = overlay_base / f"gitdir-{slug}"
+        if session_gitdir.is_dir():
+            _strip_committed_from_upper(upper, session_gitdir)
         entries = set(os.listdir(upper))
         entries.discard(".git")
         if not entries:
