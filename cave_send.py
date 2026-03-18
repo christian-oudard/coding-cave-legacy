@@ -96,13 +96,26 @@ def _read_and_clear(path):
     return messages
 
 
+def _format_age(started):
+    if not started:
+        return "?"
+    age = int(time.time() - started)
+    if age < 60:
+        return f"{age}s"
+    if age < 3600:
+        return f"{age // 60}m"
+    h, m = divmod(age, 3600)
+    return f"{h}h{m // 60:02d}m"
+
+
 def _format_messages(messages):
     """Format messages for injection into Claude's context."""
     parts = []
     for msg in messages:
         sender = msg.get("sender", "unknown")
         text = msg.get("message", "")
-        parts.append(f"{sender} {text}")
+        age = _format_age(msg.get("ts"))
+        parts.append(f"[{age} ago] {sender} {text}")
     return "\n".join(parts)
 
 
@@ -200,17 +213,6 @@ def list_sessions():
         sessions.append((sid, meta))
     return sessions
 
-
-def _format_age(started):
-    if not started:
-        return "?"
-    age = int(time.time() - started)
-    if age < 60:
-        return f"{age}s"
-    if age < 3600:
-        return f"{age // 60}m"
-    h, m = divmod(age, 3600)
-    return f"{h}h{m // 60:02d}m"
 
 
 # --- main ---

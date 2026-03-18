@@ -76,13 +76,27 @@ def main():
 
     meta_path, lock_path = _ipc_paths()
 
+    # Clean up leftover .sock files from the old PTY relay.
+    if meta_path:
+        ipc_dir = os.path.dirname(meta_path)
+        for f in os.listdir(ipc_dir) if os.path.isdir(ipc_dir) else []:
+            if f.endswith(".sock"):
+                try:
+                    os.unlink(os.path.join(ipc_dir, f))
+                except OSError:
+                    pass
+
     # Acquire session lock and write metadata before forking.
     lock_fd = None
     if meta_path:
         lock_fd = _acquire_lock(lock_path)
         _write_meta(meta_path)
 
-    # Fork so we can wait for the child and clean up.
+    # If no session metadata needed, exec directly (no fork).
+    if not meta_path:
+        os.execvp(argv[0], argv)
+
+    # Fork so we can wait for the child and clean up metadata.
     pid = os.fork()
     if pid == 0:
         # Child: exec the command directly on the terminal.

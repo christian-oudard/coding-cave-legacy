@@ -1,4 +1,4 @@
-"""Tests for session wrapper (pty-relay replacement)."""
+"""Tests for session wrapper and cave-send."""
 import json
 import os
 import signal
@@ -10,16 +10,25 @@ from pathlib import Path
 import pytest
 
 
-RELAY = str(Path(__file__).parent.parent / "pty_relay.py")
+RELAY = str(Path(__file__).parent.parent / "session_wrapper.py")
 SEND = str(Path(__file__).parent.parent / "cave_send.py")
 
 
 class TestSessionWrapper:
+    @staticmethod
+    def _env_no_session(tmp_path):
+        """Env with no session ID so wrapper execs directly."""
+        env = {k: v for k, v in os.environ.items()
+               if not k.startswith("CODING_CAVE_SESSION")}
+        env["HOME"] = str(tmp_path)
+        return env
+
     def test_exit_code_zero(self, tmp_path):
         """Wrapper propagates exit code 0."""
         proc = subprocess.run(
             [sys.executable, RELAY, "--", "true"],
             capture_output=True, timeout=5,
+            env=self._env_no_session(tmp_path),
         )
         assert proc.returncode == 0
 
@@ -28,6 +37,7 @@ class TestSessionWrapper:
         proc = subprocess.run(
             [sys.executable, RELAY, "--", "bash", "-c", "exit 42"],
             capture_output=True, timeout=5,
+            env=self._env_no_session(tmp_path),
         )
         assert proc.returncode == 42
 
@@ -74,6 +84,7 @@ class TestSessionWrapper:
             [sys.executable, RELAY, "--sock", "/tmp/ignored.sock",
              "--", "true"],
             capture_output=True, timeout=5,
+            env=self._env_no_session(tmp_path),
         )
         assert proc.returncode == 0
 
@@ -82,6 +93,7 @@ class TestSessionWrapper:
         proc = subprocess.run(
             [sys.executable, RELAY, "--", "bash", "-c", "echo hello"],
             capture_output=True, text=True, timeout=5,
+            env=self._env_no_session(tmp_path),
         )
         assert proc.returncode == 0
         assert "hello" in proc.stdout
