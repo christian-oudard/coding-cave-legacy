@@ -345,6 +345,19 @@ def _apply_user_env(user_env):
         except (json.JSONDecodeError, OSError):
             pass
 
+    # User-declared home files (written to persistent home so they appear
+    # at the correct path inside the cave; overwrite each session so Nix
+    # store paths in the content stay current after rebuilds)
+    files_dir = user_env / "files"
+    if files_dir.is_dir():
+        cave_home = _state.cave_home()
+        for file_path in files_dir.rglob("*"):
+            if file_path.is_file():
+                rel = file_path.relative_to(files_dir)
+                dest = cave_home / rel
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(file_path), str(dest))
+
     return args
 
 

@@ -266,6 +266,7 @@ _DEFAULT_CAVE_NIX = """\
     # settings = {};
     # env = {};
     # skills = {};
+    # files = { ".config/direnv/direnvrc" = "source ${pkgs.nix-direnv}/share/nix-direnv/direnvrc"; };
   };
 }
 """
@@ -295,6 +296,7 @@ _GENERATED_FLAKE_TEMPLATE = """\
     settings = pkgs.lib.recursiveUpdate pluginSettings (userConfig.settings or {{}});
     env = userConfig.env or {{}};
     skills = userConfig.skills or {{}};
+    files = userConfig.files or {{}};
     pluginSkills = builtins.concatMap (p: p.skills or []) plugins;
   in {{
     packages.x86_64-linux.default = pkgs.runCommand "cave-user-env" {{}} ''
@@ -331,6 +333,17 @@ SKILL_EOF
           install -m 644 "$f" "$out/claude/skills/${{name}}/"
         done
       '') pluginSkills}}
+
+      # Write user home files
+      ${{pkgs.lib.concatStringsSep "\\n" (pkgs.lib.mapAttrsToList (relPath: content:
+        let
+          safeName = builtins.replaceStrings ["/"] ["-"] relPath;
+          fileStore = builtins.toFile "cave-file-${{safeName}}" content;
+        in ''
+          mkdir -p $out/files/$(dirname "${{relPath}}")
+          cp ${{fileStore}} $out/files/${{relPath}}
+        ''
+      ) files)}}
     '';
   }};
 }}

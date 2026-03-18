@@ -420,6 +420,61 @@ class TestBuildUserEnvFlakeGeneration:
         flake = self._generate_and_read(tmp_path, inputs)
         assert 'foo-nixpkgs.follows = "nixpkgs";' in flake
 
+    def test_files_attribute_in_generated_flake(self, tmp_path):
+        """Generated flake includes files attribute from userConfig."""
+        flake = self._generate_and_read(tmp_path, '{}')
+        assert 'files = userConfig.files or {}' in flake
+        assert 'builtins.toFile' in flake
+        assert '$out/files/' in flake
+
+
+class TestApplyUserEnvFiles:
+    """Test that _apply_user_env writes declared home files to cave home."""
+
+    def test_files_written_to_cave_home(self, cave_env):
+        """Files in user_env/files/ are copied to cave home."""
+        from coding_cave.lifecycle import _apply_user_env
+
+        user_env = cave_env.tmp_path / "user-env"
+        files_dir = user_env / "files" / ".config" / "direnv"
+        files_dir.mkdir(parents=True)
+        (files_dir / "direnvrc").write_text("source /nix/store/abc-nix-direnv/direnvrc\n")
+
+        cave_home = cave_env.cave_data / "home"
+        _state.set_cave_data(cave_env.cave_data)
+
+        _apply_user_env(user_env)
+
+        dest = cave_home / ".config" / "direnv" / "direnvrc"
+        assert dest.exists()
+        assert dest.read_text() == "source /nix/store/abc-nix-direnv/direnvrc\n"
+
+    def test_files_overwrite_existing(self, cave_env):
+        """Declared files overwrite pre-existing files in cave home."""
+        from coding_cave.lifecycle import _apply_user_env
+
+        user_env = cave_env.tmp_path / "user-env"
+        files_dir = user_env / "files"
+        files_dir.mkdir(parents=True)
+        (files_dir / ".testrc").write_text("new content\n")
+
+        cave_home = cave_env.cave_data / "home"
+        cave_home.mkdir(parents=True, exist_ok=True)
+        (cave_home / ".testrc").write_text("old content\n")
+
+        _apply_user_env(user_env)
+
+        assert (cave_home / ".testrc").read_text() == "new content\n"
+
+    def test_no_files_dir_is_noop(self, cave_env):
+        """_apply_user_env does not fail when user_env has no files/ dir."""
+        from coding_cave.lifecycle import _apply_user_env
+
+        user_env = cave_env.tmp_path / "user-env"
+        user_env.mkdir()
+
+        _apply_user_env(user_env)  # should not raise
+
 
 def _sync_nix_db():
     """Register unregistered nix store paths so nix build works on overlayfs.
@@ -479,66 +534,6 @@ def _sync_nix_db():
         )
         if load.returncode != 0:
             raise RuntimeError(f"nix-store --load-db failed: {load.stderr}")
-
-    _sync_drv_outputs()
-
-
-def _sync_drv_outputs():
-    """Register missing DerivationOutputs entries in the nix DB.
-
-    On overlayfs, derivation .drv files and their output paths may both be
-    registered as valid, but the drv->output mapping in the DerivationOutputs
-    table can be missing. This causes 'requires non-existent output' errors
-    during nix build.
-    """
-    import json
-    import sqlite3
-
-    db_path = "/nix/var/nix/db/db.sqlite"
-    db = sqlite3.connect(db_path)
-    cur = db.cursor()
-
-    # Find all .drv paths that have no DerivationOutputs entry
-    cur.execute("""
-        SELECT VP.id, VP.path FROM ValidPaths VP
-        WHERE VP.path LIKE '%.drv'
-        AND VP.id NOT IN (SELECT DISTINCT drv FROM DerivationOutputs)
-    """)
-    orphan_drvs = cur.fetchall()
-    if not orphan_drvs:
-        db.close()
-        return
-
-    fixed = 0
-    for drv_id, drv_path in orphan_drvs:
-        try:
-            r = subprocess.run(
-                ["nix", "derivation", "show", drv_path],
-                capture_output=True, text=True, timeout=10,
-            )
-            if r.returncode != 0:
-                continue
-            data = json.loads(r.stdout)
-            detail = list(data.values())[0]
-            for out_name, out_info in detail.get("outputs", {}).items():
-                out_path = out_info.get("path", "")
-                if not out_path:
-                    continue
-                check = subprocess.run(
-                    ["nix-store", "--check-validity", out_path],
-                    capture_output=True, timeout=5,
-                )
-                if check.returncode == 0:
-                    cur.execute(
-                        "INSERT INTO DerivationOutputs (drv, id, path) VALUES (?, ?, ?)",
-                        (drv_id, out_name, out_path),
-                    )
-                    fixed += 1
-        except Exception:
-            continue
-
-    db.commit()
-    db.close()
 
 
 class TestNixBuild:
