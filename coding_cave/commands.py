@@ -61,10 +61,9 @@ def cmd_agent(args, gpu=False, continue_session=False, resume=None, claude_args=
     if claude_args:
         claude_parts.extend(claude_args)
     claude_cmd = shlex.join(claude_parts)
-    relay_cmd = f"pty-relay -- {claude_cmd}"
     command = [
         "--", "/bin/bash", "-c",
-        f"cd {workdir} && exec {relay_cmd}",
+        f". {_state.IPC_SETUP_SH}; cd {workdir} && exec {claude_cmd}",
     ]
 
     mounted = projects.parse_project_filter(projects_flag, project)

@@ -52,12 +52,10 @@ def send(target_sid, message):
         "ts": time.time(),
     })
     path = MSG_DIR / f"{target_sid}.jsonl"
-    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND)
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
         os.write(fd, (entry + "\n").encode())
     finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
 
 
@@ -160,26 +158,18 @@ def resolve_index(index):
     return None, None
 
 
-def _session_alive(lock_path):
-    """Check if a session is alive by trying a non-blocking flock.
-
-    If we can acquire the lock, the session is dead (lock was released).
-    If EWOULDBLOCK, the session is alive (holding the lock).
-    """
-    try:
-        fd = os.open(str(lock_path), os.O_RDONLY)
-    except FileNotFoundError:
+def _session_alive(meta):
+    """Check if a session is alive by testing its PID."""
+    pid = meta.get("pid")
+    if not pid:
         return False
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        # Got the lock, session is dead. Release it.
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        return False
-    except BlockingIOError:
-        # Lock held by another process, session is alive.
+        os.kill(int(pid), 0)
         return True
-    finally:
-        os.close(fd)
+    except (ProcessLookupError, ValueError):
+        return False
+    except PermissionError:
+        return True  # process exists but we can't signal it
 
 
 def list_sessions():
@@ -198,11 +188,8 @@ def list_sessions():
             meta = json.loads(meta_path.read_text())
         except (json.JSONDecodeError, OSError):
             continue
-        lock_path = meta_path.with_suffix(".lock")
-        if not _session_alive(lock_path):
-            # Stale session, clean up
+        if not _session_alive(meta):
             meta_path.unlink(missing_ok=True)
-            lock_path.unlink(missing_ok=True)
             continue
         sessions.append((sid, meta))
     return sessions

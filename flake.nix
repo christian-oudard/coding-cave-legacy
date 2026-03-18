@@ -20,12 +20,10 @@
     defaultClaudeSettings = ./defaults/claude-settings.json;
     defaultStatusline = ./defaults/statusline.sh;
     systemClaudeMd = ./system-claude.md;
+    ipcSetup = ./ipc_setup.sh;
     version = self.shortRev or self.dirtyShortRev or "dev";
 
-    # IPC: session wrapper and message sender (available inside cave)
-    sessionWrapper = pkgs.writeShellScriptBin "session-wrapper" ''
-      exec ${pkgs.python3}/bin/python3 ${./session_wrapper.py} "$@"
-    '';
+    # IPC: message sender (available inside cave)
     caveSend = pkgs.writeShellScriptBin "cave-send" ''
       exec ${pkgs.python3}/bin/python3 ${./cave_send.py} "$@"
     '';
@@ -108,7 +106,7 @@
         fuse-overlayfs
         fuse3
         gnupg
-      ] ++ [ pkgs."poppler-utils" sessionWrapper caveSend ]))
+      ] ++ [ pkgs."poppler-utils" caveSend ]))
       (set-env "TERMINFO_DIRS" "${pkgs.ncurses}/share/terminfo")
       (set-env "LOCALE_ARCHIVE" "${pkgs.glibcLocales}/lib/locale/locale-archive")
       (set-env "LANG" "en_US.UTF-8")
@@ -272,6 +270,7 @@
       SANDBOX_BIN = "${sandbox}/bin/coding-cave";
       SANDBOX_GPU_BIN = "${sandboxGpu}/bin/coding-cave";
       GATEWAY_LOCAL_BIN = "${onecli-gateway}/bin/onecli-gateway";
+      IPC_SETUP_SH = ipcSetup;
       VERSION = version;
     };
     codingCavePkg = pkgs.runCommand "coding-cave-pkg" {} ''
