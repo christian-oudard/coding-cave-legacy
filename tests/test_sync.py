@@ -995,13 +995,13 @@ class TestSessionGitdir:
                          "rev-parse", "refs/heads/main-cave-sid-b")
         assert backup.returncode != 0
 
-    def test_forward_session_refs_force_syncs_diverged(
+    def test_forward_session_refs_force_backs_up_diverged(
             self, shared_project, tmp_path):
-        """forward_session_refs with force=True warns and leaves shared unchanged.
+        """forward_session_refs with force=True backs up and leaves shared unchanged.
 
         When called from pull (force=True), diverged refs that can't be
-        rebased emit a warning to stderr. Shared stays at the last-merged
-        value; no backup ref is created.
+        rebased are backed up to refs/sessions/<sid>/<branch>. Shared stays
+        at the last-merged value.
         """
         host, slug, projects_dir = shared_project
         shared_gd = projects_dir / slug / "gitdir"
@@ -1017,12 +1017,13 @@ class TestSessionGitdir:
         (work_b / "file.txt").write_text("version B\n")
         cave_git(work_b, "add", "file.txt")
         cave_git(work_b, "commit", "-m", "commit B")
+        b_sha = cave_git(work_b, "rev-parse", "HEAD").stdout.strip()
 
         # A merges first (cleanup), advancing shared
         wrapper.merge_session_gitdirs("sid-a", overlay_a)
         shared_after_a = git_head(shared_gd, gitdir=True)
 
-        # Force-sync B (as pull would) — can't rebase, warns and leaves shared alone
+        # Force-sync B (as pull would) — can't rebase, backs up and leaves shared alone
         session_gd_b = overlay_b / f"gitdir-{slug}"
         wrapper.forward_session_refs(slug, session_gd_b, shared_gd,
                                      sid="sid-b", force=True)
@@ -1030,10 +1031,11 @@ class TestSessionGitdir:
         # Shared main unchanged (B's diverged work does not clobber A's)
         assert git_head(shared_gd, gitdir=True) == shared_after_a
 
-        # No backup ref should exist
+        # Backup ref should exist with B's tip
         backup = git_run("git", "--git-dir", str(shared_gd),
-                         "rev-parse", "refs/heads/main-cave-sid-b")
-        assert backup.returncode != 0
+                         "rev-parse", "refs/sessions/sid-b/main")
+        assert backup.returncode == 0
+        assert backup.stdout.strip() == b_sha
 
     def test_forward_refs_skips_conflicting_diverge(
             self, shared_project, tmp_path):
@@ -2092,13 +2094,13 @@ class TestSessionSetup:
         wrapper.merge_session_gitdirs("sid-ff", overlay)
         assert git_head(shared_gd, gitdir=True) == sha
 
-    def test_cleanup_diverged_warns_no_backup(self, shared_project, tmp_path):
-        """Two sessions with conflicting changes: second warns and shared stays at A."""
+    def test_cleanup_diverged_backs_up(self, shared_project, tmp_path):
+        """Two sessions with conflicting changes: second backs up and shared stays at A."""
         _, slug, projects_dir = shared_project
         shared_gd = projects_dir / slug / "gitdir"
 
         _, work_a, overlay_a = self._make_session(tmp_path, slug, projects_dir, "a")
-        _, work_b, overlay_b = self._make_session(tmp_path, slug, projects_dir, "b")
+        gd_b, work_b, overlay_b = self._make_session(tmp_path, slug, projects_dir, "b")
 
         (work_a / "file.txt").write_text("version A\n")
         cave_git(work_a, "add", "file.txt")
@@ -2107,6 +2109,7 @@ class TestSessionSetup:
         (work_b / "file.txt").write_text("version B\n")
         cave_git(work_b, "add", "file.txt")
         cave_git(work_b, "commit", "-m", "B's edit")
+        b_sha = cave_git(work_b, "rev-parse", "HEAD").stdout.strip()
 
         wrapper.merge_session_gitdirs("sid-a", overlay_a)
         shared_after_a = git_head(shared_gd, gitdir=True)
@@ -2115,10 +2118,11 @@ class TestSessionSetup:
         # Shared main should still be at A's commit (B's diverged work is not applied)
         assert git_head(shared_gd, gitdir=True) == shared_after_a
 
-        # No backup ref should exist
+        # Backup ref should exist with B's tip
         ref = git_run("git", "--git-dir", str(shared_gd),
-                      "rev-parse", "refs/heads/main-cave-sid-b")
-        assert ref.returncode != 0
+                      "rev-parse", "refs/sessions/sid-b/main")
+        assert ref.returncode == 0
+        assert ref.stdout.strip() == b_sha
 
     def test_forward_refs_updates_main_in_shared(self, shared_project, tmp_path):
         """forward_session_refs updates main in shared."""
@@ -3313,10 +3317,10 @@ class TestForceCleanupBackupRef:
         make_cave_session(session_gitdir, workdir)
         return session_gitdir, workdir, overlay_base
 
-    def test_force_cleanup_warns_no_backup(self, shared_project, tmp_path):
-        """When cleanup encounters a diverged ref, it warns and leaves shared unchanged.
+    def test_force_cleanup_backs_up_diverged(self, shared_project, tmp_path):
+        """When cleanup encounters a diverged ref, it backs up and leaves shared unchanged.
 
-        No backup branch is created. Shared stays at A's value.
+        Backup ref created at refs/sessions/<sid>/<branch>. Shared stays at A's value.
         """
         host, slug, projects_dir = shared_project
         shared_gd = projects_dir / slug / "gitdir"
@@ -3334,21 +3338,23 @@ class TestForceCleanupBackupRef:
         (work_b / "file.txt").write_text("version B\n")
         cave_git(work_b, "add", "file.txt")
         cave_git(work_b, "commit", "-m", "commit B")
+        b_sha = cave_git(work_b, "rev-parse", "HEAD").stdout.strip()
 
         # A merges first (cleanup)
         wrapper.merge_session_gitdirs("sid-a", overlay_a)
         shared_after_a = git_head(shared_gd, gitdir=True)
 
-        # B cleanup — can't rebase, warns and leaves shared alone
+        # B cleanup — can't rebase, backs up and leaves shared alone
         wrapper.merge_session_gitdirs("sid-b", overlay_b)
 
         # Shared main unchanged (A's work stays)
         assert git_head(shared_gd, gitdir=True) == shared_after_a
 
-        # No backup ref should exist
+        # Backup ref should exist with B's tip
         backup = git_run("git", "--git-dir", str(shared_gd),
-                         "rev-parse", "refs/heads/main-cave-sid-b")
-        assert backup.returncode != 0
+                         "rev-parse", "refs/sessions/sid-b/main")
+        assert backup.returncode == 0
+        assert backup.stdout.strip() == b_sha
 
     def test_multi_branch_concurrent_sessions(self, shared_project, tmp_path):
         """Session A on main, Session B on develop — both merge cleanly."""

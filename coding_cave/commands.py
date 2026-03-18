@@ -313,11 +313,14 @@ def cmd_push(slug=None, force=False):
     if not all_projects:
         print("No projects in the cave.", file=sys.stderr)
         return
+    failed = []
     for slug, _ in all_projects:
         try:
             sync.push_project(slug, force=force)
         except SystemExit:
-            pass
+            failed.append(slug)
+    if failed:
+        print(f"Push failed for: {', '.join(failed)}", file=sys.stderr)
 
 
 def _find_cave_root(project=None):

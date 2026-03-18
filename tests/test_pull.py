@@ -1686,10 +1686,10 @@ class TestCleanupOrdering:
         # Shared main should stay at A's version (B's diverged work is not applied)
         assert _head(env.gitdir, gitdir=True) == shared_after_a
 
-        # No backup ref for B
+        # Backup ref should exist for B's diverged work
         backup = _run("git", "--git-dir", str(env.gitdir), "rev-parse",
-                       "refs/heads/main-cave-b", check=False)
-        assert backup.returncode != 0
+                       "refs/sessions/b/main", check=False)
+        assert backup.returncode == 0
 
         # Pull should succeed (main has A's version)
         wrapper.pull_project(env.slug)

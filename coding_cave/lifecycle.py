@@ -236,8 +236,8 @@ def _setup_nix_store(sid, inside_cave):
                 src.close()
             else:
                 _merge_nix_db(host_nix_db, cave_nix_db)
-        except sqlite3.Error:
-            pass
+        except sqlite3.Error as exc:
+            print(f"WARNING: nix DB sync failed: {exc}", file=sys.stderr)
     if cave_nix_db.exists():
         os.environ["CODING_CAVE_NIX_DB_DIR"] = str(nix_db_dir)
 
@@ -418,7 +418,8 @@ def _mount_project_overlays(sid, overlay_base, loaded_projects):
                 )
         # Rewrite alternates from host path to cave path
         if session_gitdir:
-            (session_gitdir / "objects" / "info" / "alternates").write_text(
+            gitdir._atomic_write(
+                session_gitdir / "objects" / "info" / "alternates",
                 f"/projects/.shared-objects/{slug}\n")
 
     return overlay_mounts, bwrap_args
