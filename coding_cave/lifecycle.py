@@ -356,6 +356,7 @@ def _apply_user_env(user_env):
                 rel = file_path.relative_to(files_dir)
                 dest = cave_home / rel
                 dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.unlink(missing_ok=True)
                 shutil.copy2(str(file_path), str(dest))
 
     return args

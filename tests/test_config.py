@@ -466,6 +466,25 @@ class TestApplyUserEnvFiles:
 
         assert (cave_home / ".testrc").read_text() == "new content\n"
 
+    def test_files_overwrite_readonly(self, cave_env):
+        """Declared files overwrite read-only files (e.g. from nix store copy)."""
+        from coding_cave.lifecycle import _apply_user_env
+
+        user_env = cave_env.tmp_path / "user-env"
+        files_dir = user_env / "files"
+        files_dir.mkdir(parents=True)
+        (files_dir / ".testrc").write_text("new content\n")
+
+        cave_home = cave_env.cave_data / "home"
+        cave_home.mkdir(parents=True, exist_ok=True)
+        existing = cave_home / ".testrc"
+        existing.write_text("old content\n")
+        existing.chmod(0o444)
+
+        _apply_user_env(user_env)
+
+        assert existing.read_text() == "new content\n"
+
     def test_no_files_dir_is_noop(self, cave_env):
         """_apply_user_env does not fail when user_env has no files/ dir."""
         from coding_cave.lifecycle import _apply_user_env
