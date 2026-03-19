@@ -247,7 +247,7 @@ Base packages are infrastructure only: claude-code, nix, git, coreutils, and sta
 
 ### User layer (cave.nix)
 
-`~/.config/coding-cave/cave.nix` declares extra packages, settings, environment variables, and skills:
+`~/.config/coding-cave/cave.nix` declares extra packages, environment variables, skills, and Claude Code configuration:
 
     {
       inputs = {
@@ -255,11 +255,13 @@ Base packages are infrastructure only: claude-code, nix, git, coreutils, and sta
       };
       config = { pkgs }: {
         packages = with pkgs; [ python3 uv nano ];
-        settings = { };
+        claude = import ./claude.nix { inherit pkgs; };
         env = { EDITOR = "nano"; };
         skills = { };
       };
     }
+
+The `claude` attribute is an attrset with `plugins` (list) and `settings` (attrset). Using a separate attribute lets users import their Claude config from a standalone file (e.g. `claude.nix`).
 
 On session start, `build_user_env()` evaluates cave.nix:
 

@@ -35,7 +35,7 @@ Each agent session runs in its own **per-session bwrap namespace** with per-sess
 ### Configuration Files (on host, outside this repo)
 
 - **Global config** (`~/.config/coding-cave/config.toml`): OAuth tokens (`credentials.claude-oauth-token`), mirror settings (`[mirror]` section). Credentials are forwarded via env vars only, never written to disk inside the cave.
-- **cave.nix** (`~/.config/coding-cave/cave.nix`): User environment — extra packages, settings, env vars, and skills. Built via nix on session start. Auto-generated with defaults if missing.
+- **cave.nix** (`~/.config/coding-cave/cave.nix`): User environment — extra packages, env vars, skills, and Claude config. The `claude` attribute (`{ plugins = [...]; settings = {...}; }`) holds Claude Code plugins and settings, and can be imported from a separate file. Built via nix on session start. Auto-generated with defaults if missing.
 - **User CLAUDE.md** (`~/.config/coding-cave/CLAUDE.md`): Optional instructions file, concatenated after system-claude.md into `~/.claude/CLAUDE.md` at session startup.
 - **Shell dotfiles**: User's `~/.bashrc`/`~/.bash_profile` (ro-bind, opt-in via `[mirror]`) or `~/.config/zsh/` (overlay for writable history, opt-in via `[mirror]`) forwarded into the cave.
 

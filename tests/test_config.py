@@ -424,8 +424,18 @@ class TestBuildUserEnvFlakeGeneration:
         """Generated flake includes files attribute from userConfig."""
         flake = self._generate_and_read(tmp_path, '{}')
         assert 'files = userConfig.files or {}' in flake
-        assert 'builtins.toFile' in flake
+        assert 'pkgs.writeText' in flake
         assert '$out/files/' in flake
+
+    def test_claude_attribute_in_generated_flake(self, tmp_path):
+        """Generated flake reads plugins and settings from claude attribute."""
+        flake = self._generate_and_read(tmp_path, '{}')
+        assert 'claude = userConfig.claude;' in flake
+        assert 'claude.plugins or []' in flake
+        assert 'claude.settings or {}' in flake
+        # No top-level fallback
+        assert 'userConfig.plugins' not in flake
+        assert 'userConfig.settings' not in flake
 
 
 class TestApplyUserEnvFiles:

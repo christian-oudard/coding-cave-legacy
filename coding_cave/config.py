@@ -263,7 +263,7 @@ _DEFAULT_CAVE_NIX = """\
   inputs = {};
   config = { pkgs }: {
     # packages = with pkgs; [ python3 uv ];
-    # settings = {};
+    # claude = import ./claude.nix { inherit pkgs; };
     # env = {};
     # skills = {};
     # files = { ".config/direnv/direnvrc" = "source ${pkgs.nix-direnv}/share/nix-direnv/direnvrc"; };
@@ -285,15 +285,16 @@ _GENERATED_FLAKE_TEMPLATE = """\
       inherit pkgs;
 {input_passes}
     }};
+    claude = userConfig.claude;
     # Resolve plugins: user passes raw flake inputs, we extract plugin.${{system}}
-    rawPlugins = userConfig.plugins or [];
+    rawPlugins = claude.plugins or [];
     plugins = map (p: if p ? plugin then p.plugin.x86_64-linux else p) rawPlugins;
     pluginPackages = builtins.concatMap (p: if p ? package then [p.package] else []) plugins;
     packages = (userConfig.packages or []) ++ pluginPackages;
     pluginSettings = builtins.foldl' (acc: p:
       pkgs.lib.recursiveUpdate acc (p.settings or {{}})
     ) {{}} plugins;
-    settings = pkgs.lib.recursiveUpdate pluginSettings (userConfig.settings or {{}});
+    settings = pkgs.lib.recursiveUpdate pluginSettings (claude.settings or {{}});
     env = userConfig.env or {{}};
     skills = userConfig.skills or {{}};
     files = userConfig.files or {{}};
