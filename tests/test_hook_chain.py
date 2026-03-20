@@ -18,7 +18,7 @@ def cave_git(workdir, *args, **kwargs):
     """Run git in a cave working directory with test identity."""
     env = {**os.environ, **GIT_ENV}
     return subprocess.run(
-        ["git", "-C", str(workdir)] + list(args),
+        ["git", "-C", str(workdir), "-c", "commit.gpgsign=false"] + list(args),
         capture_output=True, text=True, env=env, **kwargs,
     )
 
@@ -145,15 +145,70 @@ class TestHookChaining:
         result = cave_git(ns.workdir, "commit", "-m", "normal commit")
         assert result.returncode == 0, result.stderr
 
-    def test_no_hookspath_no_chain(self, tmp_path):
-        """Without core.hooksPath on host, no chaining occurs."""
-        slug = "no-hookspath"
+    def test_default_git_hooks_copied(self, tmp_path):
+        """Host hooks in .git/hooks/ (no core.hooksPath) are copied and chained."""
+        slug = "default-hooks"
         _state.set_cave_data(tmp_path / "cave-data")
         projects_dir = _state.projects_dir()
         (projects_dir / slug).mkdir(parents=True)
 
         host = make_repo(tmp_path / "host")
-        # No core.hooksPath set
+        # No core.hooksPath — hooks in default .git/hooks/
+        host_hooks = host / ".git" / "hooks"
+        host_hooks.mkdir(exist_ok=True)
+        marker = tmp_path / "default-hook-ran"
+        (host_hooks / "pre-commit").write_text(
+            f"#!/bin/bash\ntouch {marker}\n"
+        )
+        (host_hooks / "pre-commit").chmod(0o755)
+        wrapper.initialize_gitdir(slug, host)
+
+        overlay = tmp_path / "overlay"
+        overlay.mkdir()
+        session_gd = wrapper.create_session_gitdir(slug, "test-sid", overlay,
+                                                   source_dir=host)
+
+        # cave.repoHooksPath should be set to absolute cave path
+        result = git_run("git", "--git-dir", str(session_gd),
+                         "config", "cave.repoHooksPath")
+        assert result.returncode == 0
+        assert result.stdout.strip() == f"/projects/.gitdirs/{slug}/repo-hooks"
+
+        # The hook should have been copied
+        assert (session_gd / "repo-hooks" / "pre-commit").is_file()
+
+    def test_default_git_hooks_samples_skipped(self, tmp_path):
+        """Hook samples (.sample suffix) are not copied."""
+        slug = "sample-hooks"
+        _state.set_cave_data(tmp_path / "cave-data")
+        projects_dir = _state.projects_dir()
+        (projects_dir / slug).mkdir(parents=True)
+
+        host = make_repo(tmp_path / "host")
+        host_hooks = host / ".git" / "hooks"
+        host_hooks.mkdir(exist_ok=True)
+        # Only samples, no real hooks
+        (host_hooks / "pre-commit.sample").write_text("#!/bin/bash\n")
+        (host_hooks / "pre-commit.sample").chmod(0o755)
+        wrapper.initialize_gitdir(slug, host)
+
+        overlay = tmp_path / "overlay"
+        overlay.mkdir()
+        session_gd = wrapper.create_session_gitdir(slug, "test-sid", overlay,
+                                                   source_dir=host)
+
+        result = git_run("git", "--git-dir", str(session_gd),
+                         "config", "cave.repoHooksPath")
+        assert result.returncode != 0, "Samples should not trigger hook forwarding"
+
+    def test_no_hooks_no_config(self, tmp_path):
+        """No hooks on host, no cave.repoHooksPath set."""
+        slug = "no-hooks"
+        _state.set_cave_data(tmp_path / "cave-data")
+        projects_dir = _state.projects_dir()
+        (projects_dir / slug).mkdir(parents=True)
+
+        host = make_repo(tmp_path / "host")
         wrapper.initialize_gitdir(slug, host)
 
         overlay = tmp_path / "overlay"

@@ -10,13 +10,17 @@ from pathlib import Path
 from . import _state, git as git_mod
 
 # Shell snippet appended to each cave hook: chains to a repo-local hook of the
-# same name via cave.repoHooksPath (forwarded from the host's core.hooksPath).
-# Exits 0 if no repo hook is configured.
+# same name via cave.repoHooksPath (forwarded from the host's hooks config).
+# The path may be absolute (for copied hooks) or relative (resolved against
+# the worktree root).  Exits 0 if no repo hook is configured.
 _CHAIN_SNIPPET = (
     '# Chain to repo-local hook\n'
     '_cave_hpath=$(git config cave.repoHooksPath 2>/dev/null) || exit 0\n'
-    '_cave_root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0\n'
-    '_rh="$_cave_root/$_cave_hpath/$(basename "$0")"\n'
+    'case "$_cave_hpath" in\n'
+    '    /*) ;;\n'
+    '    *) _cave_hpath="$(git rev-parse --show-toplevel 2>/dev/null)/$_cave_hpath" ;;\n'
+    'esac\n'
+    '_rh="$_cave_hpath/$(basename "$0")"\n'
     '[ -x "$_rh" ] && exec "$_rh" "$@"\n'
     'exit 0\n'
 )
@@ -47,6 +51,49 @@ def _atomic_write(path, content):
         except OSError:
             pass
         raise
+
+
+def _forward_repo_hooks(source_dir, slug, session_gitdir):
+    """Forward host project's hook config into the session gitdir.
+
+    If core.hooksPath is set, store it as cave.repoHooksPath (relative,
+    resolved against the worktree at hook runtime).
+
+    If core.hooksPath is not set, copy any executable hooks from the
+    host's .git/hooks/ into session_gitdir/repo-hooks/ and store the
+    absolute cave path.
+    """
+    result = subprocess.run(
+        ["git", "-C", str(source_dir), "config", "--local",
+         "core.hooksPath"],
+        capture_output=True, text=True,
+    )
+    if result.returncode == 0 and result.stdout.strip():
+        git_mod.git(session_gitdir, "config", "cave.repoHooksPath",
+                    result.stdout.strip(), capture_output=True)
+        return
+
+    # Default hooks location: .git/hooks/
+    host_hooks = Path(source_dir) / ".git" / "hooks"
+    if not host_hooks.is_dir():
+        return
+    repo_hooks = session_gitdir / "repo-hooks"
+    copied = False
+    for hook in host_hooks.iterdir():
+        if hook.is_file() and os.access(hook, os.X_OK):
+            # Skip samples
+            if hook.suffix == ".sample":
+                continue
+            if not copied:
+                repo_hooks.mkdir(exist_ok=True)
+                copied = True
+            shutil.copy2(hook, repo_hooks / hook.name)
+    if copied:
+        # Absolute cave path: session gitdir is bind-mounted at
+        # /projects/.gitdirs/<slug>
+        git_mod.git(session_gitdir, "config", "cave.repoHooksPath",
+                    f"/projects/.gitdirs/{slug}/repo-hooks",
+                    capture_output=True)
 
 
 def create_session_gitdir(slug, sid, overlay_base, *, source_dir=None):
@@ -127,17 +174,17 @@ def create_session_gitdir(slug, sid, overlay_base, *, source_dir=None):
     git_mod.git(session_gitdir, "config", "--add", "remote.shared.fetch",
         "+refs/remotes/host/*:refs/remotes/host/*", capture_output=True)
 
-    # Forward host project's core.hooksPath so cave hooks can chain to
+    # Forward host project's hook configuration so cave hooks can chain to
     # repo-local hooks (e.g. .githooks/pre-commit with nixfmt --check).
+    #
+    # Two cases:
+    #   1. core.hooksPath is set: store the relative path (resolved against
+    #      the worktree at runtime).  These hooks live in the overlay.
+    #   2. core.hooksPath is not set: hooks are in host's .git/hooks/ which
+    #      isn't in the overlay.  Copy them to session_gitdir/repo-hooks/
+    #      and store the absolute cave path.
     if source_dir is not None:
-        result = subprocess.run(
-            ["git", "-C", str(source_dir), "config", "--local",
-             "core.hooksPath"],
-            capture_output=True, text=True,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            git_mod.git(session_gitdir, "config", "cave.repoHooksPath",
-                        result.stdout.strip(), capture_output=True)
+        _forward_repo_hooks(source_dir, slug, session_gitdir)
 
     # Post-commit hook: sync with shared like a developer pushing to origin.
     # 1. Try FF push (common case: no other session modified shared)
@@ -355,8 +402,11 @@ def create_session_gitdir(slug, sid, overlay_base, *, source_dir=None):
         '_cave_post_rewrite "$@" || exit 1\n'
         # Chain variant: replay saved stdin to the repo hook via pipe.
         '_cave_hpath=$(git config cave.repoHooksPath 2>/dev/null) || exit 0\n'
-        '_cave_root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0\n'
-        '_rh="$_cave_root/$_cave_hpath/$(basename "$0")"\n'
+        'case "$_cave_hpath" in\n'
+        '    /*) ;;\n'
+        '    *) _cave_hpath="$(git rev-parse --show-toplevel 2>/dev/null)/$_cave_hpath" ;;\n'
+        'esac\n'
+        '_rh="$_cave_hpath/$(basename "$0")"\n'
         'if [ -x "$_rh" ]; then\n'
         '    echo "$_cave_stdin" | "$_rh" "$@"\n'
         '    exit $?\n'
