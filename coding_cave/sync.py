@@ -104,6 +104,10 @@ def _update_session_refs(slug, branches_shas):
                     synced_file = session_gd / "refs" / "synced" / branch
                     if synced_file.is_file():
                         synced_file.write_text(sha + "\n")
+                    # Update index to match new HEAD so git status
+                    # is clean (no phantom staged deletions).
+                    git_mod.git(session_gd, "read-tree", "HEAD",
+                                capture_output=True)
 
 
 def _parse_log(git_cmd, range_spec):
