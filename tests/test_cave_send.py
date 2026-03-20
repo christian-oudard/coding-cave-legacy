@@ -1,102 +1,53 @@
-"""Tests for session wrapper and cave-send."""
+"""Tests for cave-send IPC."""
 import json
 import os
-import signal
 import subprocess
 import sys
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 
-RELAY = str(Path(__file__).parent.parent / "session_wrapper.py")
 SEND = str(Path(__file__).parent.parent / "cave_send.py")
 
 
-class TestSessionWrapper:
-    @staticmethod
-    def _env_no_session(tmp_path):
-        """Env with no session ID so wrapper execs directly."""
-        env = {k: v for k, v in os.environ.items()
-               if not k.startswith("CODING_CAVE_SESSION")}
-        env["HOME"] = str(tmp_path)
-        return env
+class TestAgentCommand:
+    """Verify cmd_agent builds the right bash command for session startup."""
 
-    def test_exit_code_zero(self, tmp_path):
-        """Wrapper propagates exit code 0."""
-        proc = subprocess.run(
-            [sys.executable, RELAY, "--", "true"],
-            capture_output=True, timeout=5,
-            env=self._env_no_session(tmp_path),
-        )
-        assert proc.returncode == 0
+    def test_command_sources_ipc_setup(self, tmp_path, monkeypatch):
+        """cmd_agent must source ipc_setup.sh before exec-ing claude."""
+        from coding_cave import _state, commands
 
-    def test_exit_code_nonzero(self, tmp_path):
-        """Wrapper propagates non-zero exit code."""
-        proc = subprocess.run(
-            [sys.executable, RELAY, "--", "bash", "-c", "exit 42"],
-            capture_output=True, timeout=5,
-            env=self._env_no_session(tmp_path),
-        )
-        assert proc.returncode == 42
+        monkeypatch.setattr(_state, "IPC_SETUP_SH", "/nix/store/fake-ipc_setup.sh")
 
-    def test_meta_written_and_cleaned(self, tmp_path):
-        """Wrapper writes metadata and cleans up on exit."""
-        sid = "test-sid-123"
-        env = {
-            **os.environ,
-            "HOME": str(tmp_path),
-            "CODING_CAVE_SESSION_ID": sid,
-            "CODING_CAVE_SESSION_INDEX": "7",
-            "CODING_CAVE_PROJECT_PATH": "/projects/myproject",
-        }
-        ipc_dir = tmp_path / "ipc"
-        meta_path = ipc_dir / f"{sid}.json"
-        lock_path = ipc_dir / f"{sid}.lock"
+        # Capture the command passed to lifecycle.start_session
+        captured = {}
+        def fake_start(project, command, **kwargs):
+            captured["command"] = command
 
-        proc = subprocess.Popen(
-            [sys.executable, RELAY, "--", "bash", "-c", "sleep 0.3"],
-            env=env,
-        )
-        # Wait for metadata to appear
-        deadline = time.monotonic() + 3
-        while time.monotonic() < deadline:
-            if meta_path.exists():
-                break
-            time.sleep(0.05)
-        assert meta_path.exists(), "Metadata not written"
-        data = json.loads(meta_path.read_text())
-        assert data["sid"] == sid
-        assert data["index"] == "7"
-        assert data["project"] == "myproject"
-        assert lock_path.exists()
+        monkeypatch.setattr(commands.lifecycle, "start_session", fake_start)
+        monkeypatch.setattr(commands.config, "load_global_config", lambda: {})
+        monkeypatch.setattr(commands.config, "setup_env", lambda c: None)
+        monkeypatch.setattr(commands.projects, "detect_project_from_cwd",
+                            lambda: tmp_path)
+        monkeypatch.setattr(commands.projects, "ensure_project",
+                            lambda d: "test-proj")
+        monkeypatch.setattr(commands.projects, "cave_workdir",
+                            lambda p: "/projects/test-proj")
+        monkeypatch.setattr(commands.projects, "parse_project_filter",
+                            lambda f, p: {"test-proj": str(tmp_path)})
 
-        proc.wait(timeout=5)
-        assert proc.returncode == 0
-        # Cleaned up
-        assert not meta_path.exists(), "Metadata not cleaned up"
-        assert not lock_path.exists(), "Lock file not cleaned up"
+        commands.cmd_agent([])
 
-    def test_ignores_sock_flag(self, tmp_path):
-        """--sock is accepted and ignored for backwards compat."""
-        proc = subprocess.run(
-            [sys.executable, RELAY, "--sock", "/tmp/ignored.sock",
-             "--", "true"],
-            capture_output=True, timeout=5,
-            env=self._env_no_session(tmp_path),
-        )
-        assert proc.returncode == 0
-
-    def test_child_runs_directly_on_terminal(self, tmp_path):
-        """Child inherits stdin/stdout directly (no PTY intermediary)."""
-        proc = subprocess.run(
-            [sys.executable, RELAY, "--", "bash", "-c", "echo hello"],
-            capture_output=True, text=True, timeout=5,
-            env=self._env_no_session(tmp_path),
-        )
-        assert proc.returncode == 0
-        assert "hello" in proc.stdout
+        bash_script = captured["command"][-1]
+        assert "source /nix/store/fake-ipc_setup.sh" in bash_script
+        assert "exec claude" in bash_script
+        # ipc_setup.sh must come before exec claude
+        ipc_pos = bash_script.index("ipc_setup.sh")
+        exec_pos = bash_script.index("exec claude")
+        assert ipc_pos < exec_pos
 
 
 def _hold_lock(lock_path):
@@ -190,8 +141,7 @@ class TestCaveSend:
                 capture_output=True, text=True,
                 env={**os.environ, "HOME": str(tmp_path)},
             )
-            assert "abc123" in result.stdout
-            assert "myproj" in result.stdout
+            assert "myproj#1" in result.stdout
         finally:
             os.close(lock_fd)
 
