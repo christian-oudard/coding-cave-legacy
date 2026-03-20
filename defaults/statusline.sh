@@ -31,7 +31,7 @@ if [ -n "$persist_file" ]; then
         else printf '%dm' "$m"; fi
     }
     prefix="persist"
-    [ "$lock" = "true" ] && prefix="persist --lock"
+    [ "$lock" = "true" ] && prefix="persist lock"
     if [ "$total" -gt 0 ] 2>/dev/null; then
         persist="$prefix $iteration/$total"
     elif [ "${deadline%.*}" -gt 0 ] 2>/dev/null; then
