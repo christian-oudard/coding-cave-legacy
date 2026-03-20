@@ -202,7 +202,7 @@ def _cleanup_stale_pull(host_git, project_dir, slug):
     if (cur_branch.returncode == 0
             and cur_branch.stdout.strip() == "_cave_pull"):
         branches = subprocess.run(
-            host_git + ["branch", "--format=%(refname:short)"],
+            host_git + ["branch", "--format=%(refname:strip=2)"],
             capture_output=True, text=True,
         )
         for b in branches.stdout.strip().splitlines():
@@ -218,15 +218,20 @@ def _get_branches(gitdir_path, *, bare=False):
     """Return {branch_name: sha} for all branches in a git repo.
 
     If bare=True, uses --git-dir; otherwise uses -C.
+
+    Uses %(refname:strip=2) instead of %(refname:short) to always strip
+    exactly 'refs/heads/', avoiding disambiguation issues where git returns
+    'heads/<name>' when a tag with the same name exists.
     """
+    fmt = "--format=%(refname:strip=2) %(objectname)"
     if bare:
         result = git_mod.git(gitdir_path, "for-each-ref",
-                     "--format=%(refname:short) %(objectname)", "refs/heads/",
+                     fmt, "refs/heads/",
                      capture_output=True, text=True)
     else:
         result = subprocess.run(
             ["git", "-C", str(gitdir_path), "for-each-ref",
-             "--format=%(refname:short) %(objectname)", "refs/heads/"],
+             fmt, "refs/heads/"],
             capture_output=True, text=True,
         )
     if result.returncode != 0:

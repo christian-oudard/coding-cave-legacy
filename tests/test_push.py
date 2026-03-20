@@ -701,6 +701,61 @@ class TestForcePushShowsClobbered:
         assert "cave commit B" in combined
 
 
+class TestPushTagAmbiguity:
+    """Branch with same name as tag: %(refname:short) returns heads/<name>."""
+
+    def test_push_idempotent_with_tag_ambiguity(self, push_env, capsys):
+        """Push with a tag sharing a branch name doesn't re-push every time."""
+        env = push_env
+
+        # Create a tag 'main' that collides with branch 'main'
+        _run("git", "-C", str(env.host), "tag", "main", "HEAD")
+        # Verify the ambiguity: %(refname:short) would return 'heads/main'
+        short = _run("git", "-C", str(env.host), "for-each-ref",
+                      "--format=%(refname:short)", "refs/heads/main")
+        assert short.stdout.strip() == "heads/main", \
+            "Precondition: tag ambiguity changes refname:short"
+
+        # Host makes a commit
+        (env.host / "file.txt").write_text("updated\n")
+        _run("git", "-C", str(env.host), "add", ".")
+        _run("git", "-C", str(env.host), "commit", "-m", "host work")
+
+        capsys.readouterr()
+        wrapper.push_project(env.slug)
+        captured = capsys.readouterr()
+        assert "Pushed to" in captured.err
+
+        # Second push should be a noop
+        capsys.readouterr()
+        wrapper.push_project(env.slug)
+        captured = capsys.readouterr()
+        assert "Already up to date" in captured.err
+        assert "Pushed to" not in captured.err
+
+    def test_push_no_phantom_branch(self, push_env):
+        """Push doesn't create refs/heads/heads/<name> in the gitdir."""
+        env = push_env
+
+        _run("git", "-C", str(env.host), "tag", "main", "HEAD")
+        (env.host / "file.txt").write_text("updated\n")
+        _run("git", "-C", str(env.host), "add", ".")
+        _run("git", "-C", str(env.host), "commit", "-m", "host work")
+
+        wrapper.push_project(env.slug)
+
+        # Should NOT have created refs/heads/heads/main
+        phantom = _run("git", "--git-dir", str(env.gitdir), "rev-parse",
+                        "refs/heads/heads/main", check=False)
+        assert phantom.returncode != 0, \
+            "Push should not create phantom refs/heads/heads/main"
+
+        # Should have updated refs/heads/main
+        real = _run("git", "--git-dir", str(env.gitdir), "rev-parse",
+                     "refs/heads/main")
+        assert real.stdout.strip() == _head(env.host)
+
+
 class TestPushSlashBranch:
     """Push works with branch names containing '/' (e.g. feature/foo)."""
 
