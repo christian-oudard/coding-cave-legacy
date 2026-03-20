@@ -24,34 +24,24 @@ if [ -n "$persist_file" ]; then
     read -r iteration total deadline started < <(jq -r \
         '[.[]] | first | [(.iteration // 0), (.total // 0), (.deadline // 0), (.started // 0)] | map(tostring) | join(" ")' \
         "$persist_file" 2>/dev/null)
+    fmt_dur() {
+        local s=$1 h m
+        h=$((s / 3600)); m=$(( (s % 3600) / 60 ))
+        if [ "$h" -gt 0 ]; then printf '%dh%02dm' "$h" "$m"
+        else printf '%dm' "$m"; fi
+    }
     if [ "$total" -gt 0 ] 2>/dev/null; then
         persist="persist $iteration/$total"
     elif [ "${deadline%.*}" -gt 0 ] 2>/dev/null; then
         now=$(date +%s)
         remaining=$(( ${deadline%.*} - now ))
-        if [ "$remaining" -le 0 ]; then
-            persist="persist #$iteration expired"
-        elif [ "${started%.*}" -gt 0 ] 2>/dev/null; then
+        if [ "$remaining" -gt 0 ]; then
             elapsed=$(( now - ${started%.*} ))
             total_dur=$(( ${deadline%.*} - ${started%.*} ))
-            fmt_dur() {
-                local s=$1 h m
-                h=$((s / 3600)); m=$(( (s % 3600) / 60 ))
-                if [ "$h" -gt 0 ]; then printf '%dh%02dm' "$h" "$m"
-                else printf '%dm' "$m"; fi
-            }
-            persist=$(printf 'persist #%s %s/%s' "$iteration" "$(fmt_dur $elapsed)" "$(fmt_dur $total_dur)")
-        else
-            hours=$((remaining / 3600))
-            minutes=$(( (remaining % 3600) / 60 ))
-            if [ "$hours" -gt 0 ]; then
-                persist=$(printf 'persist #%s ~%dh%02dm' "$iteration" "$hours" "$minutes")
-            else
-                persist="persist #$iteration ~${minutes}m"
-            fi
+            persist=$(printf 'persist %s/%s' "$(fmt_dur $elapsed)" "$(fmt_dur $total_dur)")
         fi
     else
-        persist="persist #$iteration"
+        persist="persist forever"
     fi
 fi
 
