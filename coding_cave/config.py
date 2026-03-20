@@ -267,6 +267,7 @@ _DEFAULT_CAVE_NIX = """\
     claude = nix-claude.lib.build { inherit pkgs; };
     # packages = with pkgs; [ python3 uv ];
     # env = {};
+    # skills = {};
     # files = { ".config/direnv/direnvrc" = "source ${pkgs.nix-direnv}/share/nix-direnv/direnvrc"; };
   };
 }
@@ -287,12 +288,22 @@ _GENERATED_FLAKE_TEMPLATE = """\
 {input_passes}
     }};
     claude = userConfig.claude;
-    packages = userConfig.packages or [];
+    # Resolve plugins: user passes raw flake inputs, we extract plugin.${{system}}
+    rawPlugins = claude.plugins or [];
+    plugins = map (p: if p ? plugin then p.plugin.x86_64-linux else p) rawPlugins;
+    pluginPackages = builtins.concatMap (p: if p ? package then [p.package] else []) plugins;
+    packages = (userConfig.packages or []) ++ pluginPackages;
+    pluginSettings = builtins.foldl' (acc: p:
+      pkgs.lib.recursiveUpdate acc (p.settings or {{}})
+    ) {{}} plugins;
+    settings = pkgs.lib.recursiveUpdate pluginSettings (claude.settings or {{}});
     env = userConfig.env or {{}};
+    skills = userConfig.skills or {{}};
     files = userConfig.files or {{}};
+    pluginSkills = builtins.concatMap (p: p.skills or []) plugins;
   in {{
     packages.x86_64-linux.default = pkgs.runCommand "cave-user-env" {{}} ''
-      mkdir -p $out/packages $out/claude
+      mkdir -p $out/packages $out/claude/skills
 
       # Symlink package bin dirs
       ${{pkgs.lib.concatMapStringsSep "\\n" (p: ''
@@ -301,18 +312,30 @@ _GENERATED_FLAKE_TEMPLATE = """\
         fi
       '') packages}}
 
-      # Claude derivation (settings, skills, statusline, packages)
-      cp -r ${{claude}}/. $out/claude/
-
-      # Plugin packages
-      for pkg in ${{claude}}/packages/*; do
-        if [ -d "$pkg/bin" ]; then
-          ln -sf "$pkg" "$out/packages/$(basename "$pkg")"
-        fi
-      done 2>/dev/null || true
+      # Write settings.json
+      printf '%s' '${{builtins.toJSON settings}}' > $out/claude/settings.json
 
       # Write env.json
       printf '%s' '${{builtins.toJSON env}}' > $out/claude/env.json
+
+      # Write inline skills
+      ${{pkgs.lib.concatStringsSep "\\n" (pkgs.lib.mapAttrsToList (name: content: ''
+        mkdir -p $out/claude/skills/${{name}}
+        cat > $out/claude/skills/${{name}}/SKILL.md << 'SKILL_EOF'
+${{content}}
+SKILL_EOF
+      '') skills)}}
+
+      # Copy plugin skills (strip nix hash prefix from directory names)
+      ${{pkgs.lib.concatMapStringsSep "\\n" (skillPath:
+        let name = builtins.substring 33 (-1) (builtins.baseNameOf skillPath);
+        in ''
+        rm -rf "$out/claude/skills/${{name}}"
+        mkdir -p "$out/claude/skills/${{name}}"
+        for f in ${{skillPath}}/*; do
+          install -m 644 "$f" "$out/claude/skills/${{name}}/"
+        done
+      '') pluginSkills}}
 
       # Write user home files
       ${{pkgs.lib.concatStringsSep "\\n" (pkgs.lib.mapAttrsToList (relPath: content:

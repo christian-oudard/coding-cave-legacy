@@ -1,4 +1,5 @@
 """Per-session gitdir creation and merging."""
+import json
 import os
 import shutil
 import subprocess
@@ -7,6 +8,16 @@ import tempfile
 from pathlib import Path
 
 from . import _state, git as git_mod
+
+
+def _session_label(sid):
+    """Return a friendly label like 'coding-cave#2' for a session ID."""
+    meta = _state.sessions_dir() / f"{sid}.json"
+    try:
+        info = json.loads(meta.read_text())
+        return f"{info['project']}#{info['index']}"
+    except (OSError, json.JSONDecodeError, KeyError):
+        return sid
 
 
 def _atomic_write(path, content):
@@ -135,11 +146,22 @@ def create_session_gitdir(slug, sid, overlay_base):
         '    shared_sha=$(git rev-parse --verify '
         '"refs/remotes/shared/$branch" 2>/dev/null)\n'
         # Shared hasn't moved since our last push — we amended/rebased.
+        # But only force-push if the host hasn't already pulled that commit.
         '    if [ -n "$pushed_sha" ] && [ "$shared_sha" = "$pushed_sha" ]'
         '; then\n'
-        '        git push shared +"$branch" 2>/dev/null &&\n'
-        '            git update-ref "refs/pushed/$branch" HEAD &&\n'
-        '            pushed_ok=1\n'
+        '        host_ref=$(git rev-parse --verify '
+        '"refs/remotes/host/$branch" 2>/dev/null)\n'
+        '        if [ -n "$host_ref" ] && git merge-base --is-ancestor '
+        '"$shared_sha" "$host_ref" 2>/dev/null; then\n'
+        '            echo >&2\n'
+        '            echo "WARNING: Cannot force-push $branch. commit '
+        '${shared_sha:0:8} was already pulled to the host." >&2\n'
+        '            echo "Create a new commit instead of amending." >&2\n'
+        '        else\n'
+        '            git push shared +"$branch" 2>/dev/null &&\n'
+        '                git update-ref "refs/pushed/$branch" HEAD &&\n'
+        '                pushed_ok=1\n'
+        '        fi\n'
         '    else\n'
         # Shared has moved.  Rebase only our new commits onto shared.
         # Use refs/pushed (last successful push) or refs/init (session
@@ -352,6 +374,7 @@ def _forward_refs(sid, session_gitdir, shared_gitdir, *, force=False,
     """
     if protected_refs is None:
         protected_refs = set()
+    label = _session_label(sid)
     result = git_mod.git(session_gitdir, "for-each-ref",
                  "--format=%(refname) %(objectname)", "refs/heads/",
                  capture_output=True, text=True)
@@ -417,12 +440,48 @@ def _forward_refs(sid, session_gitdir, shared_gitdir, *, force=False,
             continue  # session is behind shared, skip
         elif session_owns:
             # Session owns this branch (no other source modified shared).
-            # Adopt session's version directly — handles amend, amend +
-            # new commits, squash, message-only amend, any rewrite.
-            git_mod.git(shared_gitdir, "update-ref", ref, sha,
-                capture_output=True)
-            git_mod.git(session_gitdir, "update-ref",
-                f"refs/synced/{branch}", sha, capture_output=True)
+            # But don't overwrite if the host already pulled the existing
+            # ref — that would force `pull --force` on the host.
+            host_sha = _ref_sha(shared_gitdir,
+                                f"refs/remotes/host/{branch}")
+            if (host_sha and merge_base.returncode == 0
+                    and git_mod.git(shared_gitdir, "merge-base",
+                        "--is-ancestor", existing_sha, host_sha,
+                        capture_output=True).returncode == 0):
+                # Host has this commit. Create a new commit with the
+                # session's tree on top of the existing shared ref.
+                # This always works (no conflicts) and preserves the
+                # host's ability to fast-forward.
+                tree = git_mod.git(shared_gitdir, "rev-parse",
+                    f"{sha}^{{tree}}", capture_output=True, text=True)
+                if tree.returncode == 0:
+                    msg = git_mod.git(shared_gitdir, "log", "-1",
+                        "--format=%B", sha,
+                        capture_output=True, text=True)
+                    new = subprocess.run(
+                        ["git", "--git-dir", str(shared_gitdir),
+                         "commit-tree", tree.stdout.strip(),
+                         "-p", existing_sha,
+                         "-m", msg.stdout.strip()],
+                        capture_output=True, text=True,
+                        env={**os.environ,
+                             "GIT_AUTHOR_NAME": "cave-coder",
+                             "GIT_AUTHOR_EMAIL": "cave@localhost",
+                             "GIT_COMMITTER_NAME": "cave-coder",
+                             "GIT_COMMITTER_EMAIL": "cave@localhost"},
+                    )
+                    if new.returncode == 0:
+                        git_mod.git(shared_gitdir, "update-ref", ref,
+                            new.stdout.strip(), capture_output=True)
+                        git_mod.git(session_gitdir, "update-ref",
+                            f"refs/synced/{branch}", sha,
+                            capture_output=True)
+            else:
+                # Host hasn't pulled — safe to adopt directly.
+                git_mod.git(shared_gitdir, "update-ref", ref, sha,
+                    capture_output=True)
+                git_mod.git(session_gitdir, "update-ref",
+                    f"refs/synced/{branch}", sha, capture_output=True)
         else:
             # Diverged, session doesn't own — try rebase, then
             # force-update (cleanup only) or skip (live sync).
@@ -444,7 +503,7 @@ def _forward_refs(sid, session_gitdir, shared_gitdir, *, force=False,
                 git_mod.git(shared_gitdir, "update-ref", backup_ref, sha,
                     capture_output=True)
                 protected_refs.add(branch)
-                print(f"WARNING: session {sid[:8]} had commits on "
+                print(f"WARNING: {label} had commits on "
                       f"{branch} that couldn't be rebased "
                       f"(backed up to {backup_ref}).",
                       file=sys.stderr)
@@ -457,7 +516,7 @@ def _forward_refs(sid, session_gitdir, shared_gitdir, *, force=False,
                     capture_output=True, text=True)
                 n = (count.stdout.strip()
                      if count.returncode == 0 else "?")
-                print(f"Session has {n} commit(s) on {branch} that "
+                print(f"{label} has {n} commit(s) on {branch} that "
                       f"diverged from shared (use 'pull' to force-sync).",
                       file=sys.stderr)
 

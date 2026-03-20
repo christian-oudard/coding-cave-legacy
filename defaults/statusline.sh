@@ -45,6 +45,9 @@ if [ -n "$persist_file" ]; then
     else
         persist="$prefix forever"
     fi
+    if [ "$lock" = "true" ]; then
+        persist="persist --lock #$iteration"
+    fi
 fi
 
 slug="${CODING_CAVE_PROJECT_PATH##*/}"

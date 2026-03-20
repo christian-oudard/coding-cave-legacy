@@ -37,7 +37,6 @@ BWRAP_ENV_ALLOWLIST = {
     # Host-side only (add-runtime reads from process env)
     "CODING_CAVE_NIX_MERGED", "CODING_CAVE_NIX_DB_DIR",
     "CODING_CAVE_BWRAP_ARGS", "CODING_CAVE_USER_CLAUDE_MD",
-    "CODING_CAVE_USER_ENV",
     # Setup-only (try-fwd-env -> wrap-entry, then unset)
     "CODING_CAVE_EXTRA_PATH",
 } | _CAVE_RUNTIME_VARS
@@ -275,19 +274,18 @@ def _inject_cave_send_hooks(settings):
 def _apply_user_env(user_env):
     """Apply user environment from cave.nix.
 
-    Merges settings into persistent home, copies skills and statusline.
+    Merges settings into persistent home, copies skills.
     Returns bwrap args for packages, env vars, and store path binds.
     """
     if not user_env:
         return []
 
-    cave_home = _state.cave_home()
-    claude_dir = cave_home / ".claude"
-    claude_dir.mkdir(parents=True, exist_ok=True)
-
     # Merge user settings into persistent home
     user_settings = user_env / "claude" / "settings.json"
     if user_settings.is_file():
+        cave_home = _state.cave_home()
+        claude_dir = cave_home / ".claude"
+        claude_dir.mkdir(parents=True, exist_ok=True)
         existing = {}
         settings_file = claude_dir / "settings.json"
         if settings_file.exists():
@@ -304,23 +302,10 @@ def _apply_user_env(user_env):
         _inject_cave_send_hooks(existing)
         settings_file.write_text(json.dumps(existing, indent=2))
 
-    # Skills from claude derivation
-    skills_dir = user_env / "claude" / "skills"
-    if skills_dir.is_dir():
-        claude_skills = claude_dir / "skills"
-        claude_skills.mkdir(parents=True, exist_ok=True)
-        for skill in skills_dir.iterdir():
-            if skill.is_dir():
-                dest = claude_skills / skill.name
-                if dest.exists():
-                    shutil.rmtree(dest)
-                shutil.copytree(skill, dest)
-
     args = []
 
     # Bind-mount user-env and its package closure directly.
     args += ["--ro-bind", str(user_env), str(user_env)]
-    os.environ["CODING_CAVE_USER_ENV"] = str(user_env)
 
     # Extra PATH entries from user packages
     packages_dir = user_env / "packages"
@@ -338,6 +323,18 @@ def _apply_user_env(user_env):
             args += ["--setenv", "CODING_CAVE_EXTRA_PATH",
                            ":".join(extra_paths)]
 
+    # Skills from user env
+    skills_dir = user_env / "claude" / "skills"
+    if skills_dir.is_dir():
+        cave_home = _state.cave_home()
+        claude_skills = cave_home / ".claude" / "skills"
+        claude_skills.mkdir(parents=True, exist_ok=True)
+        for skill in skills_dir.iterdir():
+            if skill.is_dir():
+                dest = claude_skills / skill.name
+                if not dest.exists():
+                    shutil.copytree(skill, dest)
+
     # Extra env vars
     env_json = user_env / "claude" / "env.json"
     if env_json.is_file():
@@ -353,6 +350,7 @@ def _apply_user_env(user_env):
     # store paths in the content stay current after rebuilds)
     files_dir = user_env / "files"
     if files_dir.is_dir():
+        cave_home = _state.cave_home()
         for file_path in files_dir.rglob("*"):
             if file_path.is_file():
                 rel = file_path.relative_to(files_dir)

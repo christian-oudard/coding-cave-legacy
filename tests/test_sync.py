@@ -755,6 +755,60 @@ class TestSessionGitdir:
         wrapper.merge_session_gitdirs("sid-a", overlay_a)
         assert git_head(shared_gd, gitdir=True) == sha_b_prime
 
+    def test_amended_commit_rebased_when_host_pulled(
+            self, shared_project, tmp_path):
+        """Amending a commit that the host already pulled must not overwrite shared.
+
+        Scenario: session commits B, sync pushes B to shared, host pulls
+        (refs/remotes/host/main = B), session amends B to B'.
+        _forward_refs must rebase B' onto B rather than replacing B,
+        preserving the host's ability to fast-forward.
+        """
+        host, slug, projects_dir = shared_project
+        shared_gd = projects_dir / slug / "gitdir"
+
+        gd_a, work_a, overlay_a = self._make_session(
+            tmp_path, slug, projects_dir, "a")
+
+        # Session commits B
+        (work_a / "new.txt").write_text("v1\n")
+        cave_git(work_a, "add", "new.txt")
+        cave_git(work_a, "commit", "-m", "commit B")
+        sha_b = cave_git(work_a, "rev-parse", "HEAD").stdout.strip()
+
+        # Mid-session sync pushes B to shared
+        forward_session_refs(slug, gd_a, shared_gd)
+        assert git_head(shared_gd, gitdir=True) == sha_b
+
+        # Host pulls: mark B as pulled
+        git_run("git", "--git-dir", str(shared_gd),
+                "update-ref", "refs/remotes/host/main", sha_b)
+
+        # Session amends B to B'
+        (work_a / "new.txt").write_text("v2\n")
+        cave_git(work_a, "add", "new.txt")
+        cave_git(work_a, "commit", "--amend", "-m", "commit B amended")
+        sha_b_prime = cave_git(work_a, "rev-parse", "HEAD").stdout.strip()
+        assert sha_b_prime != sha_b
+
+        # Cleanup: _forward_refs must NOT replace B with B' in shared.
+        # It should rebase B' onto B (creating a new FF commit).
+        wrapper.merge_session_gitdirs("sid-a", overlay_a)
+        shared_head = git_head(shared_gd, gitdir=True)
+        assert shared_head != sha_b_prime, \
+            "Shared must not adopt the amended commit directly"
+
+        # Shared must still be a descendant of B (host can fast-forward)
+        result = git_run("git", "--git-dir", str(shared_gd),
+                         "merge-base", "--is-ancestor", sha_b, shared_head)
+        assert result.returncode == 0, \
+            "Shared head must be a descendant of the host-pulled commit"
+
+        # The amended content should still be present (rebased, not lost)
+        show = git_run("git", "--git-dir", str(shared_gd),
+                       "show", f"{shared_head}:new.txt")
+        assert show.stdout.strip() == "v2"
+
     def test_reauthored_commit_not_overwritten(self, shared_project, tmp_path):
         """Re-authored shared ref (same tree) must not be overwritten by session.
 
@@ -3232,6 +3286,82 @@ class TestPostCommitHookSync:
         shared_head = git_head(shared_gd, gitdir=True)
         assert shared_head == git_head(gd_a, gitdir=True), \
             "Shared should still be at A's commit (B's rebase failed)"
+
+    def test_hook_blocks_force_push_when_host_pulled(
+            self, shared_project, tmp_path):
+        """Post-commit hook must not force-push an amend when host already pulled.
+
+        Scenario: session commits A, host pulls (refs/remotes/host/main = A),
+        session amends A to A'. The hook should NOT force-push A' to shared
+        because that would require the host to 'pull --force'.
+
+        Bypasses prepare-commit-msg (Layer 1) to test the post-commit hook
+        check specifically.
+        """
+        _, slug, projects_dir = shared_project
+        shared_gd = projects_dir / slug / "gitdir"
+
+        gd, work, _ = self._make_session(
+            tmp_path, slug, projects_dir, "test")
+
+        # Session commits A, hook pushes to shared
+        (work / "a.txt").write_text("v1\n")
+        cave_git(work, "add", "a.txt")
+        cave_git(work, "commit", "-m", "commit A")
+        original = git_head(gd, gitdir=True)
+        assert git_head(shared_gd, gitdir=True) == original
+
+        # Simulate host pull: set refs/remotes/host/main in shared gitdir
+        git_run("git", "--git-dir", str(shared_gd),
+                "update-ref", "refs/remotes/host/main", original)
+
+        # Disable amend-guard hooks so we can test the post-commit
+        # hook's force-push blocking in isolation.
+        hooks_dir = Path(str(gd)) / "hooks"
+        (hooks_dir / "prepare-commit-msg").write_text("#!/bin/bash\nexit 0\n")
+        (hooks_dir / "post-rewrite").write_text("#!/bin/bash\nexit 0\n")
+
+        # Session amends A to A'
+        (work / "a.txt").write_text("v2\n")
+        cave_git(work, "add", "a.txt")
+        cave_git(work, "commit", "--amend", "-m", "commit A amended")
+        amended = git_head(gd, gitdir=True)
+        assert amended != original
+
+        # Shared must still have the original (host-pulled) commit
+        assert git_head(shared_gd, gitdir=True) == original, \
+            "Hook must not force-push over a commit the host already pulled"
+
+    def test_hook_allows_force_push_when_host_not_pulled(
+            self, shared_project, tmp_path):
+        """Post-commit hook allows force-push when host hasn't pulled yet.
+
+        No refs/remotes/host ref exists, so ownership is sufficient.
+        """
+        _, slug, projects_dir = shared_project
+        shared_gd = projects_dir / slug / "gitdir"
+
+        gd, work, _ = self._make_session(
+            tmp_path, slug, projects_dir, "test")
+
+        # Session commits A, hook pushes to shared
+        (work / "a.txt").write_text("v1\n")
+        cave_git(work, "add", "a.txt")
+        cave_git(work, "commit", "-m", "commit A")
+        original = git_head(gd, gitdir=True)
+        assert git_head(shared_gd, gitdir=True) == original
+
+        # No host pull — refs/remotes/host/main does NOT exist
+
+        # Session amends A to A'
+        (work / "a.txt").write_text("v2\n")
+        cave_git(work, "add", "a.txt")
+        cave_git(work, "commit", "--amend", "-m", "commit A amended")
+        amended = git_head(gd, gitdir=True)
+        assert amended != original
+
+        # Shared should have the amended version (force-push allowed)
+        assert git_head(shared_gd, gitdir=True) == amended
 
 
 class TestPostRewriteHook:

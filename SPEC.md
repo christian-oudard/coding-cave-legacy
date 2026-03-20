@@ -100,6 +100,7 @@ Safety constraints:
 
 - **Read-only from the session's perspective**: `_forward_refs` must not modify the session gitdir in any way visible to the running agent. In practice, it writes `refs/synced` (internal bookkeeping, not visible to normal git operations) and temporarily rewrites alternates (restored immediately after). The running agent is unlikely to observe these, and the agent's git operations don't depend on them.
 - **Never clobber new content**: only replace shared refs when the session is the sole authority (ownership proven) or via rebase (preserving both sides).
+- **Preserve host fast-forward**: a non-fast-forward update to shared must never overwrite a commit the host has already pulled. `refs/remotes/host/<branch>` tracks what the host last pulled. Both the post-commit hook and `_forward_refs` must check this before any force-update, even when ownership is proven. If the existing shared ref is an ancestor of `refs/remotes/host/<branch>`, the host has it, and overwriting it would force `pull --force`. In this case, rebase the session's new work onto the existing shared ref instead of replacing it.
 
 **Cleanup** (`merge_session_gitdirs`): called when a session exits. Uses the same `_forward_refs` logic with `force=True`. When rebase fails and ownership is unproven, force-updates shared and backs up the old ref under `refs/sessions/<sid>/`.
 
@@ -108,11 +109,14 @@ Safety constraints:
 **Single session, normal commit:**
 Session commits A → hook pushes `main=A` (FF), `pushed=A`. Shared is current.
 
-**Single session, amend:**
-Session commits A → hook pushes (FF), `pushed=A` → session amends to A' → hook push fails (non-FF), `pushed` stays at A. `_forward_refs` sees `pushed=A==existing` → ownership proven → adopt A'.
+**Single session, amend (host hasn't pulled):**
+Session commits A → hook pushes (FF), `pushed=A` → session amends to A' → hook push fails (non-FF), `pushed` stays at A. Hook checks `refs/remotes/host/main`, not present → force-push allowed. `_forward_refs` sees `pushed=A==existing`, no host ref → ownership proven → adopt A'.
+
+**Single session, amend (host already pulled):**
+Session commits A → hook pushes (FF), `pushed=A`. Host runs `cav pull` → sets `refs/remotes/host/main=A`. Session amends to A' → hook push fails (non-FF), checks `refs/remotes/host/main`, A is ancestor of host ref → force-push blocked. `_forward_refs` same check → rebases A' onto A instead of replacing. Host can still fast-forward.
 
 **Single session, amend + new commits:**
-Session commits A → hook pushes → amends to A' → commits B on top → hook push fails (non-FF from A). `pushed=A==existing` → ownership → adopt B (which includes A').
+Session commits A → hook pushes → amends to A' → commits B on top → hook push fails (non-FF from A). `pushed=A==existing` → ownership. If host hasn't pulled → adopt B. If host pulled A → rebase B onto A.
 
 **Two sessions on main (normal concurrent):**
 Session 1 commits A, hook pushes (FF). Session 2 commits B (based on pre-A HEAD), hook push fails (non-FF). `_forward_refs` for session 2: `pushed` doesn't match existing (A) → no ownership → rebase B onto A → shared gets both. No data loss, no race.
@@ -121,7 +125,7 @@ Session 1 commits A, hook pushes (FF). Session 2 commits B (based on pre-A HEAD)
 Session commits A, syncs (`synced=A, shared=A`). Host `cav push` updates `shared=H`. Session amends A to A'. `synced=A ≠ existing=H` → no ownership → rebase A' onto H. Host's content preserved.
 
 **Cleanup with failed hook (force=True):**
-Session amends, hook fails, session exits. `_forward_refs(force=True)`: ownership check fires (same as live sync). If ownership proven → adopt directly (clean history). If not (another source modified shared) → rebase. If rebase fails → force-update with backup.
+Session amends, hook fails, session exits. `_forward_refs(force=True)`: ownership check fires (same as live sync). If ownership proven and host hasn't pulled → adopt directly (clean history). If ownership proven but host already pulled → rebase onto existing (preserve host fast-forward). If not owned → rebase. If rebase fails → force-update with backup.
 
 ### Host identity forwarding and GPG signing
 
@@ -261,15 +265,7 @@ Base packages are infrastructure only: claude-code, nix, git, coreutils, and sta
       };
     }
 
-The `claude` attribute is a **derivation** built by nix-claude. coding-cave copies its output directly into the user environment. The expected output layout:
-
-    $out/
-      settings.json    # Claude Code settings
-      skills/          # Skill directories (each with SKILL.md)
-      statusline.sh    # Statusline script (optional, overrides default)
-      packages/        # Plugin packages (symlinked into PATH)
-
-coding-cave does not resolve plugins, merge settings, or process skills. nix-claude owns all of that. The default statusline script documents available env vars (`CODING_CAVE_SESSION_INDEX`, `CODING_CAVE_SESSION_ID`, `CODING_CAVE_PROJECT_PATH`).
+The `claude` attribute is an attrset with `plugins` (list) and `settings` (attrset). Using a separate attribute lets users import their Claude config from a standalone file (e.g. `claude.nix`).
 
 On session start, `build_user_env()` evaluates cave.nix:
 
