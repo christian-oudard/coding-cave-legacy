@@ -52,10 +52,12 @@ def send(target_sid, message):
         "ts": time.time(),
     })
     path = MSG_DIR / f"{target_sid}.jsonl"
-    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND)
     try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
         os.write(fd, (entry + "\n").encode())
     finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
 
 
@@ -94,13 +96,26 @@ def _read_and_clear(path):
     return messages
 
 
+def _format_age(started):
+    if not started:
+        return "?"
+    age = int(time.time() - started)
+    if age < 60:
+        return f"{age}s"
+    if age < 3600:
+        return f"{age // 60}m"
+    h, m = divmod(age, 3600)
+    return f"{h}h{m // 60:02d}m"
+
+
 def _format_messages(messages):
     """Format messages for injection into Claude's context."""
     parts = []
     for msg in messages:
         sender = msg.get("sender", "unknown")
         text = msg.get("message", "")
-        parts.append(f"{sender} {text}")
+        age = _format_age(msg.get("ts"))
+        parts.append(f"[{age} ago] {sender} {text}")
     return "\n".join(parts)
 
 
@@ -134,46 +149,39 @@ def hook():
 # --- session listing ---
 
 def resolve_index(index):
-    """Resolve a session index (e.g. '4' or '#4') to (sid, meta_path).
+    """Resolve a session index (e.g. '4' or '#4') to (sid, sock_path).
 
-    Only matches sessions on the same project as the sender.
-    When multiple sessions share the same index, returns the newest.
+    When multiple sessions share the same index (stale + fresh),
+    returns the newest one by start time.
     """
     index = str(index).lstrip("#")
-    my_project = os.path.basename(
-        os.environ.get("CODING_CAVE_PROJECT_PATH", ""))
     best_sid, best_started = None, 0
     for sid, meta in list_sessions():
-        if meta.get("index") != index:
-            continue
-        # Filter by project when sender is inside a cave session.
-        # Host-originated sends (no project) can reach any session.
-        if my_project and meta.get("project", my_project) != my_project:
-            continue
-        started = meta.get("started", 0)
-        if started >= best_started:
-            best_sid, best_started = sid, started
+        if meta.get("index") == index:
+            started = meta.get("started", 0)
+            if started >= best_started:
+                best_sid, best_started = sid, started
     if best_sid:
         return best_sid, str(IPC_DIR / f"{best_sid}.json")
     return None, None
 
 
-def _session_alive(meta):
-    """Check if a session is alive by testing its flock."""
-    sid = meta.get("sid")
-    if not sid:
-        return False
-    lock_path = IPC_DIR / f"{sid}.lock"
+def _session_alive(lock_path):
+    """Check if a session is alive by trying a non-blocking flock.
+
+    If we can acquire the lock, the session is dead (lock was released).
+    If EWOULDBLOCK, the session is alive (holding the lock).
+    """
     try:
-        fd = os.open(str(lock_path), os.O_RDWR)
+        fd = os.open(str(lock_path), os.O_RDONLY)
     except FileNotFoundError:
         return False
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        # Got the lock, session is dead. Release and clean up.
+        # Got the lock, session is dead. Release it.
         fcntl.flock(fd, fcntl.LOCK_UN)
         return False
-    except OSError:
+    except BlockingIOError:
         # Lock held by another process, session is alive.
         return True
     finally:
@@ -196,9 +204,11 @@ def list_sessions():
             meta = json.loads(meta_path.read_text())
         except (json.JSONDecodeError, OSError):
             continue
-        if not _session_alive(meta):
+        lock_path = meta_path.with_suffix(".lock")
+        if not _session_alive(lock_path):
+            # Stale session, clean up
             meta_path.unlink(missing_ok=True)
-            (IPC_DIR / f"{sid}.lock").unlink(missing_ok=True)
+            lock_path.unlink(missing_ok=True)
             continue
         sessions.append((sid, meta))
     return sessions
@@ -219,25 +229,14 @@ def main():
         return
 
     if sys.argv[1] == "--list":
-        def _format_age(started):
-            if not started:
-                return "?"
-            age = int(time.time() - started)
-            if age < 60:
-                return f"{age}s"
-            if age < 3600:
-                return f"{age // 60}m"
-            h, m = divmod(age, 3600)
-            return f"{h}h{m // 60:02d}m"
-
         sessions = list_sessions()
         my_sid = os.environ.get("CODING_CAVE_SESSION_ID", "")
-        for sid, meta in sorted(sessions, key=lambda s: s[1].get("index", "")):
+        for sid, meta in sorted(sessions, key=lambda s: (s[1].get("project", ""), s[1].get("index", ""))):
             idx = meta.get("index", "?")
             proj = meta.get("project", "?")
             age = _format_age(meta.get("started"))
             me = " (me)" if sid == my_sid else ""
-            print(f"  #{idx}  {proj}  {sid}  [{age}]{me}")
+            print(f"  {proj}#{idx}  [{age}]{me}")
         if not sessions:
             print("  No active sessions.")
         return
