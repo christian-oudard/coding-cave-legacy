@@ -287,7 +287,7 @@ _GENERATED_FLAKE_TEMPLATE = """\
       inherit pkgs;
 {input_passes}
     }};
-    claude = userConfig.claude;
+    claude = userConfig.claude or {{}};
     # Resolve plugins: user passes raw flake inputs, we extract plugin.${{system}}
     rawPlugins = claude.plugins or [];
     plugins = map (p: if p ? plugin then p.plugin.x86_64-linux else p) rawPlugins;
