@@ -260,10 +260,12 @@ def setup_env(global_config):
 
 _DEFAULT_CAVE_NIX = """\
 {
-  inputs = {};
-  config = { pkgs }: {
+  inputs = {
+    nix-claude = "github:christian-oudard/nix-claude";
+  };
+  config = { pkgs, nix-claude }: {
+    claude = nix-claude.lib.build { inherit pkgs; };
     # packages = with pkgs; [ python3 uv ];
-    # claude = nix-claude.build { inherit pkgs; };
     # env = {};
     # files = { ".config/direnv/direnvrc" = "source ${pkgs.nix-direnv}/share/nix-direnv/direnvrc"; };
   };
