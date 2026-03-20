@@ -10,6 +10,8 @@ The cave gives agents unrestricted access (`--dangerously-skip-permissions`) wit
 
 The host repo is canonical. The cave works on an overlay copy. `pull` brings cave work to the host; `push` brings host state to the cave. The cave never modifies the host directly.
 
+Only commits cross the boundary between host and cave. Pull transfers commits from the cave gitdir to the host repo. Push transfers commits from the host repo to the cave gitdir. Uncommitted changes, working tree state, and staging area never cross. This is a hard boundary, not a convenience: with multiple sessions per project, there is no single working tree to transfer.
+
 `reset` is the escape hatch: wipe everything in the cave and start fresh from the host. It always works, regardless of how broken the cave state is.
 
 ## Projects are folders, not names
@@ -53,8 +55,14 @@ Each `cav` invocation starts a new bwrap process. The namespace lives as long as
 - Home directory (Claude Code config, conversation history)
 - Nix store overlay (packages installed via `nix shell`)
 - Shared gitdirs (commits merged from session gitdirs on cleanup)
+- Session continuity state (best-effort, single per-project slot):
+  - Overlay upper (uncommitted changes, untracked files, deletions)
+  - Git index (staging area) and its loose objects
+  - Stash (ref + reflog for the full stash stack)
 
-What does not persist: each session's working tree overlay and session gitdir. Uncommitted changes and unpushed refs live only in the session. To preserve work, commit it.
+On session exit, the overlay upper is saved. On session start, it is restored into the new session's overlay. The git index and stash are similarly preserved. This means uncommitted work survives session restarts for the common single-session case.
+
+Limitation: the saved state uses a single per-project slot. When multiple sessions with uncommitted changes to the same project exit, last-to-exit wins. Committed changes are always safe (refs are merged/rebased/backed up).
 
 ## Git isolation via separate gitdir
 
@@ -136,7 +144,7 @@ GPG commit signing is supported via agent socket forwarding. The host's `gpg-age
 
 ## Pull
 
-Pull brings committed cave work to the host. Uncommitted changes are not transferred — with multiple sessions per project, there is no single working tree to pull from. Agents must commit their work for it to be pullable.
+Pull brings committed cave work to the host. Agents must commit their work for it to be pullable.
 
 Pull is branch-aware: it iterates all branches in the cave gitdir and pulls each one that has new commits to the corresponding host branch. Branches are never crossed — cave commits on `develop` go to host's `develop`, not to whatever branch the host has checked out.
 
@@ -174,7 +182,7 @@ This is why the force path uses `reset --hard` (adopting exact commit objects) r
 
 ## Push
 
-Push brings host commits to the cave. It updates the shared gitdir's refs and objects to match the host. Uncommitted host changes are not transferred.
+Push brings host commits to the cave. It updates the shared gitdir's refs and objects to match the host.
 
 Push is branch-aware: it iterates all host branches and pushes each one to the corresponding cave gitdir branch. Branches are never crossed — host commits on `develop` go to cave's `develop`, not to whatever the cave gitdir HEAD points to.
 
