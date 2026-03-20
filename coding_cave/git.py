@@ -59,12 +59,13 @@ def initialize_gitdir(slug, project_dir):
         capture_output=True, text=True)
     if head.returncode == 0:
         branch = subprocess.run(
-            ["git", "-C", str(project_dir), "rev-parse", "--abbrev-ref", "HEAD"],
+            ["git", "-C", str(project_dir), "symbolic-ref", "-q", "HEAD"],
             capture_output=True, text=True,
         )
         if branch.returncode == 0:
+            name = branch.stdout.strip().removeprefix("refs/heads/")
             git(gitdir, "update-ref",
-                 f"refs/remotes/host/{branch.stdout.strip()}", head.stdout.strip())
+                 f"refs/remotes/host/{name}", head.stdout.strip())
     ensure_cave_remote(project_dir, gitdir)
     mirror_origin_refs(gitdir, project_dir)
 

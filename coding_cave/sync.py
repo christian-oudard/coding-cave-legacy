@@ -196,11 +196,11 @@ def _cleanup_stale_pull(host_git, project_dir, slug):
         print(f"Aborting stale rebase in {slug}.", file=sys.stderr)
         subprocess.run(host_git + ["rebase", "--abort"], capture_output=True)
     cur_branch = subprocess.run(
-        host_git + ["rev-parse", "--abbrev-ref", "HEAD"],
+        host_git + ["symbolic-ref", "-q", "HEAD"],
         capture_output=True, text=True,
     )
     if (cur_branch.returncode == 0
-            and cur_branch.stdout.strip() == "_cave_pull"):
+            and cur_branch.stdout.strip() == "refs/heads/_cave_pull"):
         branches = subprocess.run(
             host_git + ["branch", "--format=%(refname:strip=2)"],
             capture_output=True, text=True,
@@ -765,13 +765,19 @@ def pull_project(slug, force=False):
 
     _cleanup_stale_pull(host_git, project_dir, slug)
 
-    branch_result = subprocess.run(
-        host_git + ["rev-parse", "--abbrev-ref", "HEAD"],
+    # Use symbolic-ref (not --abbrev-ref) to avoid tag disambiguation
+    # turning branch 'cave' into 'heads/cave'.
+    branch_ref = subprocess.run(
+        host_git + ["symbolic-ref", "-q", "HEAD"],
         capture_output=True, text=True,
     )
+    has_commits = subprocess.run(
+        host_git + ["rev-parse", "--verify", "-q", "HEAD"],
+        capture_output=True,
+    ).returncode == 0
 
     # Host repo has no commits yet -- initialize from cave HEAD
-    if branch_result.returncode != 0:
+    if not has_commits:
         gitdir_head_result = git_mod.git(gitdir_path, "rev-parse", "HEAD",
             capture_output=True, text=True)
         if gitdir_head_result.returncode != 0:
@@ -779,9 +785,11 @@ def pull_project(slug, force=False):
                   file=sys.stderr)
             return
         gitdir_head = gitdir_head_result.stdout.strip()
-        branch = git_mod.git(gitdir_path, "rev-parse", "--abbrev-ref", "HEAD",
-            capture_output=True, text=True).stdout.strip()
-        if not branch or branch == "HEAD":
+        gitdir_ref = git_mod.git(gitdir_path, "symbolic-ref", "-q", "HEAD",
+            capture_output=True, text=True)
+        branch = (gitdir_ref.stdout.strip().removeprefix("refs/heads/")
+                  if gitdir_ref.returncode == 0 else "")
+        if not branch:
             branch = "main"
         subprocess.run(host_git + ["fetch", str(gitdir_path), "HEAD"],
                        check=True, capture_output=True)
@@ -802,7 +810,10 @@ def pull_project(slug, force=False):
         _mark_pulled(gitdir_path, host_head, branch)
         return
 
-    current_branch = branch_result.stdout.strip()
+    if branch_ref.returncode == 0:
+        current_branch = branch_ref.stdout.strip().removeprefix("refs/heads/")
+    else:
+        current_branch = None  # detached HEAD
 
     # Get all cave branches
     cave_branches = _get_cave_branches(gitdir_path)
@@ -813,7 +824,7 @@ def pull_project(slug, force=False):
 
     # Detached HEAD recovery: re-attach to a cave branch so pull works.
     # Prefer main, fall back to any cave branch that matches HEAD.
-    if current_branch == "HEAD":
+    if current_branch is None:
         head_sha = subprocess.run(
             host_git + ["rev-parse", "HEAD"],
             capture_output=True, text=True,
@@ -970,15 +981,20 @@ def push_project(slug, force=False):
 
     _cleanup_stale_pull(host_git, project_dir, slug)
 
-    branch_result = subprocess.run(
-        host_git + ["rev-parse", "--abbrev-ref", "HEAD"],
+    branch_ref = subprocess.run(
+        host_git + ["symbolic-ref", "-q", "HEAD"],
         capture_output=True, text=True,
     )
-    if branch_result.returncode != 0:
+    has_commits = subprocess.run(
+        host_git + ["rev-parse", "--verify", "-q", "HEAD"],
+        capture_output=True,
+    ).returncode == 0
+    if not has_commits:
         print(f"Host repo has no commits for {slug} -- nothing to push.",
               file=sys.stderr)
         return
-    current_branch = branch_result.stdout.strip()
+    current_branch = (branch_ref.stdout.strip().removeprefix("refs/heads/")
+                      if branch_ref.returncode == 0 else "HEAD")
 
     host_branches = _get_branches(project_dir)
     host_branches.pop("_cave_pull", None)
