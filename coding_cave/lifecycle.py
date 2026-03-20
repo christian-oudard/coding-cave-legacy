@@ -484,6 +484,9 @@ def _build_credential_args():
             cave_gnupg = _state.cave_home() / ".gnupg"
             cave_gnupg.mkdir(mode=0o700, exist_ok=True)
             cave_trustdb = cave_gnupg / "trustdb.gpg"
+            # Remove symlinks (cave agent could plant one to escape).
+            if cave_trustdb.is_symlink():
+                cave_trustdb.unlink()
             if not cave_trustdb.exists():
                 shutil.copy2(host_trustdb, cave_trustdb)
 
