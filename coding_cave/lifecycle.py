@@ -103,6 +103,27 @@ def _merge_nix_db(host_db_path, cave_db_path):
                         (cave_referrer, cave_reference),
                     )
 
+        # Copy DerivationOutputs for newly inserted derivations.
+        # Without this, nix can't map drv -> output path, causing
+        # "requires non-existent output" errors for downstream builds.
+        if new_host_ids:
+            try:
+                drv_outputs = src.execute(
+                    f"SELECT drv, id, path FROM DerivationOutputs "
+                    f"WHERE drv IN ({placeholders})",
+                    new_host_ids,
+                ).fetchall()
+            except sqlite3.OperationalError:
+                drv_outputs = []  # table may not exist in old DBs
+            for host_drv_id, output_name, output_path in drv_outputs:
+                cave_drv_id = id_map.get(host_drv_id)
+                if cave_drv_id:
+                    dst.execute(
+                        "INSERT OR IGNORE INTO DerivationOutputs "
+                        "(drv, id, path) VALUES (?, ?, ?)",
+                        (cave_drv_id, output_name, output_path),
+                    )
+
         dst.commit()
     finally:
         src.close()

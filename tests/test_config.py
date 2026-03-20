@@ -281,6 +281,13 @@ class TestMergeNixDb:
                 foreign key (referrer) references ValidPaths(id) on delete cascade,
                 foreign key (reference) references ValidPaths(id) on delete restrict
             );
+            CREATE TABLE DerivationOutputs (
+                drv integer not null,
+                id text not null,
+                path text not null,
+                primary key (drv, id),
+                foreign key (drv) references ValidPaths(id) on delete cascade
+            );
         """)
         return db
 

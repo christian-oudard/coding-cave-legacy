@@ -143,44 +143,74 @@ class TestIdentityForwarding:
 
 
 class TestGpgSigning:
-    """Verify GPG signing works via forwarded agent socket.
-
-    These tests require a GPG agent with a signing key configured.
-    They are skipped when GPG infrastructure is not available.
-    """
-
-    @staticmethod
-    def _gpg_available():
-        """Check if GPG signing works (agent socket + usable key)."""
-        key = os.environ.get("CODING_CAVE_GIT_SIGNING_KEY", "")
-        if not key:
-            return False
-        # Check if agent is reachable and key is usable
-        try:
-            result = subprocess.run(
-                ["gpg", "--list-keys", key],
-                capture_output=True, timeout=5,
-            )
-            return result.returncode == 0
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            return False
+    """Verify GPG signing works with a temporary test key."""
 
     @pytest.fixture
-    def gpg_env(self, e2e_env):
-        """E2E env with GPG signing configured."""
-        if not self._gpg_available():
-            pytest.skip("GPG agent/key not available")
+    def gpg_env(self, e2e_env, tmp_path):
+        """E2E env with a temporary GPG key for signing."""
+        import shutil, tempfile
+
+        # Use a short path to avoid socket name length limits (108 chars)
+        gpghome = Path(tempfile.mkdtemp(prefix="gpg", dir="/tmp"))
+        gpghome.chmod(0o700)
+
+        # Configure loopback pinentry so gpg never prompts interactively
+        (gpghome / "gpg-agent.conf").write_text("allow-loopback-pinentry\n")
+        (gpghome / "gpg.conf").write_text("pinentry-mode loopback\n")
+
+        old_gnupghome = os.environ.get("GNUPGHOME")
+        os.environ["GNUPGHOME"] = str(gpghome)
+
+        # Generate a throwaway key (no passphrase).
+        # Setting GNUPGHOME before this ensures the auto-started agent
+        # uses the temp dir (with loopback pinentry config).
+        keygen = subprocess.run(
+            ["gpg", "--batch", "--passphrase", "", "--quick-gen-key",
+             "Test User <test@test.com>", "default", "default", "0"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if keygen.returncode != 0:
+            subprocess.run(["gpgconf", "--kill", "gpg-agent"],
+                           capture_output=True)
+            shutil.rmtree(gpghome, ignore_errors=True)
+            if old_gnupghome is not None:
+                os.environ["GNUPGHOME"] = old_gnupghome
+            else:
+                os.environ.pop("GNUPGHOME", None)
+            pytest.skip(f"gpg key generation failed: {keygen.stderr}")
+
+        # Extract the key fingerprint
+        keys = subprocess.run(
+            ["gpg", "--list-keys", "--with-colons", "test@test.com"],
+            capture_output=True, text=True,
+        )
+        fpr = ""
+        for line in keys.stdout.splitlines():
+            if line.startswith("fpr:"):
+                fpr = line.split(":")[9]
+                break
+        assert fpr, "Could not find generated key fingerprint"
+
         env = e2e_env
-        key = os.environ["CODING_CAVE_GIT_SIGNING_KEY"]
         # Configure signing in the cave gitdir
         _run("git", "--git-dir", str(env.gitdir), "config",
-             "user.signingkey", key)
+             "user.signingkey", fpr)
         _run("git", "--git-dir", str(env.gitdir), "config",
              "commit.gpgsign", "true")
         # Configure host repo to verify signatures
         _run("git", "-C", str(env.host), "config",
-             "user.signingkey", key)
-        return env
+             "user.signingkey", fpr)
+
+        yield env
+
+        # Cleanup: kill agent, restore env, remove temp dir
+        subprocess.run(["gpgconf", "--kill", "gpg-agent"],
+                       capture_output=True)
+        shutil.rmtree(gpghome, ignore_errors=True)
+        if old_gnupghome is not None:
+            os.environ["GNUPGHOME"] = old_gnupghome
+        else:
+            os.environ.pop("GNUPGHOME", None)
 
     def test_gpg_signed_commit(self, gpg_env):
         """Cave can create a GPG-signed commit."""
