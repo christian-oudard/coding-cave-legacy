@@ -430,7 +430,7 @@ class TestBuildUserEnvFlakeGeneration:
     def test_claude_attribute_in_generated_flake(self, tmp_path):
         """Generated flake reads plugins and settings from claude attribute."""
         flake = self._generate_and_read(tmp_path, '{}')
-        assert 'claude = userConfig.claude;' in flake
+        assert 'claude = userConfig.claude or {};' in flake
         assert 'claude.plugins or []' in flake
         assert 'claude.settings or {}' in flake
         # No top-level fallback
