@@ -63,7 +63,7 @@ def cmd_agent(args, gpu=False, continue_session=False, resume=None, claude_args=
     claude_cmd = shlex.join(claude_parts)
     command = [
         "--", "/bin/bash", "-c",
-        f"cd {workdir} && exec {claude_cmd}",
+        f"cd {workdir} && source {_state.IPC_SETUP_SH} && exec {claude_cmd}",
     ]
 
     mounted = projects.parse_project_filter(projects_flag, project)
