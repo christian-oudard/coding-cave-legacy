@@ -473,10 +473,19 @@ def _build_credential_args():
     gnupghome = os.environ.get("CODING_CAVE_GNUPGHOME", "")
     if gnupghome and os.path.isdir(gnupghome):
         cave_gnupghome = f"{_state.JAIL_HOME}/.gnupg"
-        for fname in ("pubring.kbx", "pubring.gpg", "trustdb.gpg"):
+        for fname in ("pubring.kbx", "pubring.gpg"):
             src = os.path.join(gnupghome, fname)
             if os.path.isfile(src):
                 args += ["--ro-bind", src, f"{cave_gnupghome}/{fname}"]
+        # trustdb needs to be writable (GPG updates it on verify).
+        # Seed a copy in the persistent home instead of ro-binding.
+        host_trustdb = os.path.join(gnupghome, "trustdb.gpg")
+        if os.path.isfile(host_trustdb):
+            cave_gnupg = _state.cave_home() / ".gnupg"
+            cave_gnupg.mkdir(mode=0o700, exist_ok=True)
+            cave_trustdb = cave_gnupg / "trustdb.gpg"
+            if not cave_trustdb.exists():
+                shutil.copy2(host_trustdb, cave_trustdb)
 
     # Proxy CA certificate bind-mount (onecli MITM)
     proxy_ca = os.environ.get("CODING_CAVE_PROXY_CA_CERT", "")

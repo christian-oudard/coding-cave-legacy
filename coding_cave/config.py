@@ -33,8 +33,7 @@ def _git_config(key):
 
 
 def _detect_gpg_agent_socket():
-    """Find the gpg-agent socket path, or None."""
-    # gpgconf --list-dirs gives us the actual socket path
+    """Find the gpg-agent socket path, launching the agent if needed."""
     try:
         r = subprocess.run(
             ["gpgconf", "--list-dirs", "agent-socket"],
@@ -44,13 +43,15 @@ def _detect_gpg_agent_socket():
             sock = Path(r.stdout.strip())
             if sock.exists():
                 return str(sock)
+            # Socket path known but agent not running yet (e.g. after reboot).
+            subprocess.run(
+                ["gpgconf", "--launch", "gpg-agent"],
+                capture_output=True,
+            )
+            if sock.exists():
+                return str(sock)
     except FileNotFoundError:
         pass  # gpgconf not installed
-    # Fallback: standard location
-    gnupghome = os.environ.get("GNUPGHOME", str(Path.home() / ".gnupg"))
-    sock = Path(gnupghome) / "S.gpg-agent"
-    if sock.exists():
-        return str(sock)
     return None
 
 

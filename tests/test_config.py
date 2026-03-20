@@ -49,6 +49,22 @@ class TestGpgDetection:
         with patch.dict(os.environ, {"GNUPGHOME": str(tmp_path)}):
             assert _detect_gpg_agent_socket() == str(sock)
 
+    def test_launches_agent_when_socket_missing(self, tmp_path):
+        """After reboot, agent socket may not exist yet. Launch it."""
+        sock = tmp_path / "S.gpg-agent"
+        real_run = subprocess.run
+
+        def mock_run(cmd, **kw):
+            if cmd[:3] == ["gpgconf", "--list-dirs", "agent-socket"]:
+                return subprocess.CompletedProcess(cmd, 0, str(sock) + "\n")
+            if cmd[:3] == ["gpgconf", "--launch", "gpg-agent"]:
+                sock.touch()  # simulate agent creating its socket
+                return subprocess.CompletedProcess(cmd, 0)
+            return real_run(cmd, **kw)
+
+        with patch("coding_cave.config.subprocess.run", side_effect=mock_run):
+            assert _detect_gpg_agent_socket() == str(sock)
+
 
 class TestFlakeNixSafety:
     """Static analysis of flake.nix to catch host/cave confusion.
@@ -187,12 +203,13 @@ class TestGpgLifecycleSafety:
         assert "secring" not in src
 
     def test_only_specific_keyring_files_mounted(self):
-        """Only pubring.kbx, pubring.gpg, trustdb.gpg are mounted."""
+        """pubring files ro-bound, trustdb copied writable to persistent home."""
         src = self.LIFECYCLE_PY.read_text()
-        # The for loop should only iterate over these safe files
         assert "pubring.kbx" in src
         assert "pubring.gpg" in src
+        # trustdb is seeded (copied) into persistent home, not ro-bound
         assert "trustdb.gpg" in src
+        assert "copy2(host_trustdb" in src
 
     def test_gpg_env_vars_in_allowlist(self):
         """GPG env vars are in BWRAP_ENV_ALLOWLIST."""
@@ -280,13 +297,6 @@ class TestMergeNixDb:
                 primary key (referrer, reference),
                 foreign key (referrer) references ValidPaths(id) on delete cascade,
                 foreign key (reference) references ValidPaths(id) on delete restrict
-            );
-            CREATE TABLE DerivationOutputs (
-                drv integer not null,
-                id text not null,
-                path text not null,
-                primary key (drv, id),
-                foreign key (drv) references ValidPaths(id) on delete cascade
             );
         """)
         return db
@@ -437,7 +447,7 @@ class TestBuildUserEnvFlakeGeneration:
     def test_claude_attribute_in_generated_flake(self, tmp_path):
         """Generated flake reads plugins and settings from claude attribute."""
         flake = self._generate_and_read(tmp_path, '{}')
-        assert 'claude = userConfig.claude or {};' in flake
+        assert 'claude = userConfig.claude;' in flake
         assert 'claude.plugins or []' in flake
         assert 'claude.settings or {}' in flake
         # No top-level fallback
