@@ -159,17 +159,25 @@ def resolve_index(index):
 
 
 def _session_alive(meta):
-    """Check if a session is alive by testing its PID."""
-    pid = meta.get("pid")
-    if not pid:
+    """Check if a session is alive by testing its flock."""
+    sid = meta.get("sid")
+    if not sid:
+        return False
+    lock_path = IPC_DIR / f"{sid}.lock"
+    try:
+        fd = os.open(str(lock_path), os.O_RDWR)
+    except FileNotFoundError:
         return False
     try:
-        os.kill(int(pid), 0)
-        return True
-    except (ProcessLookupError, ValueError):
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        # Got the lock, session is dead. Release and clean up.
+        fcntl.flock(fd, fcntl.LOCK_UN)
         return False
-    except PermissionError:
-        return True  # process exists but we can't signal it
+    except OSError:
+        # Lock held by another process, session is alive.
+        return True
+    finally:
+        os.close(fd)
 
 
 def list_sessions():
@@ -190,6 +198,7 @@ def list_sessions():
             continue
         if not _session_alive(meta):
             meta_path.unlink(missing_ok=True)
+            (IPC_DIR / f"{sid}.lock").unlink(missing_ok=True)
             continue
         sessions.append((sid, meta))
     return sessions
