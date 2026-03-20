@@ -181,7 +181,7 @@ Push first syncs refs from any running sessions into the shared gitdir (same as 
 
 `--force` only applies to the currently checked-out host branch. It skips the unpulled check for that branch and force-updates it in the cave gitdir. Other branches are not touched. After overwriting the shared ref, push --force clears `refs/synced/<branch>` in all running session gitdirs so that `_forward_refs` re-evaluates on the next sync cycle — without this, sessions would think they're already synced and skip re-forwarding their work. On the next sync, session commits are rebased onto the new shared main.
 
-The gitdir is bind-mounted into the cave, so push updates are immediately visible to running agents. No cave restart needed.
+After updating the shared gitdir, push writes `refs/remotes/shared/<branch>` directly into each running session's gitdir. This makes pushed commits immediately visible to `git log shared/main` without the agent needing to fetch. The session's local `refs/heads/main` is not modified. integration happens on the session's next commit via the post-commit hook.
 
 ## Cave-originated projects
 

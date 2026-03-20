@@ -70,6 +70,24 @@ def _clear_session_synced_refs(slug, branch):
             pass
 
 
+def _update_session_refs(slug, branches_shas):
+    """Update running sessions' tracking refs after push.
+
+    Writes refs/remotes/shared/<branch> into each session gitdir so
+    sessions see pushed commits without needing to fetch.
+    """
+    for session in sessions.list_sessions():
+        sid = session["sid"]
+        session_gd = (_state.cave_data() / "session-overlays" / sid
+                      / f"gitdir-{slug}")
+        if not session_gd.is_dir():
+            continue
+        for branch, sha in branches_shas:
+            ref_dir = session_gd / "refs" / "remotes" / "shared"
+            ref_dir.mkdir(parents=True, exist_ok=True)
+            (ref_dir / branch).write_text(sha + "\n")
+
+
 def _parse_log(git_cmd, range_spec):
     """Parse 'git log' output into [(hash, tree, subject), ...]."""
     result = subprocess.run(
@@ -128,8 +146,8 @@ def _notify_sessions(slug, branches):
     if not ipc_dir.is_dir():
         return
     branch_str = ", ".join(branches)
-    message = (f"Host pushed new commits to {slug} ({branch_str}). "
-               f"Run: git fetch shared && git rebase shared/main")
+    message = (f"Host pushed new commits to {branch_str}. "
+               f"Run: git log shared/main -5")
     for s in active:
         sid = s.get("sid")
         if not sid:
@@ -972,6 +990,7 @@ def push_project(slug, force=False):
         git_mod.git(gitdir_path, "symbolic-ref", "HEAD",
             f"refs/heads/{current_branch}", capture_output=True)
         git_mod.finalize_sync(gitdir_path, project_dir)
+        _update_session_refs(slug, [(current_branch, host_sha)])
         print(f"Force-pushed to {slug}/{current_branch} ({host_sha[:8]}).",
               file=sys.stderr)
         _notify_sessions(slug, [current_branch])
@@ -1016,6 +1035,7 @@ def push_project(slug, force=False):
     git_mod.finalize_sync(gitdir_path, project_dir)
 
     if pushed_branches:
+        _update_session_refs(slug, pushed_branches)
         for branch, sha in pushed_branches:
             print(f"Pushed to {slug}/{branch} ({sha[:8]}).",
                   file=sys.stderr)
