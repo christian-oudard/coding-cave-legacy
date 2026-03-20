@@ -71,10 +71,15 @@ def _clear_session_synced_refs(slug, branch):
 
 
 def _update_session_refs(slug, branches_shas):
-    """Update running sessions' tracking refs after push.
+    """Update running sessions' refs after push.
 
-    Writes refs/remotes/shared/<branch> into each session gitdir so
-    sessions see pushed commits without needing to fetch.
+    The overlay lower layer is a live bind mount of the host project dir,
+    so the working tree already has the pushed files.  We just need to
+    update the gitdir refs so git commands see the new commits.
+
+    Updates refs/heads/<branch> (so git log works), refs/init/<branch>
+    (so _forward_refs knows), and refs/remotes/shared/<branch> (tracking).
+    Only updates local branch if the session hasn't diverged.
     """
     for session in sessions.list_sessions():
         sid = session["sid"]
@@ -83,9 +88,22 @@ def _update_session_refs(slug, branches_shas):
         if not session_gd.is_dir():
             continue
         for branch, sha in branches_shas:
+            # Update tracking ref unconditionally
             ref_dir = session_gd / "refs" / "remotes" / "shared"
             ref_dir.mkdir(parents=True, exist_ok=True)
             (ref_dir / branch).write_text(sha + "\n")
+            # Update local branch only if session hasn't diverged
+            head_file = session_gd / "refs" / "heads" / branch
+            init_file = session_gd / "refs" / "init" / branch
+            if head_file.is_file() and init_file.is_file():
+                head_sha = head_file.read_text().strip()
+                init_sha = init_file.read_text().strip()
+                if head_sha == init_sha:
+                    head_file.write_text(sha + "\n")
+                    init_file.write_text(sha + "\n")
+                    synced_file = session_gd / "refs" / "synced" / branch
+                    if synced_file.is_file():
+                        synced_file.write_text(sha + "\n")
 
 
 def _parse_log(git_cmd, range_spec):

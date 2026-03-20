@@ -122,6 +122,26 @@ def create_session_gitdir(slug, sid, overlay_base):
     if hooks.exists():
         shutil.rmtree(hooks)
     hooks.mkdir()
+    # Pre-commit hook: rebase onto shared/main if behind.
+    # This integrates pushed commits (from cav push or other sessions)
+    # before the commit, so the session stays current.
+    (hooks / "pre-commit").write_text(
+        '#!/bin/bash\n'
+        '[ -n "$_CAVE_HOOK_RUNNING" ] && exit 0\n'
+        'branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null) || exit 0\n'
+        'git fetch shared 2>/dev/null\n'
+        'shared_sha=$(git rev-parse --verify '
+        '"refs/remotes/shared/$branch" 2>/dev/null) || exit 0\n'
+        'head_sha=$(git rev-parse HEAD 2>/dev/null) || exit 0\n'
+        '[ "$shared_sha" = "$head_sha" ] && exit 0\n'
+        'if git merge-base --is-ancestor "$head_sha" "$shared_sha" '
+        '2>/dev/null; then\n'
+        '    git rebase "$shared_sha" 2>/dev/null || '
+        'git rebase --abort 2>/dev/null\n'
+        'fi\n'
+        'exit 0\n'
+    )
+    os.chmod(hooks / "pre-commit", 0o755)
     # Post-commit hook: push/pull semantics with shared gitdir.
     #
     # On every commit, try to push to shared (fast-forward).  If shared
