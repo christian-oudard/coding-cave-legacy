@@ -61,9 +61,10 @@ def cmd_agent(args, gpu=False, continue_session=False, resume=None, claude_args=
     if claude_args:
         claude_parts.extend(claude_args)
     claude_cmd = shlex.join(claude_parts)
+    relay_cmd = f"pty-relay -- {claude_cmd}"
     command = [
         "--", "/bin/bash", "-c",
-        f". {_state.IPC_SETUP_SH}; cd {workdir} && exec {claude_cmd}",
+        f"cd {workdir} && exec {relay_cmd}",
     ]
 
     mounted = projects.parse_project_filter(projects_flag, project)
@@ -662,4 +663,4 @@ def cmd_status(show_all=False):
         for s in sorted(active_sessions, key=lambda s: s.get("index", 0)):
             ago = _relative_age(s["started"])
             idx = s.get("index", "?")
-            print(f"    #{idx} [{ago}] {s['sid']}  PID {s['bwrap_pid']}", file=sys.stderr)
+            print(f"    {slug}#{idx}  [{ago}]", file=sys.stderr)
