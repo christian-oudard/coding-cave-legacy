@@ -261,7 +261,15 @@ Base packages are infrastructure only: claude-code, nix, git, coreutils, and sta
       };
     }
 
-The `claude` attribute is an attrset with `plugins` (list) and `settings` (attrset). Using a separate attribute lets users import their Claude config from a standalone file (e.g. `claude.nix`).
+The `claude` attribute is a **derivation** built by nix-claude. coding-cave copies its output directly into the user environment. The expected output layout:
+
+    $out/
+      settings.json    # Claude Code settings
+      skills/          # Skill directories (each with SKILL.md)
+      statusline.sh    # Statusline script (optional, overrides default)
+      packages/        # Plugin packages (symlinked into PATH)
+
+coding-cave does not resolve plugins, merge settings, or process skills. nix-claude owns all of that. The default statusline script documents available env vars (`CODING_CAVE_SESSION_INDEX`, `CODING_CAVE_SESSION_ID`, `CODING_CAVE_PROJECT_PATH`).
 
 On session start, `build_user_env()` evaluates cave.nix:
 

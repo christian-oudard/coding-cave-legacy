@@ -1,4 +1,11 @@
 #!/bin/bash
+# Coding Cave default statusline script.
+# Override via claude.statusline in cave.nix.
+#
+# Available environment variables:
+#   CODING_CAVE_SESSION_INDEX  - session number (1, 2, ...)
+#   CODING_CAVE_SESSION_ID     - full session ID
+#   CODING_CAVE_PROJECT_PATH   - project mount path (/projects/<slug>)
 read -r input
 
 # Find persist.json walking up from CWD

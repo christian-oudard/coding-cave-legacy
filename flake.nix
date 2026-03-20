@@ -20,10 +20,12 @@
     defaultClaudeSettings = ./defaults/claude-settings.json;
     defaultStatusline = ./defaults/statusline.sh;
     systemClaudeMd = ./system-claude.md;
-    ipcSetup = ./ipc_setup.sh;
     version = self.shortRev or self.dirtyShortRev or "dev";
 
-    # IPC: message sender (available inside cave)
+    # IPC: session wrapper and message sender (available inside cave)
+    ptyRelay = pkgs.writeShellScriptBin "pty-relay" ''
+      exec ${pkgs.python3}/bin/python3 ${./session_wrapper.py} "$@"
+    '';
     caveSend = pkgs.writeShellScriptBin "cave-send" ''
       exec ${pkgs.python3}/bin/python3 ${./cave_send.py} "$@"
     '';
@@ -106,8 +108,7 @@
         fuse-overlayfs
         fuse3
         gnupg
-      ] ++ [ pkgs."poppler-utils" pkgs.stdenv.cc.cc.lib caveSend ]))
-      (set-env "LD_LIBRARY_PATH" "${pkgs.stdenv.cc.cc.lib}/lib")
+      ] ++ [ pkgs."poppler-utils" ptyRelay caveSend ]))
       (set-env "TERMINFO_DIRS" "${pkgs.ncurses}/share/terminfo")
       (set-env "LOCALE_ARCHIVE" "${pkgs.glibcLocales}/lib/locale/locale-archive")
       (set-env "LANG" "en_US.UTF-8")
@@ -152,8 +153,12 @@
         if [ ! -f "$CAVE_HOME/.claude.json" ]; then
           printf '%s' '{"hasCompletedOnboarding":true,"theme":"dark","effortCalloutDismissed":true}' > "$CAVE_HOME/.claude.json"
         fi
-        # Always update statusline script to match current version
-        cp ${defaultStatusline} "$CLAUDE_DIR/statusline.sh"
+        # Statusline: user override from cave.nix claude.statusline, or default
+        if [ -n "''${CODING_CAVE_USER_ENV:-}" ] && [ -f "''${CODING_CAVE_USER_ENV}/claude/statusline.sh" ]; then
+          cp "''${CODING_CAVE_USER_ENV}/claude/statusline.sh" "$CLAUDE_DIR/statusline.sh"
+        else
+          cp ${defaultStatusline} "$CLAUDE_DIR/statusline.sh"
+        fi
         chmod +x "$CLAUDE_DIR/statusline.sh"
         # Concatenate system + user CLAUDE.md
         {
@@ -258,7 +263,7 @@
           RUNTIME_ARGS+=(--ro-bind "$NVIDIA_BIN" "$NVIDIA_BIN")
           RUNTIME_ARGS+=(--symlink "$NVIDIA_BIN/nvidia-smi" /bin/nvidia-smi)
         fi
-        RUNTIME_ARGS+=(--setenv LD_LIBRARY_PATH "/run/opengl-driver/lib:${pkgs.stdenv.cc.cc.lib}/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}")
+        RUNTIME_ARGS+=(--setenv LD_LIBRARY_PATH "/run/opengl-driver/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}")
       '')
     ];
 
@@ -271,7 +276,6 @@
       SANDBOX_BIN = "${sandbox}/bin/coding-cave";
       SANDBOX_GPU_BIN = "${sandboxGpu}/bin/coding-cave";
       GATEWAY_LOCAL_BIN = "${onecli-gateway}/bin/onecli-gateway";
-      IPC_SETUP_SH = ipcSetup;
       VERSION = version;
     };
     codingCavePkg = pkgs.runCommand "coding-cave-pkg" {} ''
