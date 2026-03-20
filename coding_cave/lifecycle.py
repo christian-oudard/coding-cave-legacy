@@ -410,7 +410,8 @@ def _mount_project_overlays(sid, overlay_base, loaded_projects):
         shared_gitdir = _state.projects_dir() / slug / "gitdir"
         session_gitdir = None
         if shared_gitdir.is_dir():
-            session_gitdir = gitdir.create_session_gitdir(slug, sid, overlay_base)
+            session_gitdir = gitdir.create_session_gitdir(
+                slug, sid, overlay_base, source_dir=source)
             if session_gitdir:
                 (upper / ".git").write_text(f"gitdir: /projects/.gitdirs/{slug}\n")
                 bwrap_args += ["--bind", str(session_gitdir), f"/projects/.gitdirs/{slug}"]

@@ -9,6 +9,18 @@ from pathlib import Path
 
 from . import _state, git as git_mod
 
+# Shell snippet appended to each cave hook: chains to a repo-local hook of the
+# same name via cave.repoHooksPath (forwarded from the host's core.hooksPath).
+# Exits 0 if no repo hook is configured.
+_CHAIN_SNIPPET = (
+    '# Chain to repo-local hook\n'
+    '_cave_hpath=$(git config cave.repoHooksPath 2>/dev/null) || exit 0\n'
+    '_cave_root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0\n'
+    '_rh="$_cave_root/$_cave_hpath/$(basename "$0")"\n'
+    '[ -x "$_rh" ] && exec "$_rh" "$@"\n'
+    'exit 0\n'
+)
+
 
 def _session_label(sid):
     """Return a friendly label like 'coding-cave#2' for a session ID."""
@@ -37,13 +49,16 @@ def _atomic_write(path, content):
         raise
 
 
-def create_session_gitdir(slug, sid, overlay_base):
+def create_session_gitdir(slug, sid, overlay_base, *, source_dir=None):
     """Create a per-session gitdir with alternates pointing to shared objects.
 
     The session gitdir has its own HEAD, index, and refs but shares the object
     store with the shared gitdir via alternates.  Alternates starts with the
     host path; the caller rewrites it to the cave-internal path before bwrap,
     and merge_session_gitdirs rewrites it back for cleanup.
+
+    source_dir: host project directory.  If provided, the host's
+    core.hooksPath config is forwarded so cave hooks can chain to repo hooks.
     """
     shared_gitdir = _state.projects_dir() / slug / "gitdir"
     if not shared_gitdir.is_dir():
@@ -112,6 +127,18 @@ def create_session_gitdir(slug, sid, overlay_base):
     git_mod.git(session_gitdir, "config", "--add", "remote.shared.fetch",
         "+refs/remotes/host/*:refs/remotes/host/*", capture_output=True)
 
+    # Forward host project's core.hooksPath so cave hooks can chain to
+    # repo-local hooks (e.g. .githooks/pre-commit with nixfmt --check).
+    if source_dir is not None:
+        result = subprocess.run(
+            ["git", "-C", str(source_dir), "config", "--local",
+             "core.hooksPath"],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            git_mod.git(session_gitdir, "config", "cave.repoHooksPath",
+                        result.stdout.strip(), capture_output=True)
+
     # Post-commit hook: sync with shared like a developer pushing to origin.
     # 1. Try FF push (common case: no other session modified shared)
     # 2. If non-FF + we own the branch: force push (handles amends)
@@ -125,21 +152,25 @@ def create_session_gitdir(slug, sid, overlay_base):
     # Pre-commit hook: rebase onto shared/main if behind.
     # This integrates pushed commits (from cav push or other sessions)
     # before the commit, so the session stays current.
+    # After cave logic, chains to any repo-local pre-commit hook.
     (hooks / "pre-commit").write_text(
         '#!/bin/bash\n'
         '[ -n "$_CAVE_HOOK_RUNNING" ] && exit 0\n'
-        'branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null) || exit 0\n'
-        'git fetch shared 2>/dev/null\n'
-        'shared_sha=$(git rev-parse --verify '
-        '"refs/remotes/shared/$branch" 2>/dev/null) || exit 0\n'
-        'head_sha=$(git rev-parse HEAD 2>/dev/null) || exit 0\n'
-        '[ "$shared_sha" = "$head_sha" ] && exit 0\n'
-        'if git merge-base --is-ancestor "$head_sha" "$shared_sha" '
+        '_cave_pre_commit() {\n'
+        '    branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null) || return\n'
+        '    git fetch shared 2>/dev/null\n'
+        '    shared_sha=$(git rev-parse --verify '
+        '"refs/remotes/shared/$branch" 2>/dev/null) || return\n'
+        '    head_sha=$(git rev-parse HEAD 2>/dev/null) || return\n'
+        '    [ "$shared_sha" = "$head_sha" ] && return\n'
+        '    if git merge-base --is-ancestor "$head_sha" "$shared_sha" '
         '2>/dev/null; then\n'
-        '    git rebase "$shared_sha" 2>/dev/null || '
+        '        git rebase "$shared_sha" 2>/dev/null || '
         'git rebase --abort 2>/dev/null\n'
-        'fi\n'
-        'exit 0\n'
+        '    fi\n'
+        '}\n'
+        '_cave_pre_commit\n'
+        + _CHAIN_SNIPPET
     )
     os.chmod(hooks / "pre-commit", 0o755)
     # Post-commit hook: push/pull semantics with shared gitdir.
@@ -153,67 +184,71 @@ def create_session_gitdir(slug, sid, overlay_base):
         '#!/bin/bash\n'
         '[ -n "$_CAVE_HOOK_RUNNING" ] && exit 0\n'
         'export _CAVE_HOOK_RUNNING=1\n'
-        'branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null) || exit 0\n'
+        '_cave_post_commit() {\n'
+        '    branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null) || return\n'
         # Try fast-forward push
-        'pushed_ok=0\n'
-        'if git push shared "$branch" 2>/dev/null; then\n'
-        '    git update-ref "refs/pushed/$branch" HEAD 2>/dev/null\n'
-        '    pushed_ok=1\n'
-        'else\n'
-        '    pushed_sha=$(git rev-parse --verify "refs/pushed/$branch" '
+        '    pushed_ok=0\n'
+        '    if git push shared "$branch" 2>/dev/null; then\n'
+        '        git update-ref "refs/pushed/$branch" HEAD 2>/dev/null\n'
+        '        pushed_ok=1\n'
+        '    else\n'
+        '        pushed_sha=$(git rev-parse --verify "refs/pushed/$branch" '
         '2>/dev/null)\n'
-        '    git fetch shared 2>/dev/null\n'
-        '    shared_sha=$(git rev-parse --verify '
+        '        git fetch shared 2>/dev/null\n'
+        '        shared_sha=$(git rev-parse --verify '
         '"refs/remotes/shared/$branch" 2>/dev/null)\n'
         # Shared hasn't moved since our last push — we amended/rebased.
         # But only force-push if the host hasn't already pulled that commit.
-        '    if [ -n "$pushed_sha" ] && [ "$shared_sha" = "$pushed_sha" ]'
+        '        if [ -n "$pushed_sha" ] && [ "$shared_sha" = "$pushed_sha" ]'
         '; then\n'
-        '        host_ref=$(git rev-parse --verify '
+        '            host_ref=$(git rev-parse --verify '
         '"refs/remotes/host/$branch" 2>/dev/null)\n'
-        '        if [ -n "$host_ref" ] && git merge-base --is-ancestor '
+        '            if [ -n "$host_ref" ] && git merge-base --is-ancestor '
         '"$shared_sha" "$host_ref" 2>/dev/null; then\n'
-        '            echo >&2\n'
-        '            echo "WARNING: Cannot force-push $branch. commit '
+        '                echo >&2\n'
+        '                echo "WARNING: Cannot force-push $branch. commit '
         '${shared_sha:0:8} was already pulled to the host." >&2\n'
-        '            echo "Create a new commit instead of amending." >&2\n'
+        '                echo "Create a new commit instead of amending." >&2\n'
+        '            else\n'
+        '                git push shared +"$branch" 2>/dev/null &&\n'
+        '                    git update-ref "refs/pushed/$branch" HEAD &&\n'
+        '                    pushed_ok=1\n'
+        '            fi\n'
         '        else\n'
-        '            git push shared +"$branch" 2>/dev/null &&\n'
-        '                git update-ref "refs/pushed/$branch" HEAD &&\n'
-        '                pushed_ok=1\n'
-        '        fi\n'
-        '    else\n'
         # Shared has moved.  Rebase only our new commits onto shared.
         # Use refs/pushed (last successful push) or refs/init (session
         # start point) as the base — never rebase old diverged history.
-        '        base=${pushed_sha:-$(git rev-parse --verify '
+        '            base=${pushed_sha:-$(git rev-parse --verify '
         '"refs/init/$branch" 2>/dev/null)}\n'
-        '        if [ -n "$base" ] && git rebase --onto '
+        '            if [ -n "$base" ] && git rebase --onto '
         '"shared/$branch" "$base" 2>/dev/null; then\n'
-        '            git push shared "$branch" 2>/dev/null &&\n'
-        '                git update-ref "refs/pushed/$branch" HEAD &&\n'
-        '                pushed_ok=1\n'
-        '        else\n'
-        '            git rebase --abort 2>/dev/null\n'
-        '            echo >&2\n'
-        '            echo "WARNING: Could not auto-integrate with '
+        '                git push shared "$branch" 2>/dev/null &&\n'
+        '                    git update-ref "refs/pushed/$branch" HEAD &&\n'
+        '                    pushed_ok=1\n'
+        '            else\n'
+        '                git rebase --abort 2>/dev/null\n'
+        '                echo >&2\n'
+        '                echo "WARNING: Could not auto-integrate with '
         'shared/$branch (conflict)." >&2\n'
-        '            echo "Your commit is saved locally but not '
+        '                echo "Your commit is saved locally but not '
         'synced to shared." >&2\n'
-        '            echo "Run: git fetch shared && '
+        '                echo "Run: git fetch shared && '
         'git rebase shared/$branch" >&2\n'
+        '            fi\n'
         '        fi\n'
         '    fi\n'
-        'fi\n'
         # Notify sibling sessions on the same project
-        'if [ "$pushed_ok" = 1 ] && [ -z "$CODING_CAVE_NO_SEND" ] '
+        '    if [ "$pushed_ok" = 1 ] && [ -z "$CODING_CAVE_NO_SEND" ] '
         '&& command -v cave-send >/dev/null; then\n'
-        '    cave-send --all-project "Pushed to $branch, run: '
+        '        cave-send --all-project "Pushed to $branch, run: '
         'git fetch shared && git rebase shared/$branch" '
         '</dev/null 2>/dev/null &\n'
-        'fi\n'
-        'git fetch shared 2>/dev/null\n'
-        'exit 0\n'
+        '    fi\n'
+        '    git fetch shared 2>/dev/null\n'
+        '}\n'
+        '_cave_post_commit\n'
+        'unset _CAVE_HOOK_RUNNING\n'
+        + _CHAIN_SNIPPET
     )
     os.chmod(hooks / "post-commit", 0o755)
 
@@ -231,24 +266,27 @@ def create_session_gitdir(slug, sid, overlay_base):
     # runs `cav pull` after the session's last commit but before amend.
     (hooks / "prepare-commit-msg").write_text(
         '#!/bin/bash\n'
-        'parent_cmd=$(tr "\\0" " " < /proc/$PPID/cmdline 2>/dev/null)\n'
-        'echo "$parent_cmd" | grep -q -- "--amend" || exit 0\n'
-        'git fetch shared 2>/dev/null\n'
-        'head_sha=$(git rev-parse HEAD 2>/dev/null) || exit 0\n'
-        'pulled_refs=$(git for-each-ref --format="%(objectname)" '
+        '_cave_prepare_commit_msg() {\n'
+        '    parent_cmd=$(tr "\\0" " " < /proc/$PPID/cmdline 2>/dev/null)\n'
+        '    echo "$parent_cmd" | grep -q -- "--amend" || return 0\n'
+        '    git fetch shared 2>/dev/null\n'
+        '    head_sha=$(git rev-parse HEAD 2>/dev/null) || return 0\n'
+        '    pulled_refs=$(git for-each-ref --format="%(objectname)" '
         'refs/remotes/host/ 2>/dev/null)\n'
-        '[ -z "$pulled_refs" ] && exit 0\n'
-        'for pulled in $pulled_refs; do\n'
-        '    if git merge-base --is-ancestor "$head_sha" "$pulled" '
+        '    [ -z "$pulled_refs" ] && return 0\n'
+        '    for pulled in $pulled_refs; do\n'
+        '        if git merge-base --is-ancestor "$head_sha" "$pulled" '
         '2>/dev/null; then\n'
-        '        echo >&2\n'
-        '        echo "ERROR: Cannot amend. commit '
+        '            echo >&2\n'
+        '            echo "ERROR: Cannot amend. commit '
         '${head_sha:0:8} was already pulled to the host." >&2\n'
-        '        echo "Create a new commit instead." >&2\n'
-        '        exit 1\n'
-        '    fi\n'
-        'done\n'
-        'exit 0\n'
+        '            echo "Create a new commit instead." >&2\n'
+        '            return 1\n'
+        '        fi\n'
+        '    done\n'
+        '}\n'
+        '_cave_prepare_commit_msg || exit 1\n'
+        + _CHAIN_SNIPPET
     )
     os.chmod(hooks / "prepare-commit-msg", 0o755)
 
@@ -257,58 +295,86 @@ def create_session_gitdir(slug, sid, overlay_base):
     # Fetches from shared to get latest pulled refs (same race as layer 1).
     (hooks / "pre-rebase").write_text(
         '#!/bin/bash\n'
-        'upstream=$1\n'
-        'branch=${2:-HEAD}\n'
-        'git fetch shared 2>/dev/null\n'
-        'pulled_refs=$(git for-each-ref --format="%(objectname)" '
+        '_cave_pre_rebase() {\n'
+        '    upstream=$1\n'
+        '    branch=${2:-HEAD}\n'
+        '    git fetch shared 2>/dev/null\n'
+        '    pulled_refs=$(git for-each-ref --format="%(objectname)" '
         'refs/remotes/host/ 2>/dev/null)\n'
-        '[ -z "$pulled_refs" ] && exit 0\n'
-        'for commit in $(git rev-list "$upstream..$branch" 2>/dev/null); do\n'
-        '    for pulled in $pulled_refs; do\n'
-        '        if git merge-base --is-ancestor "$commit" "$pulled" '
+        '    [ -z "$pulled_refs" ] && return 0\n'
+        '    for commit in $(git rev-list "$upstream..$branch" 2>/dev/null); do\n'
+        '        for pulled in $pulled_refs; do\n'
+        '            if git merge-base --is-ancestor "$commit" "$pulled" '
         '2>/dev/null; then\n'
-        '            echo >&2\n'
-        '            echo "ERROR: Cannot rebase. commit '
+        '                echo >&2\n'
+        '                echo "ERROR: Cannot rebase. commit '
         '${commit:0:8} was already pulled to the host." >&2\n'
-        '            echo "Create new commits instead." >&2\n'
-        '            exit 1\n'
-        '        fi\n'
+        '                echo "Create new commits instead." >&2\n'
+        '                return 1\n'
+        '            fi\n'
+        '        done\n'
         '    done\n'
-        'done\n'
-        'exit 0\n'
+        '}\n'
+        '_cave_pre_rebase "$@" || exit 1\n'
+        + _CHAIN_SNIPPET
     )
     os.chmod(hooks / "pre-rebase", 0o755)
 
     # Layer 3: post-rewrite undoes rewrites that slip past layers 1-2.
     # Cannot be bypassed with --no-verify.
     # Fetches from shared to get latest pulled refs (same race as layer 1).
+    # post-rewrite reads rewrite mappings from stdin.  Save stdin so we can
+    # replay it for a chained repo hook.
     (hooks / "post-rewrite").write_text(
         '#!/bin/bash\n'
-        'action=$1\n'
-        'git fetch shared 2>/dev/null\n'
-        'pulled_refs=$(git for-each-ref --format="%(objectname)" '
+        '_cave_stdin=$(cat)\n'
+        '_cave_post_rewrite() {\n'
+        '    action=$1\n'
+        '    git fetch shared 2>/dev/null\n'
+        '    pulled_refs=$(git for-each-ref --format="%(objectname)" '
         'refs/remotes/host/ 2>/dev/null)\n'
-        '[ -z "$pulled_refs" ] && exit 0\n'
-        'while read old_sha new_sha extra; do\n'
-        '    for pulled in $pulled_refs; do\n'
-        '        if git merge-base --is-ancestor "$old_sha" "$pulled" '
+        '    [ -z "$pulled_refs" ] && return 0\n'
+        '    while read old_sha new_sha extra; do\n'
+        '        for pulled in $pulled_refs; do\n'
+        '            if git merge-base --is-ancestor "$old_sha" "$pulled" '
         '2>/dev/null; then\n'
-        '            echo >&2\n'
-        '            echo "ERROR: Cannot $action. commit '
+        '                echo >&2\n'
+        '                echo "ERROR: Cannot $action. commit '
         '${old_sha:0:8} was already pulled to the host." >&2\n'
-        '            echo "Create a new commit instead." >&2\n'
-        '            if [ "$action" = "amend" ]; then\n'
-        '                git reset --soft "$old_sha" 2>/dev/null\n'
-        '            else\n'
-        '                git reset --hard ORIG_HEAD 2>/dev/null\n'
+        '                echo "Create a new commit instead." >&2\n'
+        '                if [ "$action" = "amend" ]; then\n'
+        '                    git reset --soft "$old_sha" 2>/dev/null\n'
+        '                else\n'
+        '                    git reset --hard ORIG_HEAD 2>/dev/null\n'
+        '                fi\n'
+        '                return 1\n'
         '            fi\n'
-        '            exit 1\n'
-        '        fi\n'
-        '    done\n'
-        'done\n'
+        '        done\n'
+        '    done <<< "$_cave_stdin"\n'
+        '}\n'
+        '_cave_post_rewrite "$@" || exit 1\n'
+        # Chain variant: replay saved stdin to the repo hook via pipe.
+        '_cave_hpath=$(git config cave.repoHooksPath 2>/dev/null) || exit 0\n'
+        '_cave_root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0\n'
+        '_rh="$_cave_root/$_cave_hpath/$(basename "$0")"\n'
+        'if [ -x "$_rh" ]; then\n'
+        '    echo "$_cave_stdin" | "$_rh" "$@"\n'
+        '    exit $?\n'
+        'fi\n'
         'exit 0\n'
     )
     os.chmod(hooks / "post-rewrite", 0o755)
+
+    # Passthrough stubs for every client-side hook type the cave doesn't
+    # define its own logic for.  Git only looks in $GIT_DIR/hooks/, so
+    # without a stub the repo's hook is invisible when core.hooksPath
+    # points elsewhere.
+    for stub in ("applypatch-msg", "pre-applypatch", "post-applypatch",
+                 "commit-msg", "pre-merge-commit", "post-merge",
+                 "pre-push", "post-checkout", "post-index-change",
+                 "sendemail-validate"):
+        (hooks / stub).write_text('#!/bin/bash\n' + _CHAIN_SNIPPET)
+        os.chmod(hooks / stub, 0o755)
 
     return session_gitdir
 

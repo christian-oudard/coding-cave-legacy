@@ -26,6 +26,7 @@ Sessions work directly on real branches (e.g. `main`, `develop`), not on private
 
 - A `shared` remote is configured pointing to `/projects/.shared-gitdirs/<slug>` (the shared gitdir bind-mounted rw into the cave).
 - A post-commit hook pushes the current branch to shared (FF only, non-FF pushes fail silently), records the pushed SHA in `refs/pushed/<branch>`, and fetches latest from shared. `refs/pushed` lets `_forward_refs` know that this session was the last to update shared, enabling ownership detection even when `refs/synced` is stale.
+- All cave hooks chain to repo-local hooks after completing their own logic. If the host project has `core.hooksPath` set, it is forwarded at session creation as `cave.repoHooksPath` in the session gitdir config. Each cave hook checks this config, resolves the path relative to the worktree root, and `exec`s the matching hook if it exists, inheriting args and exit code. Passthrough stubs are installed for all client-side hook types the cave has no logic for (commit-msg, post-checkout, pre-push, etc.), so repo hooks of any type work.
 
 On cleanup (`merge_session_gitdirs`), `_forward_refs(force=True)` forwards all branch refs into the shared gitdir. Diverged refs that can't be rebased are force-updated with backup under `refs/sessions/<sid>/`.
 
