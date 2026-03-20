@@ -89,9 +89,9 @@ def _update_session_refs(slug, branches_shas):
             continue
         for branch, sha in branches_shas:
             # Update tracking ref unconditionally
-            ref_dir = session_gd / "refs" / "remotes" / "shared"
-            ref_dir.mkdir(parents=True, exist_ok=True)
-            (ref_dir / branch).write_text(sha + "\n")
+            tracking_file = session_gd / "refs" / "remotes" / "shared" / branch
+            tracking_file.parent.mkdir(parents=True, exist_ok=True)
+            tracking_file.write_text(sha + "\n")
             # Update local branch only if session hasn't diverged
             head_file = session_gd / "refs" / "heads" / branch
             init_file = session_gd / "refs" / "init" / branch
@@ -1000,7 +1000,13 @@ def push_project(slug, force=False):
                 current_branch)
             if count:
                 print(f"Overwriting {count} unpulled cave commit(s) "
-                      f"on {current_branch}.", file=sys.stderr)
+                      f"on {current_branch}:", file=sys.stderr)
+                mb = git_mod.git(gitdir_path, "merge-base",
+                     cave_sha, host_sha,
+                    capture_output=True, text=True)
+                if mb.returncode == 0:
+                    git_mod.git(gitdir_path, "log", "--oneline",
+                         f"{mb.stdout.strip()}..{cave_sha}")
                 print(f"  Session work will be rebased on next sync.",
                       file=sys.stderr)
         _sync_branch(gitdir_path, project_dir, host_sha, current_branch)

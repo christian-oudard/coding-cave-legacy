@@ -665,3 +665,104 @@ class TestPushCleansUpStalePull:
         # Should push main only, not _cave_pull
         assert "test-project/main" in captured.err
         assert "_cave_pull" not in captured.err or "stale" in captured.err.lower()
+
+
+class TestForcePushShowsClobbered:
+    """Force push shows which commit hashes are being overwritten."""
+
+    def test_force_push_lists_overwritten_commits(self, push_env, capfd):
+        env = push_env
+        cave = push_env.host.parent / "cave-work"
+        cave.mkdir()
+        _run("git", "--git-dir", str(env.gitdir), "--work-tree", str(cave),
+             "checkout", "HEAD", "--", ".")
+        (cave / "file.txt").write_text("cave work\n")
+        _run("git", "--git-dir", str(env.gitdir), "--work-tree", str(cave),
+             "add", "file.txt")
+        _run("git", "--git-dir", str(env.gitdir), "--work-tree", str(cave),
+             "commit", "-m", "cave commit A")
+        (cave / "file.txt").write_text("more cave\n")
+        _run("git", "--git-dir", str(env.gitdir), "--work-tree", str(cave),
+             "add", "file.txt")
+        _run("git", "--git-dir", str(env.gitdir), "--work-tree", str(cave),
+             "commit", "-m", "cave commit B")
+
+        (env.host / "file.txt").write_text("host work\n")
+        _run("git", "-C", str(env.host), "add", ".")
+        _run("git", "-C", str(env.host), "commit", "-m", "host commit")
+
+        capfd.readouterr()
+        wrapper.push_project(env.slug, force=True)
+        captured = capfd.readouterr()
+        combined = captured.out + captured.err
+
+        # Should list the overwritten commits by subject
+        assert "cave commit A" in combined
+        assert "cave commit B" in combined
+
+
+class TestPushSlashBranch:
+    """Push works with branch names containing '/' (e.g. feature/foo)."""
+
+    def test_push_updates_session_refs_for_slash_branch(self, push_env, tmp_path):
+        env = push_env
+        sid = "test-session-slash"
+
+        # Create feature/foo branch on host and cave
+        _run("git", "-C", str(env.host), "branch", "feature/foo")
+        _run("git", "--git-dir", str(env.gitdir), "branch", "feature/foo")
+        wrapper.sync_refs(env.gitdir, env.host, _head(env.host), "feature/foo")
+
+        # Create a session
+        overlay_base = _state.cave_data() / "session-overlays" / sid
+        overlay_base.mkdir(parents=True)
+        session_gitdir = wrapper.create_session_gitdir(
+            env.slug, sid, overlay_base)
+        write_session(_state.cave_data(), sid, env.slug)
+
+        # Commit on feature/foo on host
+        _run("git", "-C", str(env.host), "checkout", "feature/foo")
+        (env.host / "feat.txt").write_text("feature work\n")
+        _run("git", "-C", str(env.host), "add", ".")
+        _run("git", "-C", str(env.host), "commit", "-m", "feature work")
+        _run("git", "-C", str(env.host), "checkout", "main")
+
+        # Push should not crash on slash branch
+        wrapper.push_project(env.slug)
+
+        # Session gitdir should have the tracking ref
+        tracking = (session_gitdir / "refs" / "remotes" / "shared"
+                    / "feature" / "foo")
+        assert tracking.is_file()
+
+    def test_force_push_slash_branch(self, push_env, tmp_path):
+        env = push_env
+        sid = "test-session-slash-force"
+
+        # Create feature/bar on both sides
+        _run("git", "-C", str(env.host), "checkout", "-b", "feature/bar")
+        (env.host / "bar.txt").write_text("bar\n")
+        _run("git", "-C", str(env.host), "add", ".")
+        _run("git", "-C", str(env.host), "commit", "-m", "bar initial")
+        _run("git", "--git-dir", str(env.gitdir), "fetch", str(env.host),
+             "feature/bar:feature/bar")
+        wrapper.sync_refs(env.gitdir, env.host, _head(env.host), "feature/bar")
+
+        # Create a session
+        overlay_base = _state.cave_data() / "session-overlays" / sid
+        overlay_base.mkdir(parents=True)
+        session_gitdir = wrapper.create_session_gitdir(
+            env.slug, sid, overlay_base)
+        write_session(_state.cave_data(), sid, env.slug)
+
+        # Host commits on feature/bar
+        (env.host / "bar.txt").write_text("updated\n")
+        _run("git", "-C", str(env.host), "add", ".")
+        _run("git", "-C", str(env.host), "commit", "-m", "bar update")
+
+        # Force push from feature/bar should not crash
+        wrapper.push_project(env.slug, force=True)
+
+        tracking = (session_gitdir / "refs" / "remotes" / "shared"
+                    / "feature" / "bar")
+        assert tracking.is_file()
