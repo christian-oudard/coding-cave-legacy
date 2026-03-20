@@ -196,6 +196,12 @@
         if [ -n "''${CODING_CAVE_GPG_AGENT_SOCK:-}" ]; then
           mkdir -p "$HOME/.gnupg"
           chmod 700 "$HOME/.gnupg" 2>/dev/null || true
+          # Set ultimate trust on the signing key so verification
+          # doesn't warn about uncertified signatures.
+          _sigkey=$(git config user.signingkey 2>/dev/null || true)
+          if [ -n "$_sigkey" ]; then
+            echo "$_sigkey:6:" | gpg --import-ownertrust 2>/dev/null || true
+          fi
         fi
         # Git identity from forwarded host vars (or fallback).
         if [ -n "''${CODING_CAVE_GIT_NAME:-}" ]; then
