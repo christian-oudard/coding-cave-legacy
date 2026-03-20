@@ -203,13 +203,12 @@ class TestGpgLifecycleSafety:
         assert "secring" not in src
 
     def test_only_specific_keyring_files_mounted(self):
-        """pubring files ro-bound, trustdb copied writable to persistent home."""
+        """Only pubring.kbx, pubring.gpg, trustdb.gpg are mounted."""
         src = self.LIFECYCLE_PY.read_text()
+        # The for loop should only iterate over these safe files
         assert "pubring.kbx" in src
         assert "pubring.gpg" in src
-        # trustdb is seeded (copied) into persistent home, not ro-bound
         assert "trustdb.gpg" in src
-        assert "copy2(host_trustdb" in src
 
     def test_gpg_env_vars_in_allowlist(self):
         """GPG env vars are in BWRAP_ENV_ALLOWLIST."""
