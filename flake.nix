@@ -196,10 +196,6 @@
         if [ -n "''${CODING_CAVE_GPG_AGENT_SOCK:-}" ]; then
           mkdir -p "$HOME/.gnupg"
           chmod 700 "$HOME/.gnupg" 2>/dev/null || true
-          # Seed writable trustdb from host (staged at /tmp by lifecycle.py).
-          if [ ! -f "$HOME/.gnupg/trustdb.gpg" ] && [ -f /tmp/.host-trustdb.gpg ]; then
-            cp /tmp/.host-trustdb.gpg "$HOME/.gnupg/trustdb.gpg"
-          fi
         fi
         # Git identity from forwarded host vars (or fallback).
         if [ -n "''${CODING_CAVE_GIT_NAME:-}" ]; then
