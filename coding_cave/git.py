@@ -55,17 +55,29 @@ def initialize_gitdir(slug, project_dir):
     hooks_dir = gitdir / "hooks"
     if hooks_dir.exists():
         shutil.rmtree(hooks_dir)
-    head = git(gitdir, "rev-parse", "HEAD",
-        capture_output=True, text=True)
-    if head.returncode == 0:
-        branch = subprocess.run(
-            ["git", "-C", str(project_dir), "symbolic-ref", "-q", "HEAD"],
-            capture_output=True, text=True,
-        )
-        if branch.returncode == 0:
-            name = branch.stdout.strip().removeprefix("refs/heads/")
-            git(gitdir, "update-ref",
-                 f"refs/remotes/host/{name}", head.stdout.strip())
+    # Copy all host branches into the gitdir and set up host-tracking refs
+    result = subprocess.run(
+        ["git", "-C", str(project_dir), "for-each-ref",
+         "--format=%(refname:strip=2) %(objectname)", "refs/heads/"],
+        capture_output=True, text=True,
+    )
+    if result.returncode == 0:
+        for line in result.stdout.strip().splitlines():
+            if not line:
+                continue
+            name, sha = line.split()
+            git(gitdir, "update-ref", f"refs/heads/{name}", sha,
+                capture_output=True)
+            git(gitdir, "update-ref", f"refs/remotes/host/{name}", sha,
+                capture_output=True)
+    # Point HEAD at the same branch as the host
+    branch = subprocess.run(
+        ["git", "-C", str(project_dir), "symbolic-ref", "-q", "HEAD"],
+        capture_output=True, text=True,
+    )
+    if branch.returncode == 0:
+        git(gitdir, "symbolic-ref", "HEAD", branch.stdout.strip(),
+            capture_output=True)
     ensure_cave_remote(project_dir, gitdir)
     mirror_origin_refs(gitdir, project_dir)
 

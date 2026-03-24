@@ -236,6 +236,66 @@ class TestInitializeGitdir:
         gitdir = proj_state / "gitdir"
         assert gitdir.is_dir()
 
+    def test_all_branches_copied(self, tmp_path):
+        """initialize_gitdir copies all host branches, not just HEAD."""
+        slug = "test-branches"
+        _state.set_cave_data(tmp_path)
+        proj_state = _state.projects_dir() / slug
+        proj_state.mkdir(parents=True)
+
+        project = tmp_path / "project"
+        project.mkdir()
+        git_run("git", "init", "-b", "main", str(project))
+        (project / "f.txt").write_text("hi\n")
+        git_run("git", "-C", str(project), "add", ".")
+        git_run("git", "-C", str(project), "commit", "-m", "init")
+
+        # Create a second branch
+        git_run("git", "-C", str(project), "checkout", "-b", "feature")
+        (project / "g.txt").write_text("feature\n")
+        git_run("git", "-C", str(project), "add", ".")
+        git_run("git", "-C", str(project), "commit", "-m", "feature commit")
+
+        # Switch back to main so HEAD != feature
+        git_run("git", "-C", str(project), "checkout", "main")
+
+        wrapper.initialize_gitdir(slug, project)
+
+        gitdir = proj_state / "gitdir"
+
+        # Both branches should exist in the gitdir
+        main_ref = subprocess.run(
+            ["git", "--git-dir", str(gitdir), "rev-parse", "refs/heads/main"],
+            capture_output=True, text=True,
+        )
+        assert main_ref.returncode == 0
+
+        feature_ref = subprocess.run(
+            ["git", "--git-dir", str(gitdir), "rev-parse", "refs/heads/feature"],
+            capture_output=True, text=True,
+        )
+        assert feature_ref.returncode == 0
+
+        # Host tracking refs should also exist
+        host_main = subprocess.run(
+            ["git", "--git-dir", str(gitdir), "rev-parse", "refs/remotes/host/main"],
+            capture_output=True, text=True,
+        )
+        assert host_main.returncode == 0
+
+        host_feature = subprocess.run(
+            ["git", "--git-dir", str(gitdir), "rev-parse", "refs/remotes/host/feature"],
+            capture_output=True, text=True,
+        )
+        assert host_feature.returncode == 0
+
+        # HEAD should point to main
+        head = subprocess.run(
+            ["git", "--git-dir", str(gitdir), "symbolic-ref", "HEAD"],
+            capture_output=True, text=True,
+        )
+        assert head.stdout.strip() == "refs/heads/main"
+
     def test_hardlinks_objects(self, tmp_path):
         """initialize_gitdir hardlinks objects from host when on same device."""
         slug = "test-hardlinks"
