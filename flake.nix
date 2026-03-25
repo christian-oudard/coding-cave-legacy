@@ -36,7 +36,7 @@
 
     baseCombinators = with jail.combinators; [
       no-die-with-parent
-      (set-hostname "coding-cave")
+      (set-hostname "coding-cave-legacy")
       # pasta wraps bwrap in a user namespace where the host user appears as root.
       # Force bwrap to map whatever external UID it has to cave-coder (1000) inside.
       (unsafe-add-raw-args "--uid 1000 --gid 1000")
@@ -275,14 +275,14 @@
       '')
     ];
 
-    sandbox = jail "coding-cave" pkgs.bashInteractive baseCombinators;
-    sandboxGpu = jail "coding-cave" pkgs.bashInteractive (baseCombinators ++ gpuCombinators);
+    sandbox = jail "coding-cave-legacy" pkgs.bashInteractive baseCombinators;
+    sandboxGpu = jail "coding-cave-legacy" pkgs.bashInteractive (baseCombinators ++ gpuCombinators);
 
     # Reference individual files to avoid copying a directory to the Nix
     # store (chmod on dirs fails on fuse-overlayfs inside the cave).
     codingCaveState = pkgs.replaceVars ./coding_cave/_state.py {
-      SANDBOX_BIN = "${sandbox}/bin/coding-cave";
-      SANDBOX_GPU_BIN = "${sandboxGpu}/bin/coding-cave";
+      SANDBOX_BIN = "${sandbox}/bin/coding-cave-legacy";
+      SANDBOX_GPU_BIN = "${sandboxGpu}/bin/coding-cave-legacy";
       GATEWAY_LOCAL_BIN = "${crinj-bin}/bin/crinj";
       IPC_SETUP_SH = ipcSetup;
       VERSION = version;
@@ -317,11 +317,11 @@ main()
 ' "$@"
     '';
 
-    wrapper = pkgs.runCommand "coding-cave-with-alias" {} ''
+    wrapper = pkgs.runCommand "coding-cave-legacy-with-alias" {} ''
       mkdir -p $out/bin
-      cat ${baseScript} > $out/bin/coding-cave
-      chmod +x $out/bin/coding-cave
-      ln -s coding-cave $out/bin/cav
+      cat ${baseScript} > $out/bin/coding-cave-legacy
+      chmod +x $out/bin/coding-cave-legacy
+      ln -s coding-cave-legacy $out/bin/cav-legacy
     '';
 
   in {
