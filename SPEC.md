@@ -146,7 +146,7 @@ GPG commit signing is supported via agent socket forwarding. The host's `gpg-age
 
 Pull brings committed cave work to the host. Agents must commit their work for it to be pullable.
 
-Pull is branch-aware: it iterates all branches in the cave gitdir and pulls each one that has new commits to the corresponding host branch. Branches are never crossed — cave commits on `develop` go to host's `develop`, not to whatever branch the host has checked out.
+Pull is branch-aware: it iterates all branches in the cave gitdir and pulls each one to the corresponding host branch. Branches are never crossed — cave commits on `develop` go to host's `develop`, not to whatever branch the host has checked out. New branches created in the cave are created on the host.
 
 For the host's currently checked-out branch, pull uses checkout-based rebase (with stash/unstash to preserve uncommitted changes). For other branches, pull uses git plumbing (merge-tree + commit-tree + update-ref) so it never touches the working tree.
 
@@ -184,7 +184,7 @@ This is why the force path uses `reset --hard` (adopting exact commit objects) r
 
 Push brings host commits to the cave. It updates the shared gitdir's refs and objects to match the host.
 
-Push is branch-aware: it iterates all host branches and pushes each one to the corresponding cave gitdir branch. Branches are never crossed — host commits on `develop` go to cave's `develop`, not to whatever the cave gitdir HEAD points to.
+Push is branch-aware: it iterates all host branches and pushes each one to the corresponding cave gitdir branch. Branches are never crossed — host commits on `develop` go to cave's `develop`, not to whatever the cave gitdir HEAD points to. New branches created on the host are created in the cave gitdir.
 
 Push first syncs refs from any running sessions into the shared gitdir (same as pull), so it can detect unpulled commits even when they exist only in a session gitdir. For each branch, push checks whether the cave has unpulled commits. Branches with unpulled commits are skipped with a warning suggesting `coding-cave pull` first. Clean branches are pushed regardless. This means a partial push can succeed — some branches update while others are blocked.
 

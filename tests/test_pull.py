@@ -1573,8 +1573,7 @@ class TestBranchSwitchMidSession:
     def test_new_branch_created_in_session(self, pull_env, tmp_path):
         """Session creates a new branch that doesn't exist on host.
 
-        The branch should appear in shared gitdir but pull should only
-        pull branches that exist on the host.
+        Pull should create the branch on host.
         """
         env = pull_env
         _, workdir = self._make_session_env(env, tmp_path, "newbranch")
@@ -1595,7 +1594,9 @@ class TestBranchSwitchMidSession:
 
         # Main commit should be pulled
         assert (env.host / "main.txt").read_text() == "main work\n"
-        # Experiment branch should not crash pull (it doesn't exist on host)
+        # New branch should be created on host
+        branches = _run("git", "-C", str(env.host), "branch").stdout
+        assert "experiment" in branches
 
 
 class TestCleanupOrdering:

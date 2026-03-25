@@ -655,7 +655,23 @@ def _pull_branch_other(slug, project_dir, gitdir_path, branch, cave_sha,
         capture_output=True, text=True,
     )
     if host_sha_result.returncode != 0:
-        return None  # branch doesn't exist on host, skip
+        # New branch from cave, create it on host
+        fetch = subprocess.run(
+            host_git + ["fetch", str(gitdir_path), cave_sha],
+            capture_output=True,
+        )
+        if fetch.returncode != 0:
+            return None
+        subprocess.run(
+            host_git + ["update-ref", f"refs/heads/{branch}", cave_sha],
+            check=True, capture_output=True,
+        )
+        count = subprocess.run(
+            host_git + ["rev-list", "--count", cave_sha],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        print(f"Created {slug}/{branch} ({count} commit(s)).", file=sys.stderr)
+        return cave_sha
     host_sha = host_sha_result.stdout.strip()
 
     if host_sha == cave_sha:
