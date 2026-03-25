@@ -464,6 +464,55 @@ class TestForcePushClearsSyncedPerBranch:
             "refs/synced/develop should NOT be cleared by force push of main"
 
 
+class TestForcePushIdempotent:
+    """Force-push is idempotent when cave commits were already pulled."""
+
+    def test_force_push_twice_is_noop(self, push_env, tmp_path):
+        """Second force push says 'Already up to date' when commits pulled."""
+        env = push_env
+        sid = "test-session-idempotent"
+
+        # Create a session with a cave commit
+        overlay_base = _state.cave_data() / "session-overlays" / sid
+        overlay_base.mkdir(parents=True)
+        session_gitdir = wrapper.create_session_gitdir(
+            env.slug, sid, overlay_base)
+        write_session(_state.cave_data(), sid, env.slug)
+
+        cave_work = tmp_path / "cave-work"
+        cave_work.mkdir()
+        _run("git", "--git-dir", str(env.gitdir), "--work-tree",
+             str(cave_work), "checkout", "HEAD", "--", ".")
+        (cave_work / "cave.txt").write_text("cave\n")
+        _run("git", "--git-dir", str(env.gitdir), "--work-tree",
+             str(cave_work), "add", "cave.txt")
+        _run("git", "--git-dir", str(env.gitdir), "--work-tree",
+             str(cave_work), "commit", "-m", "cave commit")
+        cave_head = _head(env.gitdir, gitdir=True)
+
+        # Session head tracks the cave commit
+        session_head_ref = session_gitdir / "refs" / "heads" / "main"
+        session_head_ref.write_text(cave_head + "\n")
+
+        # Pull cave commits to host first (so they're "already pulled")
+        wrapper.pull_project(env.slug)
+        assert (env.host / "cave.txt").read_text() == "cave\n"
+
+        # Host makes different commit on main
+        (env.host / "file.txt").write_text("host work\n")
+        _run("git", "-C", str(env.host), "add", ".")
+        _run("git", "-C", str(env.host), "commit", "-m", "host commit")
+        host_head = _head(env.host)
+
+        # First force push
+        wrapper.push_project(env.slug, force=True)
+        assert _head(env.gitdir, gitdir=True) == host_head
+
+        # Second force push — should be idempotent
+        wrapper.push_project(env.slug, force=True)
+        assert _head(env.gitdir, gitdir=True) == host_head
+
+
 class TestPushAfterPull:
     """Push after pull sends host commits to cave (not 'already up to date')."""
 

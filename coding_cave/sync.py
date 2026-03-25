@@ -55,9 +55,9 @@ def sync_live_sessions(slug, *, force=False):
 def _clear_session_synced_refs(slug, branch):
     """Clear refs/synced/<branch> in running session gitdirs.
 
-    After push --force overwrites a shared branch, session refs/synced
-    may point to SHAs no longer at the shared tip.  Clearing ensures
-    _forward_refs re-evaluates on next sync instead of skipping.
+    After push --force overwrites a shared branch that has unpulled
+    cave commits, clearing ensures _forward_refs re-evaluates on
+    next sync so the session's work can be rebased onto the new shared.
     """
     for session in sessions.list_sessions():
         sid = session["sid"]
@@ -66,6 +66,31 @@ def _clear_session_synced_refs(slug, branch):
                       / "refs" / "synced" / branch)
         try:
             synced_ref.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _mark_session_synced_refs(slug, branch):
+    """Mark refs/synced/<branch> to session's current HEAD.
+
+    After push --force overwrites a shared branch whose cave commits
+    were already pulled, set refs/synced to the session's HEAD.  This
+    prevents _forward_refs from re-forwarding (which would undo the
+    force push).
+    """
+    for session in sessions.list_sessions():
+        sid = session["sid"]
+        overlay_base = _state.cave_data() / "session-overlays" / sid
+        session_gd = overlay_base / f"gitdir-{slug}"
+        head_ref = session_gd / "refs" / "heads" / branch
+        synced_ref = session_gd / "refs" / "synced" / branch
+        try:
+            if head_ref.is_file():
+                sha = head_ref.read_text().strip()
+                synced_ref.parent.mkdir(parents=True, exist_ok=True)
+                synced_ref.write_text(sha + "\n")
+            else:
+                synced_ref.unlink()
         except FileNotFoundError:
             pass
 
@@ -1027,11 +1052,13 @@ def push_project(slug, force=False):
             print(f"Already up to date.", file=sys.stderr)
             return
         # Warn if overwriting cave commits from sessions
+        has_unpulled = False
         if cave_sha and cave_sha != host_sha:
             count = _check_unpulled(
                 gitdir_path, project_dir, cave_sha, host_sha,
                 current_branch)
             if count:
+                has_unpulled = True
                 print(f"Overwriting {count} unpulled cave commit(s) "
                       f"on {current_branch}:", file=sys.stderr)
                 mb = git_mod.git(gitdir_path, "merge-base",
@@ -1044,10 +1071,15 @@ def push_project(slug, force=False):
                       file=sys.stderr)
         _sync_branch(gitdir_path, project_dir, host_sha, current_branch)
         _mark_pulled(gitdir_path, host_sha, current_branch)
-        # Clear refs/synced in running sessions so _forward_refs
-        # re-evaluates on next sync (their synced ref now points to a
-        # SHA that is no longer the shared branch tip).
-        _clear_session_synced_refs(slug, current_branch)
+        if has_unpulled:
+            # Unpulled session work exists. clear refs/synced so
+            # _forward_refs re-evaluates on next sync and rebases it.
+            _clear_session_synced_refs(slug, current_branch)
+        else:
+            # All cave commits already pulled. mark refs/synced to
+            # session HEAD so _forward_refs won't re-forward (which
+            # would undo the force push).
+            _mark_session_synced_refs(slug, current_branch)
         git_mod.git(gitdir_path, "symbolic-ref", "HEAD",
             f"refs/heads/{current_branch}", capture_output=True)
         git_mod.finalize_sync(gitdir_path, project_dir)
