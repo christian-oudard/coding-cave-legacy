@@ -323,7 +323,7 @@ class TestProjectSyncStatus:
         )
 
         status = wrapper.project_sync_status("proj", str(repo))
-        assert "to pull" in status
+        assert "pull:" in status
 
     def test_to_push(self, cave_env):
         repo = make_repo(cave_env.tmp_path / "proj")
@@ -334,7 +334,7 @@ class TestProjectSyncStatus:
         git_run("git", "-C", str(repo), "commit", "-m", "host commit")
 
         status = wrapper.project_sync_status("proj", str(repo))
-        assert "to push" in status
+        assert "push:" in status
 
     def test_missing_project_dir(self, cave_env):
         repo = make_repo(cave_env.tmp_path / "proj")
@@ -386,7 +386,7 @@ class TestProjectSyncStatus:
         )
 
         status = wrapper.project_sync_status("proj", str(repo))
-        assert "to pull" in status
+        assert "pull:" in status
 
 
 # --- _parse_oneline / _print_rewrite_summary ---

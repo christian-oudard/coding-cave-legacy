@@ -666,11 +666,7 @@ def _pull_branch_other(slug, project_dir, gitdir_path, branch, cave_sha,
             host_git + ["update-ref", f"refs/heads/{branch}", cave_sha],
             check=True, capture_output=True,
         )
-        count = subprocess.run(
-            host_git + ["rev-list", "--count", cave_sha],
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
-        print(f"Created {slug}/{branch} ({count} commit(s)).", file=sys.stderr)
+        print(f"Created {slug}/{branch}.", file=sys.stderr)
         return cave_sha
     host_sha = host_sha_result.stdout.strip()
 
@@ -1180,15 +1176,21 @@ def project_sync_status(slug, source):
     if not host_branches or not cave_branches:
         return "?"
 
-    total_pull = 0
-    total_push = 0
+    commits_to_pull = 0
+    commits_to_push = 0
+    new_in_cave = []
+    new_on_host = []
     diverged = []
 
     all_branches = set(host_branches) | set(cave_branches)
     for branch in sorted(all_branches):
         host_sha = host_branches.get(branch)
         cave_sha = cave_branches.get(branch)
-        if not host_sha or not cave_sha:
+        if not host_sha:
+            new_in_cave.append(branch)
+            continue
+        if not cave_sha:
+            new_on_host.append(branch)
             continue
 
         # to pull: cave commits not yet pulled
@@ -1241,16 +1243,27 @@ def project_sync_status(slug, source):
                 capture_output=True, text=True)
             n_push = int(to_push.stdout.strip()) if to_push.returncode == 0 else 0
 
-        total_pull += n_pull
-        total_push += n_push
+        commits_to_pull += n_pull
+        commits_to_push += n_push
+
+    # Build pull description
+    pull_parts = []
+    if commits_to_pull:
+        pull_parts.append(f"{commits_to_pull} commit(s)")
+    if new_in_cave:
+        pull_parts.append(f"{len(new_in_cave)} new branch(es)")
+    # Build push description
+    push_parts = []
+    if commits_to_push:
+        push_parts.append(f"{commits_to_push} commit(s)")
+    if new_on_host:
+        push_parts.append(f"{len(new_on_host)} new branch(es)")
 
     tags = []
-    if total_pull and total_push:
-        tags.append(f"{total_pull} to pull, {total_push} to push")
-    elif total_pull:
-        tags.append(f"{total_pull} to pull")
-    elif total_push:
-        tags.append(f"{total_push} to push")
+    if pull_parts:
+        tags.append(f"pull: {', '.join(pull_parts)}")
+    if push_parts:
+        tags.append(f"push: {', '.join(push_parts)}")
     if diverged:
         tags.append(f"diverged: {', '.join(diverged)}")
 
