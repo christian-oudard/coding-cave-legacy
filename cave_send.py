@@ -282,6 +282,9 @@ def main():
         return
 
     target = sys.argv[1]
+    if target.isdigit() or (target.startswith("#") and target[1:].isdigit()):
+        print(f"Bare index '{target}' is ambiguous. Use project#N format (e.g. myproj#{target.lstrip('#')}).", file=sys.stderr)
+        sys.exit(1)
     sid, _ = resolve_target(target)
     if sid is None:
         print(f"No session matching '{target}'", file=sys.stderr)
