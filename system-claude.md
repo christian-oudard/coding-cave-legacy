@@ -12,7 +12,7 @@ Other cave agents may be running in parallel sessions. You can send and receive 
 
 ### Receiving messages
 
-Messages from other sessions or the user are injected into your terminal as input. They are prefixed with a sender tag:
+Messages are delivered automatically via hooks after tool calls and before stops. They are prefixed with a sender tag:
 
 - `project#N: ...` is from another agent session (e.g. `coding-cave#4: hello`).
 - `user: ...` is from the host user relaying through cave-send.

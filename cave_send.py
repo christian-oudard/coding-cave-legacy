@@ -131,6 +131,7 @@ def hook():
         sys.exit(0)
 
     formatted = _format_messages(messages)
+
     hook_input = json.loads(sys.stdin.read()) if not sys.stdin.isatty() else {}
     event = hook_input.get("hook_event_name", "")
 
@@ -235,7 +236,6 @@ def list_sessions():
 def main():
     if len(sys.argv) < 2:
         print("Usage: cave-send <target> <message>", file=sys.stderr)
-        print("       cave-send hook", file=sys.stderr)
         print("       cave-send --list", file=sys.stderr)
         sys.exit(1)
 
@@ -282,9 +282,6 @@ def main():
         return
 
     target = sys.argv[1]
-    if target.isdigit() or (target.startswith("#") and target[1:].isdigit()):
-        print(f"Bare index '{target}' is ambiguous. Use project#N format (e.g. myproj#{target.lstrip('#')}).", file=sys.stderr)
-        sys.exit(1)
     sid, _ = resolve_target(target)
     if sid is None:
         print(f"No session matching '{target}'", file=sys.stderr)
