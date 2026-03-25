@@ -91,7 +91,8 @@ def cmd_shell(args, gpu=False, projects_flag=None, port=None):
     active_sessions = sessions.list_sessions(project=project)
     if active_sessions:
         if len(active_sessions) == 1:
-            print(f"Joining session {active_sessions[0]['sid']} (PID {active_sessions[0]['bwrap_pid']}).", file=sys.stderr)
+            s0 = active_sessions[0]
+            print(f"Joining {s0.get('project', '?')}@{s0.get('index', '?')}.", file=sys.stderr)
             lifecycle.enter_session(active_sessions[0], preferred_shell, workdir=workdir)
         else:
             print("Running sessions:", file=sys.stderr)
@@ -100,7 +101,7 @@ def cmd_shell(args, gpu=False, projects_flag=None, port=None):
                 ago = _relative_age(s["started"])
                 idx = s.get("index", "?")
                 by_index[str(idx)] = s
-                print(f"  [{idx}] {s.get('project', '?')}#{idx}  [{ago}]", file=sys.stderr)
+                print(f"  [{idx}] {s.get('project', '?')}@{idx}  [{ago}]", file=sys.stderr)
             print(f"  [n] Start new session", file=sys.stderr)
             try:
                 choice = input("Join session: ").strip()
