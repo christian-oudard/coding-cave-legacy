@@ -472,7 +472,7 @@ def _build_clipboard_args():
     cave_runtime = "/run/user/1000"
     return [
         "--perms", "0700", "--tmpfs", cave_runtime,
-        "--ro-bind", str(socket_path), f"{cave_runtime}/{wayland_display}",
+        "--bind", str(socket_path), f"{cave_runtime}/{wayland_display}",
         "--setenv", "XDG_RUNTIME_DIR", cave_runtime,
         "--setenv", "WAYLAND_DISPLAY", wayland_display,
     ]
