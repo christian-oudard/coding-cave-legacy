@@ -21,6 +21,26 @@
         "type": "github"
       }
     },
+    "crinj": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1774402090,
+        "narHash": "sha256-YgsaikXWtQ+RyjICQq4MtNdSrs3QQ1cNymOPIEUWAzU=",
+        "owner": "christian-oudard",
+        "repo": "crinj",
+        "rev": "62c521bc449f359504a892262f0ec5b84ce2b0c3",
+        "type": "github"
+      },
+      "original": {
+        "owner": "christian-oudard",
+        "repo": "crinj",
+        "type": "github"
+      }
+    },
     "flake-utils": {
       "inputs": {
         "systems": "systems"
@@ -70,32 +90,12 @@
         "type": "github"
       }
     },
-    "onecli": {
-      "inputs": {
-        "nixpkgs": [
-          "nixpkgs"
-        ]
-      },
-      "locked": {
-        "lastModified": 1773847183,
-        "narHash": "sha256-aPMWGumol2g5p8taV8efiqTg7OYLPla1TgwED9HQZWA=",
-        "owner": "christian-oudard",
-        "repo": "onecli",
-        "rev": "ec85c2cab652a547b84c7807d7beb0c25a30241c",
-        "type": "github"
-      },
-      "original": {
-        "owner": "christian-oudard",
-        "repo": "onecli",
-        "type": "github"
-      }
-    },
     "root": {
       "inputs": {
         "claude-code": "claude-code",
+        "crinj": "crinj",
         "jail-nix": "jail-nix",
-        "nixpkgs": "nixpkgs",
-        "onecli": "onecli"
+        "nixpkgs": "nixpkgs"
       }
     },
     "systems": {

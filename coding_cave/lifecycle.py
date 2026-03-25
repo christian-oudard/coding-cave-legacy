@@ -32,7 +32,7 @@ BWRAP_ENV_ALLOWLIST = {
     # Git identity (try-fwd-env -> wrap-entry, then unset)
     "CODING_CAVE_GIT_NAME", "CODING_CAVE_GIT_EMAIL",
     "CODING_CAVE_GPG_AGENT_SOCK",
-    # Proxy (onecli credential injection)
+    # Proxy (crinj credential injection)
     "CODING_CAVE_PROXY_ADDR",
     # Host-side only (add-runtime reads from process env)
     "CODING_CAVE_NIX_MERGED", "CODING_CAVE_NIX_DB_DIR",
@@ -477,10 +477,10 @@ def _build_credential_args():
             src = os.path.join(gnupghome, fname)
             if os.path.isfile(src):
                 args += ["--ro-bind", src, f"{cave_gnupghome}/{fname}"]
-    # Proxy CA certificate bind-mount (onecli MITM)
+    # Proxy CA certificate bind-mount (crinj MITM)
     proxy_ca = os.environ.get("CODING_CAVE_PROXY_CA_CERT", "")
     if proxy_ca and os.path.isfile(proxy_ca):
-        args += ["--ro-bind", proxy_ca, "/etc/onecli-ca.pem"]
+        args += ["--ro-bind", proxy_ca, "/etc/crinj-ca.pem"]
 
     # Git config mirroring
     gitconfig = os.environ.get("CODING_CAVE_GITCONFIG", "")

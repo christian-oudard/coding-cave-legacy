@@ -6,16 +6,16 @@
       url = "github:sadjow/claude-code-nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    onecli = {
-      url = "github:christian-oudard/onecli";
+    crinj = {
+      url = "github:christian-oudard/crinj";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
 
-  outputs = { self, nixpkgs, jail-nix, claude-code, onecli, ... }: let
+  outputs = { self, nixpkgs, jail-nix, claude-code, crinj, ... }: let
     pkgs = import nixpkgs { system = "x86_64-linux"; };
     jail = jail-nix.lib.init pkgs;
-    onecli-gateway = onecli.packages.x86_64-linux.gateway-standalone;
+    crinj-bin = crinj.packages.x86_64-linux.default;
 
     defaultClaudeSettings = ./defaults/claude-settings.json;
     defaultStatusline = ./defaults/statusline.sh;
@@ -124,7 +124,7 @@
       # Credential forwarding
       (try-fwd-env "CLAUDE_CODE_OAUTH_TOKEN")
       (try-fwd-env "ANTHROPIC_API_KEY")
-      # Proxy address (onecli) — consumed in wrap-entry
+      # Proxy address (crinj) — consumed in wrap-entry
       (try-fwd-env "CODING_CAVE_PROXY_ADDR")
 
       # Session identity (runtime — visible to statusline and scripts)
@@ -218,7 +218,7 @@
           export GIT_AUTHOR_EMAIL="coding-cave@noreply"
           export GIT_COMMITTER_EMAIL="coding-cave@noreply"
         fi
-        # HTTP proxy for credential injection (onecli)
+        # HTTP proxy for credential injection (crinj)
         if [ -n "''${CODING_CAVE_PROXY_ADDR:-}" ]; then
           export HTTP_PROXY="http://''${CODING_CAVE_PROXY_ADDR}"
           export HTTPS_PROXY="http://''${CODING_CAVE_PROXY_ADDR}"
@@ -226,15 +226,15 @@
           export https_proxy="$HTTPS_PROXY"
           export NO_PROXY="localhost,127.0.0.1,::1"
           export no_proxy="$NO_PROXY"
-          # Trust onecli's MITM CA certificate
-          if [ -f /etc/onecli-ca.pem ]; then
+          # Trust crinj's MITM CA certificate
+          if [ -f /etc/crinj-ca.pem ]; then
             # Combined bundle for tools that use SSL_CERT_FILE (curl, Python, etc.)
-            cat /etc/ssl/certs/ca-bundle.crt /etc/onecli-ca.pem > /tmp/combined-ca.pem
+            cat /etc/ssl/certs/ca-bundle.crt /etc/crinj-ca.pem > /tmp/combined-ca.pem
             export SSL_CERT_FILE=/tmp/combined-ca.pem
             # Python requests uses certifi by default, ignoring SSL_CERT_FILE
             export REQUESTS_CA_BUNDLE=/tmp/combined-ca.pem
-            # NODE_EXTRA_CA_CERTS is additive — only needs the extra cert
-            export NODE_EXTRA_CA_CERTS=/etc/onecli-ca.pem
+            # NODE_EXTRA_CA_CERTS is additive, only needs the extra cert
+            export NODE_EXTRA_CA_CERTS=/etc/crinj-ca.pem
           fi
         fi
         # Clean up setup-only vars before saving the env snapshot.
@@ -276,7 +276,7 @@
     codingCaveState = pkgs.replaceVars ./coding_cave/_state.py {
       SANDBOX_BIN = "${sandbox}/bin/coding-cave";
       SANDBOX_GPU_BIN = "${sandboxGpu}/bin/coding-cave";
-      GATEWAY_LOCAL_BIN = "${onecli-gateway}/bin/onecli-gateway";
+      GATEWAY_LOCAL_BIN = "${crinj-bin}/bin/crinj";
       IPC_SETUP_SH = ipcSetup;
       VERSION = version;
     };
@@ -320,7 +320,7 @@ main()
   in {
     packages.x86_64-linux = {
       default = wrapper;
-      inherit onecli-gateway;
+      inherit crinj-bin;
     };
   };
 }

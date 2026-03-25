@@ -1,4 +1,4 @@
-"""Tests for proxy-based credential isolation (onecli integration)."""
+"""Tests for proxy-based credential isolation (crinj integration)."""
 import os
 import re
 from pathlib import Path
@@ -21,11 +21,11 @@ MOCK_GATEWAY = patch("coding_cave.config._start_gateway", return_value=True)
 class TestProxyConfig:
     """Config tests for _setup_proxy and setup_env proxy interaction."""
 
-    def test_onecli_proxy_sets_default_port(self, tmp_path):
-        """onecli = true sets port 10255 by default."""
+    def test_crinj_proxy_sets_default_port(self, tmp_path):
+        """crinj = true sets port 10255 by default."""
         ca = tmp_path / "ca.pem"
         ca.write_text("--- cert ---")
-        cfg = {"proxy": {"onecli": True}}
+        cfg = {"proxy": {"crinj": True}}
         with patch.dict(os.environ, {}, clear=False), MOCK_GATEWAY:
             os.environ.pop("CODING_CAVE_PROXY_PORT", None)
             with patch("coding_cave.config.Path.expanduser", return_value=ca):
@@ -37,7 +37,7 @@ class TestProxyConfig:
         ca = tmp_path / "ca.pem"
         ca.write_text("--- cert ---")
         cfg = {
-            "proxy": {"onecli": True},
+            "proxy": {"crinj": True},
             "credentials": {"claude-oauth-token": "secret-token"},
         }
         with patch.dict(os.environ, {}, clear=False), MOCK_GATEWAY:
@@ -60,31 +60,31 @@ class TestProxyConfig:
                 setup_env(cfg)
             assert os.environ.get("CLAUDE_CODE_OAUTH_TOKEN") == "secret-token"
 
-    def test_onecli_custom_port(self, tmp_path):
+    def test_crinj_custom_port(self, tmp_path):
         """Port can be overridden."""
         ca = tmp_path / "ca.pem"
         ca.write_text("--- cert ---")
-        cfg = {"proxy": {"onecli": True, "port": 8080}}
+        cfg = {"proxy": {"crinj": True, "port": 8080}}
         with patch.dict(os.environ, {}, clear=False), MOCK_GATEWAY:
             os.environ.pop("CODING_CAVE_PROXY_PORT", None)
             with patch("coding_cave.config.Path.expanduser", return_value=ca):
                 _setup_proxy(cfg)
             assert os.environ.get("CODING_CAVE_PROXY_PORT") == "8080"
 
-    def test_onecli_ca_cert_from_default_path(self, tmp_path):
-        """CA cert loaded from ~/.onecli/gateway/ca.pem."""
+    def test_crinj_ca_cert_from_default_path(self, tmp_path):
+        """CA cert loaded from ~/.crinj/gateway/ca.pem."""
         ca = tmp_path / "ca.pem"
         ca.write_text("--- cert ---")
-        cfg = {"proxy": {"onecli": True}}
+        cfg = {"proxy": {"crinj": True}}
         with patch.dict(os.environ, {}, clear=False), MOCK_GATEWAY:
             os.environ.pop("CODING_CAVE_PROXY_CA_CERT", None)
             with patch("coding_cave.config.Path.expanduser", return_value=ca):
                 _setup_proxy(cfg)
             assert os.environ.get("CODING_CAVE_PROXY_CA_CERT") == str(ca.resolve())
 
-    def test_onecli_ca_cert_missing_skipped(self):
+    def test_crinj_ca_cert_missing_skipped(self):
         """CA cert not set when gateway hasn't generated it yet."""
-        cfg = {"proxy": {"onecli": True}}
+        cfg = {"proxy": {"crinj": True}}
         with patch.dict(os.environ, {}, clear=False), MOCK_GATEWAY:
             os.environ.pop("CODING_CAVE_PROXY_CA_CERT", None)
             _setup_proxy(cfg)
@@ -94,11 +94,11 @@ class TestProxyConfig:
         """_setup_proxy returns False when no proxy configured."""
         assert _setup_proxy({}) is False
         assert _setup_proxy({"proxy": {}}) is False
-        assert _setup_proxy({"proxy": {"onecli": False}}) is False
+        assert _setup_proxy({"proxy": {"crinj": False}}) is False
 
     def test_gateway_started_when_not_running(self):
         """_setup_proxy calls _start_gateway with the configured port."""
-        cfg = {"proxy": {"onecli": True}}
+        cfg = {"proxy": {"crinj": True}}
         with patch.dict(os.environ, {}, clear=False), \
              patch("coding_cave.config._start_gateway", return_value=True) as mock_start:
             _setup_proxy(cfg)
@@ -106,7 +106,7 @@ class TestProxyConfig:
 
     def test_proxy_returns_false_when_gateway_fails(self):
         """_setup_proxy returns False if gateway can't start."""
-        cfg = {"proxy": {"onecli": True}}
+        cfg = {"proxy": {"crinj": True}}
         with patch.dict(os.environ, {}, clear=False), \
              patch("coding_cave.config._start_gateway", return_value=False):
             assert _setup_proxy(cfg) is False
@@ -118,7 +118,7 @@ class TestGatewayLifecycle:
 
     def test_stop_kills_when_no_sessions(self, tmp_path):
         """Gateway killed when no sessions remain."""
-        pid_file = tmp_path / "onecli-gateway.pid"
+        pid_file = tmp_path / "crinj.pid"
         pid_file.write_text("99999")
         with patch("coding_cave.config._gateway_pid_file", return_value=pid_file), \
              patch("coding_cave.sessions.list_sessions", return_value=[]), \
@@ -129,7 +129,7 @@ class TestGatewayLifecycle:
 
     def test_stop_skips_when_sessions_active(self, tmp_path):
         """Gateway left running when sessions exist."""
-        pid_file = tmp_path / "onecli-gateway.pid"
+        pid_file = tmp_path / "crinj.pid"
         pid_file.write_text("99999")
         with patch("coding_cave.config._gateway_pid_file", return_value=pid_file), \
              patch("coding_cave.sessions.list_sessions", return_value=[{"sid": "x"}]), \
@@ -140,7 +140,7 @@ class TestGatewayLifecycle:
 
     def test_stop_cleans_stale_pid_file(self, tmp_path):
         """PID file cleaned up even if process already dead."""
-        pid_file = tmp_path / "onecli-gateway.pid"
+        pid_file = tmp_path / "crinj.pid"
         pid_file.write_text("99999")
         with patch("coding_cave.config._gateway_pid_file", return_value=pid_file), \
              patch("coding_cave.sessions.list_sessions", return_value=[]), \
@@ -161,44 +161,44 @@ class TestGatewayConfigReload:
 
     def test_config_changed_detects_newer_rules(self, tmp_path):
         """Config change detected when rules.toml is newer than pid file."""
-        config_dir = tmp_path / "onecli"
+        config_dir = tmp_path / "crinj"
         config_dir.mkdir()
-        pid_file = tmp_path / "onecli-gateway.pid"
+        pid_file = tmp_path / "crinj.pid"
         pid_file.write_text("99999")
         import time
         time.sleep(0.05)
         rules = config_dir / "rules.toml"
         rules.write_text("[rule]\nkey = 'val'")
         with patch("coding_cave.config._gateway_pid_file", return_value=pid_file), \
-             patch("coding_cave.config._onecli_config_dir", return_value=config_dir):
+             patch("coding_cave.config._crinj_config_dir", return_value=config_dir):
             assert _gateway_config_changed() is True
 
     def test_config_changed_detects_newer_secret(self, tmp_path):
         """Config change detected when a secrets/ file is newer than pid file."""
-        config_dir = tmp_path / "onecli"
+        config_dir = tmp_path / "crinj"
         secrets_dir = config_dir / "secrets"
         secrets_dir.mkdir(parents=True)
-        pid_file = tmp_path / "onecli-gateway.pid"
+        pid_file = tmp_path / "crinj.pid"
         pid_file.write_text("99999")
         import time
         time.sleep(0.05)
         (secrets_dir / "api_key").write_text("secret")
         with patch("coding_cave.config._gateway_pid_file", return_value=pid_file), \
-             patch("coding_cave.config._onecli_config_dir", return_value=config_dir):
+             patch("coding_cave.config._crinj_config_dir", return_value=config_dir):
             assert _gateway_config_changed() is True
 
     def test_config_unchanged_when_older(self, tmp_path):
         """No config change when rules.toml is older than pid file."""
-        config_dir = tmp_path / "onecli"
+        config_dir = tmp_path / "crinj"
         config_dir.mkdir()
         rules = config_dir / "rules.toml"
         rules.write_text("[rule]\nkey = 'val'")
         import time
         time.sleep(0.05)
-        pid_file = tmp_path / "onecli-gateway.pid"
+        pid_file = tmp_path / "crinj.pid"
         pid_file.write_text("99999")
         with patch("coding_cave.config._gateway_pid_file", return_value=pid_file), \
-             patch("coding_cave.config._onecli_config_dir", return_value=config_dir):
+             patch("coding_cave.config._crinj_config_dir", return_value=config_dir):
             assert _gateway_config_changed() is False
 
     def test_config_changed_false_without_pid_file(self, tmp_path):
@@ -209,7 +209,7 @@ class TestGatewayConfigReload:
 
     def test_start_gateway_sends_sighup_on_config_change(self, tmp_path):
         """Gateway receives SIGHUP when already listening but config changed."""
-        pid_file = tmp_path / "onecli-gateway.pid"
+        pid_file = tmp_path / "crinj.pid"
         pid_file.write_text("99999")
         with patch("coding_cave.config._gateway_listening", return_value=True), \
              patch("coding_cave.config._gateway_config_changed", return_value=True), \
@@ -228,7 +228,7 @@ class TestGatewayConfigReload:
 
     def test_reload_gateway_sends_sighup(self, tmp_path):
         """_reload_gateway sends SIGHUP and touches pid file."""
-        pid_file = tmp_path / "onecli-gateway.pid"
+        pid_file = tmp_path / "crinj.pid"
         pid_file.write_text("99999")
         import time
         old_mtime = pid_file.stat().st_mtime
@@ -288,10 +288,10 @@ class TestFlakeNixProxy:
         assert "REQUESTS_CA_BUNDLE=/tmp/combined-ca.pem" in flake
 
     def test_node_extra_ca_certs_set(self):
-        """NODE_EXTRA_CA_CERTS set in wrap-entry for onecli CA."""
+        """NODE_EXTRA_CA_CERTS set in wrap-entry for crinj CA."""
         flake = FLAKE_NIX.read_text()
         assert "NODE_EXTRA_CA_CERTS" in flake
-        assert "/etc/onecli-ca.pem" in flake
+        assert "/etc/crinj-ca.pem" in flake
 
     def test_proxy_addr_unset_after_use(self):
         """CODING_CAVE_PROXY_ADDR is in the unset line (setup-only var)."""
@@ -306,7 +306,7 @@ class TestFlakeNixProxy:
         """GATEWAY_LOCAL_BIN is substituted in flake.nix replaceVars."""
         flake = FLAKE_NIX.read_text()
         assert "GATEWAY_LOCAL_BIN" in flake
-        assert "onecli-gateway" in flake
+        assert "crinj" in flake
 
 
 class TestProxyLifecycle:
@@ -318,9 +318,9 @@ class TestProxyLifecycle:
         assert '"CODING_CAVE_PROXY_ADDR"' in src
 
     def test_ca_cert_bind_mounted(self):
-        """CA cert bind-mounted at /etc/onecli-ca.pem when configured."""
+        """CA cert bind-mounted at /etc/crinj-ca.pem when configured."""
         src = LIFECYCLE_PY.read_text()
-        assert "/etc/onecli-ca.pem" in src
+        assert "/etc/crinj-ca.pem" in src
         assert "CODING_CAVE_PROXY_CA_CERT" in src
 
     def test_proxy_pasta_uses_loopback_mapping(self):
