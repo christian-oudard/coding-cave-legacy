@@ -202,28 +202,24 @@ def _setup_nix_store(sid, inside_cave):
     nix_upper.mkdir(parents=True, exist_ok=True)
 
     # Remove stale upper entries that shadow host store paths.
+    # Nix paths are content-addressed: same hash = identical contents,
+    # so the host copy is authoritative and the upper just wastes space.
+    # Best-effort: concurrent sessions may race or a running session's
+    # mount may hold the entry, so ignore removal failures.
+    def _force_remove(func, path, exc):
+        try:
+            os.chmod(os.path.dirname(path), 0o755)
+            func(path)
+        except OSError:
+            pass
     for entry in os.scandir(str(nix_upper)):
         if not entry.is_dir(follow_symlinks=False):
             continue
-        host_path = Path("/nix/store") / entry.name
-        if host_path.is_dir():
+        if Path("/nix/store", entry.name).is_dir():
             try:
-                contents = os.listdir(entry.path)
-                xattrs = os.listxattr(entry.path)
-                opaque = any("opaque" in x for x in xattrs)
-                print(f"nix overlay: removing stale upper entry: "
-                      f"{entry.name} (contents={contents}, "
-                      f"opaque={opaque}, xattrs={xattrs})",
-                      file=sys.stderr)
+                shutil.rmtree(entry.path, onexc=_force_remove)
             except OSError:
-                print(f"nix overlay: removing stale upper entry: "
-                      f"{entry.name} (could not inspect)",
-                      file=sys.stderr)
-            def _force_remove(func, path, exc):
-                parent = os.path.dirname(path)
-                os.chmod(parent, 0o755)
-                func(path)
-            shutil.rmtree(entry.path, onexc=_force_remove)
+                pass
 
     # Per-session work and merged dirs (clean FUSE cache each session)
     session_nix = _state.cave_data() / "session-overlays" / sid / "nix"
