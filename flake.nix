@@ -113,6 +113,7 @@
       (set-env "LOCALE_ARCHIVE" "${pkgs.glibcLocales}/lib/locale/locale-archive")
       (set-env "LANG" "en_US.UTF-8")
       (try-fwd-env "COLORTERM")
+      (try-fwd-env "TERM_PROGRAM")
 
       # Git identity: forwarded from host when available (eliminates
       # re-authoring on pull).  Falls back to throwaway identity.
