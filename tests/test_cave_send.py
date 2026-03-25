@@ -125,7 +125,7 @@ class TestCaveSend:
         }
         try:
             result = subprocess.run(
-                [sys.executable, SEND, "proj#1", "hello"],
+                [sys.executable, SEND, "proj@1", "hello"],
                 capture_output=True, text=True, env=env,
             )
             assert result.returncode != 0
@@ -148,12 +148,12 @@ class TestCaveSend:
                 capture_output=True, text=True,
                 env={**os.environ, "HOME": str(tmp_path)},
             )
-            assert "myproj#1" in result.stdout
+            assert "myproj@1" in result.stdout
         finally:
             os.close(lock_fd)
 
     def test_resolve_project_index(self, tmp_path):
-        """resolve_target requires 'project#index' format."""
+        """resolve_target requires 'project@index' format."""
         ipc_dir = tmp_path / "ipc"
         ipc_dir.mkdir()
         (ipc_dir / "sid-a.json").write_text(json.dumps({
@@ -171,9 +171,9 @@ class TestCaveSend:
         old_ipc = cave_send.IPC_DIR
         cave_send.IPC_DIR = ipc_dir
         try:
-            sid, _ = cave_send.resolve_target("alpha#1")
+            sid, _ = cave_send.resolve_target("alpha@1")
             assert sid == "sid-a"
-            sid, _ = cave_send.resolve_target("beta#1")
+            sid, _ = cave_send.resolve_target("beta@1")
             assert sid == "sid-b"
             # Bare index is treated as a literal session ID, not resolved
             sid, _ = cave_send.resolve_target("1")
@@ -202,7 +202,7 @@ class TestCaveSend:
         old_ipc = cave_send.IPC_DIR
         cave_send.IPC_DIR = ipc_dir
         try:
-            sid, _ = cave_send.resolve_target("proj#1")
+            sid, _ = cave_send.resolve_target("proj@1")
             assert sid == "new-sid"
         finally:
             cave_send.IPC_DIR = old_ipc

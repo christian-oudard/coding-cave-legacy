@@ -36,7 +36,7 @@ class TestCaveHook:
         sid = "test-sid"
         msg_dir = tmp_path / "ipc" / "messages"
         self._write_messages(msg_dir, sid, [
-            {"sender": "proj#1:", "message": "hello from session 1", "ts": 1.0},
+            {"sender": "proj@1:", "message": "hello from session 1", "ts": 1.0},
         ])
         result = _run_hook(tmp_path, sid, json.dumps({
             "hook_event_name": "Stop",
@@ -44,7 +44,7 @@ class TestCaveHook:
         assert result.returncode == 0
         output = json.loads(result.stdout)
         assert output["decision"] == "block"
-        assert "proj#1:" in output["reason"]
+        assert "proj@1:" in output["reason"]
         assert "hello from session 1" in output["reason"]
         assert (msg_dir / f"{sid}.jsonl").read_text().strip() == ""
 
@@ -53,14 +53,14 @@ class TestCaveHook:
         sid = "test-sid"
         msg_dir = tmp_path / "ipc" / "messages"
         self._write_messages(msg_dir, sid, [
-            {"sender": "proj#2:", "message": "build done", "ts": 1.0},
+            {"sender": "proj@2:", "message": "build done", "ts": 1.0},
         ])
         result = _run_hook(tmp_path, sid, json.dumps({
             "hook_event_name": "PostToolUse",
             "tool_name": "Bash",
         }))
         assert result.returncode == 2
-        assert "proj#2: build done" in result.stderr
+        assert "proj@2: build done" in result.stderr
 
     def test_no_messages_exits_cleanly(self, tmp_path):
         """Hook exits 0 with no output when queue is empty."""
@@ -75,8 +75,8 @@ class TestCaveHook:
         sid = "test-sid"
         msg_dir = tmp_path / "ipc" / "messages"
         self._write_messages(msg_dir, sid, [
-            {"sender": "proj#1:", "message": "first", "ts": 1.0},
-            {"sender": "proj#2:", "message": "second", "ts": 2.0},
+            {"sender": "proj@1:", "message": "first", "ts": 1.0},
+            {"sender": "proj@2:", "message": "second", "ts": 2.0},
         ])
         result = _run_hook(tmp_path, sid, json.dumps({
             "hook_event_name": "Stop",
@@ -90,7 +90,7 @@ class TestCaveHook:
         sid = "test-sid"
         msg_dir = tmp_path / "ipc" / "messages"
         self._write_messages(msg_dir, sid, [
-            {"sender": "proj#1:", "message": "hello", "ts": 1.0},
+            {"sender": "proj@1:", "message": "hello", "ts": 1.0},
         ])
         hook_input = json.dumps({"hook_event_name": "Stop"})
         r1 = _run_hook(tmp_path, sid, hook_input)
@@ -123,14 +123,14 @@ class TestQueueBasedSend:
         }
         try:
             result = subprocess.run(
-                [sys.executable, SEND, "myproj#2", "hello from sender"],
+                [sys.executable, SEND, "myproj@2", "hello from sender"],
                 capture_output=True, text=True, env=env,
             )
             assert result.returncode == 0
             queue_file = ipc_dir / "messages" / f"{target_sid}.jsonl"
             assert queue_file.exists()
             msg = json.loads(queue_file.read_text().strip())
-            assert msg["sender"] == "myproj#1:"
+            assert msg["sender"] == "myproj@1:"
             assert msg["message"] == "hello from sender"
         finally:
             os.close(lock_fd)
@@ -151,7 +151,7 @@ class TestQueueBasedSend:
         env["HOME"] = str(tmp_path)
         try:
             result = subprocess.run(
-                [sys.executable, SEND, "proj#1", "hello from host"],
+                [sys.executable, SEND, "proj@1", "hello from host"],
                 capture_output=True, text=True, env=env,
             )
             assert result.returncode == 0

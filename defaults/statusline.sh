@@ -51,7 +51,7 @@ if [ -n "$persist_file" ]; then
 fi
 
 slug="${CODING_CAVE_PROJECT_PATH##*/}"
-line="Coding Cave - ${slug:-?}#${CODING_CAVE_SESSION_INDEX:-?}"
+line="Coding Cave - ${slug:-?}@${CODING_CAVE_SESSION_INDEX:-?}"
 if [ -n "$persist" ]; then
     line="$line [$persist]"
 fi

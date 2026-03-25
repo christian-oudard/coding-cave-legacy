@@ -27,11 +27,11 @@ _CHAIN_SNIPPET = (
 
 
 def _session_label(sid):
-    """Return a friendly label like 'coding-cave#2' for a session ID."""
+    """Return a friendly label like 'coding-cave@2' for a session ID."""
     meta = _state.sessions_dir() / f"{sid}.json"
     try:
         info = json.loads(meta.read_text())
-        return f"{info['project']}#{info['index']}"
+        return f"{info['project']}@{info['index']}"
     except (OSError, json.JSONDecodeError, KeyError):
         return sid
 

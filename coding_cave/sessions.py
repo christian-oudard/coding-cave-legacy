@@ -103,7 +103,7 @@ def update_pane_titles(project):
     has_tmux = shutil.which("tmux") is not None
     for s in active:
         idx = s.get("index", "?")
-        title = f"cave:{project}#{idx}"
+        title = f"cave:{project}@{idx}"
         pane = s.get("tmux_pane")
         if pane and has_tmux:
             subprocess.run(

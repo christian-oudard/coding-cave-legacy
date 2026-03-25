@@ -36,8 +36,8 @@ def _sender_tag():
     if not idx:
         return "user:"
     if proj:
-        return f"{proj}#{idx}:"
-    return f"#{idx}:"
+        return f"{proj}@{idx}:"
+    return f"@{idx}:"
 
 
 def send(target_sid, message):
@@ -153,14 +153,14 @@ def resolve_target(target):
     """Resolve a target to (sid, meta_path).
 
     Accepted formats:
-      - "project#N"          — canonical format (e.g. "crinj#1")
+      - "project@N"          — canonical format (e.g. "crinj@1")
       - full session ID      — used directly (e.g. "1774405140-397747")
 
     When multiple sessions match, returns the newest by start time.
     """
     target = str(target)
-    if "#" in target:
-        project, index = target.split("#", 1)
+    if "@" in target:
+        project, index = target.split("@", 1)
         if not project:
             return None, None
         best_sid, best_started = None, 0
@@ -251,7 +251,7 @@ def main():
             proj = meta.get("project", "?")
             age = _format_age(meta.get("started"))
             me = " (me)" if sid == my_sid else ""
-            print(f"  {proj}#{idx}  [{age}]{me}")
+            print(f"  {proj}@{idx}  [{age}]{me}")
         if not sessions:
             print("  No active sessions.")
         return

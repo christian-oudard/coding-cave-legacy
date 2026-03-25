@@ -39,7 +39,7 @@ def cp_env(tmp_path, monkeypatch):
     (merged / "file.txt").write_text("initial\n")
 
     # Mock _find_cave_root to return our fake root
-    monkeypatch.setattr(commands, "_find_cave_root", lambda project=None: cave_root)
+    monkeypatch.setattr(commands, "_find_cave_root", lambda project=None, session_index=None: cave_root)
 
     # Session tracking (needed so _find_cave_root's session lookup succeeds,
     # though we've mocked the function itself)
@@ -625,7 +625,7 @@ class TestCpSessionSelection:
         # _find_cave_root should auto-select sess-mine without prompting.
         # We mock it to verify it receives the project hint.
         called_with = []
-        def mock_find(project=None):
+        def mock_find(project=None, session_index=None):
             called_with.append(project)
             return cave_root
         monkeypatch.setattr(commands, "_find_cave_root", mock_find)
@@ -656,12 +656,82 @@ class TestCpSessionSelection:
         merged.mkdir(parents=True)
         (merged / "f.txt").write_text("cross-session\n")
 
-        monkeypatch.setattr(commands, "_find_cave_root", lambda project=None: cave_root)
+        monkeypatch.setattr(commands, "_find_cave_root", lambda project=None, session_index=None: cave_root)
 
         dest = tmp_path / "out.txt"
         wrapper.cmd_cp([f"{slug}:f.txt"], str(dest))
 
         assert dest.read_text() == "cross-session\n"
+
+
+    def test_session_index_passed_to_find_cave_root(self, tmp_path, monkeypatch):
+        """slug@N: syntax passes session_index to _find_cave_root."""
+        slug = "myproject"
+        cave_data = tmp_path / "cave-data"
+        _state.set_cave_data(cave_data)
+
+        host = tmp_path / "host"
+        host.mkdir()
+        git_run("git", "init", "-b", "main", str(host))
+        (host / "f.txt").write_text("x\n")
+        git_run("git", "-C", str(host), "add", ".")
+        git_run("git", "-C", str(host), "commit", "-m", "init")
+        write_projects(cave_data, {slug: str(host)})
+        (_state.projects_dir() / slug).mkdir(parents=True)
+        write_session(cave_data, "sess-1", slug)
+
+        cave_root = tmp_path / "cave-root"
+        merged = cave_root / "projects" / slug
+        merged.mkdir(parents=True)
+        (merged / "f.txt").write_text("indexed\n")
+
+        called_with = []
+        def mock_find(project=None, session_index=None):
+            called_with.append((project, session_index))
+            return cave_root
+        monkeypatch.setattr(commands, "_find_cave_root", mock_find)
+
+        dest = tmp_path / "out.txt"
+        wrapper.cmd_cp([f"{slug}@2:f.txt"], str(dest))
+
+        assert called_with == [(slug, 2)]
+        assert dest.read_text() == "indexed\n"
+
+    def test_session_index_invalid_exits(self, cp_env):
+        """slug@abc: exits with error on non-integer index."""
+        e = cp_env
+        with pytest.raises(SystemExit):
+            wrapper.cmd_cp([str(e.tmp_path / "x.txt")], f"{e.slug}@abc:dest.txt")
+
+    def test_session_index_host_to_cave(self, tmp_path, monkeypatch):
+        """slug@N: works for host-to-cave direction too."""
+        slug = "myproject"
+        cave_data = tmp_path / "cave-data"
+        _state.set_cave_data(cave_data)
+
+        host = tmp_path / "host"
+        host.mkdir()
+        git_run("git", "init", "-b", "main", str(host))
+        write_projects(cave_data, {slug: str(host)})
+        (_state.projects_dir() / slug).mkdir(parents=True)
+        write_session(cave_data, "sess-1", slug)
+
+        cave_root = tmp_path / "cave-root"
+        merged = cave_root / "projects" / slug
+        merged.mkdir(parents=True)
+
+        called_with = []
+        def mock_find(project=None, session_index=None):
+            called_with.append((project, session_index))
+            return cave_root
+        monkeypatch.setattr(commands, "_find_cave_root", mock_find)
+
+        src = tmp_path / "upload.txt"
+        src.write_text("from host\n")
+        wrapper.cmd_cp([str(src)], f"{slug}@3:upload.txt")
+
+        assert called_with == [(slug, 3)]
+        assert (merged / "upload.txt").read_text() == "from host\n"
 
 
 class TestCpBwrapIntegration:
@@ -848,7 +918,7 @@ class TestCpPathTraversal:
         """.. traversal in sessionless fallback to host source is rejected."""
         e = cp_env
         # Disable session so it falls back to host source dir
-        monkeypatch.setattr(commands, "_find_cave_root", lambda project=None: None)
+        monkeypatch.setattr(commands, "_find_cave_root", lambda project=None, session_index=None: None)
 
         escaped = e.host.parent / "sensitive.txt"
         escaped.write_text("host secrets\n")

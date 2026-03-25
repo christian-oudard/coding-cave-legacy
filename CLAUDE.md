@@ -70,7 +70,7 @@ Each agent session runs in its own **per-session bwrap namespace** with per-sess
 - Session cleanup: session gitdir refs merged into shared gitdir, overlay upper saved, then session dirs removed when bwrap exits
 - GPU access opt-in via `--gpu` flag (two separate sandbox derivations)
 - CWD-based project detection: running `coding-cave` from inside a registered project dir auto-selects it; from an unregistered dir, prompts to add it
-- `cp` prefix semantics — two prefixes: `<slug>:path` (slug must be a registered project), `cave:path` (CWD project, auto-detected). Path types: relative paths are project-relative (`slug:src/main.py` → `/projects/<slug>/src/main.py`), `~/path` resolves to cave home (no session needed), `/abs/path` resolves inside the session namespace (uses project hint for session selection). No-session project writes go to `saved-upper/` (persists into the next session). No-session project reads check `saved-upper/` first, then fall back to the host source dir.
+- `cp` prefix semantics — two prefixes: `<slug>:path` (slug must be a registered project), `cave:path` (CWD project, auto-detected). Either prefix can include `@N` to target a specific session index (e.g. `slug@2:path`, `cave@1:path`), skipping the interactive session prompt. Path types: relative paths are project-relative (`slug:src/main.py` → `/projects/<slug>/src/main.py`), `~/path` resolves to cave home (no session needed), `/abs/path` resolves inside the session namespace (uses project hint for session selection). No-session project writes go to `saved-upper/` (persists into the next session). No-session project reads check `saved-upper/` first, then fall back to the host source dir.
 
 ## CLI Commands
 
@@ -83,6 +83,7 @@ coding-cave push [project] [--force]   push host commits into cave gitdir
 coding-cave reset [project]            wipe overlay + gitdir to match host (no running sessions)
 coding-cave remove [project]           unregister a project and delete overlay data
 coding-cave cp <src>... <slug>:<path>     copy host files into project
+coding-cave cp <src>... <slug>@N:<path>   copy host files into session @N
 coding-cave cp <src>... cave:<path>       copy host files into CWD project
 coding-cave cp [-f] <slug>:<path> <dest>  copy project files to host (prompts before overwrite)
 coding-cave cp <slug>:~/path <dest>       copy from cave home

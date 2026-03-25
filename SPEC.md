@@ -209,7 +209,7 @@ Two locations make the state obvious: `/projects/` = synced with host, `~/unsync
     coding-cave cp [-f] <project>:~/path <dest>  cave home → host
     coding-cave cp [-R] [-f] <src>... <dest>     -R for directories, -f to skip overwrite prompt
 
-The project slug can be omitted (`cave:path` or `:path`) if CWD is inside a registered project. When multiple sessions are running, `cp` prompts which to use.
+The project slug can be omitted (`cave:path` or `:path`) if CWD is inside a registered project. Either prefix accepts an optional `@N` suffix to target a specific session by index (e.g. `project@2:path`, `cave@1:path`), bypassing the interactive prompt. When multiple sessions are running and no index is given, `cp` prompts which to use.
 
 **Tilde expansion**: paths starting with `~/` or `/home/cave-coder/` resolve to the persistent home directory (`~/.local/share/coding-cave/home/`). Home paths do not require a running session.
 
