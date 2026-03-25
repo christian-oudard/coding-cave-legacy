@@ -114,6 +114,7 @@
       (set-env "LANG" "en_US.UTF-8")
       (try-fwd-env "COLORTERM")
       (try-fwd-env "TERM_PROGRAM")
+      (try-fwd-env "TMUX")
 
       # Git identity: forwarded from host when available (eliminates
       # re-authoring on pull).  Falls back to throwaway identity.

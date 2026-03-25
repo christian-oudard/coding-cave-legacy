@@ -27,7 +27,7 @@ BWRAP_ENV_ALLOWLIST = {
     # Runtime script needs these to function
     "HOME", "PATH", "TERM",
     # Forwarded into cave via try-fwd-env
-    "COLORTERM", "TERM_PROGRAM",
+    "COLORTERM", "TERM_PROGRAM", "TMUX",
     "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY",
     # Git identity (try-fwd-env -> wrap-entry, then unset)
     "CODING_CAVE_GIT_NAME", "CODING_CAVE_GIT_EMAIL",
