@@ -147,20 +147,35 @@ def _start_gateway(port):
         print(f"crinj binary not found: {binary}", file=sys.stderr)
         print("Run 'nix build' to include crinj.", file=sys.stderr)
         return False
+    # Ensure rules file exists (crinj requires it)
+    config_dir = _crinj_config_dir()
+    rules_file = config_dir / "rules.toml"
+    if not rules_file.exists():
+        config_dir.mkdir(parents=True, exist_ok=True)
+        rules_file.write_text("")
     import subprocess, time
+    from . import _state
+    log_path = _state.cave_data() / "crinj.log"
+    log_file = open(log_path, "w")
     proc = subprocess.Popen(
         [binary, "--port", str(port)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=log_file,
+        stderr=log_file,
         start_new_session=True,
     )
     _gateway_pid_file().write_text(str(proc.pid))
     # Wait for it to be ready
     for _ in range(20):
         if _gateway_listening(port):
+            log_file.close()
             return True
         time.sleep(0.25)
+    log_file.close()
     print(f"crinj failed to start (pid {proc.pid})", file=sys.stderr)
+    try:
+        print(log_path.read_text(), file=sys.stderr, end="")
+    except OSError:
+        pass
     return False
 
 def stop_gateway_if_idle():
