@@ -1080,6 +1080,12 @@ def push_project(slug, force=False):
                 if mb.returncode == 0:
                     git_mod.git(gitdir_path, "log", "--oneline",
                          f"{mb.stdout.strip()}..{cave_sha}")
+                # Still update host tracking ref so the cave knows
+                # where the host is (used by _forward_refs to prevent
+                # overwriting pulled commits, and by pull for rewrite
+                # detection).
+                _sync_tracking_ref(gitdir_path, project_dir,
+                    host_sha, branch)
                 any_blocked = True
                 continue
 
