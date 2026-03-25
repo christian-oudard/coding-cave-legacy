@@ -131,7 +131,7 @@ def cmd_shell(args, gpu=False, projects_flag=None, port=None):
         ]
 
     mounted = projects.parse_project_filter(projects_flag, project)
-    lifecycle.start_session(project, command, gpu=gpu, mounted_projects=mounted, port=port)
+    lifecycle.start_session(project, command, gpu=gpu, mounted_projects=mounted, port=port, clipboard=True)
 
 
 def cmd_add(directory=None):

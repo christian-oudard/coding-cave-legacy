@@ -460,6 +460,24 @@ def _mount_project_overlays(sid, overlay_base, loaded_projects):
     return overlay_mounts, bwrap_args
 
 
+def _build_clipboard_args():
+    """Build bwrap args for Wayland clipboard forwarding."""
+    wayland_display = os.environ.get("WAYLAND_DISPLAY", "")
+    xdg_runtime = os.environ.get("XDG_RUNTIME_DIR", "")
+    if not wayland_display or not xdg_runtime:
+        return []
+    socket_path = Path(xdg_runtime) / wayland_display
+    if not socket_path.exists():
+        return []
+    cave_runtime = "/run/user/1000"
+    return [
+        "--perms", "0700", "--tmpfs", cave_runtime,
+        "--ro-bind", str(socket_path), f"{cave_runtime}/{wayland_display}",
+        "--setenv", "XDG_RUNTIME_DIR", cave_runtime,
+        "--setenv", "WAYLAND_DISPLAY", wayland_display,
+    ]
+
+
 def _build_credential_args():
     """Build bwrap args for GPG, proxy CA, gitconfig, and passwd/group."""
     args = []
@@ -592,7 +610,7 @@ def _save_overlay_uppers(overlay_base, loaded_projects):
             pass
 
 
-def start_session(project, command, gpu=False, reuse_index=False, mounted_projects=None, port=None):
+def start_session(project, command, gpu=False, reuse_index=False, mounted_projects=None, port=None, clipboard=False):
     """Start a new bwrap session with per-session overlays.
 
     mounted_projects: dict of slug->source to mount. If None, mounts all.
@@ -624,6 +642,8 @@ def start_session(project, command, gpu=False, reuse_index=False, mounted_projec
     bwrap_args = _build_mirror_args()
     bwrap_args += _apply_user_env(user_env)
     bwrap_args += _build_credential_args()
+    if clipboard:
+        bwrap_args += _build_clipboard_args()
 
     # Mount project overlays (with error cleanup)
     overlay_base = _state.cave_data() / "session-overlays" / sid

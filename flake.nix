@@ -106,6 +106,7 @@
         fuse-overlayfs
         fuse3
         gnupg
+        wl-clipboard
       ] ++ [ pkgs."poppler-utils" pkgs.stdenv.cc.cc.lib caveSend ]))
       (set-env "LD_LIBRARY_PATH" "${pkgs.stdenv.cc.cc.lib}/lib")
       (set-env "TERMINFO_DIRS" "${pkgs.ncurses}/share/terminfo")
