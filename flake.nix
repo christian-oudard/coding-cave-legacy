@@ -20,7 +20,11 @@
     defaultClaudeSettings = ./defaults/claude-settings.json;
     defaultStatusline = ./defaults/statusline.sh;
     systemClaudeMd = ./system-claude.md;
-    ipcSetup = ./ipc_setup.sh;
+    pyteEnv = pkgs.python3.withPackages (ps: [ ps.pyte ]);
+    ipcSetup = pkgs.replaceVars ./ipc_setup.sh {
+      stdinWrapper = ./stdin_wrapper.py;
+      pyteBin = "${pyteEnv}/bin/python3";
+    };
     version = self.shortRev or self.dirtyShortRev or "dev";
 
     # IPC: message sender (available inside cave)

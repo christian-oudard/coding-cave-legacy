@@ -484,14 +484,26 @@ def _pull_branch_current(slug, project_dir, gitdir_path, branch, cave_sha,
             capture_output=True,
         )
         if ls_ancestor.returncode != 0:
-            # Check if host just rolled back (host HEAD is still an
-            # ancestor of last_synced).  This is safe to pull without
-            # --force: the host went backwards, the cave moved forward.
+            # Host rolled back: host HEAD is an ancestor of last_synced.
+            # Don't silently re-apply commits the user removed.
             host_behind = subprocess.run(
                 host_git + ["merge-base", "--is-ancestor", "HEAD", last_synced],
                 capture_output=True,
             )
             if host_behind.returncode == 0:
+                if not force:
+                    rolled = _parse_log(host_git, f"HEAD..{last_synced}")
+                    print(f"Host rolled back {len(rolled)} commit(s) "
+                          f"since last sync for {slug}:", file=sys.stderr)
+                    for h, tree, subj in rolled:
+                        print(f"  {h} {subj}", file=sys.stderr)
+                    print(f"To push your rollback to the cave:",
+                          file=sys.stderr)
+                    print(f"  coding-cave push --force", file=sys.stderr)
+                    print(f"To undo your rollback (re-apply cave commits):",
+                          file=sys.stderr)
+                    print(f"  coding-cave pull --force", file=sys.stderr)
+                    return None
                 stash_result = subprocess.run(
                     host_git + ["stash", "--include-untracked"],
                     capture_output=True, text=True,
@@ -505,8 +517,8 @@ def _pull_branch_current(slug, project_dir, gitdir_path, branch, cave_sha,
                 if stashed:
                     _stash_pop_or_warn(host_git, project_dir)
                 entries = _parse_log(host_git, f"{host_head}..HEAD")
-                print(f"Pulled {slug} ({len(entries)} commit(s), "
-                      f"host was behind last sync).", file=sys.stderr)
+                print(f"Force-pulled {slug} ({len(entries)} commit(s), "
+                      f"undoing host rollback).", file=sys.stderr)
                 for h, tree, subj in entries:
                     print(f"  {h} {subj}", file=sys.stderr)
                 return subprocess.run(
@@ -609,9 +621,27 @@ def _pull_branch_current(slug, project_dir, gitdir_path, branch, cave_sha,
     )
     stashed = stash_result.returncode == 0 and "No local changes" not in stash_result.stdout
 
+    # Use refs/pulled as rebase base when available, so we only rebase
+    # commits newer than what was previously pulled.  Falls back to
+    # merge_base for the first pull or when refs/pulled is missing.
+    rebase_base = merge_base
+    pulled_ref = git_mod.git(gitdir_path, "rev-parse",
+        f"refs/pulled/{branch}",
+        capture_output=True, text=True)
+    if pulled_ref.returncode == 0:
+        pulled_sha = pulled_ref.stdout.strip()
+        # Verify refs/pulled is an ancestor of cave_sha (sanity check)
+        is_anc = subprocess.run(
+            host_git + ["merge-base", "--is-ancestor",
+                        pulled_sha, "FETCH_HEAD"],
+            capture_output=True,
+        )
+        if is_anc.returncode == 0:
+            rebase_base = pulled_sha
+
     subprocess.run(host_git + ["branch", "-f", "_cave_pull", "FETCH_HEAD"], check=True, capture_output=True)
     rebase_cmd = host_git + [
-        "rebase", "--onto", branch, merge_base, "_cave_pull",
+        "rebase", "--onto", branch, rebase_base, "_cave_pull",
         "--no-reapply-cherry-picks", "--empty=stop",
     ]
     result = subprocess.run(rebase_cmd, capture_output=True)
