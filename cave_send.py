@@ -148,22 +148,35 @@ def hook():
 
 # --- session listing ---
 
-def resolve_index(index):
-    """Resolve a session index (e.g. '4' or '#4') to (sid, sock_path).
+def resolve_target(target):
+    """Resolve a target to (sid, meta_path).
 
-    When multiple sessions share the same index (stale + fresh),
-    returns the newest one by start time.
+    Accepted formats:
+      - "project#N"          — canonical format (e.g. "crinj#1")
+      - full session ID      — used directly (e.g. "1774405140-397747")
+
+    When multiple sessions match, returns the newest by start time.
     """
-    index = str(index).lstrip("#")
-    best_sid, best_started = None, 0
-    for sid, meta in list_sessions():
-        if meta.get("index") == index:
+    target = str(target)
+    if "#" in target:
+        project, index = target.split("#", 1)
+        if not project:
+            return None, None
+        best_sid, best_started = None, 0
+        for sid, meta in list_sessions():
+            if meta.get("index") != index:
+                continue
+            if meta.get("project") != project:
+                continue
             started = meta.get("started", 0)
             if started >= best_started:
                 best_sid, best_started = sid, started
-    if best_sid:
-        return best_sid, str(IPC_DIR / f"{best_sid}.json")
-    return None, None
+        if best_sid:
+            return best_sid, str(IPC_DIR / f"{best_sid}.json")
+        return None, None
+
+    # Full session ID
+    return target, str(IPC_DIR / f"{target}.json")
 
 
 def _session_alive(lock_path):
@@ -209,6 +222,8 @@ def list_sessions():
             # Stale session, clean up
             meta_path.unlink(missing_ok=True)
             lock_path.unlink(missing_ok=True)
+            msg_path = MSG_DIR / f"{sid}.jsonl"
+            msg_path.unlink(missing_ok=True)
             continue
         sessions.append((sid, meta))
     return sessions
@@ -267,12 +282,10 @@ def main():
         return
 
     target = sys.argv[1]
-    sid, _ = resolve_index(target)
-    if sid is None and (target.startswith("#") or target.isdigit()):
-        print(f"No session with index {target}", file=sys.stderr)
+    sid, _ = resolve_target(target)
+    if sid is None:
+        print(f"No session matching '{target}'", file=sys.stderr)
         sys.exit(1)
-    elif sid is None:
-        sid = target
 
     if len(sys.argv) >= 3:
         message = " ".join(sys.argv[2:])

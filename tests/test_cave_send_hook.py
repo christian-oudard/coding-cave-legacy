@@ -123,7 +123,7 @@ class TestQueueBasedSend:
         }
         try:
             result = subprocess.run(
-                [sys.executable, SEND, "2", "hello from sender"],
+                [sys.executable, SEND, "myproj#2", "hello from sender"],
                 capture_output=True, text=True, env=env,
             )
             assert result.returncode == 0
@@ -151,7 +151,7 @@ class TestQueueBasedSend:
         env["HOME"] = str(tmp_path)
         try:
             result = subprocess.run(
-                [sys.executable, SEND, "1", "hello from host"],
+                [sys.executable, SEND, "proj#1", "hello from host"],
                 capture_output=True, text=True, env=env,
             )
             assert result.returncode == 0
@@ -169,7 +169,7 @@ class TestInjectCaveSendHooks:
         from coding_cave.lifecycle import _inject_cave_send_hooks
         settings = {}
         _inject_cave_send_hooks(settings)
-        for event in ("Stop", "PostToolUse"):
+        for event in ("Stop", "PostToolUse", "UserPromptSubmit"):
             entries = settings["hooks"][event]
             assert len(entries) == 1
             assert entries[0]["matcher"] == ""
@@ -199,7 +199,7 @@ class TestInjectCaveSendHooks:
         settings = {}
         _inject_cave_send_hooks(settings)
         _inject_cave_send_hooks(settings)
-        for event in ("Stop", "PostToolUse"):
+        for event in ("Stop", "PostToolUse", "UserPromptSubmit"):
             hooks = settings["hooks"][event][0]["hooks"]
             cave_hooks = [h for h in hooks if h["command"] == "cave-send hook"]
             assert len(cave_hooks) == 1

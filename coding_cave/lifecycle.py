@@ -266,7 +266,7 @@ def _setup_nix_store(sid, inside_cave):
 
 
 _CAVE_SEND_HOOK = {"type": "command", "command": "cave-send hook"}
-_CAVE_SEND_HOOK_EVENTS = ("Stop", "PostToolUse")
+_CAVE_SEND_HOOK_EVENTS = ("Stop", "PostToolUse", "UserPromptSubmit")
 
 
 def _inject_cave_send_hooks(settings):

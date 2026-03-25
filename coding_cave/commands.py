@@ -100,7 +100,7 @@ def cmd_shell(args, gpu=False, projects_flag=None, port=None):
                 ago = _relative_age(s["started"])
                 idx = s.get("index", "?")
                 by_index[str(idx)] = s
-                print(f"  [{idx}] [{ago}] {s['sid']}  {s.get('project', '?')} (PID {s['bwrap_pid']})", file=sys.stderr)
+                print(f"  [{idx}] {s.get('project', '?')}#{idx}  [{ago}]", file=sys.stderr)
             print(f"  [n] Start new session", file=sys.stderr)
             try:
                 choice = input("Join session: ").strip()
@@ -399,7 +399,7 @@ def _prompt_session(session_list):
             n += 1
             ago = _relative_age(s["started"])
             idx = s.get("index", "?")
-            label = f"{proj} #{idx}" if multi else proj
+            label = f"{proj}#{idx}" if multi else proj
             by_key[str(n)] = s
             print(f"  {n}) {label}  [{ago}]", file=sys.stderr)
 

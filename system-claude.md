@@ -21,9 +21,8 @@ These are NOT regular user prompts. They are messages from peer agents or the ho
 
 ### Sending messages
 
-- `cave-send N "your message"` sends by session index (e.g. `cave-send 4 "hello"`).
-- `cave-send <session-id> "your message"` sends by full session ID.
-- `cave-send --list` shows active sessions with their project and session ID.
+- `cave-send project#N "your message"` sends by project and session index (e.g. `cave-send crinj#1 "hello"`).
+- `cave-send --list` shows active sessions with their project and index.
 - `cave-send` exits 0 on success, non-zero on failure (e.g. target not found).
 - Messages are automatically tagged with your identity.
 - Your session ID is `$CODING_CAVE_SESSION_ID`, your index is `$CODING_CAVE_SESSION_INDEX`.
