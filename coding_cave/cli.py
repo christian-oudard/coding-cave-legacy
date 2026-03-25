@@ -24,6 +24,7 @@ def build_parser():
     p_agent.add_argument("-r", "--resume", nargs="?", const=True, default=None, metavar="SESSION_ID", help="resume a conversation by session ID, or interactive picker")
     p_agent.add_argument("-p", "--projects", default=None, metavar="SLUGS", help="projects to mount: 'all', or comma-separated slugs (default: CWD project only)")
     p_shell = sub.add_parser("shell", help="start a shell or join a running session")
+    p_shell.add_argument("session", nargs="?", default=None, metavar="PROJECT@N", help="join session by project@index (e.g. coding-cave@2)")
     p_shell.add_argument("--port", default=None, metavar="PORTS", help="expose cave ports on host: PORT[,PORT,...] or 'auto'")
     p_shell.add_argument("-p", "--projects", default=None, metavar="SLUGS", help="projects to mount: 'all', or comma-separated slugs (default: CWD project only)")
 
@@ -84,7 +85,7 @@ def main():
     elif parsed.command == "agent":
         commands.cmd_agent([], gpu=parsed.gpu, continue_session=parsed.continue_session, resume=parsed.resume, claude_args=claude_args, projects_flag=parsed.projects, port=port)
     elif parsed.command == "shell":
-        commands.cmd_shell(claude_args, gpu=parsed.gpu, projects_flag=parsed.projects, port=port)
+        commands.cmd_shell(claude_args, gpu=parsed.gpu, projects_flag=parsed.projects, port=port, session_target=parsed.session)
     elif parsed.command == "add":
         commands.cmd_add(directory=parsed.dir)
     elif parsed.command == "status":

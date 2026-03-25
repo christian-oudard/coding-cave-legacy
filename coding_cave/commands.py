@@ -72,7 +72,7 @@ def cmd_agent(args, gpu=False, continue_session=False, resume=None, claude_args=
                             mounted_projects=mounted, port=port)
 
 
-def cmd_shell(args, gpu=False, projects_flag=None, port=None):
+def cmd_shell(args, gpu=False, projects_flag=None, port=None, session_target=None):
     """Enter cave with a shell -- join existing session or start new."""
     global_config = config.load_global_config()
     config.setup_env(global_config)
@@ -87,20 +87,42 @@ def cmd_shell(args, gpu=False, projects_flag=None, port=None):
 
     workdir = projects.cave_workdir(project)
 
+    # Parse @N from session target (e.g. "coding-cave@2" or just "2")
+    target_index = None
+    if session_target is not None:
+        if "@" in session_target:
+            _, idx_str = session_target.rsplit("@", 1)
+        else:
+            idx_str = session_target
+        try:
+            target_index = int(idx_str)
+        except ValueError:
+            print(f"Invalid session target: {session_target} (expected project@N or N)", file=sys.stderr)
+            sys.exit(1)
+
     # Check for running sessions to join
     active_sessions = sessions.list_sessions(project=project)
     if active_sessions:
-        if len(active_sessions) == 1:
+        by_index = {s.get("index"): s for s in active_sessions}
+
+        if target_index is not None:
+            s = by_index.get(target_index)
+            if s is None:
+                print(f"No session @{target_index} for {project}.", file=sys.stderr)
+                sys.exit(1)
+            print(f"Joining {s.get('project', '?')}@{target_index}.", file=sys.stderr)
+            lifecycle.enter_session(s, preferred_shell, workdir=workdir)
+        elif len(active_sessions) == 1:
             s0 = active_sessions[0]
             print(f"Joining {s0.get('project', '?')}@{s0.get('index', '?')}.", file=sys.stderr)
-            lifecycle.enter_session(active_sessions[0], preferred_shell, workdir=workdir)
+            lifecycle.enter_session(s0, preferred_shell, workdir=workdir)
         else:
             print("Running sessions:", file=sys.stderr)
-            by_index = {}
+            by_idx_str = {}
             for s in sorted(active_sessions, key=lambda s: s.get("index", 0)):
                 ago = _relative_age(s["started"])
                 idx = s.get("index", "?")
-                by_index[str(idx)] = s
+                by_idx_str[str(idx)] = s
                 print(f"  [{idx}] {s.get('project', '?')}@{idx}  [{ago}]", file=sys.stderr)
             print(f"  [n] Start new session", file=sys.stderr)
             try:
@@ -109,8 +131,8 @@ def cmd_shell(args, gpu=False, projects_flag=None, port=None):
                 return
             if choice == "n":
                 pass  # fall through to start new
-            elif choice in by_index:
-                lifecycle.enter_session(by_index[choice], preferred_shell, workdir=workdir)
+            elif choice in by_idx_str:
+                lifecycle.enter_session(by_idx_str[choice], preferred_shell, workdir=workdir)
             else:
                 print("Invalid choice.", file=sys.stderr)
                 sys.exit(1)
