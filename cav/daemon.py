@@ -34,6 +34,7 @@ def start(agent_id: str, shared_repos: list[tuple[Path, str]]) -> tuple[subproce
     Returns (socat_process, base_dir) for cleanup.
     """
     port = _agent_port(agent_id)
+    _kill_stale_listener(port)
     base_dir = Path(tempfile.mkdtemp(prefix=f"cav-daemon-{agent_id}-"))
 
     for repo_path, slug in shared_repos:
@@ -54,7 +55,7 @@ def start(agent_id: str, shared_repos: list[tuple[Path, str]]) -> tuple[subproce
         },
     )
 
-    if not _wait_for_port(port):
+    if not _wait_for_port(port, proc=proc):
         proc.kill()
         shutil.rmtree(base_dir, ignore_errors=True)
         raise SystemExit(f"Git daemon failed to start on port {port}")
@@ -87,9 +88,63 @@ def remote_url(agent_id: str, slug: str) -> str:
     return f"git://127.0.0.1:{port}/{slug}"
 
 
-def _wait_for_port(port: int, timeout: float = 5.0) -> bool:
+def _kill_stale_listener(port: int) -> None:
+    """Kill any process listening on this port (stale daemon from a previous session)."""
+    try:
+        with open("/proc/net/tcp") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) < 10:
+                    continue
+                local = parts[1]
+                if ":" not in local:
+                    continue
+                state = parts[3]
+                if state != "0A":  # 0A = LISTEN
+                    continue
+                lport = int(local.split(":")[1], 16)
+                if lport != port:
+                    continue
+                inode = int(parts[9])
+                _kill_by_inode(inode)
+                return
+    except (FileNotFoundError, ValueError):
+        pass
+
+
+def _kill_by_inode(inode: int) -> None:
+    """Find and kill the process owning a socket inode."""
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            for fd in (entry / "fd").iterdir():
+                try:
+                    target = os.readlink(fd)
+                except OSError:
+                    continue
+                if target == f"socket:[{inode}]":
+                    pid = int(entry.name)
+                    os.kill(pid, signal.SIGTERM)
+                    # Wait briefly for it to exit
+                    for _ in range(10):
+                        try:
+                            os.kill(pid, 0)
+                        except ProcessLookupError:
+                            return
+                        time.sleep(0.1)
+                    os.kill(pid, signal.SIGKILL)
+                    return
+        except (PermissionError, FileNotFoundError, ProcessLookupError):
+            continue
+
+
+def _wait_for_port(port: int, timeout: float = 5.0,
+                   proc: subprocess.Popen | None = None) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
+        if proc and proc.poll() is not None:
+            return False  # process died
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             if s.connect_ex(("127.0.0.1", port)) == 0:
                 return True
