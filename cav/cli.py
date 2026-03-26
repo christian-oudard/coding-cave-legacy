@@ -165,17 +165,7 @@ def cmd_remove_agent(args):
     base = find_repo_root()
     require_init(base)
 
-    # Accept "@4" or "coding-cave@4"
-    spec = args.agent_id
-    if "@" not in spec:
-        raise SystemExit(f"Invalid format '{spec}'. Use @<n> or <project>@<n>.")
-    project_part, agent_id = spec.rsplit("@", 1)
-    if project_part and project_part != config.project_slug(base):
-        raise SystemExit(
-            f"Project mismatch: expected '{config.project_slug(base)}', got '{project_part}'."
-        )
-    if not config.AGENT_ID_RE.match(agent_id):
-        raise SystemExit(f"Invalid agent ID in '{spec}'.")
+    agent_id = config.parse_agent_spec(args.agent_id, base)
 
     if config.is_agent_running(base, agent_id):
         raise SystemExit(f"Agent {agent_id} is running. Stop it first.")
@@ -221,8 +211,9 @@ def cmd_version(args):
 def cmd_status(args):
     base = find_repo_root()
     require_init(base)
+    agent_id = config.parse_agent_spec(args.agent, base) if args.agent else None
     from .status import status
-    status(base, verbose=args.verbose)
+    status(base, verbose=args.verbose, agent_filter=agent_id)
 
 
 def main():
@@ -256,8 +247,9 @@ def main():
     p_push = sub.add_parser("push", help="Push current branch to cave")
     p_push.add_argument("--force", action="store_true", help="Force push")
 
-    # cav status
+    # cav status [@n]
     p_status = sub.add_parser("status", help="Show agent branch status")
+    p_status.add_argument("agent", nargs="?", help="Agent to show (e.g. @1)")
     p_status.add_argument("-v", "--verbose", action="store_true", help="Show all agents including idle/paused")
 
     # cav remove-agent <@n or project@n>

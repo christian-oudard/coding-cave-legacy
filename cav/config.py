@@ -37,6 +37,20 @@ def display_name(base: Path, agent_id: str) -> str:
     return f"{project_slug(base)}@{agent_id}"
 
 
+def parse_agent_spec(spec: str, base: Path) -> str:
+    """Parse '@4' or 'project@4' into agent_id. Raises SystemExit on bad input."""
+    if "@" not in spec:
+        raise SystemExit(f"Invalid format '{spec}'. Use @<n> or <project>@<n>.")
+    project_part, agent_id = spec.rsplit("@", 1)
+    if project_part and project_part != project_slug(base):
+        raise SystemExit(
+            f"Project mismatch: expected '{project_slug(base)}', got '{project_part}'."
+        )
+    if not AGENT_ID_RE.match(agent_id):
+        raise SystemExit(f"Invalid agent ID in '{spec}'.")
+    return agent_id
+
+
 # -- Project-level paths (inside the project repo) --
 
 def cav_dir(base: Path) -> Path:
