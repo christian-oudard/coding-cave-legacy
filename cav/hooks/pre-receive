@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+"""Pre-receive hook for cave bare repo.
+
+Enforces Coding Cave branch protection:
+- Shared branches: agents can only fast-forward push.
+- Agent branches: only the matching agent (or user) can push.
+
+Agent identity: CAV_AGENT_ID env var (server-controlled, set by daemon
+wrapper). Falls back to push options for non-daemon environments (tests).
+No identity = user (unrestricted).
+"""
+
+import os
+import re
+import subprocess
+import sys
+
+AGENT_BRANCH_RE = re.compile(r"^agent-(\d+)/(.+)$")
+ZERO_SHA = "0" * 40
+
+
+def get_agent_name() -> str | None:
+    """Extract agent identity. Prefers server-controlled CAV_AGENT_ID,
+    falls back to push options for non-daemon environments."""
+    agent = os.environ.get("CAV_AGENT_ID")
+    if agent:
+        return agent
+    count = int(os.environ.get("GIT_PUSH_OPTION_COUNT", "0"))
+    for i in range(count):
+        opt = os.environ.get(f"GIT_PUSH_OPTION_{i}", "")
+        if opt.startswith("agent="):
+            return opt[len("agent="):]
+    return None
+
+
+def is_fast_forward(old_sha: str, new_sha: str) -> bool:
+    """Check if old_sha is an ancestor of new_sha."""
+    result = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", old_sha, new_sha],
+        capture_output=True,
+    )
+    return result.returncode == 0
+
+
+def check_ref(old_sha: str, new_sha: str, ref: str, agent: str | None) -> str | None:
+    """Returns an error message if the push should be rejected, else None."""
+    # Strip refs/heads/ prefix
+    if ref.startswith("refs/heads/"):
+        branch = ref[len("refs/heads/"):]
+    else:
+        return None  # Not a branch ref, allow
+
+    # User can do anything
+    if agent is None:
+        return None
+
+    m = AGENT_BRANCH_RE.match(branch)
+
+    if m:
+        # Agent branch: only matching agent can push
+        branch_agent = m.group(1)
+        if agent != branch_agent:
+            return (
+                f"REJECTED: Agent {agent} cannot push to '{branch}'.\n"
+                f"You may only push to branches matching '*/agent-{agent}'."
+            )
+        return None
+    else:
+        # Shared branch: agent can only fast-forward
+        if old_sha == ZERO_SHA:
+            return f"REJECTED: Agent {agent} cannot create shared branch '{branch}'."
+        if new_sha == ZERO_SHA:
+            # Deleting a branch, reject for agents
+            return f"REJECTED: Agent {agent} cannot delete shared branch '{branch}'."
+        if not is_fast_forward(old_sha, new_sha):
+            return (
+                f"REJECTED: Non-fast-forward push to '{branch}' by agent {agent}.\n"
+                f"Fetch the latest '{branch}' and rebase before pushing:\n"
+                f"  git fetch cave\n"
+                f"  git rebase cave/{branch}"
+            )
+        return None
+
+
+def main():
+    agent = get_agent_name()
+    errors = []
+
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        old_sha, new_sha, ref = line.split()
+        err = check_ref(old_sha, new_sha, ref, agent)
+        if err:
+            errors.append(err)
+
+    if errors:
+        for err in errors:
+            print(err, file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
