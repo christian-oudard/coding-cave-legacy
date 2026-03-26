@@ -274,6 +274,8 @@ def main():
     argv = sys.argv[1:]
     if not argv:
         argv = ["agent"]
+    elif argv[0] == "help":
+        argv = argv[1:] + ["--help"] if len(argv) > 1 else ["--help"]
     elif argv[0] not in subcmds | {"-h", "--help"}:
         argv = ["agent"] + argv
     args = parser.parse_args(argv)
