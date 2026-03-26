@@ -209,7 +209,13 @@ def cmd_remove_agent(args):
 
 
 def cmd_version(args):
-    print(f"cav @VERSION@ (@VERSION_DATE@)")
+    ts = "@VERSION_DATE@"
+    if ts.isdigit():
+        from datetime import datetime
+        dt = datetime.fromtimestamp(int(ts))
+        print(f"cav @VERSION@ ({dt:%Y-%m-%d %H:%M})")
+    else:
+        print(f"cav @VERSION@ ({ts})")
 
 
 def cmd_status(args):

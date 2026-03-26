@@ -294,10 +294,7 @@
               # Embed version and sandbox binary path
               substituteInPlace $out/lib/cav/cli.py \
                 --replace-fail "@VERSION@" "${self.shortRev or "dev"}" \
-                --replace-fail "@VERSION_DATE@" "${let d = self.lastModifiedDate or "unknown"; in
-                  if d == "unknown" then d
-                  else "${builtins.substring 0 4 d}-${builtins.substring 4 2 d}-${builtins.substring 6 2 d} ${builtins.substring 8 2 d}:${builtins.substring 10 2 d}"
-                }"
+                --replace-fail "@VERSION_DATE@" "${toString (self.lastModified or 0)}"
               substituteInPlace $out/lib/cav/sandbox.py \
                 --replace-fail "@SANDBOX_BIN@" "${sandbox}/bin/coding-cave" \
                 --replace-fail "@CAV_BIN@" "$out/bin"
