@@ -233,6 +233,7 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
     # Ensure post-commit hook is installed in all workspaces (idempotent)
     _post_commit_hook = (
         "#!/bin/sh\n"
+        "git fetch cave >/dev/null 2>&1 || true\n"
         "git push cave HEAD >/dev/null 2>&1 || true\n"
     )
     for ws, _, _ in workspaces:
@@ -246,6 +247,20 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
         url = daemon.remote_url(agent_id, slug)
         git.git("remote", "set-url", config.SHARED_REMOTE, url,
                 cwd=ws, echo=False)
+
+    # Sync: fetch latest and fast-forward local shared branches
+    for ws, _, _ in workspaces:
+        git.git("fetch", config.SHARED_REMOTE, cwd=ws, echo=False, check=False,
+                capture=True)
+        current = git.current_branch(cwd=ws)
+        for branch in git.remote_branches(config.SHARED_REMOTE, cwd=ws):
+            if config.parse_agent_branch(branch):
+                continue
+            if branch == current:
+                continue  # Can't force-update the checked-out branch
+            remote_ref = f"{config.SHARED_REMOTE}/{branch}"
+            git.git("branch", "-f", branch, remote_ref, cwd=ws,
+                    echo=False, check=False, capture=True)
 
     # Build user environment from cave.nix (cached)
     user_env_path = user_env.build()
