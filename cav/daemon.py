@@ -6,9 +6,11 @@ This replaces git daemon, which strips environment variables and prevents
 CAV_AGENT_ID from reaching the pre-receive hook.
 """
 
+import signal
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -79,6 +81,7 @@ def start(agent_id: str, shared_repos: list[tuple[Path, str]]) -> tuple[subproce
         ["socat", f"TCP-LISTEN:{port},fork,reuseaddr",
          f"EXEC:{python_bin} {handler}"],
         start_new_session=True,
+        stderr=subprocess.PIPE,
     )
 
     if not _wait_for_port(port):
@@ -93,9 +96,12 @@ def stop(proc: subprocess.Popen, base_dir: Path):
     """Stop the daemon and clean up."""
     proc.terminate()
     try:
-        proc.wait(timeout=5)
+        _, stderr = proc.communicate(timeout=5)
     except subprocess.TimeoutExpired:
         proc.kill()
+        _, stderr = proc.communicate()
+    if proc.returncode not in (0, -signal.SIGTERM, 128 + signal.SIGTERM):
+        sys.stderr.write(stderr.decode(errors="replace"))
     shutil.rmtree(base_dir, ignore_errors=True)
 
 
