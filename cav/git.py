@@ -63,6 +63,33 @@ def short_sha(ref: str, cwd=None) -> str:
     return git_output("rev-parse", "--short", ref, cwd=cwd)
 
 
+def has_merge_base(ref_a: str, ref_b: str, cwd=None) -> bool:
+    """Check if two refs share a common ancestor."""
+    r = git("merge-base", ref_a, ref_b, cwd=cwd, check=False, capture=True, echo=False)
+    return r.returncode == 0
+
+
+def cherry_undelivered(upstream: str, head: str, cwd=None) -> list[str]:
+    """Return oneline list of commits in head not yet in upstream (by patch-id).
+
+    Uses git cherry to filter out commits whose patches are already applied,
+    even under different SHAs (e.g. after rebase/cherry-pick).
+    """
+    out = git_output("cherry", "-v", upstream, head, cwd=cwd)
+    if not out:
+        return []
+    lines = []
+    for line in out.splitlines():
+        if line.startswith("+ "):
+            # Format: "+ <sha> <subject>" -> "<short_sha> <subject>"
+            parts = line[2:].split(" ", 1)
+            sha_short = parts[0][:7]
+            subject = parts[1] if len(parts) > 1 else ""
+            lines.append(f"{sha_short} {subject}")
+    return lines
+
+
+
 def commit_oneline(range_spec: str, exclude: list[str] | None = None, cwd=None) -> list[str]:
     """Return commit lines in --oneline format for a range (newest first)."""
     args = ["log", "--oneline", range_spec]

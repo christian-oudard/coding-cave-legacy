@@ -161,7 +161,7 @@ def cmd_push(args):
 
 
 def cmd_remove_agent(args):
-    import shutil
+    from .status import _remove_agent
     base = find_repo_root()
     require_init(base)
 
@@ -183,39 +183,28 @@ def cmd_remove_agent(args):
     # Find remote branches belonging to this agent
     branches = git.remote_branches(config.SHARED_REMOTE, cwd=base)
     agent_branches = [
-        (b, parsed[0])
-        for b in branches
+        b for b in branches
         if (parsed := config.parse_agent_branch(b)) and parsed[1] == agent_id
     ]
 
-    # Warn about undelivered work but proceed anyway
-    for branch, target in agent_branches:
-        remote_agent = f"{config.SHARED_REMOTE}/{branch}"
+    # Warn about undelivered work (using cherry for accuracy)
+    for b in agent_branches:
+        parsed = config.parse_agent_branch(b)
+        if not parsed:
+            continue
+        target = parsed[0]
+        remote_agent = f"{config.SHARED_REMOTE}/{b}"
         target_ref = f"{config.SHARED_REMOTE}/{target}"
         try:
-            ahead = git.commits_ahead(remote_agent, target_ref, cwd=base)
-            if ahead > 0:
-                n = "commit" if ahead == 1 else "commits"
-                print(f"Warning: discarding {ahead} undelivered {n} on {branch}.")
+            if git.has_merge_base(remote_agent, target_ref, cwd=base):
+                lines = git.cherry_undelivered(target_ref, remote_agent, cwd=base)
+                if lines:
+                    n = "commit" if len(lines) == 1 else "commits"
+                    print(f"Warning: discarding {len(lines)} undelivered {n} on {b}.")
         except Exception:
             pass
 
-    # Delete remote branches
-    for branch, _ in agent_branches:
-        git.git("push", config.SHARED_REMOTE, f":refs/heads/{branch}", cwd=base)
-
-    # Clean up lock, session, and worktree
-    slug = config.project_slug(base)
-    for path in [
-        config.agent_lock_dir(slug) / f"{agent_id}.lock",
-        config.agent_session_file(slug, agent_id),
-    ]:
-        if path.exists():
-            path.unlink()
-    ws = config.worktree_dir(slug, agent_id)
-    if ws.exists():
-        shutil.rmtree(ws)
-
+    _remove_agent(base, agent_id, agent_branches)
     print(f"Removed {config.display_name(base, agent_id)}.")
 
 
@@ -227,7 +216,7 @@ def cmd_status(args):
     base = find_repo_root()
     require_init(base)
     from .status import status
-    status(base)
+    status(base, verbose=args.verbose)
 
 
 def main():
@@ -262,7 +251,8 @@ def main():
     p_push.add_argument("--force", action="store_true", help="Force push")
 
     # cav status
-    sub.add_parser("status", help="Show agent branch status")
+    p_status = sub.add_parser("status", help="Show agent branch status")
+    p_status.add_argument("-v", "--verbose", action="store_true", help="Show all agents including idle/paused")
 
     # cav remove-agent <@n or project@n>
     p_rm = sub.add_parser("remove-agent", help="Remove a paused agent and its branches")

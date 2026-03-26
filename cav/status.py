@@ -1,5 +1,6 @@
 """cav status: show what's happening in the cave."""
 
+import shutil
 import time
 from pathlib import Path
 
@@ -18,7 +19,24 @@ def _format_age(timestamp: float) -> str:
     return f"{delta // 86400}d ago"
 
 
-def status(base: Path):
+def _remove_agent(base: Path, agent_id: str, branches: list[str]):
+    """Remove an agent's remote branches and local state."""
+    for branch in branches:
+        git.git("push", config.SHARED_REMOTE, f":refs/heads/{branch}",
+                cwd=base, echo=False, capture=True)
+    slug = config.project_slug(base)
+    for path in [
+        config.agent_lock_dir(slug) / f"{agent_id}.lock",
+        config.agent_session_file(slug, agent_id),
+    ]:
+        if path.exists():
+            path.unlink()
+    ws = config.worktree_dir(slug, agent_id)
+    if ws.exists():
+        shutil.rmtree(ws)
+
+
+def status(base: Path, verbose: bool = False):
     git.git("fetch", "--prune", config.SHARED_REMOTE, cwd=base)
     print()
 
@@ -34,7 +52,7 @@ def status(base: Path):
 
     if local_sha and remote_sha:
         if local_sha == remote_sha:
-            print(f"{local_branch} up to date with {remote_ref}.")
+            print(f"{local_branch} is up to date with {remote_ref}.")
         else:
             ahead = git.commits_ahead(remote_ref, local_branch, cwd=base)
             if ahead > 0:
@@ -63,31 +81,33 @@ def status(base: Path):
     for branch, target, agent_id in sorted(agent_branches):
         by_agent.setdefault(agent_id, []).append((branch, target))
 
-    # Map agent_id -> remote ref (for excluding sibling agent commits)
-    agent_ref = {
-        agent_id: f"{config.SHARED_REMOTE}/{branch}"
-        for branch, target, agent_id in agent_branches
-    }
-
+    hidden = []
+    pruned = []
     for agent_id in sorted(by_agent, key=int):
         branches = by_agent[agent_id]
         name = config.display_name(base, agent_id)
         running = config.is_agent_running(base, agent_id)
-        other_agents = [ref for aid, ref in agent_ref.items() if aid != agent_id]
 
-        # Collect undelivered work across all branches for this agent,
-        # excluding commits already reachable from other agents
         undelivered = []
+        orphaned = []
         for branch, target in branches:
             remote_agent = f"{config.SHARED_REMOTE}/{branch}"
             target_ref = f"{config.SHARED_REMOTE}/{target}"
             try:
-                ahead = git.commits_ahead(remote_agent, target_ref, exclude=other_agents, cwd=base)
+                if git.has_merge_base(remote_agent, target_ref, cwd=base):
+                    lines = git.cherry_undelivered(target_ref, remote_agent, cwd=base)
+                    if lines:
+                        undelivered.append((branch, len(lines), lines))
+                else:
+                    orphaned.append(branch)
             except Exception:
-                ahead = 0
-            if ahead > 0:
-                lines = git.commit_oneline(f"{target_ref}..{remote_agent}", exclude=other_agents, cwd=base)
-                undelivered.append((branch, ahead, lines))
+                pass
+
+        # Auto-prune orphaned non-running agents
+        if orphaned and not running and not undelivered:
+            _remove_agent(base, agent_id, orphaned)
+            pruned.append(name)
+            continue
 
         total_ahead = sum(a for _, a, _ in undelivered)
 
@@ -102,6 +122,10 @@ def status(base: Path):
         else:
             state = "idle"
 
+        if not undelivered and not running:
+            hidden.append(name)
+            continue
+
         if not undelivered:
             print(f"{name}  ({state})")
         else:
@@ -110,3 +134,17 @@ def status(base: Path):
                 print(f"{name}  ({state}) {ahead} undelivered {n} on {branch}")
                 for line in lines:
                     print(f"  {line}")
+
+    if hidden:
+        if verbose:
+            for name in hidden:
+                print(f"{name}  (idle)")
+        else:
+            n = len(hidden)
+            s = "session" if n == 1 else "sessions"
+            print(f"{n} idle {s} not shown. Use -v to list.")
+
+    if pruned:
+        n = len(pruned)
+        s = "session" if n == 1 else "sessions"
+        print(f"Pruned {n} orphaned {s}: {', '.join(pruned)}")
