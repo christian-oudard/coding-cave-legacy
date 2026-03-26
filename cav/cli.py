@@ -87,9 +87,14 @@ def cmd_agent(args):
         return config.is_session_expired(base, aid)
 
     if args.resume_session:
-        # Route --resume to the agent that owns this session, not just most-recent
+        # Route --resume to the agent that owns this session
         slug = config.project_slug(base)
         owner = config.find_agent_by_session(slug, args.resume_session)
+        if owner is None:
+            raise SystemExit(
+                f"No agent owns session {args.resume_session}.\n"
+                f"Use --continue to resume the most recent agent instead."
+            )
         agent_id, lock_fd = config.continue_agent_id(base, owner)
         session_id = args.resume_session
     elif args.continue_agent:

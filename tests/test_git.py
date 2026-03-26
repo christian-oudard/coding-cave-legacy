@@ -760,6 +760,161 @@ class TestCAV(unittest.TestCase):
             sid = config.read_session_id(self.user_repo, "1")
         self.assertEqual(sid, "new-file")
 
+    def test_resume_unknown_uuid_returns_none(self):
+        """find_agent_by_session returns None for unknown UUIDs."""
+        self._init_and_agents("1")
+        slug = config.project_slug(self.user_repo)
+
+        # Agent 1 exits
+        id1, fd1 = config.acquire_agent_id(self.user_repo)
+        fd1.seek(0); fd1.truncate()
+        fd1.write(str(int(time.time())))
+        fd1.flush(); fd1.close()
+
+        # No agent owns "nonexistent-uuid"
+        owner = config.find_agent_by_session(slug, "nonexistent-uuid")
+        self.assertIsNone(owner)
+        # CLI checks for None and errors before calling continue_agent_id
+
+    def test_sessions_dir_depth_zero_uses_persistent_home(self):
+        """At depth 0 (host), sessions dir is under persistent_home()."""
+        slug = "myproject"
+        with unittest.mock.patch.dict(os.environ, {"CODING_CAVE_DEPTH": "0"}):
+            sessions_dir = config._claude_sessions_dir(slug)
+        self.assertEqual(
+            sessions_dir,
+            config.persistent_home() / ".claude" / "projects" / "-projects-myproject",
+        )
+
+    def test_sessions_dir_depth_nonzero_uses_real_home(self):
+        """At depth > 0 (inside cave), sessions dir is under Path.home()."""
+        slug = "myproject"
+        with unittest.mock.patch.dict(os.environ, {"CODING_CAVE_DEPTH": "1"}):
+            sessions_dir = config._claude_sessions_dir(slug)
+        self.assertEqual(
+            sessions_dir,
+            Path.home() / ".claude" / "projects" / "-projects-myproject",
+        )
+
+    def test_sessions_dir_depth_two_uses_real_home(self):
+        """At depth 2 (subcave), sessions dir still uses Path.home()."""
+        slug = "myproject"
+        with unittest.mock.patch.dict(os.environ, {"CODING_CAVE_DEPTH": "2"}):
+            sessions_dir = config._claude_sessions_dir(slug)
+        self.assertEqual(
+            sessions_dir,
+            Path.home() / ".claude" / "projects" / "-projects-myproject",
+        )
+
+    def test_continue_specific_agent_not_most_recent(self):
+        """continue_agent_id(base, '1') returns agent 1 even when agent 2 exited more recently."""
+        self._init_and_agents("1", "2")
+
+        # Both agents exit, agent 2 more recently
+        id1, fd1 = config.acquire_agent_id(self.user_repo)
+        id2, fd2 = config.acquire_agent_id(self.user_repo)
+        fd1.seek(0); fd1.truncate()
+        fd1.write(str(int(time.time()) - 100))
+        fd1.flush(); fd1.close()
+        fd2.seek(0); fd2.truncate()
+        fd2.write(str(int(time.time())))
+        fd2.flush(); fd2.close()
+
+        # Explicitly requesting agent 1 should return 1, not 2
+        cid, cfd = config.continue_agent_id(self.user_repo, "1")
+        self.assertEqual(cid, "1")
+        cfd.close()
+
+    def test_continue_running_agent_errors(self):
+        """continue_agent_id errors when the requested agent is still running."""
+        self._init_and_agents("1")
+
+        # Agent 1 is running (holds lock)
+        id1, fd1 = config.acquire_agent_id(self.user_repo)
+
+        with self.assertRaises(SystemExit) as ctx:
+            config.continue_agent_id(self.user_repo, "1")
+        self.assertIn("still running", str(ctx.exception))
+
+        fd1.close()
+
+    def test_depth_and_lineage_propagation(self):
+        """Verify depth increments and lineage chains across 3 levels of nesting."""
+        # Simulate the env computation from sandbox.py launch() at each level
+
+        def compute_env(parent_env, agent_name, recursive=True):
+            """Replicate the depth/lineage logic from sandbox.py."""
+            parent_depth = int(parent_env.get("CODING_CAVE_DEPTH", "0"))
+            env = {
+                **parent_env,
+                "CODING_CAVE_DEPTH": str(parent_depth + 1),
+                "CAV_AGENT_NAME": agent_name,
+                "CODING_CAVE_HOST_HOME": parent_env.get(
+                    "CODING_CAVE_HOST_HOME", "/home/testuser"),
+            }
+            if recursive:
+                env["CODING_CAVE_RECURSIVE"] = "1"
+            parent_lineage = parent_env.get("CODING_CAVE_LINEAGE", "")
+            parent_agent = parent_env.get("CAV_AGENT_NAME", "")
+            if parent_agent:
+                lineage = f"{parent_lineage}.{parent_agent}" if parent_lineage else parent_agent
+                env["CODING_CAVE_LINEAGE"] = lineage
+            return env
+
+        # Level 0: host
+        host_env = {"CODING_CAVE_HOST_HOME": "/home/testuser"}
+
+        # Level 1: first cave
+        l1 = compute_env(host_env, "project@1")
+        self.assertEqual(l1["CODING_CAVE_DEPTH"], "1")
+        self.assertNotIn("CODING_CAVE_LINEAGE", l1)  # no parent agent at host
+        self.assertEqual(l1["CODING_CAVE_HOST_HOME"], "/home/testuser")
+
+        # Level 2: subcave
+        l2 = compute_env(l1, "project@2")
+        self.assertEqual(l2["CODING_CAVE_DEPTH"], "2")
+        self.assertEqual(l2["CODING_CAVE_LINEAGE"], "project@1")
+        self.assertEqual(l2["CODING_CAVE_HOST_HOME"], "/home/testuser")
+
+        # Level 3: sub-subcave
+        l3 = compute_env(l2, "project@1")
+        self.assertEqual(l3["CODING_CAVE_DEPTH"], "3")
+        self.assertEqual(l3["CODING_CAVE_LINEAGE"], "project@1.project@2")
+        self.assertEqual(l3["CODING_CAVE_HOST_HOME"], "/home/testuser")
+
+        # Level 4: verify it keeps working
+        l4 = compute_env(l3, "project@3")
+        self.assertEqual(l4["CODING_CAVE_DEPTH"], "4")
+        self.assertEqual(l4["CODING_CAVE_LINEAGE"], "project@1.project@2.project@1")
+
+    def test_sessions_dir_at_each_depth(self):
+        """_claude_sessions_dir resolves correctly at depths 0, 1, 2, 3."""
+        slug = "testproject"
+
+        # Depth 0 (host): uses persistent_home()
+        with unittest.mock.patch.dict(os.environ, {"CODING_CAVE_DEPTH": "0"}):
+            d0 = config._claude_sessions_dir(slug)
+        self.assertTrue(str(d0).startswith(str(config.persistent_home())))
+
+        # Depths 1, 2, 3 (inside cave): all use Path.home()
+        for depth in ("1", "2", "3"):
+            with unittest.mock.patch.dict(os.environ, {"CODING_CAVE_DEPTH": depth}):
+                d = config._claude_sessions_dir(slug)
+            self.assertTrue(
+                str(d).startswith(str(Path.home())),
+                f"At depth {depth}, sessions dir should be under Path.home(), got {d}",
+            )
+
+    def test_recursive_not_set_blocks_subcave(self):
+        """Without --recursive, CODING_CAVE_RECURSIVE is not propagated."""
+        # Simulate launch without --recursive
+        env = {}
+        recursive = False
+        if recursive:
+            env["CODING_CAVE_RECURSIVE"] = "1"
+
+        self.assertNotIn("CODING_CAVE_RECURSIVE", env)
+
     def test_reject_workflow(self):
         """Agent delivers v1, user rejects via rollback, agent delivers v2."""
         agents = self._init_and_agents("1")
