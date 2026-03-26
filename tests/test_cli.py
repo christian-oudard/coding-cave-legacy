@@ -96,6 +96,23 @@ class TestInitDefaults(unittest.TestCase):
         self.assertTrue((self.repo / ".coding-cave" / "cave-shared.git").exists())
 
 
+class TestTopLevelHelp(unittest.TestCase):
+    """cav --help shows top-level usage, not agent subcommand."""
+
+    def test_help_flag_shows_all_subcommands(self):
+        result = cav_cli("--help", cwd=PROJECT_ROOT, check=False)
+        self.assertIn("init", result.stdout)
+        self.assertIn("agent", result.stdout)
+        self.assertIn("pull", result.stdout)
+        self.assertIn("push", result.stdout)
+        self.assertIn("status", result.stdout)
+
+    def test_short_help_flag(self):
+        result = cav_cli("-h", cwd=PROJECT_ROOT, check=False)
+        self.assertIn("init", result.stdout)
+        self.assertIn("agent", result.stdout)
+
+
 class TestPullForceGuard(unittest.TestCase):
     """cav pull --force is only allowed on agent branches."""
 

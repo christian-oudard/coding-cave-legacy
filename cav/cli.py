@@ -220,7 +220,7 @@ def cmd_remove_agent(args):
 
 
 def cmd_version(args):
-    print(f"cav @VERSION@")
+    print(f"cav @VERSION@ (@VERSION_DATE@)")
 
 
 def cmd_status(args):
@@ -276,7 +276,9 @@ def main():
     # so check if the first arg looks like a subcommand.
     subcmds = {"init", "agent", "pull", "push", "status", "version", "remove-agent"}
     argv = sys.argv[1:]
-    if not argv or argv[0] not in subcmds:
+    if not argv:
+        argv = ["agent"]
+    elif argv[0] not in subcmds | {"-h", "--help"}:
         argv = ["agent"] + argv
     args = parser.parse_args(argv)
 
