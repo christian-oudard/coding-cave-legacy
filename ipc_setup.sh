@@ -12,9 +12,3 @@ printf '{"sid":"%s","index":"%s","project":"%s","started":%s}\n' \
   "$CODING_CAVE_SESSION_ID" "$CODING_CAVE_SESSION_INDEX" \
   "$(basename "$CODING_CAVE_PROJECT_PATH")" "$(date +%s.%N)" \
   > "$_ipc/$CODING_CAVE_SESSION_ID.json"
-
-# Interpose a pty wrapper so other sessions can inject stdin via FIFO.
-eval "$(@pyteBin@ @stdinWrapper@ "$_ipc/$CODING_CAVE_SESSION_ID.stdin")"
-if [ -n "$STDIN_MUX_SLAVE" ]; then
-  exec 0< "$STDIN_MUX_SLAVE"
-fi
