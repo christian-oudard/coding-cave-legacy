@@ -1035,25 +1035,32 @@ class TestCAV(unittest.TestCase):
         self._init()
         slug = config.project_slug(self.user_repo)
 
-        with unittest.mock.patch.dict(os.environ, {"CODING_CAVE_DEPTH": "0"}):
-            sessions_dir = config._claude_sessions_dir(slug)
-            sessions_dir.mkdir(parents=True, exist_ok=True)
+        # In production, all depths share the same sessions dir (bind-mounted home).
+        # Simulate this by using a fixed sessions dir regardless of depth.
+        sessions_dir = self.data_dir / "test-sessions"
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+        (sessions_dir / "depth1-session.jsonl").write_text("")
+        time.sleep(0.01)
+        (sessions_dir / "depth2-session.jsonl").write_text("")
 
-            # Depth 1 agent 1 captures a session
-            (sessions_dir / "depth1-session.jsonl").write_text("")
-            config.capture_session_id(self.user_repo, "1")
-            depth1_sid = config.read_session_id(self.user_repo, "1")
+        with unittest.mock.patch("cav.config._claude_sessions_dir", return_value=sessions_dir):
+            # Depth 1 agent 1 captures
+            with unittest.mock.patch.dict(os.environ, {"CODING_CAVE_DEPTH": "1"}):
+                snap1 = {"depth2-session": 9999999999.0}
+                config.capture_session_id(self.user_repo, "1", snapshot=snap1)
+                depth1_sid = config.read_session_id(self.user_repo, "1")
             self.assertEqual(depth1_sid, "depth1-session")
 
             # Depth 2 agent 1 captures a different session
-            time.sleep(0.01)
-            (sessions_dir / "depth2-session.jsonl").write_text("")
-            config.capture_session_id(self.user_repo, "1")
+            with unittest.mock.patch.dict(os.environ, {"CODING_CAVE_DEPTH": "2"}):
+                snap2 = {"depth1-session": 9999999999.0}
+                config.capture_session_id(self.user_repo, "1", snapshot=snap2)
+                depth2_sid = config.read_session_id(self.user_repo, "1")
+            self.assertEqual(depth2_sid, "depth2-session")
 
-            # BUG: depth 2's capture overwrites agent 1's session file because
-            # the session file path doesn't include depth.
-            # Depth 1's session should still be intact.
-            depth1_sid_after = config.read_session_id(self.user_repo, "1")
+            # Depth 1's session should still be intact (different lock dir)
+            with unittest.mock.patch.dict(os.environ, {"CODING_CAVE_DEPTH": "1"}):
+                depth1_sid_after = config.read_session_id(self.user_repo, "1")
             self.assertEqual(depth1_sid_after, "depth1-session")
 
     def test_daemon_port_isolated_by_depth(self):

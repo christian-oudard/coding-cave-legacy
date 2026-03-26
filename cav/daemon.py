@@ -30,7 +30,7 @@ def start(agent_id: str, shared_repos: list[tuple[Path, str]]) -> tuple[subproce
     shared_repos: list of (bare_repo_path, slug) tuples.
     Returns (socat_process, base_dir) for cleanup.
     """
-    port = config.DAEMON_BASE_PORT + int(agent_id)
+    port = _agent_port(agent_id)
     base_dir = Path(tempfile.mkdtemp(prefix=f"cav-daemon-{agent_id}-"))
 
     for repo_path, slug in shared_repos:
@@ -99,9 +99,15 @@ def stop(proc: subprocess.Popen, base_dir: Path):
     shutil.rmtree(base_dir, ignore_errors=True)
 
 
+def _agent_port(agent_id: str) -> int:
+    """Port for an agent's git daemon, scoped by depth to avoid collisions."""
+    depth = config.cave_depth()
+    return config.DAEMON_BASE_PORT + depth * 100 + int(agent_id)
+
+
 def remote_url(agent_id: str, slug: str) -> str:
     """Git remote URL for an agent to access a project's bare repo."""
-    port = config.DAEMON_BASE_PORT + int(agent_id)
+    port = _agent_port(agent_id)
     return f"git://127.0.0.1:{port}/{slug}"
 
 

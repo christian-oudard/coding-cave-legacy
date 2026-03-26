@@ -69,7 +69,14 @@ def project_slug(base: Path) -> str:
     return slug or "project"
 
 
+def cave_depth() -> int:
+    return int(os.environ.get("CODING_CAVE_DEPTH", "0"))
+
+
 def agent_lock_dir(slug: str) -> Path:
+    depth = cave_depth()
+    if depth > 0:
+        return DATA_DIR / "locks" / slug / f"d{depth}"
     return DATA_DIR / "locks" / slug
 
 
@@ -106,6 +113,22 @@ def snapshot_sessions(base: Path) -> dict[str, float]:
         return {}
 
 
+def _claimed_sessions(slug: str) -> set[str]:
+    """Return set of session UUIDs already claimed by any agent."""
+    lock_dir = agent_lock_dir(slug)
+    claimed = set()
+    if not lock_dir.exists():
+        return claimed
+    for p in lock_dir.glob("*.session"):
+        try:
+            sid = p.read_text().strip()
+            if sid:
+                claimed.add(sid)
+        except OSError:
+            pass
+    return claimed
+
+
 def capture_session_id(base: Path, agent_id: str,
                        snapshot: dict[str, float] | None = None) -> None:
     """After an agent exits, find the session this agent used and store it.
@@ -113,6 +136,9 @@ def capture_session_id(base: Path, agent_id: str,
     If snapshot (from snapshot_sessions before launch) is provided, finds the
     file that is new or has a newer mtime than the snapshot. Falls back to
     most-recently-modified if no snapshot or no clear winner.
+
+    Excludes sessions already claimed by other agents to avoid collisions
+    when multiple agents launch concurrently.
     """
     slug = project_slug(base)
     sessions_dir = _claude_sessions_dir(slug)
@@ -131,6 +157,12 @@ def capture_session_id(base: Path, agent_id: str,
         ]
         if changed:
             files = changed
+
+    # Exclude sessions already claimed by other agents
+    claimed = _claimed_sessions(slug)
+    unclaimed = [p for p in files if p.stem not in claimed]
+    if unclaimed:
+        files = unclaimed
 
     files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     sid = files[0].stem
