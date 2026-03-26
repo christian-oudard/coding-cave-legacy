@@ -91,9 +91,11 @@ With `--recursive`, the cave can launch subcaves. This exposes `/dev/fuse` insid
 
 ### `cav pull`
 
-Fetches from the cave remote and fast-forward merges into the current branch. Equivalent to `git fetch cave && git merge --ff-only cave/<branch>`. Fails if the branches have diverged.
+Fetches from the cave remote and updates the current branch.
 
-With `--force`, hard-resets the current branch to match the remote. Only allowed on agent branches. Shared branches (main, develop, etc.) cannot be force-pulled, because the host repo is the source of truth for shared branches.
+On **shared branches**, fast-forward merges. Equivalent to `git fetch cave && git merge --ff-only cave/<branch>`. Fails if the branches have diverged. Force-pull is not allowed on shared branches, because the host repo is the source of truth. Use `cav push --force` to correct the cave instead.
+
+On **agent branches**, always hard-resets to the remote agent branch. Agent branches are ephemeral on the host. The cave agent is authoritative, so pull unconditionally accepts the remote version. Shows the agent's commits relative to the target branch.
 
 ### `cav push`
 

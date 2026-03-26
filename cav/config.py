@@ -32,6 +32,16 @@ def parse_agent_branch(branch: str) -> tuple[str, str] | None:
     return None
 
 
+def resolve_target(branch: str) -> str:
+    """Resolve the ultimate shared-branch target of an agent branch.
+    Handles nested agent branches like agent-7/agent-5/main -> main."""
+    while True:
+        parsed = parse_agent_branch(branch)
+        if not parsed:
+            return branch
+        branch = parsed[0]
+
+
 def display_name(base: Path, agent_id: str) -> str:
     """Display name: <slug>@<id>."""
     return f"{project_slug(base)}@{agent_id}"

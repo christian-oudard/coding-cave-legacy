@@ -70,7 +70,8 @@ def status(base: Path, verbose: bool = False, agent_filter: str | None = None):
         parsed = config.parse_agent_branch(branch)
         if not parsed:
             continue
-        target, agent_id = parsed
+        target = config.resolve_target(branch)
+        _, agent_id = parsed
         if agent_filter and agent_id != agent_filter:
             continue
         agent_branches.append((branch, target, agent_id))

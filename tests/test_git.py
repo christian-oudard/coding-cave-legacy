@@ -143,6 +143,14 @@ class TestCAV(unittest.TestCase):
         with self.assertRaises(SystemExit):
             worktree.create(self.user_repo, "bad_name")
 
+    def test_launch_from_agent_branch_rejected(self):
+        """Cannot launch a new agent while on an agent branch."""
+        self._init()
+        git("checkout", "-b", "agent-1/main", cwd=self.user_repo)
+        with self.assertRaises(SystemExit) as ctx:
+            worktree.create(self.user_repo, "2")
+        self.assertIn("agent branch", str(ctx.exception))
+
     def test_auto_agent_id(self):
         """acquire_agent_id auto-assigns 1, 2, 3 when all are locked."""
         self._init()
@@ -270,6 +278,80 @@ class TestCAV(unittest.TestCase):
         log = git_out("log", "--oneline", cwd=self.user_repo)
         self.assertIn("Add feature", log)
         self.assertIn("Update feature", log)
+
+    def test_pull_agent_branch_resets_to_remote(self):
+        """cav pull on an agent branch hard-resets to the remote agent branch."""
+        agents = self._init_and_agents("1")
+        ws = agents["1"]
+
+        # Agent makes a commit and pushes the agent branch
+        (ws / "wip.py").write_text("# v1\n")
+        git("add", "wip.py", cwd=ws)
+        git("commit", "-m", "WIP v1", cwd=ws)
+        git("push", "cave", "agent-1/main", cwd=ws, env=agent_env("1"))
+
+        # User checks out the agent branch
+        git("fetch", "cave", cwd=self.user_repo)
+        git("checkout", "-b", "agent-1/main", "cave/agent-1/main", cwd=self.user_repo)
+
+        # User makes a local commit (simulating divergence)
+        (self.user_repo / "local.py").write_text("# local\n")
+        git("add", "local.py", cwd=self.user_repo)
+        git("commit", "-m", "Local change", cwd=self.user_repo)
+
+        # Agent amends and force-pushes (rewrites history)
+        (ws / "wip.py").write_text("# v2\n")
+        git("add", "wip.py", cwd=ws)
+        git("commit", "--amend", "-m", "WIP v2", cwd=ws)
+        git("push", "--force", "cave", "agent-1/main", cwd=ws, env=agent_env("1"))
+
+        # cav pull should reset to remote, discarding local divergence
+        cav_cli("pull", cwd=self.user_repo)
+
+        log = git_out("log", "--oneline", cwd=self.user_repo)
+        self.assertIn("WIP v2", log)
+        self.assertNotIn("Local change", log)
+        self.assertNotIn("WIP v1", log)
+
+        content = (self.user_repo / "wip.py").read_text()
+        self.assertEqual(content, "# v2\n")
+        self.assertFalse((self.user_repo / "local.py").exists())
+
+    def test_nested_agent_branch_resolves_to_shared_target(self):
+        """Nested agent branch agent-2/agent-1/main resolves target to main."""
+        agents = self._init_and_agents("1", "2")
+        ws1 = agents["1"]
+
+        # Agent 1 pushes work on their branch
+        (ws1 / "a1.py").write_text("# a1\n")
+        git("add", "a1.py", cwd=ws1)
+        git("commit", "-m", "Agent 1 work", cwd=ws1)
+        git("push", "cave", "agent-1/main", cwd=ws1, env=agent_env("1"))
+
+        # Agent 2 creates a nested branch (as if spawned inside agent 1's workspace)
+        ws2 = agents["2"]
+        git("checkout", "-b", "agent-2/agent-1/main", cwd=ws2)
+        (ws2 / "a2.py").write_text("# a2\n")
+        git("add", "a2.py", cwd=ws2)
+        git("commit", "-m", "Agent 2 nested work", cwd=ws2)
+        git("push", "cave", "agent-2/agent-1/main", cwd=ws2, env=agent_env("2"))
+
+        # Also deliver agent 1's work to main so we can test the delta
+        git("push", "cave", "agent-1/main:main", cwd=ws1, env=agent_env("1"))
+
+        # Status should compare agent-2's branch against main (not agent-1/main)
+        result = cav_cli("status", cwd=self.user_repo)
+        # Only agent 2's own commit should be undelivered, not agent 1's
+        self.assertIn("1 undelivered commit", result.stdout)
+        self.assertIn("Agent 2 nested work", result.stdout)
+
+        # Pull on the nested branch should reset to remote and show
+        # commits relative to main
+        git("fetch", "cave", cwd=self.user_repo)
+        git("checkout", "-b", "agent-2/agent-1/main",
+            "cave/agent-2/agent-1/main", cwd=self.user_repo)
+        result = cav_cli("pull", cwd=self.user_repo, check=False)
+        self.assertIn("Already up to date", result.stdout)
 
     # -- merge + push --
 
