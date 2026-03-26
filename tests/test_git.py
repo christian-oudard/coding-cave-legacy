@@ -279,6 +279,31 @@ class TestCAV(unittest.TestCase):
         self.assertIn("Add feature", log)
         self.assertIn("Update feature", log)
 
+    def test_deliver_cleans_up_agent_branch(self):
+        """Delivering to main auto-deletes the agent's remote branch."""
+        agents = self._init_and_agents("1")
+        ws = agents["1"]
+
+        (ws / "feature.py").write_text("print('hello')\n")
+        git("add", "feature.py", cwd=ws)
+        git("commit", "-m", "Add feature", cwd=ws)
+
+        # Push to agent branch first (simulating normal workflow)
+        git("push", "cave", "agent-1/main", cwd=ws, env=agent_env("1"))
+
+        # Verify agent branch exists on remote
+        git("fetch", "cave", cwd=self.user_repo)
+        branches = git_out("branch", "-r", cwd=self.user_repo)
+        self.assertIn("cave/agent-1/main", branches)
+
+        # Agent delivers to main
+        git("push", "cave", "agent-1/main:main", cwd=ws, env=agent_env("1"))
+
+        # Agent branch should be gone from remote
+        git("fetch", "--prune", "cave", cwd=self.user_repo)
+        branches = git_out("branch", "-r", cwd=self.user_repo)
+        self.assertNotIn("cave/agent-1/main", branches)
+
     def test_pull_agent_branch_resets_to_remote(self):
         """cav pull on an agent branch hard-resets to the remote agent branch."""
         agents = self._init_and_agents("1")

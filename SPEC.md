@@ -43,6 +43,10 @@ A pre-receive hook on the shared repo enforces:
 
 Agent identity is communicated via git push options. No push option means the pusher is the user.
 
+A post-receive hook handles cleanup: when an agent delivers to a shared branch, the agent's corresponding branch is automatically deleted. The agent's post-commit hook re-creates it on the next commit.
+
+Agents cannot be launched from agent branches. The user must be on a shared branch (e.g. main) when starting a new agent.
+
 ## Sandbox
 
 Each agent runs in a bwrap namespace (via jail.nix) with:

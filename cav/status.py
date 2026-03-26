@@ -1,6 +1,5 @@
 """cav status: show what's happening in the cave."""
 
-import shutil
 import time
 from pathlib import Path
 
@@ -92,14 +91,12 @@ def status(base: Path, verbose: bool = False, agent_filter: str | None = None):
         by_agent.setdefault(agent_id, []).append((branch, target))
 
     hidden = []
-    pruned = []
     for agent_id in sorted(by_agent, key=int):
         branches = by_agent[agent_id]
         name = config.display_name(base, agent_id)
         running = config.is_agent_running(base, agent_id)
 
         undelivered = []
-        orphaned = []
         for branch, target in branches:
             remote_agent = f"{config.SHARED_REMOTE}/{branch}"
             target_ref = f"{config.SHARED_REMOTE}/{target}"
@@ -108,16 +105,8 @@ def status(base: Path, verbose: bool = False, agent_filter: str | None = None):
                     lines = git.cherry_undelivered(target_ref, remote_agent, cwd=base)
                     if lines:
                         undelivered.append((branch, len(lines), lines))
-                else:
-                    orphaned.append(branch)
             except Exception:
                 pass
-
-        # Auto-prune orphaned non-running agents
-        if orphaned and not running and not undelivered:
-            _remove_agent(base, agent_id, orphaned)
-            pruned.append(name)
-            continue
 
         total_ahead = sum(a for _, a, _ in undelivered)
 
@@ -153,8 +142,3 @@ def status(base: Path, verbose: bool = False, agent_filter: str | None = None):
             n = len(hidden)
             s = "session" if n == 1 else "sessions"
             print(f"{n} idle {s} not shown. Use -v to list.")
-
-    if pruned:
-        n = len(pruned)
-        s = "session" if n == 1 else "sessions"
-        print(f"Pruned {n} orphaned {s}: {', '.join(pruned)}")

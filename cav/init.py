@@ -7,19 +7,20 @@ from pathlib import Path
 from . import config, git
 
 
-def install_hook(shared: Path):
-    """Install pre-receive hook with correct python3 shebang."""
-    hook_src = Path(__file__).parent / "hooks" / "pre-receive"
-    hook_dst = shared / "hooks" / "pre-receive"
-    content = hook_src.read_text()
-    # Replace shebang with the current python3 interpreter
-    content = content.replace(
-        "#!/usr/bin/env python3",
-        f"#!{sys.executable}",
-        1,
-    )
-    hook_dst.write_text(content)
-    hook_dst.chmod(0o755)
+def install_hooks(shared: Path):
+    """Install git hooks with correct python3 shebang."""
+    hooks_dir = Path(__file__).parent / "hooks"
+    for name in ("pre-receive", "post-receive"):
+        src = hooks_dir / name
+        dst = shared / "hooks" / name
+        content = src.read_text()
+        content = content.replace(
+            "#!/usr/bin/env python3",
+            f"#!{sys.executable}",
+            1,
+        )
+        dst.write_text(content)
+        dst.chmod(0o755)
 
 
 def init(path: str):
@@ -51,8 +52,8 @@ def init(path: str):
     # Enable push options
     git.git("config", "receive.advertisePushOptions", "true", cwd=shared, echo=False)
 
-    # Install pre-receive hook
-    install_hook(shared)
+    # Install hooks
+    install_hooks(shared)
 
     # Add cave remote
     git.git("remote", "add", config.SHARED_REMOTE, str(shared), cwd=base, echo=False)
