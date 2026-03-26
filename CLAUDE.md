@@ -6,7 +6,7 @@ Coordinates multiple Claude agents working in parallel on a Git project, using G
 
 Three test tiers, separated by what they require:
 
-- **Fast (pure Python):** `nix flake check` runs `test_hook`, `test_cli`, `test_alternates`. No git subprocesses.
+- **Fast (pure Python):** `nix flake check` runs `test_hook`, `test_cli`, `test_alternates`, `test_lint`. No git subprocesses.
 - **Git integration:** `python3 -m unittest -v tests.test_git tests.test_daemon`. Spawns real git repos, exercises CLI and daemon isolation.
 - **Cave integration:** `python3 -m unittest -v tests.test_cave`. Requires running inside a cave (GPG socket, git identity). Tests environment features.
 
@@ -19,7 +19,7 @@ Nix-only. `nix build` produces the `cav` binary. `cave-env` is a symlinkJoin of 
 ## Layout
 
 - `cav/` - Python package (cli, config, daemon, init, sandbox, worktree, pull, push, status, git, hooks/)
-- `tests/` - test_hook (hook security), test_cli (CLI usability), test_alternates (shared clone setup), test_git (full integration), test_daemon (daemon isolation)
+- `tests/` - test_hook (hook security), test_cli (CLI usability), test_alternates (shared clone setup), test_lint (import smoke, Path.home() audit, env completeness), test_git (full integration), test_daemon (daemon isolation)
 - `.coding-cave/` - per-project data dir created by `cav init` (bare repo with pre-receive hook)
 
 ## Naming
