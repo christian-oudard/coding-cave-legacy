@@ -56,15 +56,11 @@ def _pull_agent(base: Path, local_branch: str, target: str, force: bool):
         print("Already up to date.")
         return
 
-    # Show incoming commits on target
+    # Count incoming commits on target
+    ahead = None
     try:
         ahead = git.git_output(
             "log", "--oneline", f"{merge_base}..{remote_ref}", cwd=base)
-        if ahead:
-            count = len(ahead.splitlines())
-            n = "commit" if count == 1 else "commits"
-            print(f"\n{count} new {n} on {target}:")
-            print(ahead)
     except Exception:
         pass
 
@@ -72,6 +68,12 @@ def _pull_agent(base: Path, local_branch: str, target: str, force: bool):
         git.git("reset", "--hard", remote_ref, cwd=base)
     else:
         git.git("rebase", remote_ref, cwd=base)
+
+    if ahead:
+        count = len(ahead.splitlines())
+        n = "commit" if count == 1 else "commits"
+        print(f"\n{count} new {n} on {target}:")
+        print(ahead)
 
 
 def _pull_shared(base: Path, local_branch: str, target_branch: str, force: bool):
@@ -95,9 +97,6 @@ def _pull_shared(base: Path, local_branch: str, target_branch: str, force: bool)
     ahead = git.git_output(
         "log", "--oneline", f"{local_branch}..{remote_ref}", cwd=base)
     count = len(ahead.splitlines())
-    n = "commit" if count == 1 else "commits"
-    print(f"\n{count} new {n}:")
-    print(ahead)
 
     if force:
         git.git("reset", "--hard", remote_ref, cwd=base)
@@ -110,5 +109,6 @@ def _pull_shared(base: Path, local_branch: str, target_branch: str, force: bool)
             print(f"  cav pull --force                # accept remote version")
             raise SystemExit(1)
 
-    log = git.git_output("log", "--oneline", f"{local_sha}..{remote_sha}", cwd=base)
-    print(log)
+    n = "commit" if count == 1 else "commits"
+    print(f"\n{count} new {n} on {target_branch}:")
+    print(ahead)
