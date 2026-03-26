@@ -32,14 +32,17 @@ def status(base: Path):
     except Exception:
         remote_sha = local_sha = None
 
-    if local_sha and remote_sha and local_sha != remote_sha:
-        ahead = git.commits_ahead(remote_ref, local_branch, cwd=base)
-        if ahead > 0:
-            n = "commit" if ahead == 1 else "commits"
-            print(f"{local_branch} is behind '{remote_ref}' by {ahead} {n}.")
-            for line in git.commit_oneline(f"{local_branch}..{remote_ref}", cwd=base):
-                print(f"  {line}")
-            print()
+    if local_sha and remote_sha:
+        if local_sha == remote_sha:
+            print(f"{local_branch} up to date with {remote_ref}.")
+        else:
+            ahead = git.commits_ahead(remote_ref, local_branch, cwd=base)
+            if ahead > 0:
+                n = "commit" if ahead == 1 else "commits"
+                print(f"{local_branch} is behind {remote_ref} by {ahead} {n}.")
+                for line in git.commit_oneline(f"{local_branch}..{remote_ref}", cwd=base):
+                    print(f"  {line}")
+        print()
 
     # Agent branch activity
     branches = git.remote_branches(config.SHARED_REMOTE, cwd=base)
@@ -52,8 +55,7 @@ def status(base: Path):
         agent_branches.append((branch, target, agent_id))
 
     if not agent_branches:
-        if local_sha == remote_sha:
-            print("No agent activity.")
+        print("No agent activity.")
         return
 
     # Group branches by agent ID
