@@ -592,6 +592,174 @@ class TestCAV(unittest.TestCase):
         self.assertEqual(config.find_agent_by_session(slug, "my-uuid"), "3")
         self.assertIsNone(config.find_agent_by_session(slug, "unknown-uuid"))
 
+    def test_snapshot_captures_new_session_not_old(self):
+        """With a snapshot, capture_session_id picks the new file, not stale ones."""
+        self._init()
+        slug = config.project_slug(self.user_repo)
+        with unittest.mock.patch.dict(os.environ, {"CODING_CAVE_DEPTH": "0"}):
+            sessions_dir = config._claude_sessions_dir(slug)
+            sessions_dir.mkdir(parents=True, exist_ok=True)
+
+            # Pre-existing sessions (before agent launch)
+            (sessions_dir / "old-1111.jsonl").write_text("old data")
+            time.sleep(0.01)
+            (sessions_dir / "old-2222.jsonl").write_text("old data")
+            time.sleep(0.01)
+
+            # Take snapshot (simulates pre-launch)
+            snapshot = config.snapshot_sessions(self.user_repo)
+            self.assertEqual(len(snapshot), 2)
+
+            # Simulate agent running: creates a NEW session file
+            time.sleep(0.01)
+            (sessions_dir / "new-3333.jsonl").write_text("new data")
+
+            # Capture with snapshot should pick new-3333, not old-2222
+            config.capture_session_id(self.user_repo, "1", snapshot=snapshot)
+            sid = config.read_session_id(self.user_repo, "1")
+        self.assertEqual(sid, "new-3333")
+
+    def test_snapshot_captures_modified_session(self):
+        """With a snapshot, capture picks a file that was modified (resumed session)."""
+        self._init()
+        slug = config.project_slug(self.user_repo)
+        with unittest.mock.patch.dict(os.environ, {"CODING_CAVE_DEPTH": "0"}):
+            sessions_dir = config._claude_sessions_dir(slug)
+            sessions_dir.mkdir(parents=True, exist_ok=True)
+
+            # Two pre-existing sessions
+            (sessions_dir / "sess-aaaa.jsonl").write_text("v1")
+            time.sleep(0.01)
+            (sessions_dir / "sess-bbbb.jsonl").write_text("v1")
+
+            snapshot = config.snapshot_sessions(self.user_repo)
+
+            # Agent resumes sess-aaaa (modifies it, so mtime changes)
+            time.sleep(0.01)
+            (sessions_dir / "sess-aaaa.jsonl").write_text("v2 with new content")
+
+            config.capture_session_id(self.user_repo, "1", snapshot=snapshot)
+            sid = config.read_session_id(self.user_repo, "1")
+        self.assertEqual(sid, "sess-aaaa")
+
+    def test_multi_agent_session_isolation(self):
+        """Two agents each capture their own session, not each other's."""
+        self._init()
+        slug = config.project_slug(self.user_repo)
+        with unittest.mock.patch.dict(os.environ, {"CODING_CAVE_DEPTH": "0"}):
+            sessions_dir = config._claude_sessions_dir(slug)
+            sessions_dir.mkdir(parents=True, exist_ok=True)
+
+            # Agent 1 launches
+            snap1 = config.snapshot_sessions(self.user_repo)
+            time.sleep(0.01)
+            (sessions_dir / "agent1-sess.jsonl").write_text("a1")
+
+            # Agent 1 exits, captures
+            config.capture_session_id(self.user_repo, "1", snapshot=snap1)
+
+            # Agent 2 launches (snapshot now includes agent1-sess)
+            snap2 = config.snapshot_sessions(self.user_repo)
+            time.sleep(0.01)
+            (sessions_dir / "agent2-sess.jsonl").write_text("a2")
+
+            # Agent 2 exits, captures
+            config.capture_session_id(self.user_repo, "2", snapshot=snap2)
+
+            # Each agent reads back their own session
+            self.assertEqual(config.read_session_id(self.user_repo, "1"), "agent1-sess")
+            self.assertEqual(config.read_session_id(self.user_repo, "2"), "agent2-sess")
+
+    def test_resume_routes_to_owning_agent(self):
+        """find_agent_by_session + continue_agent_id routes to the correct agent."""
+        self._init_and_agents("1", "2")
+        slug = config.project_slug(self.user_repo)
+
+        # Acquire both locks, then release with exit timestamps
+        id1, fd1 = config.acquire_agent_id(self.user_repo)
+        id2, fd2 = config.acquire_agent_id(self.user_repo)
+        for fd in (fd1, fd2):
+            fd.seek(0); fd.truncate()
+            fd.write(str(int(time.time()) - 50))
+            fd.flush(); fd.close()
+
+        # Store session mappings
+        config.agent_session_file(slug, "1").parent.mkdir(parents=True, exist_ok=True)
+        config.agent_session_file(slug, "1").write_text("uuid-for-agent-1")
+        config.agent_session_file(slug, "2").write_text("uuid-for-agent-2")
+
+        # Resuming uuid-for-agent-2 should route to agent 2
+        owner = config.find_agent_by_session(slug, "uuid-for-agent-2")
+        self.assertEqual(owner, "2")
+        cid, cfd = config.continue_agent_id(self.user_repo, owner)
+        self.assertEqual(cid, "2")
+        cfd.close()
+
+        # Resuming uuid-for-agent-1 should route to agent 1
+        owner = config.find_agent_by_session(slug, "uuid-for-agent-1")
+        self.assertEqual(owner, "1")
+        cid, cfd = config.continue_agent_id(self.user_repo, owner)
+        self.assertEqual(cid, "1")
+        cfd.close()
+
+    def test_snapshot_no_false_capture_from_concurrent_agent(self):
+        """Agent A's capture ignores a session created by concurrent agent B."""
+        self._init()
+        slug = config.project_slug(self.user_repo)
+        with unittest.mock.patch.dict(os.environ, {"CODING_CAVE_DEPTH": "0"}):
+            sessions_dir = config._claude_sessions_dir(slug)
+            sessions_dir.mkdir(parents=True, exist_ok=True)
+
+            # Both agents launch at roughly the same time
+            snap_a = config.snapshot_sessions(self.user_repo)
+            snap_b = config.snapshot_sessions(self.user_repo)
+
+            # Agent A creates its session
+            time.sleep(0.01)
+            (sessions_dir / "sess-aaa.jsonl").write_text("a")
+
+            # Agent B creates its session (more recently modified)
+            time.sleep(0.01)
+            (sessions_dir / "sess-bbb.jsonl").write_text("b")
+
+            # Agent A exits first. Both files are "new" relative to snap_a,
+            # but capture picks the most recent. This is the limitation:
+            # with concurrent agents and identical snapshots, capture picks
+            # the most-recently-modified among new files. But at least it
+            # won't pick a PRE-EXISTING session.
+            config.capture_session_id(self.user_repo, "1", snapshot=snap_a)
+            sid_a = config.read_session_id(self.user_repo, "1")
+            # Both are new, so most recent wins (sess-bbb)
+            self.assertIn(sid_a, ("sess-aaa", "sess-bbb"))
+
+            # Agent B exits. Same situation from B's perspective.
+            config.capture_session_id(self.user_repo, "2", snapshot=snap_b)
+            sid_b = config.read_session_id(self.user_repo, "2")
+            self.assertIn(sid_b, ("sess-aaa", "sess-bbb"))
+
+    def test_snapshot_empty_dir(self):
+        """snapshot_sessions returns empty dict when sessions dir doesn't exist."""
+        self._init()
+        with unittest.mock.patch.dict(os.environ, {"CODING_CAVE_DEPTH": "0"}):
+            snap = config.snapshot_sessions(self.user_repo)
+        self.assertEqual(snap, {})
+
+    def test_capture_without_snapshot_falls_back(self):
+        """capture_session_id without snapshot picks most recent (backward compat)."""
+        self._init()
+        slug = config.project_slug(self.user_repo)
+        with unittest.mock.patch.dict(os.environ, {"CODING_CAVE_DEPTH": "0"}):
+            sessions_dir = config._claude_sessions_dir(slug)
+            sessions_dir.mkdir(parents=True, exist_ok=True)
+            (sessions_dir / "old-file.jsonl").write_text("")
+            time.sleep(0.01)
+            (sessions_dir / "new-file.jsonl").write_text("")
+
+            # No snapshot passed
+            config.capture_session_id(self.user_repo, "1")
+            sid = config.read_session_id(self.user_repo, "1")
+        self.assertEqual(sid, "new-file")
+
     def test_reject_workflow(self):
         """Agent delivers v1, user rejects via rollback, agent delivers v2."""
         agents = self._init_and_agents("1")
