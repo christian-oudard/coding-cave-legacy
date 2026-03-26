@@ -1008,5 +1008,103 @@ class TestCAV(unittest.TestCase):
         self.assertNotIn("bad.py", files)
 
 
+    # -- cross-depth isolation bugs --
+
+    def test_lock_files_isolated_by_depth(self):
+        """Agent 1 at depth 1 and agent 1 at depth 2 must not share a lock file."""
+        self._init()
+        slug = config.project_slug(self.user_repo)
+
+        # Depth 1 agent acquires lock for agent 1
+        with unittest.mock.patch.dict(os.environ, {"CODING_CAVE_DEPTH": "1"}):
+            id1, fd1 = config.acquire_agent_id(self.user_repo)
+            self.assertEqual(id1, "1")
+
+            # Depth 2 agent tries to acquire agent 1 - should get it independently
+            with unittest.mock.patch.dict(os.environ, {"CODING_CAVE_DEPTH": "2"}):
+                id2, fd2 = config.acquire_agent_id(self.user_repo)
+                # BUG: currently returns "2" because depth 1 holds agent 1's lock.
+                # Should return "1" because depth 2 has its own lock namespace.
+                self.assertEqual(id2, "1")
+                fd2.close()
+
+            fd1.close()
+
+    def test_session_files_isolated_by_depth(self):
+        """Session capture at depth 2 must not overwrite depth 1's session."""
+        self._init()
+        slug = config.project_slug(self.user_repo)
+
+        with unittest.mock.patch.dict(os.environ, {"CODING_CAVE_DEPTH": "0"}):
+            sessions_dir = config._claude_sessions_dir(slug)
+            sessions_dir.mkdir(parents=True, exist_ok=True)
+
+            # Depth 1 agent 1 captures a session
+            (sessions_dir / "depth1-session.jsonl").write_text("")
+            config.capture_session_id(self.user_repo, "1")
+            depth1_sid = config.read_session_id(self.user_repo, "1")
+            self.assertEqual(depth1_sid, "depth1-session")
+
+            # Depth 2 agent 1 captures a different session
+            time.sleep(0.01)
+            (sessions_dir / "depth2-session.jsonl").write_text("")
+            config.capture_session_id(self.user_repo, "1")
+
+            # BUG: depth 2's capture overwrites agent 1's session file because
+            # the session file path doesn't include depth.
+            # Depth 1's session should still be intact.
+            depth1_sid_after = config.read_session_id(self.user_repo, "1")
+            self.assertEqual(depth1_sid_after, "depth1-session")
+
+    def test_daemon_port_isolated_by_depth(self):
+        """Agent 1 at depth 1 and agent 1 at depth 2 must use different ports."""
+        from cav import daemon
+
+        # Same agent ID at two different depths should produce different ports
+        # Currently both would use DAEMON_BASE_PORT + 1 = 9401
+        with unittest.mock.patch.dict(os.environ, {"CODING_CAVE_DEPTH": "1"}):
+            url_d1 = daemon.remote_url("1", "project")
+
+        with unittest.mock.patch.dict(os.environ, {"CODING_CAVE_DEPTH": "2"}):
+            url_d2 = daemon.remote_url("1", "project")
+
+        # BUG: both return git://127.0.0.1:9401/project
+        self.assertNotEqual(url_d1, url_d2)
+
+    # -- concurrent agent race --
+
+    def test_concurrent_agents_capture_distinct_sessions(self):
+        """Two agents launching simultaneously must each capture their own session."""
+        self._init()
+        slug = config.project_slug(self.user_repo)
+
+        with unittest.mock.patch.dict(os.environ, {"CODING_CAVE_DEPTH": "0"}):
+            sessions_dir = config._claude_sessions_dir(slug)
+            sessions_dir.mkdir(parents=True, exist_ok=True)
+
+            # Both agents take snapshot at the same moment (empty dir)
+            snap = config.snapshot_sessions(self.user_repo)
+
+            # Agent 1 creates its session
+            time.sleep(0.01)
+            (sessions_dir / "agent1-uuid.jsonl").write_text("a1")
+
+            # Agent 2 creates its session (more recently modified)
+            time.sleep(0.01)
+            (sessions_dir / "agent2-uuid.jsonl").write_text("a2")
+
+            # Agent 1 exits and captures
+            config.capture_session_id(self.user_repo, "1", snapshot=snap)
+            # Agent 2 exits and captures
+            config.capture_session_id(self.user_repo, "2", snapshot=snap)
+
+            sid1 = config.read_session_id(self.user_repo, "1")
+            sid2 = config.read_session_id(self.user_repo, "2")
+
+            # BUG: both agents pick "agent2-uuid" because it's most recent
+            # among "new" files. They should each capture their own session.
+            self.assertNotEqual(sid1, sid2)
+
+
 if __name__ == "__main__":
     unittest.main()
