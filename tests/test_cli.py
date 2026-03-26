@@ -1,0 +1,125 @@
+"""Tests for CLI usability: friendly errors, defaults."""
+
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+
+def git(*args, cwd=None):
+    return subprocess.run(
+        ["git"] + list(args), cwd=cwd,
+        capture_output=True, text=True, check=True,
+    )
+
+
+def cav_cli(*args, cwd=None, check=True):
+    return subprocess.run(
+        ["python3", "-m", "cav.cli"] + list(args),
+        cwd=cwd, check=check,
+        capture_output=True, text=True,
+    )
+
+
+class TestRequireInit(unittest.TestCase):
+    """cav commands give a friendly error when not initialized."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.repo = Path(self.tmpdir) / "project"
+        self.repo.mkdir()
+        git("init", "-b", "main", cwd=self.repo)
+        git("config", "user.email", "test@test.com", cwd=self.repo)
+        git("config", "user.name", "Test", cwd=self.repo)
+        (self.repo / "file.txt").write_text("content\n")
+        git("add", "file.txt", cwd=self.repo)
+        git("commit", "-m", "init", cwd=self.repo)
+        os.symlink(PROJECT_ROOT / "cav", self.repo / "cav")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir)
+
+    def test_agent_without_init(self):
+        """Running cav (agent) without init gives a friendly message."""
+        result = cav_cli(cwd=self.repo, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not initialized", result.stderr)
+        self.assertIn("cav init", result.stderr)
+        # Should NOT be a Python traceback
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_status_without_init(self):
+        result = cav_cli("status", cwd=self.repo, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not initialized", result.stderr)
+
+    def test_pull_without_init(self):
+        result = cav_cli("pull", cwd=self.repo, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not initialized", result.stderr)
+
+    def test_push_without_init(self):
+        result = cav_cli("push", cwd=self.repo, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not initialized", result.stderr)
+
+
+class TestInitDefaults(unittest.TestCase):
+    """cav init defaults to current directory."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.repo = Path(self.tmpdir) / "project"
+        self.repo.mkdir()
+        git("init", "-b", "main", cwd=self.repo)
+        git("config", "user.email", "test@test.com", cwd=self.repo)
+        git("config", "user.name", "Test", cwd=self.repo)
+        (self.repo / "file.txt").write_text("content\n")
+        git("add", "file.txt", cwd=self.repo)
+        git("commit", "-m", "init", cwd=self.repo)
+        os.symlink(PROJECT_ROOT / "cav", self.repo / "cav")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir)
+
+    def test_init_no_args(self):
+        """cav init with no path argument initializes the current directory."""
+        result = cav_cli("init", cwd=self.repo)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("Initialized", result.stdout)
+        self.assertTrue((self.repo / ".coding-cave" / "cave-shared.git").exists())
+
+
+class TestContinueFlag(unittest.TestCase):
+    """cav -c / cav --continue parses correctly."""
+
+    def test_continue_flag_recognized(self):
+        """cav -c is a valid argument (doesn't error on parse)."""
+        result = cav_cli("-c", cwd="/tmp", check=False)
+        # It will fail (not in a git repo), but should NOT fail on argument parsing
+        self.assertNotIn("unrecognized arguments", result.stderr)
+
+    def test_continue_long_flag_recognized(self):
+        """cav --continue is a valid argument."""
+        result = cav_cli("--continue", cwd="/tmp", check=False)
+        self.assertNotIn("unrecognized arguments", result.stderr)
+
+    def test_resume_flag_recognized(self):
+        """cav -r <uuid> is a valid argument."""
+        result = cav_cli("-r", "some-uuid", cwd="/tmp", check=False)
+        self.assertNotIn("unrecognized arguments", result.stderr)
+
+    def test_resume_long_flag_recognized(self):
+        """cav --resume <uuid> is a valid argument."""
+        result = cav_cli("--resume", "some-uuid", cwd="/tmp", check=False)
+        self.assertNotIn("unrecognized arguments", result.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()
