@@ -58,6 +58,6 @@ def init(path: str):
     git.git("remote", "add", config.SHARED_REMOTE, str(shared), cwd=base, echo=False)
 
     # Push all branches to cave
-    git.git("push", config.SHARED_REMOTE, "--all", cwd=base, echo=False)
+    git.git("push", "--no-set-upstream", config.SHARED_REMOTE, "--all", cwd=base, echo=False)
 
     print(f"Initialized Coding Cave at {cav}")

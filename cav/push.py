@@ -8,7 +8,7 @@ from . import config, git
 
 def push(base: Path, force: bool = False):
     branch = git.current_branch(cwd=base)
-    args = ["push", config.SHARED_REMOTE, branch]
+    args = ["push", "--no-set-upstream", config.SHARED_REMOTE, branch]
     if force:
         args.insert(1, "--force")
     try:
