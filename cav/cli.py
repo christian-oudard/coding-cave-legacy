@@ -150,7 +150,7 @@ def cmd_pull(args):
     base = find_repo_root()
     require_init(base)
     from .pull import pull
-    pull(base, args.force)
+    pull(base, force=args.force, branch=args.branch)
 
 
 def cmd_push(args):
@@ -254,6 +254,7 @@ def main():
 
     # cav pull [--force]
     p_pull = sub.add_parser("pull", help="Fetch from cave and fast-forward merge")
+    p_pull.add_argument("branch", nargs="?", default=None, help="Remote branch to pull (default: current branch)")
     p_pull.add_argument("--force", action="store_true", help="Hard reset to remote branch")
 
     # cav push [--force]

@@ -96,6 +96,84 @@ class TestInitDefaults(unittest.TestCase):
         self.assertTrue((self.repo / ".coding-cave" / "cave-shared.git").exists())
 
 
+class TestPullForceGuard(unittest.TestCase):
+    """cav pull --force is only allowed on agent branches."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.repo = Path(self.tmpdir) / "project"
+        self.repo.mkdir()
+        git("init", "-b", "main", cwd=self.repo)
+        git("config", "user.email", "test@test.com", cwd=self.repo)
+        git("config", "user.name", "Test", cwd=self.repo)
+        (self.repo / "file.txt").write_text("content\n")
+        git("add", "file.txt", cwd=self.repo)
+        git("commit", "-m", "init", cwd=self.repo)
+        os.symlink(PROJECT_ROOT / "cav", self.repo / "cav")
+        cav_cli("init", cwd=self.repo)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir)
+
+    def test_pull_force_blocked_on_main(self):
+        """cav pull --force refuses on shared branches like main."""
+        result = cav_cli("pull", "--force", cwd=self.repo, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("agent branch", result.stderr.lower())
+
+    def test_pull_force_blocked_on_non_agent_branch(self):
+        """cav pull --force refuses on any non-agent branch."""
+        git("checkout", "-b", "develop", cwd=self.repo)
+        result = cav_cli("pull", "--force", cwd=self.repo, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("agent branch", result.stderr.lower())
+
+    def test_pull_force_allowed_on_agent_branch(self):
+        """cav pull --force is allowed on agent branches."""
+        git("checkout", "-b", "agent-1/main", cwd=self.repo)
+        # Will fail (no remote tracking branch), but should NOT fail on the guard
+        result = cav_cli("pull", "--force", cwd=self.repo, check=False)
+        self.assertNotIn("agent branch", result.stderr.lower())
+
+    def test_pull_force_with_branch_arg_blocked_on_shared(self):
+        """cav pull --force main refuses even when given as argument."""
+        git("checkout", "-b", "agent-1/main", cwd=self.repo)
+        result = cav_cli("pull", "--force", "main", cwd=self.repo, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("agent branch", result.stderr.lower())
+
+    def test_pull_branch_arg_accepted(self):
+        """cav pull <branch> is a valid argument."""
+        result = cav_cli("pull", "main", cwd=self.repo, check=False)
+        self.assertNotIn("unrecognized arguments", result.stderr)
+
+
+class TestPushForceAllowed(unittest.TestCase):
+    """cav push --force is allowed on any branch (user is source of truth)."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.repo = Path(self.tmpdir) / "project"
+        self.repo.mkdir()
+        git("init", "-b", "main", cwd=self.repo)
+        git("config", "user.email", "test@test.com", cwd=self.repo)
+        git("config", "user.name", "Test", cwd=self.repo)
+        (self.repo / "file.txt").write_text("content\n")
+        git("add", "file.txt", cwd=self.repo)
+        git("commit", "-m", "init", cwd=self.repo)
+        os.symlink(PROJECT_ROOT / "cav", self.repo / "cav")
+        cav_cli("init", cwd=self.repo)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir)
+
+    def test_push_force_not_blocked_on_main(self):
+        """cav push --force on main is allowed (user corrects the cave)."""
+        result = cav_cli("push", "--force", cwd=self.repo, check=False)
+        # May fail for other reasons (no remote tracking), but NOT the guard
+        self.assertNotIn("agent branch", result.stderr.lower())
+
+
 class TestContinueFlag(unittest.TestCase):
     """cav -c / cav --continue parses correctly."""
 

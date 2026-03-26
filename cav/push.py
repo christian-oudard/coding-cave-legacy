@@ -14,4 +14,6 @@ def push(base: Path, force: bool = False):
     try:
         git.git(*args, cwd=base)
     except subprocess.CalledProcessError:
+        if not force:
+            print(f"\n  cav push --force                # overwrite cave with local branch")
         raise SystemExit(1)

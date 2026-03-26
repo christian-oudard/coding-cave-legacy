@@ -6,11 +6,17 @@ from pathlib import Path
 from . import config, git
 
 
-def pull(base: Path, force: bool = False):
+def pull(base: Path, force: bool = False, branch: str | None = None):
     git.git("fetch", "--prune", config.SHARED_REMOTE, cwd=base)
 
     local_branch = git.current_branch(cwd=base)
-    remote_ref = f"{config.SHARED_REMOTE}/{local_branch}"
+    target_branch = branch or local_branch
+
+    if force and not config.parse_agent_branch(target_branch):
+        raise SystemExit(
+            f"--force is only allowed on agent branches, not '{target_branch}'."
+        )
+    remote_ref = f"{config.SHARED_REMOTE}/{target_branch}"
 
     try:
         git.git_output("rev-parse", remote_ref, cwd=base)
