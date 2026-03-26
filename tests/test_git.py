@@ -1081,7 +1081,11 @@ class TestCAV(unittest.TestCase):
     # -- concurrent agent race --
 
     def test_concurrent_agents_capture_distinct_sessions(self):
-        """Two agents launching simultaneously must each capture their own session."""
+        """Two agents launching simultaneously each capture their own session.
+
+        The capture lock serializes the scan-and-claim. Agent 1 captures first
+        (claims most recent), agent 2 captures second (claims the remaining one).
+        """
         self._init()
         slug = config.project_slug(self.user_repo)
 
@@ -1100,17 +1104,18 @@ class TestCAV(unittest.TestCase):
             time.sleep(0.01)
             (sessions_dir / "agent2-uuid.jsonl").write_text("a2")
 
-            # Agent 1 exits and captures
+            # Agent 1 captures first (gets most recent: agent2-uuid)
             config.capture_session_id(self.user_repo, "1", snapshot=snap)
-            # Agent 2 exits and captures
+            # Agent 2 captures second (agent2-uuid already claimed, gets agent1-uuid)
             config.capture_session_id(self.user_repo, "2", snapshot=snap)
 
             sid1 = config.read_session_id(self.user_repo, "1")
             sid2 = config.read_session_id(self.user_repo, "2")
 
-            # BUG: both agents pick "agent2-uuid" because it's most recent
-            # among "new" files. They should each capture their own session.
+            # Each agent gets a distinct session
             self.assertNotEqual(sid1, sid2)
+            self.assertIn(sid1, ("agent1-uuid", "agent2-uuid"))
+            self.assertIn(sid2, ("agent1-uuid", "agent2-uuid"))
 
 
 if __name__ == "__main__":

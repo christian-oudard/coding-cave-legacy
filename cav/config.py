@@ -113,8 +113,16 @@ def snapshot_sessions(base: Path) -> dict[str, float]:
         return {}
 
 
+def _capture_lock_path(slug: str) -> Path:
+    """Lock file used to serialize session capture across concurrent agents."""
+    return agent_lock_dir(slug) / ".capture.lock"
+
+
 def _claimed_sessions(slug: str) -> set[str]:
-    """Return set of session UUIDs already claimed by any agent."""
+    """Return set of session UUIDs already claimed by any agent.
+
+    Must be called while holding the capture lock.
+    """
     lock_dir = agent_lock_dir(slug)
     claimed = set()
     if not lock_dir.exists():
@@ -133,42 +141,47 @@ def capture_session_id(base: Path, agent_id: str,
                        snapshot: dict[str, float] | None = None) -> None:
     """After an agent exits, find the session this agent used and store it.
 
-    If snapshot (from snapshot_sessions before launch) is provided, finds the
-    file that is new or has a newer mtime than the snapshot. Falls back to
-    most-recently-modified if no snapshot or no clear winner.
-
-    Excludes sessions already claimed by other agents to avoid collisions
-    when multiple agents launch concurrently.
+    Holds an exclusive lock during the entire scan-and-claim operation so
+    concurrent agents never pick the same session.
     """
     slug = project_slug(base)
-    sessions_dir = _claude_sessions_dir(slug)
+    lock_dir = agent_lock_dir(slug)
+    lock_dir.mkdir(parents=True, exist_ok=True)
+
+    lock_path = _capture_lock_path(slug)
+    lock_fd = open(lock_path, "w")
     try:
-        files = list(sessions_dir.glob("*.jsonl"))
-    except OSError:
-        return
-    if not files:
-        return
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
 
-    if snapshot is not None:
-        # Prefer files that are new or modified since the snapshot
-        changed = [
-            p for p in files
-            if p.stem not in snapshot or p.stat().st_mtime > snapshot[p.stem]
-        ]
-        if changed:
-            files = changed
+        sessions_dir = _claude_sessions_dir(slug)
+        try:
+            files = list(sessions_dir.glob("*.jsonl"))
+        except OSError:
+            return
+        if not files:
+            return
 
-    # Exclude sessions already claimed by other agents
-    claimed = _claimed_sessions(slug)
-    unclaimed = [p for p in files if p.stem not in claimed]
-    if unclaimed:
-        files = unclaimed
+        if snapshot is not None:
+            changed = [
+                p for p in files
+                if p.stem not in snapshot or p.stat().st_mtime > snapshot[p.stem]
+            ]
+            if changed:
+                files = changed
 
-    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    sid = files[0].stem
-    p = agent_session_file(slug, agent_id)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(sid)
+        # Exclude sessions already claimed by other agents
+        claimed = _claimed_sessions(slug)
+        unclaimed = [p for p in files if p.stem not in claimed]
+        if unclaimed:
+            files = unclaimed
+
+        files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        sid = files[0].stem
+        p = agent_session_file(slug, agent_id)
+        p.write_text(sid)
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        lock_fd.close()
 
 
 def _claude_sessions_dir(slug: str) -> Path:

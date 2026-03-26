@@ -6,6 +6,7 @@ This replaces git daemon, which strips environment variables and prevents
 CAV_AGENT_ID from reaching the pre-receive hook.
 """
 
+import os
 import signal
 import shutil
 import socket
@@ -39,49 +40,18 @@ def start(agent_id: str, shared_repos: list[tuple[Path, str]]) -> tuple[subproce
         (base_dir / slug).symlink_to(repo_path)
 
     python_bin = _find_bin("python3")
-
-    # Write a Python handler that parses pkt-line and execs the git service.
-    # This replaces git daemon --inetd, preserving env vars for hooks.
-    handler = base_dir / "handler.py"
-    # Avoid f-strings for the handler body to prevent \x00 escaping issues.
-    handler.write_text(
-        "import os, sys\n"
-        "\n"
-        'os.environ["CAV_AGENT_ID"] = "' + agent_id + '"\n'
-        'base_path = "' + str(base_dir) + '"\n'
-        "\n"
-        "raw_len = sys.stdin.buffer.read(4)\n"
-        "if len(raw_len) < 4:\n"
-        "    sys.exit(0)\n"
-        "pkt_len = int(raw_len, 16)\n"
-        "if pkt_len < 4:\n"
-        "    sys.exit(1)\n"
-        "payload = sys.stdin.buffer.read(pkt_len - 4)\n"
-        "\n"
-        'parts = payload.split(b"\\x00")\n'
-        "request = parts[0].decode()\n"
-        'service, path = request.split(" ", 1)\n'
-        "\n"
-        'ALLOWED = {"git-upload-pack", "git-receive-pack"}\n'
-        "if service not in ALLOWED:\n"
-        "    sys.exit(1)\n"
-        "\n"
-        "# Resolve path under base_path, but check BEFORE following symlinks\n"
-        "# (repos are symlinked from base_path to the actual bare repos).\n"
-        'repo = os.path.normpath(os.path.join(base_path, path.lstrip("/")))\n'
-        "if not repo.startswith(base_path):\n"
-        "    sys.exit(1)\n"
-        "repo = os.path.realpath(repo)\n"
-        "\n"
-        "os.execvp(service, [service, repo])\n"
-    )
-    handler.chmod(0o755)
+    handler_module = Path(__file__).parent / "handler.py"
 
     proc = subprocess.Popen(
         ["socat", f"TCP-LISTEN:{port},fork,reuseaddr",
-         f"EXEC:{python_bin} {handler}"],
+         f"EXEC:{python_bin} {handler_module}"],
         start_new_session=True,
         stderr=subprocess.PIPE,
+        env={
+            **os.environ,
+            "CAV_HANDLER_AGENT_ID": agent_id,
+            "CAV_HANDLER_BASE_PATH": str(base_dir),
+        },
     )
 
     if not _wait_for_port(port):
