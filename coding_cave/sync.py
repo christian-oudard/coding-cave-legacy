@@ -436,7 +436,7 @@ def _pull_branch_current(slug, project_dir, gitdir_path, branch, cave_sha,
             old = _parse_log(host_git, f"{merge_base}..HEAD")
             new = _parse_log(host_git, f"{merge_base}..FETCH_HEAD")
             _print_rewrite_summary(old, new)
-            print(f"Run 'coding-cave pull --force' to adopt.", file=sys.stderr)
+            print(f"Run 'coding-cave-legacy pull --force' to adopt.", file=sys.stderr)
             return None
 
         host_count = subprocess.run(
@@ -499,10 +499,10 @@ def _pull_branch_current(slug, project_dir, gitdir_path, branch, cave_sha,
                         print(f"  {h} {subj}", file=sys.stderr)
                     print(f"To push your rollback to the cave:",
                           file=sys.stderr)
-                    print(f"  coding-cave push --force", file=sys.stderr)
+                    print(f"  coding-cave-legacy push --force", file=sys.stderr)
                     print(f"To undo your rollback (re-apply cave commits):",
                           file=sys.stderr)
-                    print(f"  coding-cave pull --force", file=sys.stderr)
+                    print(f"  coding-cave-legacy pull --force", file=sys.stderr)
                     return None
                 stash_result = subprocess.run(
                     host_git + ["stash", "--include-untracked"],
@@ -534,7 +534,7 @@ def _pull_branch_current(slug, project_dir, gitdir_path, branch, cave_sha,
                 old = _parse_log(host_git, f"{merge_base}..FETCH_HEAD")
                 new = _parse_log(host_git, f"{merge_base}..HEAD")
                 _print_rewrite_summary(old, new)
-                print(f"Run 'coding-cave pull --force' to adopt host's history.",
+                print(f"Run 'coding-cave-legacy pull --force' to adopt host's history.",
                       file=sys.stderr)
                 return None
 
@@ -821,7 +821,7 @@ def pull_project(slug, force=False):
     gitdir_path = proj_state / "gitdir"
 
     if not gitdir_path.exists():
-        print(f"No gitdir for {slug} -- run 'coding-cave reset' first.",
+        print(f"No gitdir for {slug} -- run 'coding-cave-legacy reset' first.",
               file=sys.stderr)
         sys.exit(1)
 
@@ -979,11 +979,11 @@ def pull_project(slug, force=False):
         if total_ahead:
             print(f"Already up to date, host is {total_ahead} commit(s) ahead.",
                   file=sys.stderr)
-            print(f"  (use 'coding-cave push' to sync)", file=sys.stderr)
+            print(f"  (use 'coding-cave-legacy push' to sync)", file=sys.stderr)
         else:
             print(f"Already up to date.", file=sys.stderr)
     elif total_ahead:
-        print(f"Host is {total_ahead} commit(s) ahead, use 'coding-cave push' to sync.",
+        print(f"Host is {total_ahead} commit(s) ahead, use 'coding-cave-legacy push' to sync.",
               file=sys.stderr)
 
 
@@ -1037,7 +1037,7 @@ def push_project(slug, force=False):
     gitdir_path = proj_state / "gitdir"
 
     if not gitdir_path.exists():
-        print(f"No gitdir for {slug} -- run 'coding-cave reset' first.",
+        print(f"No gitdir for {slug} -- run 'coding-cave-legacy reset' first.",
               file=sys.stderr)
         sys.exit(1)
 
@@ -1173,8 +1173,8 @@ def push_project(slug, force=False):
         print(f"Already up to date.", file=sys.stderr)
 
     if any_blocked:
-        print(f"Run 'coding-cave pull' first, or check out the branch "
-              f"and use 'coding-cave push --force'.", file=sys.stderr)
+        print(f"Run 'coding-cave-legacy pull' first, or check out the branch "
+              f"and use 'coding-cave-legacy push --force'.", file=sys.stderr)
         if not pushed_branches:
             sys.exit(1)
 

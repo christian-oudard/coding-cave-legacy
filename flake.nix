@@ -51,7 +51,7 @@
       (set-env "HOME" jailHome)
       # Persistent home directory (bind mount, survives across sessions).
       (add-runtime ''
-        CAVE_HOME="$HOME/.local/share/coding-cave/home"
+        CAVE_HOME="$HOME/.local/share/coding-cave-legacy/home"
         mkdir -p "$CAVE_HOME"
         RUNTIME_ARGS+=(--bind "$CAVE_HOME" ${jailHome})
       '')
@@ -145,7 +145,7 @@
       # are read from the process env before bwrap starts.
       # Claude Code state init
       (add-runtime ''
-        CAVE_HOME="$HOME/.local/share/coding-cave/home"
+        CAVE_HOME="$HOME/.local/share/coding-cave-legacy/home"
         CLAUDE_DIR="$CAVE_HOME/.claude"
         mkdir -p "$CLAUDE_DIR"
         # Merge default settings (base) with user's existing settings (overlay)

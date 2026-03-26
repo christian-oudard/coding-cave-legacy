@@ -16,7 +16,7 @@ from . import _state
 
 
 def load_global_config():
-    config_path = Path.home() / ".config" / "coding-cave" / "config.toml"
+    config_path = Path.home() / ".config" / "coding-cave-legacy" / "config.toml"
     if config_path.exists():
         with open(config_path, "rb") as f:
             return tomllib.load(f)
@@ -210,7 +210,7 @@ def setup_env(global_config):
     if token:
         os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = token
 
-    claude_md = Path.home() / ".config" / "coding-cave" / "CLAUDE.md"
+    claude_md = Path.home() / ".config" / "coding-cave-legacy" / "CLAUDE.md"
     if claude_md.exists():
         os.environ["CODING_CAVE_USER_CLAUDE_MD"] = str(claude_md)
 
@@ -370,7 +370,7 @@ SKILL_EOF
 
 
 def _cave_nix_path():
-    return Path.home() / ".config" / "coding-cave" / "cave.nix"
+    return Path.home() / ".config" / "coding-cave-legacy" / "cave.nix"
 
 
 def _user_env_dir():

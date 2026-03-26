@@ -46,7 +46,7 @@ def cmd_agent(args, gpu=False, continue_session=False, resume=None, claude_args=
 
     project_dir = projects.detect_project_from_cwd()
     if project_dir is None:
-        print("No project. Run 'coding-cave add' or cd into a project directory.", file=sys.stderr)
+        print("No project. Run 'coding-cave-legacy add' or cd into a project directory.", file=sys.stderr)
         sys.exit(1)
     project = projects.ensure_project(project_dir)
 
@@ -81,13 +81,13 @@ def cmd_shell(args, gpu=False, projects_flag=None, port=None, session_target=Non
 
     project_dir = projects.detect_project_from_cwd()
     if project_dir is None:
-        print("No project. Run 'coding-cave add' or cd into a project directory.", file=sys.stderr)
+        print("No project. Run 'coding-cave-legacy add' or cd into a project directory.", file=sys.stderr)
         sys.exit(1)
     project = projects.ensure_project(project_dir)
 
     workdir = projects.cave_workdir(project)
 
-    # Parse @N from session target (e.g. "coding-cave@2" or just "2")
+    # Parse @N from session target (e.g. "coding-cave-legacy@2" or just "2")
     target_index = None
     if session_target is not None:
         if "@" in session_target:
@@ -644,12 +644,12 @@ def cmd_cp(srcs, dest, recursive=False, force=False):
         print(f"  {srcs[0]} -> {dest}", file=sys.stderr)
     else:
         print("One of source or destination must use a cave path prefix.", file=sys.stderr)
-        print("  coding-cave cp <file>... <slug>:<path>        host -> project", file=sys.stderr)
-        print("  coding-cave cp <file>... <slug>@N:<path>      host -> session @N", file=sys.stderr)
-        print("  coding-cave cp <file>... cave:<path>          host -> CWD project", file=sys.stderr)
-        print("  coding-cave cp <slug>:<path> <dest>           project -> host", file=sys.stderr)
-        print("  coding-cave cp <slug>:~/path <dest>           cave home -> host", file=sys.stderr)
-        print("  coding-cave cp <file>... <slug>:/tmp/path     host -> cave filesystem", file=sys.stderr)
+        print("  coding-cave-legacy cp <file>... <slug>:<path>        host -> project", file=sys.stderr)
+        print("  coding-cave-legacy cp <file>... <slug>@N:<path>      host -> session @N", file=sys.stderr)
+        print("  coding-cave-legacy cp <file>... cave:<path>          host -> CWD project", file=sys.stderr)
+        print("  coding-cave-legacy cp <slug>:<path> <dest>           project -> host", file=sys.stderr)
+        print("  coding-cave-legacy cp <slug>:~/path <dest>           cave home -> host", file=sys.stderr)
+        print("  coding-cave-legacy cp <file>... <slug>:/tmp/path     host -> cave filesystem", file=sys.stderr)
         sys.exit(1)
 
 
@@ -677,7 +677,7 @@ def cmd_flake_update(inputs):
 def cmd_status(show_all=False):
     overlay.clean_stale_session_overlays()
 
-    print(f"coding-cave {_state.VERSION}", file=sys.stderr)
+    print(f"coding-cave-legacy {_state.VERSION}", file=sys.stderr)
 
     all_projects = projects.list_projects()
     if not all_projects:

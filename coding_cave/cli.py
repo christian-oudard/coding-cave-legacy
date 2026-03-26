@@ -7,10 +7,10 @@ from . import _state, commands
 
 def build_parser():
     parser = argparse.ArgumentParser(
-        prog="coding-cave",
+        prog="coding-cave-legacy",
         description="Sandboxed Claude Code agent sessions with Nix environments. Use -- to pass extra arguments to claude.",
     )
-    parser.add_argument("--version", action="version", version=f"coding-cave {_state.VERSION}")
+    parser.add_argument("--version", action="version", version=f"coding-cave-legacy {_state.VERSION}")
     parser.add_argument("--gpu", action="store_true", help="enable GPU access")
     parser.add_argument("--port", default=None, metavar="PORTS", help="expose cave ports on host: PORT[,PORT,...] or 'auto'")
     parser.add_argument("-c", "--continue", action="store_true", dest="continue_session", help="continue most recent conversation")
@@ -24,7 +24,7 @@ def build_parser():
     p_agent.add_argument("-r", "--resume", nargs="?", const=True, default=None, metavar="SESSION_ID", help="resume a conversation by session ID, or interactive picker")
     p_agent.add_argument("-p", "--projects", default=None, metavar="SLUGS", help="projects to mount: 'all', or comma-separated slugs (default: CWD project only)")
     p_shell = sub.add_parser("shell", help="start a shell or join a running session")
-    p_shell.add_argument("session", nargs="?", default=None, metavar="PROJECT@N", help="join session by project@index (e.g. coding-cave@2)")
+    p_shell.add_argument("session", nargs="?", default=None, metavar="PROJECT@N", help="join session by project@index (e.g. coding-cave-legacy@2)")
     p_shell.add_argument("--port", default=None, metavar="PORTS", help="expose cave ports on host: PORT[,PORT,...] or 'auto'")
     p_shell.add_argument("-p", "--projects", default=None, metavar="SLUGS", help="projects to mount: 'all', or comma-separated slugs (default: CWD project only)")
 
@@ -100,7 +100,7 @@ def main():
         commands.cmd_remove(slug=parsed.project)
     elif parsed.command == "cp":
         if len(parsed.paths) < 2:
-            print("Usage: coding-cave cp <src>... <dest>", file=sys.stderr)
+            print("Usage: coding-cave-legacy cp <src>... <dest>", file=sys.stderr)
             sys.exit(1)
         commands.cmd_cp(parsed.paths[:-1], parsed.paths[-1], recursive=parsed.recursive, force=parsed.force)
     elif parsed.command == "update-plugins":
@@ -109,7 +109,7 @@ def main():
         if parsed.flake_command == "update":
             commands.cmd_flake_update(parsed.inputs)
         else:
-            print("Usage: coding-cave flake update [INPUT...]", file=sys.stderr)
+            print("Usage: coding-cave-legacy flake update [INPUT...]", file=sys.stderr)
             sys.exit(1)
     elif parsed.command == "move":
         commands.cmd_move(parsed.old_slug, parsed.new_path)

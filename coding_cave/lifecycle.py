@@ -713,7 +713,7 @@ def start_session(project, command, gpu=False, reuse_index=False, mounted_projec
     sessions.register_session(sid, project, proc.pid, index=session_index,
                               mounted_projects=list(loaded_projects.keys()))
     sessions.update_pane_titles(project)
-    print("Started coding-cave.", file=sys.stderr)
+    print("Started coding-cave-legacy.", file=sys.stderr)
 
     # Convert SIGTERM/SIGHUP into SystemExit so the finally block runs.
     def _exit_on_signal(signum, _frame):

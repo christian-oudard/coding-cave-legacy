@@ -13,10 +13,10 @@ _cave_data = None
 
 
 def cave_data():
-    """Return the cave data root, defaulting to ~/.local/share/coding-cave."""
+    """Return the cave data root, defaulting to ~/.local/share/coding-cave-legacy."""
     if _cave_data is not None:
         return _cave_data
-    return Path.home() / ".local" / "share" / "coding-cave"
+    return Path.home() / ".local" / "share" / "coding-cave-legacy"
 
 
 def set_cave_data(path):
