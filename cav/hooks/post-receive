@@ -1,56 +1,6 @@
 #!/usr/bin/env python3
 """Post-receive hook for cave bare repo.
 
-After an agent delivers to a shared branch, deletes the agent's branch for
-that target. The agent's post-commit hook will re-create it on the next commit.
+Agent branches persist until explicitly removed via cav remove-agent.
+This hook is reserved for future post-delivery actions.
 """
-
-import os
-import re
-import subprocess
-import sys
-
-AGENT_BRANCH_RE = re.compile(r"^agent-(\d+)/(.+)$")
-
-
-def get_agent_id() -> str | None:
-    agent = os.environ.get("CAV_AGENT_ID")
-    if agent:
-        return agent
-    count = int(os.environ.get("GIT_PUSH_OPTION_COUNT", "0"))
-    for i in range(count):
-        opt = os.environ.get(f"GIT_PUSH_OPTION_{i}", "")
-        if opt.startswith("agent="):
-            return opt[len("agent="):]
-    return None
-
-
-def main():
-    agent = get_agent_id()
-    if not agent:
-        return
-
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
-        old_sha, new_sha, ref = line.split()
-
-        if not ref.startswith("refs/heads/"):
-            continue
-        branch = ref[len("refs/heads/"):]
-
-        # Only act on shared branch pushes (not agent branch pushes)
-        if AGENT_BRANCH_RE.match(branch):
-            continue
-
-        # Agent just delivered to shared branch. Delete their agent branch.
-        agent_ref = f"refs/heads/agent-{agent}/{branch}"
-        subprocess.run(
-            ["git", "update-ref", "-d", agent_ref],
-            capture_output=True,
-        )
-
-
-if __name__ == "__main__":
-    main()

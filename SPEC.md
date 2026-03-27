@@ -43,7 +43,7 @@ A pre-receive hook on the shared repo enforces:
 3. Agents cannot delete shared branches.
 4. The user can push anything.
 
-A post-receive hook cleans up after delivery: when an agent pushes to a shared branch, the agent's corresponding agent branch is deleted. The agent's post-commit hook will re-create it on the next commit.
+Agent branches persist until the agent is explicitly removed via `cav remove-agent`. When an agent exits with all work delivered, it is auto-removed (registry entry, branches, workspace). When an agent exits with undelivered work, it remains paused and can be continued with `cav -c`. Undelivered work is detected using `git cherry` (patch-id comparison), so rebased or rewritten commits count as undelivered.
 
 Agent identity is communicated via git push options. No push option means the pusher is the user.
 
@@ -115,13 +115,13 @@ Pushes the current branch to the cave remote. With `--force`, force-pushes (for 
 
 Shows whether shared branches on the cave remote are ahead of local branches. No fetch, reads local state only.
 
-### `cav remove-agent <@n>`
+### `cav remove-agent <n>`
 
-Removes a paused agent's session from the registry, deletes its agent branches from the current project's bare repo, and removes its workspace. Refuses to remove a running agent.
+Removes a paused agent by ID. Deletes its session from the database, its agent branches from the current project's bare repo, and its workspace. Warns about any undelivered commits being discarded. Refuses to remove a running agent.
 
 ### `cav remove-agent --all [--yes]`
 
-Resets the session registry. Removes all agent sessions, workspaces, and agent branches in the current project. Refuses if any agents are currently running. Prompts for confirmation unless `--yes` is given.
+Removes all paused agents and resets the database. Refuses if any agents are currently running. Prompts for confirmation unless `--yes` is given.
 
 ### `cav shell`
 

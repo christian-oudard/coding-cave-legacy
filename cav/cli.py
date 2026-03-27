@@ -110,7 +110,41 @@ def cmd_agent(args):
                     resuming=resuming)
     finally:
         config.mark_agent_exited(agent_id)
+        _auto_cleanup_if_clean(base, agent_id)
     sys.exit(rc)
+
+
+def _auto_cleanup_if_clean(base, agent_id):
+    """Remove agent if all work is delivered. Keep if undelivered work remains."""
+    from .status import _remove_agent
+    try:
+        branches = git.remote_branches(config.SHARED_REMOTE, cwd=base)
+    except Exception:
+        return  # can't check, keep the agent
+    agent_branches = [
+        b for b in branches
+        if (parsed := config.parse_agent_branch(b)) and parsed[1] == agent_id
+    ]
+    if not agent_branches:
+        # No branches at all, clean up
+        _remove_agent(base, agent_id, [])
+        return
+    for b in agent_branches:
+        parsed = config.parse_agent_branch(b)
+        if not parsed:
+            continue
+        target = config.resolve_target(b)
+        remote_agent = f"{config.SHARED_REMOTE}/{b}"
+        target_ref = f"{config.SHARED_REMOTE}/{target}"
+        try:
+            if not git.has_merge_base(remote_agent, target_ref, cwd=base):
+                return  # can't determine, keep
+            if git.cherry_undelivered(target_ref, remote_agent, cwd=base):
+                return  # has undelivered work, keep
+        except Exception:
+            return  # can't check, keep
+    # All branches fully delivered
+    _remove_agent(base, agent_id, agent_branches)
 
 
 def cmd_pull(args):
@@ -137,9 +171,11 @@ def cmd_remove_agent(args):
         return
 
     if not args.agent_id:
-        raise SystemExit("Specify an agent (@<n>) or use --all.")
+        raise SystemExit("Specify an agent ID (e.g. 3) or use --all.")
 
-    agent_id = config.parse_agent_spec(args.agent_id, base)
+    agent_id = args.agent_id.lstrip("@").split("@")[-1]  # accept "3", "@3", "slug@3"
+    if not config.AGENT_ID_RE.match(agent_id):
+        raise SystemExit(f"Invalid agent ID '{args.agent_id}'. Use a number (e.g. 3).")
 
     if config.is_agent_running(agent_id):
         raise SystemExit(f"Agent {agent_id} is running. Stop it first.")
@@ -223,7 +259,11 @@ def cmd_version(args):
 def cmd_status(args):
     base = find_repo_root()
     require_init(base)
-    agent_id = config.parse_agent_spec(args.agent, base) if args.agent else None
+    agent_id = None
+    if args.agent:
+        agent_id = args.agent.lstrip("@").split("@")[-1]  # accept "3", "@3", "slug@3"
+        if not config.AGENT_ID_RE.match(agent_id):
+            raise SystemExit(f"Invalid agent ID '{args.agent}'. Use a number (e.g. 3).")
     from .status import status
     status(base, verbose=args.verbose, agent_filter=agent_id)
 
@@ -261,15 +301,15 @@ def main():
     p_push = sub.add_parser("push", help="Push current branch to cave")
     p_push.add_argument("--force", action="store_true", help="Force push")
 
-    # cav status [@n]
+    # cav status [n]
     p_status = sub.add_parser("status", help="Show agent branch status")
-    p_status.add_argument("agent", nargs="?", help="Agent to show (e.g. @1)")
+    p_status.add_argument("agent", nargs="?", help="Agent ID to filter (e.g. 1)")
     p_status.add_argument("-v", "--verbose", action="store_true", help="Show all agents including idle/paused")
 
-    # cav remove-agent <@n or project@n> | --all
+    # cav remove-agent <n> | --all
     p_rm = sub.add_parser("remove-agent", help="Remove a paused agent and its branches")
-    p_rm.add_argument("agent_id", nargs="?", help="Agent display name (e.g. @4 or coding-cave@4)")
-    p_rm.add_argument("--all", action="store_true", help="Remove all agents and reset the registry")
+    p_rm.add_argument("agent_id", nargs="?", help="Agent ID (e.g. 3)")
+    p_rm.add_argument("--all", action="store_true", help="Remove all agents and reset the database")
     p_rm.add_argument("--yes", "-y", action="store_true", help="Skip confirmation prompt")
 
     # cav version

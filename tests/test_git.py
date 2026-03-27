@@ -180,8 +180,8 @@ class TestCAV(unittest.TestCase):
         config.mark_agent_exited(id1)
         config.mark_agent_exited(id2)
 
-    def test_auto_agent_id_reuse(self):
-        """acquire_agent_id reuses IDs of agents that exited beyond SESSION_TIMEOUT."""
+    def test_agent_id_reuse_after_remove(self):
+        """acquire_agent_id reuses IDs after they are removed from registry."""
         self._init()
 
         id1 = config.acquire_agent_id(self.user_repo)
@@ -192,16 +192,9 @@ class TestCAV(unittest.TestCase):
         self.assertEqual(id2, "2")
         self._create_agent(id2)
 
-        # Agent 1 exits beyond SESSION_TIMEOUT
+        # Remove agent 1 from registry
         config.mark_agent_exited(id1)
-        now = time.time()
-        db = config._open_registry()
-        db.execute(
-            "UPDATE agents SET exited_at = ? WHERE agent_id = ?",
-            (now - config.SESSION_TIMEOUT - 1, id1)
-        )
-        db.commit()
-        db.close()
+        config.remove_agent(id1)
 
         # Next agent should reuse ID 1
         id3 = config.acquire_agent_id(self.user_repo)
@@ -210,32 +203,15 @@ class TestCAV(unittest.TestCase):
         config.mark_agent_exited(id2)
         config.mark_agent_exited(id3)
 
-    def test_auto_agent_id_gaps(self):
-        """acquire_agent_id fills gaps in the ID sequence."""
+    def test_paused_agent_keeps_id(self):
+        """Exited agents keep their ID reserved until explicitly removed."""
         self._init()
 
-        # No agents registered, should get 1
-        aid = config.acquire_agent_id(self.user_repo)
-        self.assertEqual(aid, "1")
-        config.mark_agent_exited(aid)
-
-    def test_paused_session_protected(self):
-        """Recently exited agent keeps its ID reserved by SESSION_TIMEOUT."""
-        agents = self._init_and_agents("1")
-        ws = agents["1"]
-
-        # Agent 1 does work and pushes to its agent branch (not main)
-        (ws / "wip.py").write_text("work in progress\n")
-        git("add", "wip.py", cwd=ws)
-        git("commit", "-m", "WIP", cwd=ws)
-        git("push", "cave", "HEAD", cwd=ws, env=agent_env("1"))
-
-        # Agent 1 acquires and exits recently (within SESSION_TIMEOUT)
         id1 = config.acquire_agent_id(self.user_repo)
         self.assertEqual(id1, "1")
         config.mark_agent_exited(id1)
 
-        # Next agent should skip 1 (recently exited, protected) and get 2
+        # Paused agent keeps its ID, next agent gets 2
         id2 = config.acquire_agent_id(self.user_repo)
         self.assertEqual(id2, "2")
         config.mark_agent_exited(id2)
@@ -263,8 +239,8 @@ class TestCAV(unittest.TestCase):
         self.assertIn("Add feature", log)
         self.assertIn("Update feature", log)
 
-    def test_deliver_cleans_up_agent_branch(self):
-        """Delivering to main auto-deletes the agent's remote branch."""
+    def test_deliver_preserves_agent_branch(self):
+        """Delivering to main does NOT auto-delete the agent's remote branch."""
         agents = self._init_and_agents("1")
         ws = agents["1"]
 
@@ -275,18 +251,13 @@ class TestCAV(unittest.TestCase):
         # Push to agent branch first (simulating normal workflow)
         git("push", "cave", "agent-1/main", cwd=ws, env=agent_env("1"))
 
-        # Verify agent branch exists on remote
-        git("fetch", "cave", cwd=self.user_repo)
-        branches = git_out("branch", "-r", cwd=self.user_repo)
-        self.assertIn("cave/agent-1/main", branches)
-
         # Agent delivers to main
         git("push", "cave", "agent-1/main:main", cwd=ws, env=agent_env("1"))
 
-        # Agent branch should be gone from remote
+        # Agent branch should still exist on remote
         git("fetch", "--prune", "cave", cwd=self.user_repo)
         branches = git_out("branch", "-r", cwd=self.user_repo)
-        self.assertNotIn("cave/agent-1/main", branches)
+        self.assertIn("cave/agent-1/main", branches)
 
     def test_pull_agent_branch_resets_to_remote(self):
         """cav pull on an agent branch hard-resets to the remote agent branch."""
@@ -362,8 +333,8 @@ class TestCAV(unittest.TestCase):
         result = cav_cli("pull", cwd=self.user_repo, check=False)
         self.assertIn("Already up to date", result.stdout)
 
-    def test_delivery_cleans_up_agent_branch(self):
-        """After agent delivers to main, the agent branch is deleted from remote."""
+    def test_delivery_preserves_agent_branch(self):
+        """After agent delivers to main, the agent branch still exists."""
         agents = self._init_and_agents("1")
         ws = agents["1"]
 
@@ -379,9 +350,9 @@ class TestCAV(unittest.TestCase):
         # Deliver to main
         git("push", "cave", "agent-1/main:main", cwd=ws, env=agent_env("1"))
 
-        # Agent branch should be gone from remote after delivery
+        # Agent branch should still exist after delivery
         refs_after = git_out("branch", cwd=shared)
-        self.assertNotIn("agent-1/main", refs_after)
+        self.assertIn("agent-1/main", refs_after)
 
         # Work should be on main
         git("fetch", "cave", cwd=self.user_repo)

@@ -18,7 +18,6 @@ DATA_DIR = Path(os.environ.get(
     Path.home() / ".local" / "share" / "coding-cave",
 ))
 CAVE_USER = "cave-coder"
-SESSION_TIMEOUT = 24 * 3600  # seconds before a paused agent ID is reclaimable
 
 SCHEMA_VERSION = 2  # v1: (project, agent_id) PK; v2: agent_id PK (global IDs)
 
@@ -48,20 +47,6 @@ def resolve_target(branch: str) -> str:
 def display_name(base: Path, agent_id: str) -> str:
     """Display name: <slug>@<id>."""
     return f"{project_slug(base)}@{agent_id}"
-
-
-def parse_agent_spec(spec: str, base: Path) -> str:
-    """Parse '@4' or 'project@4' into agent_id. Raises SystemExit on bad input."""
-    if "@" not in spec:
-        raise SystemExit(f"Invalid format '{spec}'. Use @<n> or <project>@<n>.")
-    project_part, agent_id = spec.rsplit("@", 1)
-    if project_part and project_part != project_slug(base):
-        raise SystemExit(
-            f"Project mismatch: expected '{project_slug(base)}', got '{project_part}'."
-        )
-    if not AGENT_ID_RE.match(agent_id):
-        raise SystemExit(f"Invalid agent ID in '{spec}'.")
-    return agent_id
 
 
 # -- Project-level paths (inside the project repo) --
@@ -300,14 +285,6 @@ def agent_exit_time(agent_id: str) -> float | None:
         db.close()
 
 
-def is_session_expired(agent_id: str) -> bool:
-    """True if the agent exited long enough ago to reclaim its ID."""
-    t = agent_exit_time(agent_id)
-    if t is None:
-        return True
-    return (time.time() - t) > SESSION_TIMEOUT
-
-
 def running_agent_ids(base: Path) -> list[str]:
     """Return agent IDs that are currently running for a given project."""
     slug = project_slug(base)
@@ -361,16 +338,8 @@ def acquire_agent_id(base: Path) -> str:
                     (now, aid)
                 )
 
-        # Find occupied IDs (running or recently exited, globally)
-        occupied = set()
-        for row in db.execute(
-            "SELECT agent_id, exited_at FROM agents"
-        ):
-            aid, exited_at = row
-            if exited_at is None:
-                occupied.add(aid)  # running
-            elif (now - exited_at) <= SESSION_TIMEOUT:
-                occupied.add(aid)  # recently exited, protected
+        # All IDs in the registry are occupied (running or paused with work)
+        occupied = {r[0] for r in db.execute("SELECT agent_id FROM agents")}
 
         # Find lowest available ID
         n = 1
@@ -428,9 +397,8 @@ def continue_agent_id(base: Path, agent_id: str | None = None) -> str:
         row = db.execute(
             "SELECT agent_id FROM agents "
             "WHERE project = ? AND exited_at IS NOT NULL "
-            "AND ? - exited_at <= ? "
             "ORDER BY exited_at DESC LIMIT 1",
-            (slug, now, SESSION_TIMEOUT)
+            (slug,)
         ).fetchone()
         if not row:
             raise SystemExit("No paused agents to continue.")
