@@ -84,8 +84,10 @@ class TestInitDefaults(unittest.TestCase):
         git("add", "file.txt", cwd=self.repo)
         git("commit", "-m", "init", cwd=self.repo)
         os.symlink(PROJECT_ROOT / "cav", self.repo / "cav")
+        os.environ["CAV_DATA_DIR"] = str(Path(self.tmpdir) / "data")
 
     def tearDown(self):
+        os.environ.pop("CAV_DATA_DIR", None)
         shutil.rmtree(self.tmpdir)
 
     def test_init_no_args(self):
@@ -127,9 +129,11 @@ class TestPullForceGuard(unittest.TestCase):
         git("add", "file.txt", cwd=self.repo)
         git("commit", "-m", "init", cwd=self.repo)
         os.symlink(PROJECT_ROOT / "cav", self.repo / "cav")
+        os.environ["CAV_DATA_DIR"] = str(Path(self.tmpdir) / "data")
         cav_cli("init", cwd=self.repo)
 
     def tearDown(self):
+        os.environ.pop("CAV_DATA_DIR", None)
         shutil.rmtree(self.tmpdir)
 
     def test_pull_force_blocked_on_main(self):
@@ -179,9 +183,11 @@ class TestPushForceAllowed(unittest.TestCase):
         git("add", "file.txt", cwd=self.repo)
         git("commit", "-m", "init", cwd=self.repo)
         os.symlink(PROJECT_ROOT / "cav", self.repo / "cav")
+        os.environ["CAV_DATA_DIR"] = str(Path(self.tmpdir) / "data")
         cav_cli("init", cwd=self.repo)
 
     def tearDown(self):
+        os.environ.pop("CAV_DATA_DIR", None)
         shutil.rmtree(self.tmpdir)
 
     def test_push_force_not_blocked_on_main(self):

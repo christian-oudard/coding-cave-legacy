@@ -19,7 +19,7 @@ DATA_DIR = Path(os.environ.get(
 ))
 CAVE_USER = "cave-coder"
 
-SCHEMA_VERSION = 2  # v1: (project, agent_id) PK; v2: agent_id PK (global IDs)
+SCHEMA_VERSION = 3  # v1: (project,agent_id) PK; v2: agent_id PK; v3: +projects table
 
 
 def agent_branch(target: str, agent_id: str) -> str:
@@ -87,7 +87,7 @@ def cave_depth() -> int:
 # -- Agent registry (SQLite) --
 
 def _registry_path() -> Path:
-    return DATA_DIR / "registry.db"
+    return DATA_DIR / "coding-cave.db"
 
 
 def _open_registry() -> sqlite3.Connection:
@@ -104,11 +104,10 @@ def _open_registry() -> sqlite3.Connection:
 
     version = db.execute("PRAGMA user_version").fetchone()[0]
 
-    if is_new or version == 0:
-        if not is_new and version == 0:
-            # Migrate from v1 (composite PK) to v2 (global agent_id PK)
+    if version < SCHEMA_VERSION:
+        if version == 0 and not is_new:
             _migrate_v1_to_v2(db)
-        else:
+        elif is_new:
             db.execute("""
                 CREATE TABLE IF NOT EXISTS agents (
                     agent_id TEXT PRIMARY KEY,
@@ -120,6 +119,15 @@ def _open_registry() -> sqlite3.Connection:
                 )
             """)
             _migrate_session_files(db)
+
+        # v3: add projects table
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS projects (
+                slug TEXT PRIMARY KEY,
+                path TEXT NOT NULL UNIQUE
+            )
+        """)
+
         db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         db.commit()
 
@@ -475,5 +483,52 @@ def clear_registry() -> None:
     try:
         db.execute("DELETE FROM agents")
         db.commit()
+    finally:
+        db.close()
+
+
+# -- Project registry --
+
+def register_project(base: Path) -> str:
+    """Register a project in the registry. Fails loud on slug collision."""
+    slug = project_slug(base)
+    path = str(base.resolve())
+    db = _open_registry()
+    try:
+        row = db.execute(
+            "SELECT path FROM projects WHERE slug = ?", (slug,)
+        ).fetchone()
+        if row and row[0] != path:
+            raise SystemExit(
+                f"Slug collision: '{slug}' is already registered to {row[0]}\n"
+                f"Rename one of the project directories to avoid this."
+            )
+        db.execute(
+            "INSERT OR REPLACE INTO projects (slug, path) VALUES (?, ?)",
+            (slug, path)
+        )
+        db.commit()
+        return slug
+    finally:
+        db.close()
+
+
+def project_path(slug: str) -> str | None:
+    """Look up the path for a project slug, or None."""
+    db = _open_registry()
+    try:
+        row = db.execute(
+            "SELECT path FROM projects WHERE slug = ?", (slug,)
+        ).fetchone()
+        return row[0] if row else None
+    finally:
+        db.close()
+
+
+def all_projects() -> list[tuple[str, str]]:
+    """Return all (slug, path) pairs."""
+    db = _open_registry()
+    try:
+        return db.execute("SELECT slug, path FROM projects").fetchall()
     finally:
         db.close()

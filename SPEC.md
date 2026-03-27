@@ -81,9 +81,18 @@ Every session gets `~/.claude/CLAUDE.md` = system layer + cave.nix layer + user 
 
 ## Commands
 
+## Data
+
+`coding-cave.db` in the data directory (`~/.local/share/coding-cave/`) is a SQLite database (WAL mode) containing:
+
+- **agents**: agent_id (PK), project slug, session_id, pid, started_at, exited_at.
+- **projects**: slug (PK) to absolute path mapping, registered at `cav init` time.
+
+Slug collisions (two different paths producing the same slug) are rejected at init time. Rename the project directory to resolve.
+
 ### `cav init`
 
-Initializes Coding Cave in a project directory. Creates `.coding-cave/cave-shared.git` with the pre-receive hook.
+Initializes Coding Cave in a project directory. Creates `.coding-cave/cave-shared.git` with the pre-receive hook. Registers the project in the global database.
 
 ### `cav [-c] [-p path ...] [--recursive]`
 

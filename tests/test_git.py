@@ -847,6 +847,32 @@ class TestCAV(unittest.TestCase):
         config.mark_agent_exited(id1)
         config.mark_agent_exited(id2)
 
+    def test_init_registers_project(self):
+        """cav init registers the project slug and path."""
+        self._init()
+        projects = config.all_projects()
+        self.assertEqual(len(projects), 1)
+        slug, path = projects[0]
+        self.assertEqual(slug, config.project_slug(self.user_repo))
+        self.assertEqual(path, str(self.user_repo.resolve()))
+
+    def test_init_slug_collision_different_path(self):
+        """cav init rejects a slug collision from a different path."""
+        self._init()
+        # Create a second repo with the same directory name in a different location
+        other_parent = Path(self.tmpdir) / "elsewhere"
+        other_parent.mkdir()
+        other = other_parent / self.user_repo.name
+        other.mkdir()
+        git("init", "-b", "main", cwd=other)
+        git("config", "user.email", "t@t.com", cwd=other)
+        git("config", "user.name", "T", cwd=other)
+        (other / "f").write_text("x")
+        git("add", "f", cwd=other)
+        git("commit", "-m", "init", cwd=other)
+        with self.assertRaises(SystemExit):
+            config.register_project(other)
+
     def test_depth_and_lineage_propagation(self):
         """Verify depth increments and lineage chains across 3 levels of nesting."""
         # Simulate the env computation from sandbox.py launch() at each level

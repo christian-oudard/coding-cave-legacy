@@ -33,6 +33,7 @@ def init(path: str):
 
     if shared.exists():
         install_hooks(shared)
+        config.register_project(base)
         print(f"Updated hooks at {shared}")
         return
 
@@ -63,4 +64,5 @@ def init(path: str):
     # Push all branches to cave
     git.git("push", "--no-set-upstream", config.SHARED_REMOTE, "--all", cwd=base, echo=False)
 
+    config.register_project(base)
     print(f"Initialized Coding Cave at {cav}")
