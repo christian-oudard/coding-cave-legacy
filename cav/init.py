@@ -32,7 +32,9 @@ def init(path: str):
     shared = config.shared_repo_path(base)
 
     if shared.exists():
-        raise SystemExit(f"Already initialized: {shared}")
+        install_hooks(shared)
+        print(f"Updated hooks at {shared}")
+        return
 
     # Check for conflicting remote before creating anything
     try:

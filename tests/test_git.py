@@ -122,6 +122,20 @@ class TestCAV(unittest.TestCase):
         remotes = git_out("remote", cwd=self.user_repo)
         self.assertIn("cave", remotes)
 
+    def test_init_idempotent(self):
+        """cav init on an existing project updates hooks."""
+        cav_cli("init", str(self.user_repo), cwd=self.user_repo)
+        shared = self.user_repo / ".coding-cave" / "cave-shared.git"
+
+        # Delete post-receive to simulate old install
+        (shared / "hooks" / "post-receive").unlink()
+        self.assertFalse((shared / "hooks" / "post-receive").exists())
+
+        # Re-init should update hooks, not error
+        result = cav_cli("init", str(self.user_repo), cwd=self.user_repo)
+        self.assertIn("Updated hooks", result.stdout)
+        self.assertTrue((shared / "hooks" / "post-receive").exists())
+
     # -- workspace creation --
 
     def test_workspace_creation(self):
@@ -377,6 +391,32 @@ class TestCAV(unittest.TestCase):
             "cave/agent-2/agent-1/main", cwd=self.user_repo)
         result = cav_cli("pull", cwd=self.user_repo, check=False)
         self.assertIn("Already up to date", result.stdout)
+
+    def test_delivery_cleans_up_agent_branch(self):
+        """After agent delivers to main, the agent branch is deleted from remote."""
+        agents = self._init_and_agents("1")
+        ws = agents["1"]
+
+        (ws / "feature.py").write_text("print('hello')\n")
+        git("add", "feature.py", cwd=ws)
+        git("commit", "-m", "Add feature", cwd=ws)
+
+        # Agent branch exists on remote before delivery
+        shared = self.user_repo / ".coding-cave" / "cave-shared.git"
+        refs_before = git_out("branch", cwd=shared)
+        self.assertIn("agent-1/main", refs_before)
+
+        # Deliver to main
+        git("push", "cave", "agent-1/main:main", cwd=ws, env=agent_env("1"))
+
+        # Agent branch should be gone from remote after delivery
+        refs_after = git_out("branch", cwd=shared)
+        self.assertNotIn("agent-1/main", refs_after)
+
+        # Work should be on main
+        git("fetch", "cave", cwd=self.user_repo)
+        log = git_out("log", "--oneline", "cave/main", cwd=self.user_repo)
+        self.assertIn("Add feature", log)
 
     # -- merge + push --
 

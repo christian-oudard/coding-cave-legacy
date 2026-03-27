@@ -41,9 +41,9 @@ A pre-receive hook on the shared repo enforces:
 3. Agents cannot delete shared branches.
 4. The user can push anything.
 
-Agent identity is communicated via git push options. No push option means the pusher is the user.
+A post-receive hook cleans up after delivery: when an agent pushes to a shared branch, the agent's corresponding agent branch is deleted. The agent's post-commit hook will re-create it on the next commit.
 
-A post-receive hook handles cleanup: when an agent delivers to a shared branch, the agent's corresponding branch is automatically deleted. The agent's post-commit hook re-creates it on the next commit.
+Agent identity is communicated via git push options. No push option means the pusher is the user.
 
 Agents cannot be launched from agent branches. The user must be on a shared branch (e.g. main) when starting a new agent.
 
