@@ -90,6 +90,15 @@ def cherry_undelivered(upstream: str, head: str, cwd=None) -> list[str]:
 
 
 
+def commit_timestamp(ref: str, cwd=None) -> float | None:
+    """Return the committer timestamp (unix epoch) of a ref, or None."""
+    try:
+        out = git_output("log", "-1", "--format=%ct", ref, cwd=cwd)
+        return float(out) if out else None
+    except Exception:
+        return None
+
+
 def commit_oneline(range_spec: str, exclude: list[str] | None = None, cwd=None) -> list[str]:
     """Return commit lines in --oneline format for a range (newest first)."""
     args = ["log", "--oneline", range_spec]

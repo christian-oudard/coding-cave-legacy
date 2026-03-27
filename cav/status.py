@@ -95,16 +95,22 @@ def status(base: Path, verbose: bool = False, agent_filter: str | None = None):
     if agent_filter:
         verbose = True
 
-    hidden = []
-    for agent_id in sorted(by_agent, key=int):
-        branches = by_agent[agent_id]
+    MAX_COMMITS = 3
+
+    # Collect agent info and sort by last activity (oldest first)
+    agents = []
+    for agent_id, branches in by_agent.items():
         name = config.display_name(base, agent_id)
         running = config.is_agent_running(agent_id)
 
         undelivered = []
+        last_activity = 0.0
         for branch, target in branches:
             remote_agent = f"{config.SHARED_REMOTE}/{branch}"
             target_ref = f"{config.SHARED_REMOTE}/{target}"
+            ts = git.commit_timestamp(remote_agent, cwd=base)
+            if ts and ts > last_activity:
+                last_activity = ts
             try:
                 if git.has_merge_base(remote_agent, target_ref, cwd=base):
                     lines = git.cherry_undelivered(target_ref, remote_agent, cwd=base)
@@ -113,36 +119,53 @@ def status(base: Path, verbose: bool = False, agent_filter: str | None = None):
             except Exception:
                 pass
 
+        # Fall back to registry timestamps if no branches
+        if not last_activity:
+            exit_t = config.agent_exit_time(agent_id)
+            if exit_t:
+                last_activity = exit_t
+
         total_ahead = sum(a for _, a, _ in undelivered)
 
         if running:
             state = "running"
         elif total_ahead > 0:
-            exit_t = config.agent_exit_time(agent_id)
-            if exit_t:
-                state = f"paused {_format_age(exit_t)}"
-            else:
-                state = "paused"
+            state = "paused"
         else:
             state = "idle"
 
+        agents.append((last_activity, agent_id, name, running, state, undelivered))
+
+    # Sort by last activity, oldest first
+    agents.sort(key=lambda a: a[0])
+
+    hidden = []
+    for last_activity, agent_id, name, running, state, undelivered in agents:
         if not undelivered and not running:
-            hidden.append(name)
+            hidden.append((name, last_activity))
             continue
 
+        age = _format_age(last_activity) if last_activity else ""
+        header = f"{name}  ({state})" + (f"  {age}" if age else "")
+
         if not undelivered:
-            print(f"{name}  ({state})")
+            print(header)
         else:
+            print(header)
             for branch, ahead, lines in undelivered:
                 n = "commit" if ahead == 1 else "commits"
-                print(f"{name}  ({state}) {ahead} undelivered {n} on {branch}")
-                for line in lines:
-                    print(f"  {line}")
+                print(f"  {ahead} undelivered {n} on {branch}")
+                for line in lines[:MAX_COMMITS]:
+                    print(f"    {line}")
+                if ahead > MAX_COMMITS:
+                    print(f"    ... and {ahead - MAX_COMMITS} more")
 
     if hidden:
         if verbose:
-            for name in hidden:
-                print(f"{name}  (idle)")
+            for name, ts in hidden:
+                age = _format_age(ts) if ts else ""
+                suffix = f"  {age}" if age else ""
+                print(f"{name}  (idle){suffix}")
         else:
             n = len(hidden)
             s = "session" if n == 1 else "sessions"
