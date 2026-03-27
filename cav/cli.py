@@ -234,8 +234,12 @@ def cmd_remove_agent(args):
     if not config.AGENT_ID_RE.match(agent_id):
         raise SystemExit(f"Invalid agent ID '{args.agent_id}'. Use a number (e.g. 3).")
 
+    name = config.display_name(base, agent_id)
+    if agent_id not in config.all_agent_ids():
+        raise SystemExit(f"{name} not found.")
+
     if config.is_agent_running(agent_id):
-        raise SystemExit(f"Agent {agent_id} is running. Stop it first.")
+        raise SystemExit(f"{name} is running. Stop it first.")
 
     # Find remote branches belonging to this agent
     branches = git.remote_branches(config.SHARED_REMOTE, cwd=base)
