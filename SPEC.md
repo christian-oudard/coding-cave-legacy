@@ -20,7 +20,7 @@ A bare Git repo (`.coding-cave/cave-shared.git`) acts as the shared remote, name
 
 ## Agents
 
-Agents are identified by globally unique numeric IDs: 1, 2, 3. IDs are assigned from a single incrementing counter across all projects, so there are never two different agents with the same ID. Display names combine the project slug with the ID: `coding-cave@1`, `my-app@2`. Each agent gets a lightweight shared clone that shares the object store with the bare repo via alternates.
+Agents are identified by globally unique numeric IDs: 1, 2, 3. IDs are assigned from a single incrementing counter across all projects, so there are never two different agents with the same ID. Display names combine the project slug with the ID: `coding-cave@1`, `my-app@2`. Each agent gets its own workspace clone of the shared repo.
 
 Each agent session has a primary project (the project directory where the session was started). When an agent operates on multiple projects, it creates agent branches in each project's bare repo using the same globally unique ID.
 
@@ -43,7 +43,9 @@ A pre-receive hook on the shared repo enforces:
 3. Agents cannot delete shared branches.
 4. The user can push anything.
 
-Agent branches persist until the agent is explicitly removed via `cav remove-agent`. When an agent exits with all work delivered, it is auto-removed (registry entry, branches, workspace). When an agent exits with undelivered work, it remains paused and can be continued with `cav -c`. Undelivered work is detected using `git cherry` (patch-id comparison), so rebased or rewritten commits count as undelivered.
+Agent branches persist until the agent is explicitly removed via `cav remove-agent`. When an agent exits with all work delivered, it is auto-removed (registry entry, branches, workspace). When an agent exits with undelivered work, it remains paused and can be continued with `cav -c`. Undelivered work is detected by patch-id comparison, so rebased or rewritten commits count as undelivered.
+
+Every commit on an agent branch is automatically force-pushed to the cave remote. This keeps the remote branch in sync without manual pushes. Only the agent's own branch is pushed, never shared branches or other agents' branches.
 
 Agent identity is communicated via git push options. No push option means the pusher is the user.
 
@@ -51,9 +53,9 @@ Agents cannot be launched from agent branches. The user must be on a shared bran
 
 ## Sandbox
 
-Each agent runs in a bwrap namespace (via jail.nix) with:
+Each agent runs in a sandbox with:
 
-- Nix store overlay (host store read-only + writable upper via fuse-overlayfs).
+- Nix store overlay (host store read-only, writable upper layer).
 - Project workspace mounted at `/projects/<slug>`.
 - Persistent home at `/home/cave-coder` (survives across sessions).
 - GPG agent socket forwarded for commit signing (private key stays on host).
@@ -63,13 +65,13 @@ Each agent runs in a bwrap namespace (via jail.nix) with:
 
 ## Credential Isolation
 
-Caves hold zero real credentials. All HTTPS traffic is routed through a MITM proxy (crinj) running on the host, which injects API keys based on destination host. A placeholder OAuth token satisfies Claude Code's local auth check, but is replaced by crinj at the HTTP level before reaching the API. The proxy CA certificate is bind-mounted into the cave. If crinj isn't running, HTTPS requests to credential-protected services fail. No fallback to direct credential forwarding.
+Caves hold zero real credentials. All HTTPS traffic is routed through a MITM proxy (crinj) running on the host, which injects API keys based on destination host. A placeholder OAuth token satisfies Claude Code's local auth check, but is replaced by crinj at the HTTP level before reaching the API. The proxy CA certificate is available inside the cave. If crinj isn't running, HTTPS requests to credential-protected services fail. No fallback to direct credential forwarding.
 
 ## User/System Configuration
 
-### System layer (flake.nix)
+### System layer
 
-Base packages are infrastructure only: claude-code, nix, git, coreutils, and standard unix tools. No editors, language runtimes, or dev tools. `system-claude.md` is baked into the derivation and concatenated with the user's CLAUDE.md at session startup. Claude Code settings are declared via nix-claude.
+Base packages are infrastructure only: claude-code, nix, git, coreutils, and standard unix tools. No editors, language runtimes, or dev tools. A system CLAUDE.md is concatenated with the user's CLAUDE.md at session startup.
 
 ### User layer (cave.nix)
 
@@ -83,16 +85,13 @@ Every session gets `~/.claude/CLAUDE.md` = system layer + cave.nix layer + user 
 
 ## Data
 
-`coding-cave.db` in the data directory (`~/.local/share/coding-cave/`) is a SQLite database (WAL mode) containing:
-
-- **agents**: agent_id (PK), project slug, session_id, pid, started_at, exited_at.
-- **projects**: slug (PK) to absolute path mapping, registered at `cav init` time.
+A global database in the data directory (`~/.local/share/coding-cave/`) tracks registered agents and projects. Each agent has an ID, project, session ID, and lifecycle state. Each project maps a slug to an absolute path.
 
 Slug collisions (two different paths producing the same slug) are rejected at init time. Rename the project directory to resolve.
 
 ### `cav init`
 
-Initializes Coding Cave in a project directory. Creates `.coding-cave/cave-shared.git` with the pre-receive hook. Registers the project in the global database.
+Initializes Coding Cave in a project directory. Sets up the shared bare repo, branch protection hooks, and registers the project in the global database.
 
 ### `cav [-c] [-p path ...] [--recursive]`
 
@@ -102,7 +101,7 @@ With `-c` / `--continue`, resumes the most recently paused agent whose primary p
 
 With `-p`, additional projects are mounted into the same cave. Each project must already have `cav init` done. The agent uses its globally unique ID across all projects, with separate workspaces and agent branches per project. All workspaces are mounted at `/projects/<slug>`. Fails with a helpful message if any project is not initialized.
 
-With `--recursive`, the cave can launch subcaves. This exposes `/dev/fuse` inside the sandbox so the child cave can create its own nix store overlay. Disabled by default.
+With `--recursive`, the cave can launch subcaves. Disabled by default.
 
 ### `cav pull`
 
@@ -134,7 +133,7 @@ Removes all paused agents and resets the database. Also deletes local agent bran
 
 ### `cav prune-branches`
 
-Deletes orphaned local agent branch checkouts whose remote tracking branch no longer exists. Prompts for confirmation before deleting.
+Deletes orphaned local agent branch checkouts. An agent branch is orphaned if it has no upstream or its cave upstream no longer exists. Refuses to touch agent-named branches tracking a non-cave remote. Prompts for confirmation before deleting.
 
 ### `cav shell`
 
