@@ -55,9 +55,8 @@ def cmd_agent(args):
 
     if args.resume_session:
         # Route --resume to the agent that owns this session
-        slug = config.project_slug(base)
         agent_id_arg = getattr(args, 'agent_id', None)
-        owner = config.find_agent_by_session(slug, args.resume_session)
+        owner = config.find_agent_by_session(args.resume_session)
         if owner:
             agent_id = config.continue_agent_id(base, owner)
         elif agent_id_arg:
@@ -71,11 +70,11 @@ def cmd_agent(args):
         resuming = True
     elif args.continue_agent:
         agent_id = config.continue_agent_id(base)
-        session_id = config.read_session_id(base, agent_id)
+        session_id = config.read_session_id(agent_id)
         resuming = bool(session_id)
     else:
         agent_id = config.acquire_agent_id(base)
-        session_id = config.read_session_id(base, agent_id)
+        session_id = config.read_session_id(agent_id)
         resuming = False
 
     # Primary project (cwd)
@@ -110,7 +109,7 @@ def cmd_agent(args):
                     recursive=args.recursive, session_id=session_id,
                     resuming=resuming)
     finally:
-        config.mark_agent_exited(base, agent_id)
+        config.mark_agent_exited(agent_id)
     sys.exit(rc)
 
 
@@ -133,9 +132,16 @@ def cmd_remove_agent(args):
     base = find_repo_root()
     require_init(base)
 
+    if args.all:
+        _cmd_remove_all_agents(base, yes=args.yes)
+        return
+
+    if not args.agent_id:
+        raise SystemExit("Specify an agent (@<n>) or use --all.")
+
     agent_id = config.parse_agent_spec(args.agent_id, base)
 
-    if config.is_agent_running(base, agent_id):
+    if config.is_agent_running(agent_id):
         raise SystemExit(f"Agent {agent_id} is running. Stop it first.")
 
     # Find remote branches belonging to this agent
@@ -164,6 +170,44 @@ def cmd_remove_agent(args):
 
     _remove_agent(base, agent_id, agent_branches)
     print(f"Removed {config.display_name(base, agent_id)}.")
+
+
+def _cmd_remove_all_agents(base, yes=False):
+    from .status import _remove_agent
+
+    if config.any_agent_running():
+        raise SystemExit("Cannot remove all: some agents are still running.")
+
+    all_ids = config.all_agent_ids()
+    if not all_ids:
+        print("No agents in registry.")
+        return
+
+    # Find all agent branches in this project
+    branches = git.remote_branches(config.SHARED_REMOTE, cwd=base)
+    agent_branches = [b for b in branches if config.parse_agent_branch(b)]
+
+    n = len(all_ids)
+    s = "session" if n == 1 else "sessions"
+    print(f"This will remove {n} agent {s} and {len(agent_branches)} agent branches.")
+
+    if not yes:
+        try:
+            answer = input("Continue? [y/N] ")
+        except (EOFError, KeyboardInterrupt):
+            raise SystemExit("\nAborted.")
+        if answer.strip().lower() not in ("y", "yes"):
+            raise SystemExit("Aborted.")
+
+    # Remove branches and workspaces per agent
+    for agent_id in all_ids:
+        ab = [b for b in agent_branches
+              if (p := config.parse_agent_branch(b)) and p[1] == agent_id]
+        _remove_agent(base, agent_id, ab)
+
+    # Clear registry completely
+    config.clear_registry()
+    print(f"Removed {n} agent {s}.")
 
 
 def cmd_version(args):
@@ -222,9 +266,11 @@ def main():
     p_status.add_argument("agent", nargs="?", help="Agent to show (e.g. @1)")
     p_status.add_argument("-v", "--verbose", action="store_true", help="Show all agents including idle/paused")
 
-    # cav remove-agent <@n or project@n>
+    # cav remove-agent <@n or project@n> | --all
     p_rm = sub.add_parser("remove-agent", help="Remove a paused agent and its branches")
-    p_rm.add_argument("agent_id", help="Agent display name (e.g. @4 or coding-cave@4)")
+    p_rm.add_argument("agent_id", nargs="?", help="Agent display name (e.g. @4 or coding-cave@4)")
+    p_rm.add_argument("--all", action="store_true", help="Remove all agents and reset the registry")
+    p_rm.add_argument("--yes", "-y", action="store_true", help="Skip confirmation prompt")
 
     # cav version
     sub.add_parser("version", help="Show version")

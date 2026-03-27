@@ -24,11 +24,14 @@ def _remove_agent(base: Path, agent_id: str, branches: list[str]):
     for branch in branches:
         git.git("push", config.SHARED_REMOTE, f":refs/heads/{branch}",
                 cwd=base, echo=False, capture=True)
-    slug = config.project_slug(base)
-    config.remove_agent(slug, agent_id)
-    ws = config.worktree_dir(slug, agent_id)
-    if ws.exists():
-        shutil.rmtree(ws)
+    config.remove_agent(agent_id)
+    # Clean up workspaces for all projects (agent ID is globally unique)
+    worktrees_dir = config.DATA_DIR / "worktrees"
+    if worktrees_dir.exists():
+        for slug_dir in worktrees_dir.iterdir():
+            ws = slug_dir / agent_id
+            if ws.exists():
+                shutil.rmtree(ws)
 
 
 def status(base: Path, verbose: bool = False, agent_filter: str | None = None):
@@ -96,7 +99,7 @@ def status(base: Path, verbose: bool = False, agent_filter: str | None = None):
     for agent_id in sorted(by_agent, key=int):
         branches = by_agent[agent_id]
         name = config.display_name(base, agent_id)
-        running = config.is_agent_running(base, agent_id)
+        running = config.is_agent_running(agent_id)
 
         undelivered = []
         for branch, target in branches:
@@ -115,7 +118,7 @@ def status(base: Path, verbose: bool = False, agent_filter: str | None = None):
         if running:
             state = "running"
         elif total_ahead > 0:
-            exit_t = config.agent_exit_time(base, agent_id)
+            exit_t = config.agent_exit_time(agent_id)
             if exit_t:
                 state = f"paused {_format_age(exit_t)}"
             else:

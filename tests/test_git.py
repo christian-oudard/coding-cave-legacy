@@ -177,8 +177,8 @@ class TestCAV(unittest.TestCase):
         self.assertEqual(id2, "2")
         self._create_agent(id2)
 
-        config.mark_agent_exited(self.user_repo, id1)
-        config.mark_agent_exited(self.user_repo, id2)
+        config.mark_agent_exited(id1)
+        config.mark_agent_exited(id2)
 
     def test_auto_agent_id_reuse(self):
         """acquire_agent_id reuses IDs of agents that exited beyond SESSION_TIMEOUT."""
@@ -193,13 +193,12 @@ class TestCAV(unittest.TestCase):
         self._create_agent(id2)
 
         # Agent 1 exits beyond SESSION_TIMEOUT
-        config.mark_agent_exited(self.user_repo, id1)
-        slug = config.project_slug(self.user_repo)
+        config.mark_agent_exited(id1)
         now = time.time()
         db = config._open_registry()
         db.execute(
-            "UPDATE agents SET exited_at = ? WHERE project = ? AND agent_id = ?",
-            (now - config.SESSION_TIMEOUT - 1, slug, id1)
+            "UPDATE agents SET exited_at = ? WHERE agent_id = ?",
+            (now - config.SESSION_TIMEOUT - 1, id1)
         )
         db.commit()
         db.close()
@@ -208,8 +207,8 @@ class TestCAV(unittest.TestCase):
         id3 = config.acquire_agent_id(self.user_repo)
         self.assertEqual(id3, "1")
 
-        config.mark_agent_exited(self.user_repo, id2)
-        config.mark_agent_exited(self.user_repo, id3)
+        config.mark_agent_exited(id2)
+        config.mark_agent_exited(id3)
 
     def test_auto_agent_id_gaps(self):
         """acquire_agent_id fills gaps in the ID sequence."""
@@ -218,7 +217,7 @@ class TestCAV(unittest.TestCase):
         # No agents registered, should get 1
         aid = config.acquire_agent_id(self.user_repo)
         self.assertEqual(aid, "1")
-        config.mark_agent_exited(self.user_repo, aid)
+        config.mark_agent_exited(aid)
 
     def test_paused_session_protected(self):
         """Recently exited agent keeps its ID reserved by SESSION_TIMEOUT."""
@@ -234,12 +233,12 @@ class TestCAV(unittest.TestCase):
         # Agent 1 acquires and exits recently (within SESSION_TIMEOUT)
         id1 = config.acquire_agent_id(self.user_repo)
         self.assertEqual(id1, "1")
-        config.mark_agent_exited(self.user_repo, id1)
+        config.mark_agent_exited(id1)
 
         # Next agent should skip 1 (recently exited, protected) and get 2
         id2 = config.acquire_agent_id(self.user_repo)
         self.assertEqual(id2, "2")
-        config.mark_agent_exited(self.user_repo, id2)
+        config.mark_agent_exited(id2)
 
     # -- agent work + pull --
 
@@ -606,12 +605,12 @@ class TestCAV(unittest.TestCase):
         # Agent 1 acquires and exits
         id1 = config.acquire_agent_id(self.user_repo)
         self.assertEqual(id1, "1")
-        config.mark_agent_exited(self.user_repo, id1)
+        config.mark_agent_exited(id1)
 
         # continue_agent_id should return ID 1
         cid = config.continue_agent_id(self.user_repo)
         self.assertEqual(cid, "1")
-        config.mark_agent_exited(self.user_repo, cid)
+        config.mark_agent_exited(cid)
 
     def test_continue_picks_most_recent(self):
         """continue_agent_id picks the most recently exited agent."""
@@ -621,22 +620,21 @@ class TestCAV(unittest.TestCase):
         id2 = config.acquire_agent_id(self.user_repo)
 
         # Both exit, manipulate timestamps so agent 2 exited more recently
-        config.mark_agent_exited(self.user_repo, id1)
-        config.mark_agent_exited(self.user_repo, id2)
+        config.mark_agent_exited(id1)
+        config.mark_agent_exited(id2)
 
-        slug = config.project_slug(self.user_repo)
         now = time.time()
         db = config._open_registry()
         db.execute(
-            "UPDATE agents SET exited_at = ? WHERE project = ? AND agent_id = ?",
-            (now - 100, slug, id1)
+            "UPDATE agents SET exited_at = ? WHERE agent_id = ?",
+            (now - 100, id1)
         )
         db.commit()
         db.close()
 
         cid = config.continue_agent_id(self.user_repo)
         self.assertEqual(cid, "2")
-        config.mark_agent_exited(self.user_repo, cid)
+        config.mark_agent_exited(cid)
 
     def test_continue_skips_running(self):
         """continue_agent_id skips agents that are still running."""
@@ -647,13 +645,13 @@ class TestCAV(unittest.TestCase):
 
         # Agent 2 exited
         id2 = config.acquire_agent_id(self.user_repo)
-        config.mark_agent_exited(self.user_repo, id2)
+        config.mark_agent_exited(id2)
 
         cid = config.continue_agent_id(self.user_repo)
         self.assertEqual(cid, "2")
 
-        config.mark_agent_exited(self.user_repo, id1)
-        config.mark_agent_exited(self.user_repo, cid)
+        config.mark_agent_exited(id1)
+        config.mark_agent_exited(cid)
 
     def test_continue_no_agents(self):
         """continue_agent_id raises SystemExit when no agents exist."""
@@ -666,12 +664,12 @@ class TestCAV(unittest.TestCase):
         import uuid as uuid_mod
         self._init()
         aid = config.acquire_agent_id(self.user_repo)
-        sid = config.read_session_id(self.user_repo, aid)
+        sid = config.read_session_id(aid)
         self.assertIsNotNone(sid)
         # Must be a valid UUID v4
         parsed = uuid_mod.UUID(sid)
         self.assertEqual(parsed.version, 4)
-        config.mark_agent_exited(self.user_repo, aid)
+        config.mark_agent_exited(aid)
 
     def test_session_id_unique_per_agent(self):
         """Each agent gets a distinct session UUID."""
@@ -681,91 +679,88 @@ class TestCAV(unittest.TestCase):
         id2 = config.acquire_agent_id(self.user_repo)
         self._create_agent(id2)
 
-        sid1 = config.read_session_id(self.user_repo, id1)
-        sid2 = config.read_session_id(self.user_repo, id2)
+        sid1 = config.read_session_id(id1)
+        sid2 = config.read_session_id(id2)
         self.assertNotEqual(sid1, sid2)
 
-        config.mark_agent_exited(self.user_repo, id1)
-        config.mark_agent_exited(self.user_repo, id2)
+        config.mark_agent_exited(id1)
+        config.mark_agent_exited(id2)
 
     def test_session_id_missing_returns_none(self):
         """read_session_id returns None when no agent exists in registry."""
         self._init()
-        self.assertIsNone(config.read_session_id(self.user_repo, "99"))
+        self.assertIsNone(config.read_session_id("99"))
 
     def test_session_id_persists_after_exit(self):
         """Session ID is retained after agent exits, for resume."""
         self._init()
         aid = config.acquire_agent_id(self.user_repo)
-        sid = config.read_session_id(self.user_repo, aid)
-        config.mark_agent_exited(self.user_repo, aid)
-        self.assertEqual(config.read_session_id(self.user_repo, aid), sid)
+        sid = config.read_session_id(aid)
+        config.mark_agent_exited(aid)
+        self.assertEqual(config.read_session_id(aid), sid)
 
     def test_find_agent_by_session(self):
         """find_agent_by_session returns the agent that owns a given UUID."""
         self._init()
-        slug = config.project_slug(self.user_repo)
         id1 = config.acquire_agent_id(self.user_repo)
         self._create_agent(id1)
         id2 = config.acquire_agent_id(self.user_repo)
         self._create_agent(id2)
 
-        sid1 = config.read_session_id(self.user_repo, id1)
-        sid2 = config.read_session_id(self.user_repo, id2)
+        sid1 = config.read_session_id(id1)
+        sid2 = config.read_session_id(id2)
 
-        self.assertEqual(config.find_agent_by_session(slug, sid1), id1)
-        self.assertEqual(config.find_agent_by_session(slug, sid2), id2)
-        self.assertIsNone(config.find_agent_by_session(slug, "unknown-uuid"))
+        self.assertEqual(config.find_agent_by_session(sid1), id1)
+        self.assertEqual(config.find_agent_by_session(sid2), id2)
+        self.assertIsNone(config.find_agent_by_session("unknown-uuid"))
 
-        config.mark_agent_exited(self.user_repo, id1)
-        config.mark_agent_exited(self.user_repo, id2)
+        config.mark_agent_exited(id1)
+        config.mark_agent_exited(id2)
 
     def test_resume_routes_to_owning_agent(self):
         """find_agent_by_session + continue_agent_id routes to the correct agent."""
         self._init_and_agents("1", "2")
-        slug = config.project_slug(self.user_repo)
 
         id1 = config.acquire_agent_id(self.user_repo)
         id2 = config.acquire_agent_id(self.user_repo)
-        sid1 = config.read_session_id(self.user_repo, id1)
-        sid2 = config.read_session_id(self.user_repo, id2)
-        config.mark_agent_exited(self.user_repo, id1)
-        config.mark_agent_exited(self.user_repo, id2)
+        sid1 = config.read_session_id(id1)
+        sid2 = config.read_session_id(id2)
+        config.mark_agent_exited(id1)
+        config.mark_agent_exited(id2)
 
         # Resuming agent 2's session should route to agent 2
-        owner = config.find_agent_by_session(slug, sid2)
+        owner = config.find_agent_by_session(sid2)
         self.assertEqual(owner, "2")
         cid = config.continue_agent_id(self.user_repo, owner)
         self.assertEqual(cid, "2")
-        config.mark_agent_exited(self.user_repo, cid)
+        config.mark_agent_exited(cid)
 
         # Resuming agent 1's session should route to agent 1
-        owner = config.find_agent_by_session(slug, sid1)
+        owner = config.find_agent_by_session(sid1)
         self.assertEqual(owner, "1")
         cid = config.continue_agent_id(self.user_repo, owner)
         self.assertEqual(cid, "1")
-        config.mark_agent_exited(self.user_repo, cid)
+        config.mark_agent_exited(cid)
 
     def test_resume_unknown_uuid_returns_none(self):
         """find_agent_by_session returns None for unknown UUIDs."""
         self._init_and_agents("1")
-        slug = config.project_slug(self.user_repo)
 
         id1 = config.acquire_agent_id(self.user_repo)
-        config.mark_agent_exited(self.user_repo, id1)
+        config.mark_agent_exited(id1)
 
-        owner = config.find_agent_by_session(slug, "nonexistent-uuid")
+        owner = config.find_agent_by_session("nonexistent-uuid")
         self.assertIsNone(owner)
 
     def test_write_session_id_overwrites(self):
         """write_session_id can update a session ID (e.g. when resuming a different session)."""
         self._init()
         aid = config.acquire_agent_id(self.user_repo)
-        original_sid = config.read_session_id(self.user_repo, aid)
-        config.write_session_id(self.user_repo, aid, "new-uuid")
-        self.assertEqual(config.read_session_id(self.user_repo, aid), "new-uuid")
+        original_sid = config.read_session_id(aid)
+        config.write_session_id(aid, "new-uuid")
+        self.assertEqual(config.read_session_id(aid), "new-uuid")
         self.assertNotEqual(original_sid, "new-uuid")
-        config.mark_agent_exited(self.user_repo, aid)
+        config.mark_agent_exited(aid)
 
     def test_continue_specific_agent_not_most_recent(self):
         """continue_agent_id(base, '1') returns agent 1 even when agent 2 exited more recently."""
@@ -774,15 +769,14 @@ class TestCAV(unittest.TestCase):
         # Both agents exit, agent 2 more recently
         id1 = config.acquire_agent_id(self.user_repo)
         id2 = config.acquire_agent_id(self.user_repo)
-        config.mark_agent_exited(self.user_repo, id1)
-        config.mark_agent_exited(self.user_repo, id2)
+        config.mark_agent_exited(id1)
+        config.mark_agent_exited(id2)
 
-        slug = config.project_slug(self.user_repo)
         now = time.time()
         db = config._open_registry()
         db.execute(
-            "UPDATE agents SET exited_at = ? WHERE project = ? AND agent_id = ?",
-            (now - 100, slug, id1)
+            "UPDATE agents SET exited_at = ? WHERE agent_id = ?",
+            (now - 100, id1)
         )
         db.commit()
         db.close()
@@ -790,7 +784,7 @@ class TestCAV(unittest.TestCase):
         # Explicitly requesting agent 1 should return 1, not 2
         cid = config.continue_agent_id(self.user_repo, "1")
         self.assertEqual(cid, "1")
-        config.mark_agent_exited(self.user_repo, cid)
+        config.mark_agent_exited(cid)
 
     def test_continue_running_agent_errors(self):
         """continue_agent_id errors when the requested agent is still running."""
@@ -803,7 +797,84 @@ class TestCAV(unittest.TestCase):
             config.continue_agent_id(self.user_repo, "1")
         self.assertIn("still running", str(ctx.exception))
 
-        config.mark_agent_exited(self.user_repo, id1)
+        config.mark_agent_exited(id1)
+
+    def test_remove_all_agents(self):
+        """remove-agent --all clears registry and agent branches."""
+        agents = self._init_and_agents("1", "2")
+
+        # Both agents do work and push
+        for name, ws in agents.items():
+            (ws / f"work-{name}.py").write_text(f"# {name}\n")
+            git("add", f"work-{name}.py", cwd=ws)
+            git("commit", "-m", f"Agent {name} work", cwd=ws)
+            git("push", "cave", f"agent-{name}/main", cwd=ws, env=agent_env(name))
+
+        # Register them in the registry and mark exited
+        id1 = config.acquire_agent_id(self.user_repo)
+        id2 = config.acquire_agent_id(self.user_repo)
+        config.mark_agent_exited(id1)
+        config.mark_agent_exited(id2)
+
+        # Verify agent branches exist
+        git("fetch", "--prune", "cave", cwd=self.user_repo)
+        branches = git_out("branch", "-r", cwd=self.user_repo)
+        self.assertIn("cave/agent-1/main", branches)
+        self.assertIn("cave/agent-2/main", branches)
+
+        # Run remove-agent --all --yes
+        result = cav_cli("remove-agent", "--all", "--yes", cwd=self.user_repo)
+        self.assertEqual(result.returncode, 0)
+
+        # Registry should be empty
+        self.assertEqual(config.all_agent_ids(), [])
+
+        # Agent branches should be gone
+        git("fetch", "--prune", "cave", cwd=self.user_repo)
+        branches = git_out("branch", "-r", cwd=self.user_repo)
+        self.assertNotIn("agent-1", branches)
+        self.assertNotIn("agent-2", branches)
+
+    def test_remove_all_refuses_running(self):
+        """remove-agent --all refuses if any agent is running."""
+        self._init()
+        id1 = config.acquire_agent_id(self.user_repo)
+
+        result = cav_cli("remove-agent", "--all", "--yes", cwd=self.user_repo, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("still running", result.stderr)
+
+        config.mark_agent_exited(id1)
+
+    def test_remove_all_empty_registry(self):
+        """remove-agent --all on empty registry is a no-op."""
+        self._init()
+        result = cav_cli("remove-agent", "--all", "--yes", cwd=self.user_repo)
+        self.assertIn("No agents", result.stdout)
+
+    def test_global_agent_id_uniqueness(self):
+        """Agent IDs are globally unique across projects, not per-project."""
+        self._init()
+        # Acquire agents for this project
+        id1 = config.acquire_agent_id(self.user_repo)
+        self.assertEqual(id1, "1")
+
+        # Simulate a second project acquiring an agent (same registry)
+        other = Path(self.tmpdir) / "other-project"
+        other.mkdir()
+        git("init", "-b", "main", cwd=other)
+        git("config", "user.email", "t@t.com", cwd=other)
+        git("config", "user.name", "T", cwd=other)
+        (other / "f").write_text("x")
+        git("add", "f", cwd=other)
+        git("commit", "-m", "init", cwd=other)
+
+        # Next ID should be 2, not 1 (global uniqueness)
+        id2 = config.acquire_agent_id(other)
+        self.assertEqual(id2, "2")
+
+        config.mark_agent_exited(id1)
+        config.mark_agent_exited(id2)
 
     def test_depth_and_lineage_propagation(self):
         """Verify depth increments and lineage chains across 3 levels of nesting."""
@@ -984,15 +1055,15 @@ class TestCAV(unittest.TestCase):
         id2 = config.acquire_agent_id(self.user_repo)
         self._create_agent(id2)
 
-        sid1 = config.read_session_id(self.user_repo, id1)
-        sid2 = config.read_session_id(self.user_repo, id2)
+        sid1 = config.read_session_id(id1)
+        sid2 = config.read_session_id(id2)
 
         self.assertIsNotNone(sid1)
         self.assertIsNotNone(sid2)
         self.assertNotEqual(sid1, sid2)
 
-        config.mark_agent_exited(self.user_repo, id1)
-        config.mark_agent_exited(self.user_repo, id2)
+        config.mark_agent_exited(id1)
+        config.mark_agent_exited(id2)
 
 
 if __name__ == "__main__":

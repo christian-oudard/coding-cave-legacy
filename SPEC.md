@@ -20,7 +20,9 @@ A bare Git repo (`.coding-cave/cave-shared.git`) acts as the shared remote, name
 
 ## Agents
 
-Agents are identified by numeric IDs: 1, 2, 3. Display names combine the project slug with the ID: `coding-cave@1`, `my-app@2`. Each agent gets a lightweight shared clone that shares the object store with the bare repo via alternates.
+Agents are identified by globally unique numeric IDs: 1, 2, 3. IDs are assigned from a single incrementing counter across all projects, so there are never two different agents with the same ID. Display names combine the project slug with the ID: `coding-cave@1`, `my-app@2`. Each agent gets a lightweight shared clone that shares the object store with the bare repo via alternates.
+
+Each agent session has a primary project (the project directory where the session was started). When an agent operates on multiple projects, it creates agent branches in each project's bare repo using the same globally unique ID.
 
 ## Branching
 
@@ -87,9 +89,9 @@ Initializes Coding Cave in a project directory. Creates `.coding-cave/cave-share
 
 Launches an agent. Auto-assigns the next available numeric ID. Creates the workspace and sandbox, starts Claude with full permissions inside the cave.
 
-With `-c` / `--continue`, resumes the most recently paused agent instead of starting a new one. A paused agent is one that exited but still has a workspace and lock file. If multiple paused agents exist, the one with the most recent exit timestamp is chosen. Fails if no paused agents exist.
+With `-c` / `--continue`, resumes the most recently paused agent whose primary project matches the current directory. A paused agent is one that exited but still has a session in the registry. If multiple paused agents exist, the one with the most recent exit timestamp is chosen. Fails if no paused agents exist.
 
-With `-p`, additional projects are mounted into the same cave. Each project must already have `cav init` done. The agent gets the same ID across all projects, with separate workspaces and agent branches per project. All workspaces are mounted at `/projects/<slug>`. Fails with a helpful message if any project is not initialized.
+With `-p`, additional projects are mounted into the same cave. Each project must already have `cav init` done. The agent uses its globally unique ID across all projects, with separate workspaces and agent branches per project. All workspaces are mounted at `/projects/<slug>`. Fails with a helpful message if any project is not initialized.
 
 With `--recursive`, the cave can launch subcaves. This exposes `/dev/fuse` inside the sandbox so the child cave can create its own nix store overlay. Disabled by default.
 
@@ -112,6 +114,14 @@ Pushes the current branch to the cave remote. With `--force`, force-pushes (for 
 ### `cav status`
 
 Shows whether shared branches on the cave remote are ahead of local branches. No fetch, reads local state only.
+
+### `cav remove-agent <@n>`
+
+Removes a paused agent's session from the registry, deletes its agent branches from the current project's bare repo, and removes its workspace. Refuses to remove a running agent.
+
+### `cav remove-agent --all [--yes]`
+
+Resets the session registry. Removes all agent sessions, workspaces, and agent branches in the current project. Refuses if any agents are currently running. Prompts for confirmation unless `--yes` is given.
 
 ### `cav shell`
 

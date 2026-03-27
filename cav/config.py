@@ -20,6 +20,8 @@ DATA_DIR = Path(os.environ.get(
 CAVE_USER = "cave-coder"
 SESSION_TIMEOUT = 24 * 3600  # seconds before a paused agent ID is reclaimable
 
+SCHEMA_VERSION = 2  # v1: (project, agent_id) PK; v2: agent_id PK (global IDs)
+
 
 def agent_branch(target: str, agent_id: str) -> str:
     return f"agent-{agent_id}/{target}"
@@ -104,27 +106,80 @@ def _registry_path() -> Path:
 
 
 def _open_registry() -> sqlite3.Connection:
-    """Open the agent registry, creating table if needed."""
+    """Open the agent registry, creating/migrating table as needed.
+
+    Schema v2: agent_id is the sole primary key (globally unique).
+    The project column records the primary project where the session started.
+    """
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     db_path = _registry_path()
-    needs_migration = not db_path.exists()
+    is_new = not db_path.exists()
     db = sqlite3.connect(str(db_path), timeout=10)
     db.execute("PRAGMA journal_mode=WAL")
+
+    version = db.execute("PRAGMA user_version").fetchone()[0]
+
+    if is_new or version == 0:
+        if not is_new and version == 0:
+            # Migrate from v1 (composite PK) to v2 (global agent_id PK)
+            _migrate_v1_to_v2(db)
+        else:
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS agents (
+                    agent_id TEXT PRIMARY KEY,
+                    project TEXT NOT NULL,
+                    session_id TEXT UNIQUE,
+                    pid INTEGER,
+                    started_at REAL,
+                    exited_at REAL
+                )
+            """)
+            _migrate_session_files(db)
+        db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        db.commit()
+
+    return db
+
+
+def _migrate_v1_to_v2(db: sqlite3.Connection) -> None:
+    """Migrate from v1 schema (project, agent_id) PK to v2 (agent_id PK)."""
+    # Check if old table exists
+    has_table = db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='agents'"
+    ).fetchone()
+    if not has_table:
+        db.execute("""
+            CREATE TABLE agents (
+                agent_id TEXT PRIMARY KEY,
+                project TEXT NOT NULL,
+                session_id TEXT UNIQUE,
+                pid INTEGER,
+                started_at REAL,
+                exited_at REAL
+            )
+        """)
+        return
+
+    # Save old data, keeping most recently started entry per agent_id
     db.execute("""
-        CREATE TABLE IF NOT EXISTS agents (
+        CREATE TABLE agents_v2 (
+            agent_id TEXT PRIMARY KEY,
             project TEXT NOT NULL,
-            agent_id TEXT NOT NULL,
             session_id TEXT UNIQUE,
             pid INTEGER,
             started_at REAL,
-            exited_at REAL,
-            PRIMARY KEY (project, agent_id)
+            exited_at REAL
         )
     """)
-    if needs_migration:
-        _migrate_session_files(db)
-    db.commit()
-    return db
+    db.execute("""
+        INSERT OR IGNORE INTO agents_v2
+            (agent_id, project, session_id, pid, started_at, exited_at)
+        SELECT agent_id, project, session_id, pid, started_at, exited_at
+        FROM agents
+        ORDER BY COALESCE(started_at, 0) DESC
+    """)
+    db.execute("DROP TABLE agents")
+    db.execute("ALTER TABLE agents_v2 RENAME TO agents")
 
 
 def _migrate_session_files(db: sqlite3.Connection) -> None:
@@ -146,8 +201,8 @@ def _migrate_session_files(db: sqlite3.Connection) -> None:
                 continue
             if sid:
                 db.execute(
-                    "INSERT OR IGNORE INTO agents (project, agent_id, session_id) VALUES (?, ?, ?)",
-                    (slug, aid, sid)
+                    "INSERT OR IGNORE INTO agents (agent_id, project, session_id) VALUES (?, ?, ?)",
+                    (aid, slug, sid)
                 )
             session_file.unlink()
 
@@ -165,35 +220,33 @@ def _is_pid_alive(pid: int) -> bool:
 
 # -- Session management --
 
-def write_session_id(base: Path, agent_id: str, session_id: str) -> None:
+def write_session_id(agent_id: str, session_id: str) -> None:
     """Record the session ID for an agent."""
-    slug = project_slug(base)
     db = _open_registry()
     try:
         db.execute(
-            "UPDATE agents SET session_id = ? WHERE project = ? AND agent_id = ?",
-            (session_id, slug, agent_id)
+            "UPDATE agents SET session_id = ? WHERE agent_id = ?",
+            (session_id, agent_id)
         )
         db.commit()
     finally:
         db.close()
 
 
-def read_session_id(base: Path, agent_id: str) -> str | None:
+def read_session_id(agent_id: str) -> str | None:
     """Read the stored Claude session ID for an agent, or None."""
-    slug = project_slug(base)
     db = _open_registry()
     try:
         row = db.execute(
-            "SELECT session_id FROM agents WHERE project = ? AND agent_id = ?",
-            (slug, agent_id)
+            "SELECT session_id FROM agents WHERE agent_id = ?",
+            (agent_id,)
         ).fetchone()
         return row[0] if row and row[0] else None
     finally:
         db.close()
 
 
-def find_agent_by_session(slug: str, session_id: str) -> str | None:
+def find_agent_by_session(session_id: str) -> str | None:
     """Return the agent ID that owns the given session UUID, or None."""
     db = _open_registry()
     try:
@@ -208,14 +261,13 @@ def find_agent_by_session(slug: str, session_id: str) -> str | None:
 
 # -- Agent lifecycle --
 
-def is_agent_running(base: Path, agent_id: str) -> bool:
+def is_agent_running(agent_id: str) -> bool:
     """Check if an agent process is alive by PID."""
-    slug = project_slug(base)
     db = _open_registry()
     try:
         row = db.execute(
-            "SELECT pid, exited_at FROM agents WHERE project = ? AND agent_id = ?",
-            (slug, agent_id)
+            "SELECT pid, exited_at FROM agents WHERE agent_id = ?",
+            (agent_id,)
         ).fetchone()
         if not row:
             return False
@@ -226,8 +278,8 @@ def is_agent_running(base: Path, agent_id: str) -> bool:
             return True
         # Process died without marking exit
         db.execute(
-            "UPDATE agents SET exited_at = ?, pid = NULL WHERE project = ? AND agent_id = ?",
-            (time.time(), slug, agent_id)
+            "UPDATE agents SET exited_at = ?, pid = NULL WHERE agent_id = ?",
+            (time.time(), agent_id)
         )
         db.commit()
         return False
@@ -235,30 +287,29 @@ def is_agent_running(base: Path, agent_id: str) -> bool:
         db.close()
 
 
-def agent_exit_time(base: Path, agent_id: str) -> float | None:
+def agent_exit_time(agent_id: str) -> float | None:
     """Read the exit timestamp for an agent, or None."""
-    slug = project_slug(base)
     db = _open_registry()
     try:
         row = db.execute(
-            "SELECT exited_at FROM agents WHERE project = ? AND agent_id = ?",
-            (slug, agent_id)
+            "SELECT exited_at FROM agents WHERE agent_id = ?",
+            (agent_id,)
         ).fetchone()
         return row[0] if row else None
     finally:
         db.close()
 
 
-def is_session_expired(base: Path, agent_id: str) -> bool:
+def is_session_expired(agent_id: str) -> bool:
     """True if the agent exited long enough ago to reclaim its ID."""
-    t = agent_exit_time(base, agent_id)
+    t = agent_exit_time(agent_id)
     if t is None:
         return True
     return (time.time() - t) > SESSION_TIMEOUT
 
 
 def running_agent_ids(base: Path) -> list[str]:
-    """Return agent IDs that are currently running."""
+    """Return agent IDs that are currently running for a given project."""
     slug = project_slug(base)
     db = _open_registry()
     try:
@@ -274,8 +325,8 @@ def running_agent_ids(base: Path) -> list[str]:
             else:
                 db.execute(
                     "UPDATE agents SET exited_at = ?, pid = NULL "
-                    "WHERE project = ? AND agent_id = ?",
-                    (time.time(), slug, aid)
+                    "WHERE agent_id = ?",
+                    (time.time(), aid)
                 )
         db.commit()
         return sorted(result, key=int)
@@ -286,8 +337,9 @@ def running_agent_ids(base: Path) -> list[str]:
 def acquire_agent_id(base: Path) -> str:
     """Acquire the next available agent ID.
 
-    Returns agent_id. The agent is marked as running in the registry.
-    Call mark_agent_exited() when the agent exits.
+    Agent IDs are globally unique across all projects.
+    The base path records which project this session started from.
+    Returns agent_id. Call mark_agent_exited() when the agent exits.
     """
     slug = project_slug(base)
     now = time.time()
@@ -296,25 +348,23 @@ def acquire_agent_id(base: Path) -> str:
     try:
         db.execute("BEGIN IMMEDIATE")
 
-        # Clean up dead agents
+        # Clean up dead agents (globally)
         rows = db.execute(
             "SELECT agent_id, pid FROM agents "
-            "WHERE project = ? AND exited_at IS NULL AND pid IS NOT NULL",
-            (slug,)
+            "WHERE exited_at IS NULL AND pid IS NOT NULL"
         ).fetchall()
         for aid, p in rows:
             if not _is_pid_alive(p):
                 db.execute(
                     "UPDATE agents SET exited_at = ?, pid = NULL "
-                    "WHERE project = ? AND agent_id = ?",
-                    (now, slug, aid)
+                    "WHERE agent_id = ?",
+                    (now, aid)
                 )
 
-        # Find occupied IDs (running or recently exited)
+        # Find occupied IDs (running or recently exited, globally)
         occupied = set()
         for row in db.execute(
-            "SELECT agent_id, exited_at FROM agents WHERE project = ?",
-            (slug,)
+            "SELECT agent_id, exited_at FROM agents"
         ):
             aid, exited_at = row
             if exited_at is None:
@@ -331,9 +381,9 @@ def acquire_agent_id(base: Path) -> str:
         sid = str(uuid.uuid4())
         db.execute(
             "INSERT OR REPLACE INTO agents "
-            "(project, agent_id, pid, started_at, exited_at, session_id) "
+            "(agent_id, project, pid, started_at, exited_at, session_id) "
             "VALUES (?, ?, ?, ?, NULL, ?)",
-            (slug, aid, pid, now, sid)
+            (aid, slug, pid, now, sid)
         )
         db.commit()
         return aid
@@ -344,8 +394,9 @@ def acquire_agent_id(base: Path) -> str:
 def continue_agent_id(base: Path, agent_id: str | None = None) -> str:
     """Reacquire a paused agent.
 
-    If agent_id is given, continue that specific agent.
-    Otherwise, continue the most recently exited agent.
+    If agent_id is given, continue that specific agent (regardless of project).
+    Otherwise, continue the most recently exited agent whose primary project
+    matches base.
     Returns agent_id or raises SystemExit.
     """
     slug = project_slug(base)
@@ -357,9 +408,8 @@ def continue_agent_id(base: Path, agent_id: str | None = None) -> str:
 
         if agent_id is not None:
             row = db.execute(
-                "SELECT pid, exited_at FROM agents "
-                "WHERE project = ? AND agent_id = ?",
-                (slug, agent_id)
+                "SELECT pid, exited_at FROM agents WHERE agent_id = ?",
+                (agent_id,)
             ).fetchone()
             if not row:
                 raise SystemExit(f"No agent {agent_id} found.")
@@ -368,13 +418,13 @@ def continue_agent_id(base: Path, agent_id: str | None = None) -> str:
                 raise SystemExit(f"Agent {agent_id} is still running.")
             db.execute(
                 "UPDATE agents SET pid = ?, started_at = ?, exited_at = NULL "
-                "WHERE project = ? AND agent_id = ?",
-                (pid, now, slug, agent_id)
+                "WHERE agent_id = ?",
+                (pid, now, agent_id)
             )
             db.commit()
             return agent_id
 
-        # Find most recently exited agent
+        # Find most recently exited agent for this project
         row = db.execute(
             "SELECT agent_id FROM agents "
             "WHERE project = ? AND exited_at IS NOT NULL "
@@ -388,8 +438,8 @@ def continue_agent_id(base: Path, agent_id: str | None = None) -> str:
         aid = row[0]
         db.execute(
             "UPDATE agents SET pid = ?, started_at = ?, exited_at = NULL "
-            "WHERE project = ? AND agent_id = ?",
-            (pid, now, slug, aid)
+            "WHERE agent_id = ?",
+            (pid, now, aid)
         )
         db.commit()
         return aid
@@ -397,29 +447,65 @@ def continue_agent_id(base: Path, agent_id: str | None = None) -> str:
         db.close()
 
 
-def mark_agent_exited(base: Path, agent_id: str) -> None:
+def mark_agent_exited(agent_id: str) -> None:
     """Mark an agent as exited."""
-    slug = project_slug(base)
     db = _open_registry()
     try:
         db.execute(
-            "UPDATE agents SET exited_at = ?, pid = NULL "
-            "WHERE project = ? AND agent_id = ?",
-            (time.time(), slug, agent_id)
+            "UPDATE agents SET exited_at = ?, pid = NULL WHERE agent_id = ?",
+            (time.time(), agent_id)
         )
         db.commit()
     finally:
         db.close()
 
 
-def remove_agent(slug: str, agent_id: str) -> None:
+def remove_agent(agent_id: str) -> None:
     """Remove an agent from the registry."""
     db = _open_registry()
     try:
-        db.execute(
-            "DELETE FROM agents WHERE project = ? AND agent_id = ?",
-            (slug, agent_id)
-        )
+        db.execute("DELETE FROM agents WHERE agent_id = ?", (agent_id,))
+        db.commit()
+    finally:
+        db.close()
+
+
+def all_agent_ids() -> list[str]:
+    """Return all agent IDs in the registry."""
+    db = _open_registry()
+    try:
+        rows = db.execute("SELECT agent_id FROM agents").fetchall()
+        return sorted([r[0] for r in rows], key=int)
+    finally:
+        db.close()
+
+
+def any_agent_running() -> bool:
+    """Return True if any agent in the registry is currently running."""
+    db = _open_registry()
+    try:
+        rows = db.execute(
+            "SELECT agent_id, pid FROM agents "
+            "WHERE exited_at IS NULL AND pid IS NOT NULL"
+        ).fetchall()
+        for aid, pid in rows:
+            if _is_pid_alive(pid):
+                return True
+            db.execute(
+                "UPDATE agents SET exited_at = ?, pid = NULL WHERE agent_id = ?",
+                (time.time(), aid)
+            )
+        db.commit()
+        return False
+    finally:
+        db.close()
+
+
+def clear_registry() -> None:
+    """Remove all agents from the registry."""
+    db = _open_registry()
+    try:
+        db.execute("DELETE FROM agents")
         db.commit()
     finally:
         db.close()
