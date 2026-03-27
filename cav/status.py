@@ -1,5 +1,6 @@
 """cav status: show what's happening in the cave."""
 
+import shutil
 import time
 from pathlib import Path
 
@@ -24,12 +25,7 @@ def _remove_agent(base: Path, agent_id: str, branches: list[str]):
         git.git("push", config.SHARED_REMOTE, f":refs/heads/{branch}",
                 cwd=base, echo=False, capture=True)
     slug = config.project_slug(base)
-    for path in [
-        config.agent_lock_dir(slug) / f"{agent_id}.lock",
-        config.agent_session_file(slug, agent_id),
-    ]:
-        if path.exists():
-            path.unlink()
+    config.remove_agent(slug, agent_id)
     ws = config.worktree_dir(slug, agent_id)
     if ws.exists():
         shutil.rmtree(ws)
@@ -75,7 +71,18 @@ def status(base: Path, verbose: bool = False, agent_filter: str | None = None):
             continue
         agent_branches.append((branch, target, agent_id))
 
-    if not agent_branches:
+    # Group branches by agent ID
+    by_agent = {}
+    for branch, target, agent_id in sorted(agent_branches):
+        by_agent.setdefault(agent_id, []).append((branch, target))
+
+    # Include running agents that haven't pushed any branches yet
+    for aid in config.running_agent_ids(base):
+        if agent_filter and aid != agent_filter:
+            continue
+        by_agent.setdefault(aid, [])
+
+    if not by_agent:
         if agent_filter:
             print(f"No branches for agent {agent_filter}.")
         else:
@@ -84,11 +91,6 @@ def status(base: Path, verbose: bool = False, agent_filter: str | None = None):
 
     if agent_filter:
         verbose = True
-
-    # Group branches by agent ID
-    by_agent = {}
-    for branch, target, agent_id in sorted(agent_branches):
-        by_agent.setdefault(agent_id, []).append((branch, target))
 
     hidden = []
     for agent_id in sorted(by_agent, key=int):

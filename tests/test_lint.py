@@ -52,8 +52,8 @@ class TestPathHomeLint(unittest.TestCase):
     # Approved Path.home() usage: {filename: {function_or_variable_names}}
     # Duplicate keys merged manually since Python dicts overwrite.
     ALLOWED = {
-        # DATA_DIR default + _claude_sessions_dir depth-aware dispatch
-        "config.py": {"DATA_DIR", "_claude_sessions_dir"},
+        # DATA_DIR default uses Path.home()
+        "config.py": {"DATA_DIR"},
         # _host_home fallback + CODING_CAVE_HOST_HOME fallback in launch()
         "sandbox.py": {"_host_home", "launch"},
         # _cave_nix_path uses CODING_CAVE_HOST_HOME with Path.home() fallback

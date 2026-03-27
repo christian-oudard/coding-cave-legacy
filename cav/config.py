@@ -1,9 +1,10 @@
 """Constants and naming helpers for Coding Cave."""
 
-import fcntl
 import os
 import re
+import sqlite3
 import time
+import uuid
 from pathlib import Path
 
 SHARED_REMOTE = "cave"
@@ -17,7 +18,7 @@ DATA_DIR = Path(os.environ.get(
     Path.home() / ".local" / "share" / "coding-cave",
 ))
 CAVE_USER = "cave-coder"
-SESSION_TIMEOUT = 24 * 3600  # seconds before a paused session is reclaimable
+SESSION_TIMEOUT = 24 * 3600  # seconds before a paused agent ID is reclaimable
 
 
 def agent_branch(target: str, agent_id: str) -> str:
@@ -87,7 +88,6 @@ def worktree_dir(slug: str, agent_id: str) -> Path:
 
 def project_slug(base: Path) -> str:
     """Derive a slug from the project path."""
-    # Lowercase, replace non-alphanumeric with hyphens, collapse runs
     name = base.name.lower()
     slug = re.sub(r"[^a-z0-9]+", "-", name).strip("-")
     return slug or "project"
@@ -97,273 +97,329 @@ def cave_depth() -> int:
     return int(os.environ.get("CODING_CAVE_DEPTH", "0"))
 
 
-def agent_lock_dir(slug: str) -> Path:
-    depth = cave_depth()
-    if depth > 0:
-        return DATA_DIR / "locks" / slug / f"d{depth}"
-    return DATA_DIR / "locks" / slug
+# -- Agent registry (SQLite) --
+
+def _registry_path() -> Path:
+    return DATA_DIR / "registry.db"
 
 
-def agent_session_file(slug: str, agent_id: str) -> Path:
-    return agent_lock_dir(slug) / f"{agent_id}.session"
+def _open_registry() -> sqlite3.Connection:
+    """Open the agent registry, creating table if needed."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    db_path = _registry_path()
+    needs_migration = not db_path.exists()
+    db = sqlite3.connect(str(db_path), timeout=10)
+    db.execute("PRAGMA journal_mode=WAL")
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS agents (
+            project TEXT NOT NULL,
+            agent_id TEXT NOT NULL,
+            session_id TEXT UNIQUE,
+            pid INTEGER,
+            started_at REAL,
+            exited_at REAL,
+            PRIMARY KEY (project, agent_id)
+        )
+    """)
+    if needs_migration:
+        _migrate_session_files(db)
+    db.commit()
+    return db
+
+
+def _migrate_session_files(db: sqlite3.Connection) -> None:
+    """One-time migration of old .session files into the registry."""
+    locks_dir = DATA_DIR / "locks"
+    if not locks_dir.exists():
+        return
+    for slug_dir in locks_dir.iterdir():
+        if not slug_dir.is_dir():
+            continue
+        slug = slug_dir.name
+        for session_file in slug_dir.rglob("*.session"):
+            aid = session_file.stem
+            if not AGENT_ID_RE.match(aid):
+                continue
+            try:
+                sid = session_file.read_text().strip()
+            except OSError:
+                continue
+            if sid:
+                db.execute(
+                    "INSERT OR IGNORE INTO agents (project, agent_id, session_id) VALUES (?, ?, ?)",
+                    (slug, aid, sid)
+                )
+            session_file.unlink()
+
+
+def _is_pid_alive(pid: int) -> bool:
+    """Check if a process is alive by PID."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists but can't signal
+
+
+# -- Session management --
+
+def write_session_id(base: Path, agent_id: str, session_id: str) -> None:
+    """Record the session ID for an agent."""
+    slug = project_slug(base)
+    db = _open_registry()
+    try:
+        db.execute(
+            "UPDATE agents SET session_id = ? WHERE project = ? AND agent_id = ?",
+            (session_id, slug, agent_id)
+        )
+        db.commit()
+    finally:
+        db.close()
 
 
 def read_session_id(base: Path, agent_id: str) -> str | None:
     """Read the stored Claude session ID for an agent, or None."""
     slug = project_slug(base)
-    p = agent_session_file(slug, agent_id)
+    db = _open_registry()
     try:
-        sid = p.read_text().strip()
-    except OSError:
-        return None
-    if not sid:
-        return None
-    # Verify the session file still exists in the persistent home
-    session_file = _claude_sessions_dir(slug) / f"{sid}.jsonl"
-    return sid if session_file.exists() else None
-
-
-def snapshot_sessions(base: Path) -> dict[str, float]:
-    """Snapshot the sessions dir before launching an agent.
-
-    Returns {uuid: mtime} for all existing .jsonl files.
-    Used by capture_session_id to identify which file this agent created/modified.
-    """
-    slug = project_slug(base)
-    sessions_dir = _claude_sessions_dir(slug)
-    try:
-        return {p.stem: p.stat().st_mtime for p in sessions_dir.glob("*.jsonl")}
-    except OSError:
-        return {}
-
-
-def _capture_lock_path(slug: str) -> Path:
-    """Lock file used to serialize session capture across concurrent agents."""
-    return agent_lock_dir(slug) / ".capture.lock"
-
-
-def _claimed_sessions(slug: str) -> set[str]:
-    """Return set of session UUIDs already claimed by any agent.
-
-    Must be called while holding the capture lock.
-    """
-    lock_dir = agent_lock_dir(slug)
-    claimed = set()
-    if not lock_dir.exists():
-        return claimed
-    for p in lock_dir.glob("*.session"):
-        try:
-            sid = p.read_text().strip()
-            if sid:
-                claimed.add(sid)
-        except OSError:
-            pass
-    return claimed
-
-
-def capture_session_id(base: Path, agent_id: str,
-                       snapshot: dict[str, float] | None = None) -> None:
-    """After an agent exits, find the session this agent used and store it.
-
-    Holds an exclusive lock during the entire scan-and-claim operation so
-    concurrent agents never pick the same session.
-    """
-    slug = project_slug(base)
-    lock_dir = agent_lock_dir(slug)
-    lock_dir.mkdir(parents=True, exist_ok=True)
-
-    lock_path = _capture_lock_path(slug)
-    lock_fd = open(lock_path, "w")
-    try:
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
-
-        sessions_dir = _claude_sessions_dir(slug)
-        try:
-            files = list(sessions_dir.glob("*.jsonl"))
-        except OSError:
-            return
-        if not files:
-            return
-
-        if snapshot is not None:
-            changed = [
-                p for p in files
-                if p.stem not in snapshot or p.stat().st_mtime > snapshot[p.stem]
-            ]
-            if changed:
-                files = changed
-
-        # Exclude sessions already claimed by other agents
-        claimed = _claimed_sessions(slug)
-        unclaimed = [p for p in files if p.stem not in claimed]
-        if unclaimed:
-            files = unclaimed
-
-        files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-        sid = files[0].stem
-        p = agent_session_file(slug, agent_id)
-        p.write_text(sid)
+        row = db.execute(
+            "SELECT session_id FROM agents WHERE project = ? AND agent_id = ?",
+            (slug, agent_id)
+        ).fetchone()
+        return row[0] if row and row[0] else None
     finally:
-        fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        lock_fd.close()
+        db.close()
 
 
-def _claude_sessions_dir(slug: str) -> Path:
-    """Path where Claude stores sessions for /projects/<slug> inside the cave."""
-    depth = int(os.environ.get("CODING_CAVE_DEPTH", "0"))
-    base = Path.home() if depth > 0 else persistent_home()
-    return base / ".claude" / "projects" / f"-projects-{slug}"
+def find_agent_by_session(slug: str, session_id: str) -> str | None:
+    """Return the agent ID that owns the given session UUID, or None."""
+    db = _open_registry()
+    try:
+        row = db.execute(
+            "SELECT agent_id FROM agents WHERE session_id = ?",
+            (session_id,)
+        ).fetchone()
+        return row[0] if row else None
+    finally:
+        db.close()
 
+
+# -- Agent lifecycle --
 
 def is_agent_running(base: Path, agent_id: str) -> bool:
-    """Check if an agent is currently running (holds its lock file)."""
+    """Check if an agent process is alive by PID."""
     slug = project_slug(base)
-    lock_path = agent_lock_dir(slug) / f"{agent_id}.lock"
-    if not lock_path.exists():
-        return False
-    fd = open(lock_path, "r")
+    db = _open_registry()
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        # Got the lock, so no one else holds it
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        row = db.execute(
+            "SELECT pid, exited_at FROM agents WHERE project = ? AND agent_id = ?",
+            (slug, agent_id)
+        ).fetchone()
+        if not row:
+            return False
+        pid, exited_at = row
+        if exited_at is not None or pid is None:
+            return False
+        if _is_pid_alive(pid):
+            return True
+        # Process died without marking exit
+        db.execute(
+            "UPDATE agents SET exited_at = ?, pid = NULL WHERE project = ? AND agent_id = ?",
+            (time.time(), slug, agent_id)
+        )
+        db.commit()
         return False
-    except BlockingIOError:
-        return True
     finally:
-        fd.close()
+        db.close()
 
 
 def agent_exit_time(base: Path, agent_id: str) -> float | None:
-    """Read the exit timestamp from an agent's lock file, or None."""
+    """Read the exit timestamp for an agent, or None."""
     slug = project_slug(base)
-    lock_path = agent_lock_dir(slug) / f"{agent_id}.lock"
+    db = _open_registry()
     try:
-        content = lock_path.read_text().strip()
-        return float(content) if content else None
-    except (ValueError, OSError):
-        return None
+        row = db.execute(
+            "SELECT exited_at FROM agents WHERE project = ? AND agent_id = ?",
+            (slug, agent_id)
+        ).fetchone()
+        return row[0] if row else None
+    finally:
+        db.close()
 
 
 def is_session_expired(base: Path, agent_id: str) -> bool:
     """True if the agent exited long enough ago to reclaim its ID."""
     t = agent_exit_time(base, agent_id)
     if t is None:
-        # No exit timestamp: crashed, or pre-timestamp era.
-        # Fall back to lock file mtime (set when agent last started).
-        slug = project_slug(base)
-        lock_path = agent_lock_dir(slug) / f"{agent_id}.lock"
-        try:
-            t = lock_path.stat().st_mtime
-        except OSError:
-            return True
+        return True
     return (time.time() - t) > SESSION_TIMEOUT
 
 
-def find_agent_by_session(slug: str, session_id: str) -> str | None:
-    """Return the agent ID that owns the given session UUID, or None."""
-    lock_dir = agent_lock_dir(slug)
-    if not lock_dir.exists():
-        return None
-    for p in lock_dir.glob("*.session"):
-        try:
-            if p.read_text().strip() == session_id:
-                return p.stem
-        except OSError:
-            pass
-    return None
+def running_agent_ids(base: Path) -> list[str]:
+    """Return agent IDs that are currently running."""
+    slug = project_slug(base)
+    db = _open_registry()
+    try:
+        rows = db.execute(
+            "SELECT agent_id, pid FROM agents "
+            "WHERE project = ? AND exited_at IS NULL AND pid IS NOT NULL",
+            (slug,)
+        ).fetchall()
+        result = []
+        for aid, pid in rows:
+            if _is_pid_alive(pid):
+                result.append(aid)
+            else:
+                db.execute(
+                    "UPDATE agents SET exited_at = ?, pid = NULL "
+                    "WHERE project = ? AND agent_id = ?",
+                    (time.time(), slug, aid)
+                )
+        db.commit()
+        return sorted(result, key=int)
+    finally:
+        db.close()
 
 
-def continue_agent_id(base: Path, agent_id: str | None = None):
-    """Reacquire a paused agent's lock.
+def acquire_agent_id(base: Path) -> str:
+    """Acquire the next available agent ID.
+
+    Returns agent_id. The agent is marked as running in the registry.
+    Call mark_agent_exited() when the agent exits.
+    """
+    slug = project_slug(base)
+    now = time.time()
+    pid = os.getpid()
+    db = _open_registry()
+    try:
+        db.execute("BEGIN IMMEDIATE")
+
+        # Clean up dead agents
+        rows = db.execute(
+            "SELECT agent_id, pid FROM agents "
+            "WHERE project = ? AND exited_at IS NULL AND pid IS NOT NULL",
+            (slug,)
+        ).fetchall()
+        for aid, p in rows:
+            if not _is_pid_alive(p):
+                db.execute(
+                    "UPDATE agents SET exited_at = ?, pid = NULL "
+                    "WHERE project = ? AND agent_id = ?",
+                    (now, slug, aid)
+                )
+
+        # Find occupied IDs (running or recently exited)
+        occupied = set()
+        for row in db.execute(
+            "SELECT agent_id, exited_at FROM agents WHERE project = ?",
+            (slug,)
+        ):
+            aid, exited_at = row
+            if exited_at is None:
+                occupied.add(aid)  # running
+            elif (now - exited_at) <= SESSION_TIMEOUT:
+                occupied.add(aid)  # recently exited, protected
+
+        # Find lowest available ID
+        n = 1
+        while str(n) in occupied:
+            n += 1
+        aid = str(n)
+
+        sid = str(uuid.uuid4())
+        db.execute(
+            "INSERT OR REPLACE INTO agents "
+            "(project, agent_id, pid, started_at, exited_at, session_id) "
+            "VALUES (?, ?, ?, ?, NULL, ?)",
+            (slug, aid, pid, now, sid)
+        )
+        db.commit()
+        return aid
+    finally:
+        db.close()
+
+
+def continue_agent_id(base: Path, agent_id: str | None = None) -> str:
+    """Reacquire a paused agent.
 
     If agent_id is given, continue that specific agent.
     Otherwise, continue the most recently exited agent.
-    Returns (agent_id, lock_fd) or raises SystemExit.
+    Returns agent_id or raises SystemExit.
     """
     slug = project_slug(base)
-    lock_dir = agent_lock_dir(slug)
-    if not lock_dir.exists():
-        raise SystemExit("No paused agents to continue.")
+    now = time.time()
+    pid = os.getpid()
+    db = _open_registry()
+    try:
+        db.execute("BEGIN IMMEDIATE")
 
-    if agent_id is not None:
-        lock_path = lock_dir / f"{agent_id}.lock"
-        try:
-            fd = open(lock_path, "r+")
-        except FileNotFoundError:
-            raise SystemExit(f"No agent {agent_id} found.")
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            fd.close()
-            raise SystemExit(f"Agent {agent_id} is still running.")
-        return agent_id, fd
+        if agent_id is not None:
+            row = db.execute(
+                "SELECT pid, exited_at FROM agents "
+                "WHERE project = ? AND agent_id = ?",
+                (slug, agent_id)
+            ).fetchone()
+            if not row:
+                raise SystemExit(f"No agent {agent_id} found.")
+            p, exited_at = row
+            if exited_at is None and p is not None and _is_pid_alive(p):
+                raise SystemExit(f"Agent {agent_id} is still running.")
+            db.execute(
+                "UPDATE agents SET pid = ?, started_at = ?, exited_at = NULL "
+                "WHERE project = ? AND agent_id = ?",
+                (pid, now, slug, agent_id)
+            )
+            db.commit()
+            return agent_id
 
-    best = None  # (aid, fd, exit_ts)
+        # Find most recently exited agent
+        row = db.execute(
+            "SELECT agent_id FROM agents "
+            "WHERE project = ? AND exited_at IS NOT NULL "
+            "AND ? - exited_at <= ? "
+            "ORDER BY exited_at DESC LIMIT 1",
+            (slug, now, SESSION_TIMEOUT)
+        ).fetchone()
+        if not row:
+            raise SystemExit("No paused agents to continue.")
 
-    for lock_path in lock_dir.glob("*.lock"):
-        aid = lock_path.stem
-        if not AGENT_ID_RE.match(aid):
-            continue
-        try:
-            fd = open(lock_path, "r+")
-        except FileNotFoundError:
-            continue
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            fd.close()
-            continue  # still running
-
-        fd.seek(0)
-        content = fd.read().strip()
-        try:
-            exit_ts = float(content) if content else 0
-        except ValueError:
-            exit_ts = 0
-
-        if best is None or exit_ts > best[2]:
-            if best is not None:
-                best[1].close()
-            best = (aid, fd, exit_ts)
-        else:
-            fd.close()
-
-    if best is None:
-        raise SystemExit("No paused agents to continue.")
-
-    return best[0], best[1]
+        aid = row[0]
+        db.execute(
+            "UPDATE agents SET pid = ?, started_at = ?, exited_at = NULL "
+            "WHERE project = ? AND agent_id = ?",
+            (pid, now, slug, aid)
+        )
+        db.commit()
+        return aid
+    finally:
+        db.close()
 
 
-def acquire_agent_id(base: Path, available=None):
-    """Acquire the next available agent ID with a lock.
-
-    Returns (agent_id, lock_fd). The caller must keep lock_fd open for the
-    duration of the agent's lifetime. Closing it releases the lock.
-
-    If available is provided, it is called with (agent_id) after acquiring
-    the lock. If it returns False, the lock is released and the next ID
-    is tried.
-    """
+def mark_agent_exited(base: Path, agent_id: str) -> None:
+    """Mark an agent as exited."""
     slug = project_slug(base)
-    lock_dir = agent_lock_dir(slug)
-    lock_dir.mkdir(parents=True, exist_ok=True)
+    db = _open_registry()
+    try:
+        db.execute(
+            "UPDATE agents SET exited_at = ?, pid = NULL "
+            "WHERE project = ? AND agent_id = ?",
+            (time.time(), slug, agent_id)
+        )
+        db.commit()
+    finally:
+        db.close()
 
-    # Try 1, 2, 3, ... until we find an unlocked, available ID
-    n = 1
-    while True:
-        lock_path = lock_dir / f"{n}.lock"
-        # Open r+ to preserve exit timestamp; fall back to w for new files
-        try:
-            fd = open(lock_path, "r+")
-        except FileNotFoundError:
-            fd = open(lock_path, "w")
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            if available and not available(str(n)):
-                fd.close()
-                n += 1
-                continue
-            return str(n), fd
-        except BlockingIOError:
-            fd.close()
-            n += 1
+
+def remove_agent(slug: str, agent_id: str) -> None:
+    """Remove an agent from the registry."""
+    db = _open_registry()
+    try:
+        db.execute(
+            "DELETE FROM agents WHERE project = ? AND agent_id = ?",
+            (slug, agent_id)
+        )
+        db.commit()
+    finally:
+        db.close()

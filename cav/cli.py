@@ -4,37 +4,9 @@ import argparse
 import os
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 from . import config, git
-
-
-def _has_undelivered_work(base: Path, agent_id: str) -> bool:
-    """Check if any agent branch has commits ahead of its target."""
-    shared = config.shared_repo_path(base)
-    try:
-        refs = git.git_output(
-            "for-each-ref", "--format=%(refname:short)",
-            f"refs/heads/agent-{agent_id}/*",
-            cwd=shared,
-        )
-    except subprocess.CalledProcessError:
-        return False
-    for branch in refs.splitlines():
-        parsed = config.parse_agent_branch(branch)
-        if not parsed:
-            continue
-        target, _ = parsed
-        try:
-            ahead = int(git.git_output(
-                "rev-list", "--count", f"{target}..{branch}", cwd=shared,
-            ))
-            if ahead > 0:
-                return True
-        except subprocess.CalledProcessError:
-            pass
-    return False
 
 
 def find_repo_root() -> Path:
@@ -81,28 +53,30 @@ def cmd_agent(args):
     from .worktree import create
     from .sandbox import launch
 
-    def _is_available(aid):
-        if not _has_undelivered_work(base, aid):
-            return True
-        return config.is_session_expired(base, aid)
-
     if args.resume_session:
         # Route --resume to the agent that owns this session
         slug = config.project_slug(base)
+        agent_id_arg = getattr(args, 'agent_id', None)
         owner = config.find_agent_by_session(slug, args.resume_session)
-        if owner is None:
+        if owner:
+            agent_id = config.continue_agent_id(base, owner)
+        elif agent_id_arg:
+            agent_id = config.continue_agent_id(base, agent_id_arg)
+        else:
             raise SystemExit(
                 f"No agent owns session {args.resume_session}.\n"
-                f"Use --continue to resume the most recent agent instead."
+                f"Specify the agent: cav agent -r {args.resume_session} <id>"
             )
-        agent_id, lock_fd = config.continue_agent_id(base, owner)
         session_id = args.resume_session
+        resuming = True
     elif args.continue_agent:
-        agent_id, lock_fd = config.continue_agent_id(base)
+        agent_id = config.continue_agent_id(base)
         session_id = config.read_session_id(base, agent_id)
+        resuming = bool(session_id)
     else:
-        agent_id, lock_fd = config.acquire_agent_id(base, available=_is_available)
-        session_id = None
+        agent_id = config.acquire_agent_id(base)
+        session_id = config.read_session_id(base, agent_id)
+        resuming = False
 
     # Primary project (cwd)
     projects = [(base, config.project_slug(base))]
@@ -111,7 +85,6 @@ def cmd_agent(args):
     for path in (args.extra_projects or []):
         extra = resolve_project(path)
         slug = config.project_slug(extra)
-        # Check for slug collisions
         if any(s == slug for _, s in projects):
             raise SystemExit(
                 f"Project slug collision: '{slug}' already used.\n"
@@ -130,19 +103,14 @@ def cmd_agent(args):
     lineage = os.environ.get("CODING_CAVE_LINEAGE", "")
     if lineage:
         name += f" (depth {int(os.environ.get('CODING_CAVE_DEPTH', '0')) + 1}, parent {lineage})"
-    verb = "Continuing" if session_id else "Launching"
+    verb = "Continuing" if resuming else "Launching"
     print(f"{verb} {name} ...")
-    session_snapshot = config.snapshot_sessions(base)
     try:
         rc = launch(workspaces, name, project_slug=projects[0][1],
-                    recursive=args.recursive, session_id=session_id)
+                    recursive=args.recursive, session_id=session_id,
+                    resuming=resuming)
     finally:
-        config.capture_session_id(base, agent_id, snapshot=session_snapshot)
-        lock_fd.seek(0)
-        lock_fd.truncate()
-        lock_fd.write(str(int(time.time())))
-        lock_fd.flush()
-        lock_fd.close()
+        config.mark_agent_exited(base, agent_id)
     sys.exit(rc)
 
 
@@ -233,12 +201,14 @@ def main():
                          help="Continue the most recently paused agent")
     p_agent.add_argument("-r", "--resume", dest="resume_session", metavar="UUID",
                          help="Resume a specific Claude session by UUID")
+    p_agent.add_argument("agent_id", nargs="?", default=None,
+                         help="Agent ID to resume (used with -r when mapping is lost)")
     p_agent.add_argument("-p", "--project", action="append", dest="extra_projects",
                          metavar="PATH", help="Additional project to mount (repeatable)")
     p_agent.add_argument("--recursive", action="store_true",
                          help="Allow agent to launch subcaves (exposes /dev/fuse)")
 
-    # cav pull [--force]
+    # cav pull [branch]
     p_pull = sub.add_parser("pull", help="Fetch from cave and fast-forward merge")
     p_pull.add_argument("branch", nargs="?", default=None, help="Remote branch to pull (default: current branch)")
     p_pull.add_argument("--force", action="store_true", help="Hard reset to remote branch")
