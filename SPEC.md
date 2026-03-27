@@ -122,15 +122,19 @@ Pushes the current branch to the cave remote. With `--force`, force-pushes (for 
 
 ### `cav status`
 
-Shows whether shared branches on the cave remote are ahead of local branches. No fetch, reads local state only.
+Fetches from the cave remote and shows agent activity. Agents are derived from the registry, not from branch names. For each registered agent, shows whether it is running, paused (has undelivered commits), or idle. Read-only aside from the fetch.
 
 ### `cav remove-agent <n>`
 
-Removes a paused agent by ID. Deletes its session from the database, its agent branches from the current project's bare repo, and its workspace. Warns about any undelivered commits being discarded. Refuses to remove a running agent.
+Removes a paused agent by ID. Deletes its session from the database, its remote agent branches, local agent branch checkouts, and its workspace. Warns about any undelivered commits being discarded. Refuses to remove a running agent.
 
 ### `cav remove-agent --all [--yes]`
 
-Removes all paused agents and resets the database. Refuses if any agents are currently running. Prompts for confirmation unless `--yes` is given.
+Removes all paused agents and resets the database. Also deletes local agent branch checkouts. Refuses if any agents are currently running. Prompts for confirmation unless `--yes` is given.
+
+### `cav prune-branches`
+
+Deletes orphaned local agent branch checkouts whose remote tracking branch no longer exists. Prompts for confirmation before deleting.
 
 ### `cav shell`
 

@@ -309,6 +309,9 @@ class TestCAV(unittest.TestCase):
     def test_nested_agent_branch_resolves_to_shared_target(self):
         """Nested agent branch agent-2/agent-1/main resolves target to main."""
         agents = self._init_and_agents("1", "2")
+        # Register so status can see them
+        for name in agents:
+            config.acquire_agent_id(self.user_repo)
         ws1 = agents["1"]
 
         # Agent 1 pushes work on their branch
@@ -548,6 +551,7 @@ class TestCAV(unittest.TestCase):
     def test_status_dedup_multi_branch_agent(self):
         """cav status shows one line per agent even when agent has multiple branches."""
         agents = self._init_and_agents("1")
+        config.acquire_agent_id(self.user_repo)  # register agent 1
         a1 = agents["1"]
 
         # Agent 1 pushes work on their main branch

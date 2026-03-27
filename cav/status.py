@@ -20,10 +20,13 @@ def _format_age(timestamp: float) -> str:
 
 
 def _remove_agent(base: Path, agent_id: str, branches: list[str]):
-    """Remove an agent's remote branches and local state."""
+    """Remove an agent's remote branches, local branches, and local state."""
     for branch in branches:
         git.git("push", config.SHARED_REMOTE, f":refs/heads/{branch}",
                 cwd=base, echo=False, capture=True)
+        # Also delete the local checkout if it exists
+        git.git("branch", "-D", branch,
+                cwd=base, echo=False, capture=True, check=False)
     config.remove_agent(agent_id)
     # Clean up workspaces for all projects (agent ID is globally unique)
     worktrees_dir = config.DATA_DIR / "worktrees"
@@ -61,33 +64,27 @@ def status(base: Path, verbose: bool = False, agent_filter: str | None = None):
                         print(f"  {line}")
             print()
 
-    # Agent branch activity
+    # Agents come from the registry, branches provide detail
+    slug = config.project_slug(base)
+    registered = config.all_agent_ids(slug)
+    if agent_filter:
+        registered = [a for a in registered if a == agent_filter]
+
     branches = git.remote_branches(config.SHARED_REMOTE, cwd=base)
-    agent_branches = []
+    by_agent = {aid: [] for aid in registered}
     for branch in branches:
         parsed = config.parse_agent_branch(branch)
         if not parsed:
             continue
-        target = config.resolve_target(branch)
         _, agent_id = parsed
-        if agent_filter and agent_id != agent_filter:
+        if agent_id not in by_agent:
             continue
-        agent_branches.append((branch, target, agent_id))
-
-    # Group branches by agent ID
-    by_agent = {}
-    for branch, target, agent_id in sorted(agent_branches):
-        by_agent.setdefault(agent_id, []).append((branch, target))
-
-    # Include running agents that haven't pushed any branches yet
-    for aid in config.running_agent_ids(base):
-        if agent_filter and aid != agent_filter:
-            continue
-        by_agent.setdefault(aid, [])
+        target = config.resolve_target(branch)
+        by_agent[agent_id].append((branch, target))
 
     if not by_agent:
         if agent_filter:
-            print(f"No branches for agent {agent_filter}.")
+            print(f"No agent {agent_filter} in registry.")
         else:
             print("No agent activity.")
         return

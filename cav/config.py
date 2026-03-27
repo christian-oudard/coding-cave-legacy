@@ -446,11 +446,16 @@ def remove_agent(agent_id: str) -> None:
         db.close()
 
 
-def all_agent_ids() -> list[str]:
-    """Return all agent IDs in the registry."""
+def all_agent_ids(project: str | None = None) -> list[str]:
+    """Return all agent IDs in the registry, optionally filtered by project slug."""
     db = _open_registry()
     try:
-        rows = db.execute("SELECT agent_id FROM agents").fetchall()
+        if project:
+            rows = db.execute(
+                "SELECT agent_id FROM agents WHERE project = ?", (project,)
+            ).fetchall()
+        else:
+            rows = db.execute("SELECT agent_id FROM agents").fetchall()
         return sorted([r[0] for r in rows], key=int)
     finally:
         db.close()

@@ -161,6 +161,63 @@ def cmd_push(args):
     push(base, args.force)
 
 
+def cmd_prune_branches(args):
+    base = find_repo_root()
+    require_init(base)
+    git.git("fetch", "--prune", config.SHARED_REMOTE, cwd=base)
+
+    # Find local agent branches that tracked cave/* but whose upstream is gone.
+    # After fetch --prune, git marks these with [gone] in %(upstream:track).
+    local_out = git.git_output(
+        "for-each-ref",
+        "--format=%(refname:short)\t%(upstream:short)\t%(upstream:track)",
+        "refs/heads/", cwd=base)
+    if not local_out:
+        print("No orphaned agent branches.")
+        return
+
+    cave_prefix = f"{config.SHARED_REMOTE}/"
+    orphans = []
+    for line in local_out.splitlines():
+        parts = line.split("\t")
+        branch = parts[0]
+        upstream = parts[1] if len(parts) > 1 else ""
+        track = parts[2] if len(parts) > 2 else ""
+        if not config.parse_agent_branch(branch):
+            continue
+        if upstream and not upstream.startswith(cave_prefix):
+            raise SystemExit(
+                f"Branch '{branch}' tracks '{upstream}', not cave. "
+                "Refusing to prune. Remove it manually if intended."
+            )
+        if upstream and "[gone]" not in track:
+            continue  # upstream still live, skip
+        orphans.append(branch)
+
+    if not orphans:
+        print("No orphaned agent branches.")
+        return
+
+    current = git.current_branch(cwd=base)
+    if current in orphans:
+        raise SystemExit(
+            f"Currently on orphaned branch '{current}'. Switch to main first."
+        )
+
+    print("Orphaned local agent branches:")
+    for b in orphans:
+        print(f"  {b}")
+    try:
+        answer = input(f"\nDelete {len(orphans)} branches? [Y/n] ")
+    except (EOFError, KeyboardInterrupt):
+        raise SystemExit("\nAborted.")
+    if answer.strip().lower() in ("n", "no"):
+        raise SystemExit("Aborted.")
+
+    for b in orphans:
+        git.git("branch", "-D", b, cwd=base)
+
+
 def cmd_remove_agent(args):
     from .status import _remove_agent
     base = find_repo_root()
@@ -312,13 +369,16 @@ def main():
     p_rm.add_argument("--all", action="store_true", help="Remove all agents and reset the database")
     p_rm.add_argument("--yes", "-y", action="store_true", help="Skip confirmation prompt")
 
+    # cav prune-branches
+    sub.add_parser("prune-branches", help="Delete orphaned local agent branches")
+
     # cav version
     sub.add_parser("version", help="Show version")
 
     # Default to "agent" subcommand when none given.
     # parse_known_args can't handle agent flags (-p, -c) at top level,
     # so check if the first arg looks like a subcommand.
-    subcmds = {"init", "agent", "pull", "push", "status", "version", "remove-agent"}
+    subcmds = {"init", "agent", "pull", "push", "status", "version", "remove-agent", "prune-branches"}
     argv = sys.argv[1:]
     if not argv:
         argv = ["agent"]
@@ -335,6 +395,7 @@ def main():
         "push": cmd_push,
         "status": cmd_status,
         "remove-agent": cmd_remove_agent,
+        "prune-branches": cmd_prune_branches,
         "version": cmd_version,
     }
     dispatch[args.command](args)
