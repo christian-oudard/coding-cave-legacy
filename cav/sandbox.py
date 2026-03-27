@@ -127,12 +127,11 @@ def _start_crinj() -> str:
         raise SystemExit("crinj not found on PATH")
 
     if not _crinj_listening():
-        log = config.DATA_DIR / "crinj.log"
         config.DATA_DIR.mkdir(parents=True, exist_ok=True)
         subprocess.Popen(
             ["crinj", "--port", str(CRINJ_PORT)],
-            stdout=open(log, "a"),
-            stderr=subprocess.STDOUT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
         for _ in range(20):
