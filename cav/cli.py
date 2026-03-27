@@ -50,7 +50,7 @@ def resolve_project(path: str) -> Path:
 def cmd_agent(args):
     base = find_repo_root()
     require_init(base)
-    from .worktree import create
+    from .workspace import create
     from .sandbox import launch
 
     if args.resume_session:

@@ -25,7 +25,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from cav import config, daemon, worktree
+from cav import config, daemon, workspace
 from cav.handler import parse_request, validate_service, resolve_repo
 
 TEST_DAEMON_BASE_PORT = 19500  # distinct from test_daemon's 19400
@@ -175,7 +175,7 @@ class DaemonSecurityBase(unittest.TestCase):
 
     def _ws(self, agent_id="1"):
         """Create workspace with daemon remote."""
-        ws = worktree.create(self.user_repo, agent_id)
+        ws = workspace.create(self.user_repo, agent_id)
         git("config", "user.email", f"{agent_id}@test.com", cwd=ws)
         git("config", "user.name", f"Agent {agent_id}", cwd=ws)
         url = daemon.remote_url(agent_id, self.slug)

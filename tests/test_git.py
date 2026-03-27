@@ -19,7 +19,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from cav import config, worktree
+from cav import config, workspace
 
 
 def run(cmd, cwd=None, check=True, env=None):
@@ -98,7 +98,7 @@ class TestCAV(unittest.TestCase):
 
     def _create_agent(self, name):
         """Create agent workspace, configure git identity. Returns workspace path."""
-        ws = worktree.create(self.user_repo, name)
+        ws = workspace.create(self.user_repo, name)
         git("config", "user.email", f"{name}@test.com", cwd=ws)
         git("config", "user.name", name, cwd=ws)
         return ws
@@ -151,18 +151,27 @@ class TestCAV(unittest.TestCase):
             branch = git_out("rev-parse", "--abbrev-ref", "HEAD", cwd=ws)
             self.assertEqual(branch, f"agent-{name}/main")
 
+    def test_post_commit_hook_force_pushes(self):
+        """Post-commit hook uses --force and only pushes this agent's branch."""
+        agents = self._init_and_agents("1")
+        ws = agents["1"]
+        hook = ws / ".git" / "hooks" / "post-commit"
+        content = hook.read_text()
+        self.assertIn("--force", content)
+        self.assertIn("agent-1/main", content)
+
     def test_invalid_agent_id(self):
         """Non-numeric agent IDs are rejected."""
         self._init()
         with self.assertRaises(SystemExit):
-            worktree.create(self.user_repo, "bad_name")
+            workspace.create(self.user_repo, "bad_name")
 
     def test_launch_from_agent_branch_rejected(self):
         """Cannot launch a new agent while on an agent branch."""
         self._init()
         git("checkout", "-b", "agent-1/main", cwd=self.user_repo)
         with self.assertRaises(SystemExit) as ctx:
-            worktree.create(self.user_repo, "2")
+            workspace.create(self.user_repo, "2")
         self.assertIn("agent branch", str(ctx.exception))
 
     def test_auto_agent_id(self):

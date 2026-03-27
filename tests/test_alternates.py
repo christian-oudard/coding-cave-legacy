@@ -11,7 +11,7 @@ import sys
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from cav import config, worktree
+from cav import config, workspace
 
 
 def git(*args, cwd=None):
@@ -48,7 +48,7 @@ class TestAlternates(unittest.TestCase):
 
     def test_alternates_points_to_bare_repo(self):
         """Shared clone's alternates file points to the bare repo's objects dir."""
-        ws = worktree.create(self.user_repo, "1")
+        ws = workspace.create(self.user_repo, "1")
 
         alternates = ws / ".git" / "objects" / "info" / "alternates"
         self.assertTrue(alternates.exists(), "alternates file missing")
@@ -61,7 +61,7 @@ class TestAlternates(unittest.TestCase):
 
     def test_alternates_path_is_absolute(self):
         """Alternates must be absolute for bwrap bind-mount to work."""
-        ws = worktree.create(self.user_repo, "1")
+        ws = workspace.create(self.user_repo, "1")
 
         alternates = ws / ".git" / "objects" / "info" / "alternates"
         alt_path = alternates.read_text().strip()
@@ -70,7 +70,7 @@ class TestAlternates(unittest.TestCase):
 
     def test_objects_accessible_via_alternates(self):
         """Git operations in the shared clone can access objects from the bare repo."""
-        ws = worktree.create(self.user_repo, "1")
+        ws = workspace.create(self.user_repo, "1")
 
         # The clone should see the same history as the bare repo
         log = subprocess.run(
@@ -81,7 +81,7 @@ class TestAlternates(unittest.TestCase):
 
     def test_bwrap_mount_path_matches_alternates(self):
         """The bare repo path in alternates is what sandbox.py would bind-mount."""
-        ws = worktree.create(self.user_repo, "1")
+        ws = workspace.create(self.user_repo, "1")
 
         alternates = ws / ".git" / "objects" / "info" / "alternates"
         alt_path = Path(alternates.read_text().strip())
