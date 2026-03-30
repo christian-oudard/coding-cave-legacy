@@ -345,7 +345,9 @@ def cmd_status(args):
         projects = config.all_projects()
         if not projects:
             raise SystemExit("No registered projects. Run: cav init")
-        for slug, path in projects:
+        for i, (slug, path) in enumerate(projects):
+            if i > 0:
+                print()
             print(f"=== {slug} ===")
             status(Path(path), verbose=args.verbose)
         return
@@ -364,6 +366,7 @@ def main():
         prog="cav",
         description="Collaborative Agent Versioning",
     )
+    parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
     sub = parser.add_subparsers(dest="command")
 
     # cav init <path>
@@ -402,7 +405,6 @@ def main():
     # cav status [n]
     p_status = sub.add_parser("status", help="Show agent branch status")
     p_status.add_argument("agent", nargs="?", help="Agent ID to filter (e.g. 1)")
-    p_status.add_argument("-v", "--verbose", action="store_true", help="Show all agents including idle/paused")
     p_status.add_argument("-a", "--all", action="store_true", help="Show status for all registered projects")
 
     # cav remove-agent <n> | --all

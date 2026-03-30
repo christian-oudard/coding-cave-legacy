@@ -38,8 +38,7 @@ def _remove_agent(base: Path, agent_id: str, branches: list[str]):
 
 
 def status(base: Path, verbose: bool = False, agent_filter: str | None = None):
-    git.git("fetch", "--prune", config.SHARED_REMOTE, cwd=base)
-    print()
+    git.git("fetch", "--prune", config.SHARED_REMOTE, cwd=base, echo=verbose, capture=not verbose)
 
     if not agent_filter:
         local_branch = git.current_branch(cwd=base)
@@ -86,7 +85,7 @@ def status(base: Path, verbose: bool = False, agent_filter: str | None = None):
         if agent_filter:
             print(f"No agent {agent_filter} in registry.")
         else:
-            print("No agent activity.")
+            print("No running agents.")
         return
 
     if agent_filter:
