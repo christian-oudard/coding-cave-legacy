@@ -163,9 +163,18 @@ def cp(srcs: list[str], dest: str, recursive: bool = False, force: bool = False)
                 if not recursive:
                     raise SystemExit(f"cp: -R not specified; omitting directory '{src}'")
                 target = dest_path / src_obj.name if dest_path.is_dir() else dest_path
-                shutil.copytree(src_obj, target, dirs_exist_ok=True)
             else:
                 target = dest_path / src_obj.name if dest_path.is_dir() else dest_path
+            if not force and target.exists():
+                try:
+                    answer = input(f"Overwrite {target}? [y/N] ").strip().lower()
+                except EOFError:
+                    answer = ""
+                if answer != "y":
+                    raise SystemExit("Aborted.")
+            if src_obj.is_dir():
+                shutil.copytree(src_obj, target, dirs_exist_ok=True)
+            else:
                 if target.is_symlink():
                     target.unlink()
                 shutil.copy2(src_obj, target, follow_symlinks=False)

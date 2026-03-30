@@ -161,7 +161,7 @@ Copies files between the host and a cave agent worktree or persistent home. One 
 
 Direction is determined by which path has the cave prefix. If the destination has a cave prefix, copies host files into the worktree. If a source has a cave prefix, copies from the worktree to the host.
 
-If multiple agents have worktrees for a slug, the `@N` form is required. Refuses to copy symlinks out of the cave. Prompts before overwriting existing host files unless `-f` is given.
+If multiple agents have worktrees for a slug, the `@N` form is required. Refuses to copy symlinks out of the cave. Prompts before overwriting existing files in either direction unless `-f` is given.
 
 ### `cav prune-branches`
 

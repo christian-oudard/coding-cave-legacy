@@ -100,14 +100,46 @@ class TestCpHostToProject(CpTestCase):
 
         assert (self.ws / "mydir" / "f.txt").read_text() == "f\n"
 
-    def test_copy_overwrites_existing(self):
+    def test_overwrite_prompt_yes(self):
         (self.ws / "existing.txt").write_text("old\n")
         src = Path(self.tmpdir) / "existing.txt"
         src.write_text("new\n")
 
-        cp([str(src)], "myproject:existing.txt")
+        with patch("builtins.input", return_value="y"):
+            cp([str(src)], "myproject:existing.txt")
 
         assert (self.ws / "existing.txt").read_text() == "new\n"
+
+    def test_overwrite_prompt_no_aborts(self):
+        (self.ws / "existing.txt").write_text("old\n")
+        src = Path(self.tmpdir) / "existing.txt"
+        src.write_text("new\n")
+
+        with patch("builtins.input", return_value="n"):
+            with self.assertRaises(SystemExit) as ctx:
+                cp([str(src)], "myproject:existing.txt")
+        assert "Aborted" in str(ctx.exception)
+        assert (self.ws / "existing.txt").read_text() == "old\n"
+
+    def test_force_skips_prompt(self):
+        (self.ws / "existing.txt").write_text("old\n")
+        src = Path(self.tmpdir) / "existing.txt"
+        src.write_text("new\n")
+
+        cp([str(src)], "myproject:existing.txt", force=True)
+
+        assert (self.ws / "existing.txt").read_text() == "new\n"
+
+    def test_overwrite_prompt_eof_aborts(self):
+        (self.ws / "existing.txt").write_text("old\n")
+        src = Path(self.tmpdir) / "existing.txt"
+        src.write_text("new\n")
+
+        with patch("builtins.input", side_effect=EOFError):
+            with self.assertRaises(SystemExit) as ctx:
+                cp([str(src)], "myproject:existing.txt")
+        assert "Aborted" in str(ctx.exception)
+        assert (self.ws / "existing.txt").read_text() == "old\n"
 
     def test_copy_replaces_symlink(self):
         target = Path(self.tmpdir) / "real.txt"
@@ -116,7 +148,7 @@ class TestCpHostToProject(CpTestCase):
         src = Path(self.tmpdir) / "link.txt"
         src.write_text("content\n")
 
-        cp([str(src)], "myproject:link.txt")
+        cp([str(src)], "myproject:link.txt", force=True)
 
         dest = self.ws / "link.txt"
         assert not dest.is_symlink()
