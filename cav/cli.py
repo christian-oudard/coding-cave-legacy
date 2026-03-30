@@ -1,11 +1,12 @@
 """Coding Cave CLI entry point."""
 
-import argparse
 import os
 import re
 import subprocess
 import sys
 from pathlib import Path
+
+import click
 
 from . import config, git
 
@@ -32,11 +33,6 @@ def require_init(base: Path):
     raise SystemExit("Coding Cave not initialized. Run: cav init")
 
 
-def cmd_init(args):
-    from .init import init
-    init(args.path)
-
-
 def resolve_project(path: str) -> Path:
     """Resolve a project slug or path to its git root and validate init."""
     registered = config.project_path(path)
@@ -55,22 +51,44 @@ def resolve_project(path: str) -> Path:
     return p
 
 
-def cmd_agent(args):
+@click.group(context_settings={"help_option_names": ["-h", "--help"]})
+def cli():
+    pass
+
+
+@cli.command()
+@click.argument("path", default=".")
+def init(path):
+    """Initialize Coding Cave in a project."""
+    from .init import init as _init
+    _init(path)
+
+
+@cli.command()
+@click.option("-c", "--continue", "continue_agent", is_flag=True,
+              help="Continue the most recently paused agent")
+@click.option("-r", "--resume", "resume_session", metavar="UUID",
+              help="Resume a specific Claude session by UUID")
+@click.option("-p", "--project", "extra_projects", multiple=True, metavar="PATH",
+              help="Additional project to mount (repeatable)")
+@click.option("--recursive", is_flag=True,
+              help="Allow agent to launch subcaves (exposes /dev/fuse)")
+def agent(continue_agent, resume_session, extra_projects, recursive):
+    """Launch an agent in a sandbox."""
     base = find_repo_root()
     require_init(base)
+    _sweep_stale_agents(base)
     from .workspace import create
     from .sandbox import launch
 
-    if args.resume_session:
-        owner = config.find_agent_by_session(args.resume_session)
+    if resume_session:
+        owner = config.find_agent_by_session(resume_session)
         if not owner:
-            raise SystemExit(
-                f"No agent owns session {args.resume_session}."
-            )
+            raise SystemExit(f"No agent owns session {resume_session}.")
         agent_id = config.continue_agent_id(base, owner)
-        session_id = args.resume_session
+        session_id = resume_session
         resuming = True
-    elif args.continue_agent:
+    elif continue_agent:
         agent_id = config.continue_agent_id(base)
         session_id = config.read_session_id(agent_id)
         resuming = bool(session_id)
@@ -79,11 +97,9 @@ def cmd_agent(args):
         session_id = config.read_session_id(agent_id)
         resuming = False
 
-    # Primary project (cwd)
     projects = [(base, config.project_slug(base))]
 
-    # Additional projects via -p
-    for path in (args.extra_projects or []):
+    for path in extra_projects:
         extra = resolve_project(path)
         slug = config.project_slug(extra)
         if any(s == slug for _, s in projects):
@@ -93,7 +109,6 @@ def cmd_agent(args):
             )
         projects.append((extra, slug))
 
-    # Create workspaces for all projects
     workspaces = []
     for project_base, slug in projects:
         ws = create(project_base, agent_id)
@@ -108,7 +123,7 @@ def cmd_agent(args):
     print(f"{verb} {name} ...")
     try:
         rc = launch(workspaces, name, project_slug=projects[0][1],
-                    recursive=args.recursive, session_id=session_id,
+                    recursive=recursive, session_id=session_id,
                     resuming=resuming)
     finally:
         config.mark_agent_exited(agent_id)
@@ -116,19 +131,26 @@ def cmd_agent(args):
     sys.exit(rc)
 
 
+def _sweep_stale_agents(base: Path):
+    """Clean up exited agents with no pending work before launching."""
+    slug = config.project_slug(base)
+    for agent_id in config.all_agent_ids(project=slug):
+        if not config.is_agent_running(agent_id):
+            _auto_cleanup_if_clean(base, agent_id)
+
+
 def _auto_cleanup_if_clean(base, agent_id):
-    """Remove agent if all work is approved. Keep if unapproved work remains."""
+    """Remove agent if all work is approved."""
     from .status import _remove_agent
     try:
         branches = git.remote_branches(config.SHARED_REMOTE, cwd=base)
     except Exception:
-        return  # can't check, keep the agent
+        return
     agent_branches = [
         b for b in branches
         if (parsed := config.parse_agent_branch(b)) and parsed[1] == agent_id
     ]
     if not agent_branches:
-        # No branches at all, clean up
         _remove_agent(base, agent_id, [])
         return
     for b in agent_branches:
@@ -140,50 +162,180 @@ def _auto_cleanup_if_clean(base, agent_id):
         target_ref = f"{config.SHARED_REMOTE}/{target}"
         try:
             if not git.has_merge_base(remote_agent, target_ref, cwd=base):
-                return  # can't determine, keep
+                return
             if git.cherry_undelivered(target_ref, remote_agent, cwd=base):
-                return  # has unapproved work, keep
+                return
         except Exception:
-            return  # can't check, keep
-    # All branches fully approved
+            return
     _remove_agent(base, agent_id, agent_branches)
 
 
-def cmd_approve(args):
+@cli.command()
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+def approve(yes):
+    """Approve agent work into shared branch."""
     base = find_repo_root()
     require_init(base)
-    from .approve import approve
-    approve(base, yes=args.yes)
+    from .approve import approve as _approve
+    _approve(base, yes=yes)
 
 
-def cmd_reject(args):
+@cli.command()
+@click.argument("agent_id", required=False)
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+def reject(agent_id, yes):
+    """Reject tip commit of shared branch."""
     base = find_repo_root()
     require_init(base)
-    from .reject import reject
-    reject(base, agent_id=args.agent_id, yes=args.yes)
+    from .reject import reject as _reject
+    _reject(base, agent_id=agent_id, yes=yes)
 
 
-def cmd_pull(args):
+@cli.command()
+@click.argument("branch", required=False)
+@click.option("-f", "--force", is_flag=True, help="Hard reset to remote branch")
+def pull(branch, force):
+    """Fetch from cave and fast-forward merge."""
     base = find_repo_root()
     require_init(base)
-    from .pull import pull
-    pull(base, force=args.force, branch=args.branch)
+    from .pull import pull as _pull
+    _pull(base, force=force, branch=branch)
 
 
-def cmd_push(args):
+@cli.command()
+@click.option("-f", "--force", is_flag=True, help="Force push")
+def push(force):
+    """Push current branch to cave."""
     base = find_repo_root()
     require_init(base)
-    from .push import push
-    push(base, args.force)
+    from .push import push as _push
+    _push(base, force)
 
 
-def cmd_prune_branches(args):
+@cli.command()
+@click.argument("agent", required=False)
+@click.option("-a", "--all", "all_projects", is_flag=True,
+              help="Show status for all registered projects")
+def status(agent, all_projects):
+    """Show agent branch status."""
+    from .status import status as _status
+    if all_projects:
+        projects = config.all_projects()
+        if not projects:
+            raise SystemExit("No registered projects. Run: cav init")
+        for i, (slug, path) in enumerate(projects):
+            if i > 0:
+                print()
+            print(f"=== {slug} ===")
+            _status(Path(path))
+        return
+    base = find_repo_root()
+    require_init(base)
+    agent_id = None
+    if agent:
+        agent_id = agent.lstrip("@").split("@")[-1]
+        if not config.AGENT_ID_RE.match(agent_id):
+            raise SystemExit(f"Invalid agent ID '{agent}'. Use a number (e.g. 3).")
+    _status(base, agent_filter=agent_id)
+
+
+@cli.command("remove-agent")
+@click.argument("agent_id", required=False)
+@click.option("-a", "--all", "all_agents", is_flag=True,
+              help="Remove all agents and reset the database")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
+def remove_agent(agent_id, all_agents, yes):
+    """Remove a paused agent and its branches."""
+    from .status import _remove_agent
+    base = find_repo_root()
+    require_init(base)
+
+    if all_agents:
+        _cmd_remove_all_agents(base, yes=yes)
+        return
+
+    if not agent_id:
+        raise SystemExit("Specify an agent ID (e.g. 3) or use --all.")
+
+    aid = agent_id.lstrip("@").split("@")[-1]
+    if not config.AGENT_ID_RE.match(aid):
+        raise SystemExit(f"Invalid agent ID '{agent_id}'. Use a number (e.g. 3).")
+
+    name = config.display_name(base, aid)
+    if aid not in config.all_agent_ids():
+        raise SystemExit(f"{name} not found.")
+
+    if config.is_agent_running(aid):
+        raise SystemExit(f"{name} is running. Stop it first.")
+
+    branches = git.remote_branches(config.SHARED_REMOTE, cwd=base)
+    agent_branches = [
+        b for b in branches
+        if (parsed := config.parse_agent_branch(b)) and parsed[1] == aid
+    ]
+
+    for b in agent_branches:
+        parsed = config.parse_agent_branch(b)
+        if not parsed:
+            continue
+        target = parsed[0]
+        remote_agent = f"{config.SHARED_REMOTE}/{b}"
+        target_ref = f"{config.SHARED_REMOTE}/{target}"
+        try:
+            if git.has_merge_base(remote_agent, target_ref, cwd=base):
+                lines = git.cherry_undelivered(target_ref, remote_agent, cwd=base)
+                if lines:
+                    n = "commit" if len(lines) == 1 else "commits"
+                    print(f"Warning: discarding {len(lines)} unapproved {n} on {b}.")
+        except Exception:
+            pass
+
+    _remove_agent(base, aid, agent_branches)
+    print(f"Removed {config.display_name(base, aid)}.")
+
+
+def _cmd_remove_all_agents(base, yes=False):
+    from .status import _remove_agent
+
+    if config.any_agent_running():
+        raise SystemExit("Cannot remove all: some agents are still running.")
+
+    all_ids = config.all_agent_ids()
+    if not all_ids:
+        print("No agents in registry.")
+        return
+
+    branches = git.remote_branches(config.SHARED_REMOTE, cwd=base)
+    agent_branches = [b for b in branches if config.parse_agent_branch(b)]
+
+    n = len(all_ids)
+    s = "session" if n == 1 else "sessions"
+    print(f"This will remove {n} agent {s} and {len(agent_branches)} agent branches.")
+
+    if not yes:
+        try:
+            answer = input("Continue? [y/N] ")
+        except (EOFError, KeyboardInterrupt):
+            raise SystemExit("\nAborted.")
+        if answer.strip().lower() not in ("y", "yes"):
+            raise SystemExit("Aborted.")
+
+    for aid in all_ids:
+        ab = [b for b in agent_branches
+              if (p := config.parse_agent_branch(b)) and p[1] == aid]
+        _remove_agent(base, aid, ab)
+
+    config.clear_registry()
+    print(f"Removed {n} agent {s}.")
+
+
+@cli.command("prune-branches")
+def prune_branches():
+    """Delete orphaned local agent branches."""
     base = find_repo_root()
     require_init(base)
     git.git("fetch", "--prune", config.SHARED_REMOTE, cwd=base, **config.v())
 
-    # Find local agent branches that tracked cave/* but whose upstream is gone.
-    # After fetch --prune, git marks these with [gone] in %(upstream:track).
     local_out = git.git_output(
         "for-each-ref",
         "--format=%(refname:short)\t%(upstream:short)\t%(upstream:track)",
@@ -207,7 +359,7 @@ def cmd_prune_branches(args):
                 "Refusing to prune. Remove it manually if intended."
             )
         if upstream and "[gone]" not in track:
-            continue  # upstream still live, skip
+            continue
         orphans.append(branch)
 
     if not orphans:
@@ -234,103 +386,23 @@ def cmd_prune_branches(args):
         git.git("branch", "-D", b, cwd=base, **config.v())
 
 
-def cmd_remove_agent(args):
-    from .status import _remove_agent
-    base = find_repo_root()
-    require_init(base)
-
-    if args.all:
-        _cmd_remove_all_agents(base, yes=args.yes)
-        return
-
-    if not args.agent_id:
-        raise SystemExit("Specify an agent ID (e.g. 3) or use --all.")
-
-    agent_id = args.agent_id.lstrip("@").split("@")[-1]  # accept "3", "@3", "slug@3"
-    if not config.AGENT_ID_RE.match(agent_id):
-        raise SystemExit(f"Invalid agent ID '{args.agent_id}'. Use a number (e.g. 3).")
-
-    name = config.display_name(base, agent_id)
-    if agent_id not in config.all_agent_ids():
-        raise SystemExit(f"{name} not found.")
-
-    if config.is_agent_running(agent_id):
-        raise SystemExit(f"{name} is running. Stop it first.")
-
-    # Find remote branches belonging to this agent
-    branches = git.remote_branches(config.SHARED_REMOTE, cwd=base)
-    agent_branches = [
-        b for b in branches
-        if (parsed := config.parse_agent_branch(b)) and parsed[1] == agent_id
-    ]
-
-    # Warn about unapproved work (using cherry for accuracy)
-    for b in agent_branches:
-        parsed = config.parse_agent_branch(b)
-        if not parsed:
-            continue
-        target = parsed[0]
-        remote_agent = f"{config.SHARED_REMOTE}/{b}"
-        target_ref = f"{config.SHARED_REMOTE}/{target}"
-        try:
-            if git.has_merge_base(remote_agent, target_ref, cwd=base):
-                lines = git.cherry_undelivered(target_ref, remote_agent, cwd=base)
-                if lines:
-                    n = "commit" if len(lines) == 1 else "commits"
-                    print(f"Warning: discarding {len(lines)} unapproved {n} on {b}.")
-        except Exception:
-            pass
-
-    _remove_agent(base, agent_id, agent_branches)
-    print(f"Removed {config.display_name(base, agent_id)}.")
-
-
-def _cmd_remove_all_agents(base, yes=False):
-    from .status import _remove_agent
-
-    if config.any_agent_running():
-        raise SystemExit("Cannot remove all: some agents are still running.")
-
-    all_ids = config.all_agent_ids()
-    if not all_ids:
-        print("No agents in registry.")
-        return
-
-    # Find all agent branches in this project
-    branches = git.remote_branches(config.SHARED_REMOTE, cwd=base)
-    agent_branches = [b for b in branches if config.parse_agent_branch(b)]
-
-    n = len(all_ids)
-    s = "session" if n == 1 else "sessions"
-    print(f"This will remove {n} agent {s} and {len(agent_branches)} agent branches.")
-
-    if not yes:
-        try:
-            answer = input("Continue? [y/N] ")
-        except (EOFError, KeyboardInterrupt):
-            raise SystemExit("\nAborted.")
-        if answer.strip().lower() not in ("y", "yes"):
-            raise SystemExit("Aborted.")
-
-    # Remove branches and workspaces per agent
-    for agent_id in all_ids:
-        ab = [b for b in agent_branches
-              if (p := config.parse_agent_branch(b)) and p[1] == agent_id]
-        _remove_agent(base, agent_id, ab)
-
-    # Clear registry completely
-    config.clear_registry()
-    print(f"Removed {n} agent {s}.")
-
-
-def cmd_cp(args):
-    from .cp import cp
-    if len(args.paths) < 2:
+@cli.command()
+@click.argument("paths", nargs=-1, required=True)
+@click.option("-R", "-r", "--recursive", is_flag=True,
+              help="Copy directories recursively")
+@click.option("-f", "--force", is_flag=True,
+              help="Overwrite existing files without prompting")
+def cp(paths, recursive, force):
+    """Copy files to/from a cave agent worktree."""
+    from .cp import cp as _cp
+    if len(paths) < 2:
         raise SystemExit("Usage: cav cp <src>... <dest>")
-    cp(args.paths[:-1], args.paths[-1], recursive=args.recursive, force=args.force)
+    _cp(list(paths[:-1]), paths[-1], recursive=recursive, force=force)
 
 
-def cmd_version(args):
+@cli.command()
+def version():
+    """Show version."""
     ts = "@VERSION_DATE@"
     if ts.isdigit():
         from datetime import datetime
@@ -340,100 +412,7 @@ def cmd_version(args):
         print(f"cav @VERSION@ ({ts})")
 
 
-def cmd_status(args):
-    from .status import status
-    if args.all:
-        projects = config.all_projects()
-        if not projects:
-            raise SystemExit("No registered projects. Run: cav init")
-        for i, (slug, path) in enumerate(projects):
-            if i > 0:
-                print()
-            print(f"=== {slug} ===")
-            status(Path(path))
-        return
-    base = find_repo_root()
-    require_init(base)
-    agent_id = None
-    if args.agent:
-        agent_id = args.agent.lstrip("@").split("@")[-1]  # accept "3", "@3", "slug@3"
-        if not config.AGENT_ID_RE.match(agent_id):
-            raise SystemExit(f"Invalid agent ID '{args.agent}'. Use a number (e.g. 3).")
-    status(base, agent_filter=agent_id)
-
-
 def main():
-    parser = argparse.ArgumentParser(
-        prog="cav",
-        description="Collaborative Agent Versioning",
-    )
-    parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
-    sub = parser.add_subparsers(dest="command")
-
-    # cav init <path>
-    p_init = sub.add_parser("init", help="Initialize Coding Cave in a project")
-    p_init.add_argument("path", nargs="?", default=".", help="Path to the project directory (default: current directory)")
-
-    # cav agent [id]  (also the default action)
-    p_agent = sub.add_parser("agent", help="Launch an agent in a sandbox")
-    p_agent.add_argument("-c", "--continue", action="store_true", dest="continue_agent",
-                         help="Continue the most recently paused agent")
-    p_agent.add_argument("-r", "--resume", dest="resume_session", metavar="UUID",
-                         help="Resume a specific Claude session by UUID")
-    p_agent.add_argument("-p", "--project", action="append", dest="extra_projects",
-                         metavar="PATH", help="Additional project to mount (repeatable)")
-    p_agent.add_argument("--recursive", action="store_true",
-                         help="Allow agent to launch subcaves (exposes /dev/fuse)")
-
-    # cav approve [--yes]
-    p_approve = sub.add_parser("approve", help="Approve agent work into shared branch")
-    p_approve.add_argument("--yes", "-y", action="store_true", help="Skip confirmation")
-
-    # cav reject [agent-id] [--yes]
-    p_reject = sub.add_parser("reject", help="Reject tip commit of shared branch")
-    p_reject.add_argument("agent_id", nargs="?", help="Agent ID to assign rework")
-    p_reject.add_argument("--yes", "-y", action="store_true", help="Skip confirmation")
-
-    # cav pull [branch]
-    p_pull = sub.add_parser("pull", help="Fetch from cave and fast-forward merge")
-    p_pull.add_argument("branch", nargs="?", default=None, help="Remote branch to pull (default: current branch)")
-    p_pull.add_argument("-f", "--force", action="store_true", help="Hard reset to remote branch")
-
-    # cav push [--force]
-    p_push = sub.add_parser("push", help="Push current branch to cave")
-    p_push.add_argument("-f", "--force", action="store_true", help="Force push")
-
-    # cav status [n]
-    p_status = sub.add_parser("status", help="Show agent branch status")
-    p_status.add_argument("agent", nargs="?", help="Agent ID to filter (e.g. 1)")
-    p_status.add_argument("-a", "--all", action="store_true", help="Show status for all registered projects")
-
-    # cav remove-agent <n> | --all
-    p_rm = sub.add_parser("remove-agent", help="Remove a paused agent and its branches")
-    p_rm.add_argument("agent_id", nargs="?", help="Agent ID (e.g. 3)")
-    p_rm.add_argument("-a", "--all", action="store_true", help="Remove all agents and reset the database")
-    p_rm.add_argument("--yes", "-y", action="store_true", help="Skip confirmation prompt")
-
-    # cav prune-branches
-    sub.add_parser("prune-branches", help="Delete orphaned local agent branches")
-
-    # cav cp
-    p_cp = sub.add_parser("cp", help="Copy files to/from a cave agent worktree")
-    p_cp.add_argument("-R", "-r", "--recursive", action="store_true",
-                      help="Copy directories recursively")
-    p_cp.add_argument("-f", "--force", action="store_true",
-                      help="Overwrite existing files without prompting")
-    p_cp.add_argument("paths", nargs="+",
-                      help="Source(s) and destination. "
-                           "Cave paths: slug:path, slug@N:path, cave:path, slug:~/path")
-
-    # cav version
-    sub.add_parser("version", help="Show version")
-
-    # Default to "agent" subcommand when none given.
-    # parse_known_args can't handle agent flags (-p, -c) at top level,
-    # so check if the first arg looks like a subcommand.
-    subcmds = {"init", "agent", "approve", "reject", "pull", "push", "status", "version", "remove-agent", "prune-branches", "cp"}
     argv = sys.argv[1:]
 
     # Strip -v/--verbose anywhere in argv (including combined like -va).
@@ -450,33 +429,22 @@ def main():
             clean.append(a)
     argv = clean
 
+    subcmds = {
+        "init", "agent", "approve", "reject", "pull", "push",
+        "status", "version", "remove-agent", "prune-branches", "cp",
+    }
     if not argv:
         argv = ["agent"]
     elif argv[0] == "help":
         argv = argv[1:] + ["--help"] if len(argv) > 1 else ["--help"]
     elif argv[0] not in subcmds | {"-h", "--help"}:
-        # Only default to "agent" for known agent flags.
         agent_flags = {"-c", "--continue", "-r", "--resume", "-p", "--project", "--recursive"}
         if argv[0] in agent_flags:
             argv = ["agent"] + argv
         else:
-            parser.error(f"Unknown command '{argv[0]}'.")
-    args = parser.parse_args(argv)
+            raise SystemExit(f"Unknown command '{argv[0]}'.")
 
-    dispatch = {
-        "init": cmd_init,
-        "agent": cmd_agent,
-        "approve": cmd_approve,
-        "reject": cmd_reject,
-        "pull": cmd_pull,
-        "push": cmd_push,
-        "status": cmd_status,
-        "remove-agent": cmd_remove_agent,
-        "prune-branches": cmd_prune_branches,
-        "cp": cmd_cp,
-        "version": cmd_version,
-    }
-    dispatch[args.command](args)
+    cli(args=argv)
 
 
 if __name__ == "__main__":

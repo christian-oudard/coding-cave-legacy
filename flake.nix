@@ -23,7 +23,7 @@
       packages = eachSystem (pkgs:
         let
           jail = jail-nix.lib.init pkgs;
-          python = pkgs.python3;
+          python = pkgs.python3.withPackages (ps: [ ps.click ]);
           mkClaudeConfig = nix-claude.lib.mkClaudeConfig;
           defaultStatusline = ./defaults/statusline.sh;
           claudeConfig = mkClaudeConfig {
@@ -328,7 +328,7 @@
 
       checks = eachSystem (pkgs: {
         unit = pkgs.runCommand "cav-unit-tests" {
-          nativeBuildInputs = [ pkgs.python3 pkgs.git ];
+          nativeBuildInputs = [ (pkgs.python3.withPackages (ps: [ ps.click ])) pkgs.git ];
         } ''
           cp -r ${pkgs.lib.cleanSource ./.}/* .
           export HOME=$TMPDIR
