@@ -5,6 +5,7 @@ Objects are shared via alternates, so disk cost is minimal. The clone has its
 own .git, making it self-contained for bwrap mounting.
 """
 
+import subprocess
 from pathlib import Path
 
 from . import config, git
@@ -42,12 +43,19 @@ def create(base: Path, agent_id: str) -> Path:
     # Rename origin -> cave
     git.git("remote", "rename", "origin", config.SHARED_REMOTE, cwd=ws_path, echo=False)
 
-    # Create and checkout agent branch
     ab = config.agent_branch(target, agent_id)
-    git.git("checkout", "-b", ab, cwd=ws_path, echo=False)
+    remote_ref = f"refs/remotes/{config.SHARED_REMOTE}/{ab}"
 
-    # Push agent branch immediately so it's visible in cav status
-    git.git("push", config.SHARED_REMOTE, ab,
-            f"--push-option=agent={agent_id}", cwd=ws_path, echo=False)
+    # If the agent branch already exists on the remote (re-creating a
+    # workspace for a continuing agent), check it out with tracking.
+    # Otherwise create a fresh branch and push it.
+    try:
+        git.git_output("rev-parse", "--verify", remote_ref, cwd=ws_path)
+        git.git("checkout", ab, cwd=ws_path, echo=False)
+    except subprocess.CalledProcessError:
+        git.git("checkout", "-b", ab, cwd=ws_path, echo=False)
+        git.git("push", config.SHARED_REMOTE, ab,
+                f"--push-option=agent={agent_id}", cwd=ws_path,
+                echo=False, capture=True)
 
     return ws_path
