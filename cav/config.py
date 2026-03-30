@@ -19,7 +19,7 @@ DATA_DIR = Path(os.environ.get(
 ))
 CAVE_USER = "cave-coder"
 
-SCHEMA_VERSION = 4  # v1: (project,agent_id) PK; v2: agent_id PK; v3: +projects; v4: +approvals
+SCHEMA_VERSION = 1
 
 # Runtime flags set once in main() before dispatch
 verbose: bool = False
@@ -136,44 +136,29 @@ def _registry_path() -> Path:
 
 
 def _open_registry() -> sqlite3.Connection:
-    """Open the agent registry, creating/migrating table as needed.
-
-    Schema v2: agent_id is the sole primary key (globally unique).
-    The project column records the primary project where the session started.
-    """
+    """Open the agent registry, creating tables as needed."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    db_path = _registry_path()
-    is_new = not db_path.exists()
-    db = sqlite3.connect(str(db_path), timeout=10)
+    db = sqlite3.connect(str(_registry_path()), timeout=10)
     db.execute("PRAGMA journal_mode=WAL")
 
     version = db.execute("PRAGMA user_version").fetchone()[0]
-
     if version < SCHEMA_VERSION:
-        if version == 0 and not is_new:
-            _migrate_v1_to_v2(db)
-        elif is_new:
-            db.execute("""
-                CREATE TABLE IF NOT EXISTS agents (
-                    agent_id TEXT PRIMARY KEY,
-                    project TEXT NOT NULL,
-                    session_id TEXT UNIQUE,
-                    pid INTEGER,
-                    started_at REAL,
-                    exited_at REAL
-                )
-            """)
-            _migrate_session_files(db)
-
-        # v3: add projects table
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS agents (
+                agent_id TEXT PRIMARY KEY,
+                project TEXT NOT NULL,
+                session_id TEXT UNIQUE,
+                pid INTEGER,
+                started_at REAL,
+                exited_at REAL
+            )
+        """)
         db.execute("""
             CREATE TABLE IF NOT EXISTS projects (
                 slug TEXT PRIMARY KEY,
                 path TEXT NOT NULL UNIQUE
             )
         """)
-
-        # v4: add approvals table
         db.execute("""
             CREATE TABLE IF NOT EXISTS approvals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -185,77 +170,10 @@ def _open_registry() -> sqlite3.Connection:
                 approved_at REAL NOT NULL
             )
         """)
-
         db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         db.commit()
 
     return db
-
-
-def _migrate_v1_to_v2(db: sqlite3.Connection) -> None:
-    """Migrate from v1 schema (project, agent_id) PK to v2 (agent_id PK)."""
-    # Check if old table exists
-    has_table = db.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='agents'"
-    ).fetchone()
-    if not has_table:
-        db.execute("""
-            CREATE TABLE agents (
-                agent_id TEXT PRIMARY KEY,
-                project TEXT NOT NULL,
-                session_id TEXT UNIQUE,
-                pid INTEGER,
-                started_at REAL,
-                exited_at REAL
-            )
-        """)
-        return
-
-    # Save old data, keeping most recently started entry per agent_id
-    db.execute("""
-        CREATE TABLE agents_v2 (
-            agent_id TEXT PRIMARY KEY,
-            project TEXT NOT NULL,
-            session_id TEXT UNIQUE,
-            pid INTEGER,
-            started_at REAL,
-            exited_at REAL
-        )
-    """)
-    db.execute("""
-        INSERT OR IGNORE INTO agents_v2
-            (agent_id, project, session_id, pid, started_at, exited_at)
-        SELECT agent_id, project, session_id, pid, started_at, exited_at
-        FROM agents
-        ORDER BY COALESCE(started_at, 0) DESC
-    """)
-    db.execute("DROP TABLE agents")
-    db.execute("ALTER TABLE agents_v2 RENAME TO agents")
-
-
-def _migrate_session_files(db: sqlite3.Connection) -> None:
-    """One-time migration of old .session files into the registry."""
-    locks_dir = DATA_DIR / "locks"
-    if not locks_dir.exists():
-        return
-    for slug_dir in locks_dir.iterdir():
-        if not slug_dir.is_dir():
-            continue
-        slug = slug_dir.name
-        for session_file in slug_dir.rglob("*.session"):
-            aid = session_file.stem
-            if not AGENT_ID_RE.match(aid):
-                continue
-            try:
-                sid = session_file.read_text().strip()
-            except OSError:
-                continue
-            if sid:
-                db.execute(
-                    "INSERT OR IGNORE INTO agents (agent_id, project, session_id) VALUES (?, ?, ?)",
-                    (aid, slug, sid)
-                )
-            session_file.unlink()
 
 
 def _is_pid_alive(pid: int) -> bool:
