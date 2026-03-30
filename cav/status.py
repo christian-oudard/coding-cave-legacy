@@ -43,21 +43,16 @@ def status(base: Path, agent_filter: str | None = None):
     if not agent_filter:
         local_branch = git.current_branch(cwd=base)
         remote_ref = f"{config.SHARED_REMOTE}/{local_branch}"
-
-        # Shared branch status
         try:
             local_sha = git.git_output("rev-parse", local_branch, cwd=base)
             remote_sha = git.git_output("rev-parse", remote_ref, cwd=base)
         except Exception:
             remote_sha = local_sha = None
-
         if local_sha and remote_sha and local_sha != remote_sha:
             ahead = git.commits_ahead(remote_ref, local_branch, cwd=base)
             if ahead > 0:
                 n = "commit" if ahead == 1 else "commits"
-                print(f"{local_branch} is behind {remote_ref} by {ahead} {n}.")
-                for line in git.commit_oneline(f"{local_branch}..{remote_ref}", cwd=base):
-                    print(f"  {line}")
+                print(f"{local_branch} is behind by {ahead} {n}. Please run `cav pull`.")
                 print()
 
     # Agents come from the registry, branches provide detail
@@ -128,15 +123,19 @@ def status(base: Path, agent_filter: str | None = None):
 
         agents.append((last_activity, agent_id, name, running, state, unapproved))
 
-    # Sort by last activity, oldest first
+    # Sort by last activity, oldest first; drop idle (not running, no pending work)
     agents.sort(key=lambda a: a[0])
+    agents = [(ts, aid, name, run, state, un) for ts, aid, name, run, state, un in agents
+              if run or un]
 
-    hidden = []
+    if not agents:
+        if agent_filter:
+            print(f"No agent {agent_filter} in registry.")
+        else:
+            print("No running agents.")
+        return
+
     for last_activity, agent_id, name, running, state, unapproved in agents:
-        if not unapproved and not running:
-            hidden.append((name, last_activity))
-            continue
-
         age = _format_age(last_activity) if last_activity else ""
         header = f"{name}  ({state})" + (f"  {age}" if age else "")
 
@@ -151,14 +150,3 @@ def status(base: Path, agent_filter: str | None = None):
                     print(f"    {line}")
                 if MAX_COMMITS and ahead > MAX_COMMITS:
                     print(f"    ... and {ahead - MAX_COMMITS} more")
-
-    if hidden:
-        if verbose:
-            for name, ts in hidden:
-                age = _format_age(ts) if ts else ""
-                suffix = f"  {age}" if age else ""
-                print(f"{name}  (idle){suffix}")
-        else:
-            n = len(hidden)
-            s = "session" if n == 1 else "sessions"
-            print(f"{n} idle {s} not shown. Use -v to list.")
