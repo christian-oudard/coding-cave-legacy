@@ -479,5 +479,63 @@ class TestSessionLifecycle(unittest.TestCase):
         self.assertEqual(config.find_agent_by_session(real_uuid), aid)
 
 
+class TestFormatAll(unittest.TestCase):
+    """Unit tests for multi-project status formatting."""
+
+    def setUp(self):
+        from cav.status import format_all
+        self.format_all = format_all
+
+    def test_no_agents_anywhere(self):
+        entries = [
+            (False, "alpha", ""),
+            (False, "beta", ""),
+        ]
+        self.assertEqual(self.format_all(entries),
+                         "No running agents in any project.")
+
+    def test_active_shown_inactive_summarized(self):
+        entries = [
+            (True, "onecli", "onecli@3  (running)  1h ago\n"),
+            (False, "coding-cave", ""),
+            (False, "dotfiles", ""),
+        ]
+        out = self.format_all(entries)
+        self.assertIn("=== onecli ===", out)
+        self.assertIn("onecli@3", out)
+        self.assertIn("No running agents in: coding-cave, dotfiles", out)
+        # Inactive projects should not get their own headers
+        self.assertNotIn("=== coding-cave ===", out)
+        self.assertNotIn("=== dotfiles ===", out)
+
+    def test_inactive_sorted_alphabetically(self):
+        entries = [
+            (True, "zoo", "zoo@1  (running)\n"),
+            (False, "delta", ""),
+            (False, "alpha", ""),
+            (False, "charlie", ""),
+        ]
+        out = self.format_all(entries)
+        self.assertIn("No running agents in: alpha, charlie, delta", out)
+
+    def test_all_active(self):
+        entries = [
+            (True, "proj-a", "a@1  (running)\n"),
+            (True, "proj-b", "b@2  (paused)\n"),
+        ]
+        out = self.format_all(entries)
+        self.assertIn("=== proj-a ===", out)
+        self.assertIn("=== proj-b ===", out)
+        self.assertNotIn("No running agents", out)
+
+    def test_single_inactive(self):
+        entries = [
+            (True, "active", "active@1  (running)\n"),
+            (False, "lonely", ""),
+        ]
+        out = self.format_all(entries)
+        self.assertIn("No running agents in: lonely", out)
+
+
 if __name__ == "__main__":
     unittest.main()

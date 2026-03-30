@@ -228,14 +228,18 @@ def status(agent, all_projects):
     """Show agent branch status."""
     from .status import status as _status
     if all_projects:
+        import io, contextlib
+        from .status import format_all
         projects = config.all_projects()
         if not projects:
             raise SystemExit("No registered projects. Run: cav init")
-        for i, (slug, path) in enumerate(projects):
-            if i > 0:
-                print()
-            print(f"=== {slug} ===")
-            _status(Path(path), scoped=False)
+        entries = []
+        for slug, path in projects:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                has_agents = _status(Path(path), scoped=False)
+            entries.append((has_agents, slug, buf.getvalue()))
+        print(format_all(entries))
         return
     base = find_repo_root()
     require_init(base)

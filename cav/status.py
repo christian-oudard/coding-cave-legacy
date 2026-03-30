@@ -7,6 +7,20 @@ from pathlib import Path
 from . import config, git
 
 
+def format_all(entries: list[tuple[bool, str, str]]) -> str:
+    """Format multi-project status from (has_agents, slug, output) tuples."""
+    active = [(s, o) for has, s, o in entries if has]
+    inactive = sorted(s for has, s, _ in entries if not has)
+    if not active:
+        return "No running agents in any project."
+    parts = []
+    for slug, output in active:
+        parts.append(f"=== {slug} ===\n{output}")
+    if inactive:
+        parts.append(f"No running agents in: {', '.join(inactive)}")
+    return "\n".join(parts)
+
+
 def _format_age(timestamp: float) -> str:
     """Format a timestamp as a human-readable age like '3h ago'."""
     delta = int(time.time() - timestamp)
@@ -37,7 +51,8 @@ def _remove_agent(base: Path, agent_id: str, branches: list[str]):
                 shutil.rmtree(ws)
 
 
-def status(base: Path, agent_filter: str | None = None, scoped: bool = True):
+def status(base: Path, agent_filter: str | None = None, scoped: bool = True) -> bool:
+    """Show agent status. Returns True if any active agents were displayed."""
     git.git("fetch", "--prune", config.SHARED_REMOTE, cwd=base, **config.v())
 
     if not agent_filter:
@@ -76,9 +91,9 @@ def status(base: Path, agent_filter: str | None = None, scoped: bool = True):
     if not by_agent:
         if agent_filter:
             print(f"No agent {agent_filter} in registry.")
-        else:
-            print(f"No running agents in {slug}." if scoped else "No running agents.")
-        return
+        elif scoped:
+            print(f"No running agents in {slug}.")
+        return False
 
     verbose = config.verbose or bool(agent_filter)
 
@@ -131,9 +146,9 @@ def status(base: Path, agent_filter: str | None = None, scoped: bool = True):
     if not agents:
         if agent_filter:
             print(f"No agent {agent_filter} in registry.")
-        else:
-            print(f"No running agents in {slug}." if scoped else "No running agents.")
-        return
+        elif scoped:
+            print(f"No running agents in {slug}.")
+        return False
 
     for last_activity, agent_id, name, running, state, unapproved in agents:
         age = _format_age(last_activity) if last_activity else ""
@@ -150,3 +165,4 @@ def status(base: Path, agent_filter: str | None = None, scoped: bool = True):
                     print(f"    {line}")
                 if MAX_COMMITS and ahead > MAX_COMMITS:
                     print(f"    ... and {ahead - MAX_COMMITS} more")
+    return True
