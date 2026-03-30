@@ -87,7 +87,7 @@ def status(base: Path, agent_filter: str | None = None):
 
     verbose = config.verbose or bool(agent_filter)
 
-    MAX_COMMITS = 3
+    MAX_COMMITS = None if verbose else 3
 
     # Collect agent info and sort by last activity (oldest first)
     agents = []
@@ -147,9 +147,9 @@ def status(base: Path, agent_filter: str | None = None):
             for branch, ahead, lines in unapproved:
                 n = "commit" if ahead == 1 else "commits"
                 print(f"  {ahead} unapproved {n} on {branch}")
-                for line in lines[:MAX_COMMITS]:
+                for line in (lines if MAX_COMMITS is None else lines[:MAX_COMMITS]):
                     print(f"    {line}")
-                if ahead > MAX_COMMITS:
+                if MAX_COMMITS and ahead > MAX_COMMITS:
                     print(f"    ... and {ahead - MAX_COMMITS} more")
 
     if hidden:

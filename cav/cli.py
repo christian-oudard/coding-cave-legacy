@@ -2,6 +2,7 @@
 
 import argparse
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -435,10 +436,19 @@ def main():
     subcmds = {"init", "agent", "approve", "reject", "pull", "push", "status", "version", "remove-agent", "prune-branches", "cp"}
     argv = sys.argv[1:]
 
-    # Strip -v/--verbose anywhere in argv; it has the same effect regardless of position.
-    verbose_flags = {"-v", "--verbose"}
-    config.verbose = bool(set(argv) & verbose_flags)
-    argv = [a for a in argv if a not in verbose_flags]
+    # Strip -v/--verbose anywhere in argv (including combined like -va).
+    clean = []
+    for a in argv:
+        if a == "--verbose":
+            config.verbose = True
+        elif re.match(r'^-[a-zA-Z]+$', a) and 'v' in a:
+            config.verbose = True
+            rest = a.replace('v', '', 1)
+            if rest != '-':
+                clean.append(rest)
+        else:
+            clean.append(a)
+    argv = clean
 
     if not argv:
         argv = ["agent"]
