@@ -5,7 +5,7 @@ from pathlib import Path
 from . import config, git
 
 
-def reject(base: Path, agent_id: str | None = None, yes: bool = False, verbose: bool = False):
+def reject(base: Path, agent_id: str | None = None, yes: bool = False):
     branch = git.current_branch(cwd=base)
     if config.parse_agent_branch(branch):
         raise SystemExit(
@@ -13,7 +13,7 @@ def reject(base: Path, agent_id: str | None = None, yes: bool = False, verbose: 
             f"Switch to a shared branch first (e.g. 'git checkout main')."
         )
 
-    git.git("fetch", "--prune", config.SHARED_REMOTE, cwd=base, echo=verbose, capture=not verbose)
+    git.git("fetch", "--prune", config.SHARED_REMOTE, cwd=base, **config.v())
 
     remote_ref = f"{config.SHARED_REMOTE}/{branch}"
     try:
@@ -75,14 +75,14 @@ def reject(base: Path, agent_id: str | None = None, yes: bool = False, verbose: 
     # Create agent branch on cave (before resetting, so commits stay reachable)
     ab = config.agent_branch(branch, target_agent)
     git.git("push", "--force", config.SHARED_REMOTE,
-            f"{tip_sha}:refs/heads/{ab}", cwd=base, echo=verbose, capture=not verbose)
+            f"{tip_sha}:refs/heads/{ab}", cwd=base, **config.v())
 
     # Reset shared branch on cave
     git.git("push", "--force", config.SHARED_REMOTE,
-            f"{before_sha}:refs/heads/{branch}", cwd=base, echo=verbose, capture=not verbose)
+            f"{before_sha}:refs/heads/{branch}", cwd=base, **config.v())
 
     # Update local branch
-    git.git("reset", "--hard", before_sha, cwd=base, echo=verbose, capture=not verbose)
+    git.git("reset", "--hard", before_sha, cwd=base, **config.v())
 
     config.delete_approval(approval["id"])
 

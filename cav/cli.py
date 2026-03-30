@@ -152,34 +152,34 @@ def cmd_approve(args):
     base = find_repo_root()
     require_init(base)
     from .approve import approve
-    approve(base, yes=args.yes, verbose=args.verbose)
+    approve(base, yes=args.yes)
 
 
 def cmd_reject(args):
     base = find_repo_root()
     require_init(base)
     from .reject import reject
-    reject(base, agent_id=args.agent_id, yes=args.yes, verbose=args.verbose)
+    reject(base, agent_id=args.agent_id, yes=args.yes)
 
 
 def cmd_pull(args):
     base = find_repo_root()
     require_init(base)
     from .pull import pull
-    pull(base, force=args.force, branch=args.branch, verbose=args.verbose)
+    pull(base, force=args.force, branch=args.branch)
 
 
 def cmd_push(args):
     base = find_repo_root()
     require_init(base)
     from .push import push
-    push(base, args.force, verbose=args.verbose)
+    push(base, args.force)
 
 
 def cmd_prune_branches(args):
     base = find_repo_root()
     require_init(base)
-    git.git("fetch", "--prune", config.SHARED_REMOTE, cwd=base, echo=args.verbose, capture=not args.verbose)
+    git.git("fetch", "--prune", config.SHARED_REMOTE, cwd=base, **config.v())
 
     # Find local agent branches that tracked cave/* but whose upstream is gone.
     # After fetch --prune, git marks these with [gone] in %(upstream:track).
@@ -230,7 +230,7 @@ def cmd_prune_branches(args):
         raise SystemExit("Aborted.")
 
     for b in orphans:
-        git.git("branch", "-D", b, cwd=base, echo=args.verbose, capture=not args.verbose)
+        git.git("branch", "-D", b, cwd=base, **config.v())
 
 
 def cmd_remove_agent(args):
@@ -349,7 +349,7 @@ def cmd_status(args):
             if i > 0:
                 print()
             print(f"=== {slug} ===")
-            status(Path(path), verbose=args.verbose)
+            status(Path(path))
         return
     base = find_repo_root()
     require_init(base)
@@ -358,7 +358,7 @@ def cmd_status(args):
         agent_id = args.agent.lstrip("@").split("@")[-1]  # accept "3", "@3", "slug@3"
         if not config.AGENT_ID_RE.match(agent_id):
             raise SystemExit(f"Invalid agent ID '{args.agent}'. Use a number (e.g. 3).")
-    status(base, verbose=args.verbose, agent_filter=agent_id)
+    status(base, agent_filter=agent_id)
 
 
 def main():
@@ -446,6 +446,7 @@ def main():
         else:
             parser.error(f"Unknown command '{argv[0]}'.")
     args = parser.parse_args(argv)
+    config.verbose = args.verbose
 
     dispatch = {
         "init": cmd_init,

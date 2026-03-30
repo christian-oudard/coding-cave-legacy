@@ -21,6 +21,14 @@ CAVE_USER = "cave-coder"
 
 SCHEMA_VERSION = 4  # v1: (project,agent_id) PK; v2: agent_id PK; v3: +projects; v4: +approvals
 
+# Runtime flags set once in main() before dispatch
+verbose: bool = False
+
+
+def v() -> dict:
+    """Return git() kwargs for the current verbosity setting."""
+    return {"echo": verbose, "capture": not verbose}
+
 
 def agent_branch(target: str, agent_id: str) -> str:
     return f"agent-{agent_id}/{target}"

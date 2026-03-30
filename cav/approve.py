@@ -5,7 +5,7 @@ from pathlib import Path
 from . import config, git
 
 
-def approve(base: Path, yes: bool = False, verbose: bool = False):
+def approve(base: Path, yes: bool = False):
     branch = git.current_branch(cwd=base)
     parsed = config.parse_agent_branch(branch)
     if not parsed:
@@ -18,7 +18,7 @@ def approve(base: Path, yes: bool = False, verbose: bool = False):
     _, agent_id = parsed
     name = config.display_name(base, agent_id)
 
-    git.git("fetch", "--prune", config.SHARED_REMOTE, cwd=base, echo=verbose, capture=not verbose)
+    git.git("fetch", "--prune", config.SHARED_REMOTE, cwd=base, **config.v())
 
     remote_agent = f"{config.SHARED_REMOTE}/{branch}"
     remote_target = f"{config.SHARED_REMOTE}/{target}"
@@ -63,7 +63,7 @@ def approve(base: Path, yes: bool = False, verbose: bool = False):
 
     # Push agent branch to shared branch (as user, no agent identity)
     git.git("push", config.SHARED_REMOTE,
-            f"{after_sha}:refs/heads/{target}", cwd=base, echo=verbose, capture=not verbose)
+            f"{after_sha}:refs/heads/{target}", cwd=base, **config.v())
 
     # Record one approval per commit (enables per-commit rejection)
     slug = config.project_slug(base)
@@ -78,7 +78,7 @@ def approve(base: Path, yes: bool = False, verbose: bool = False):
     # Update local target branch and switch to it
     git.git("branch", "-f", target, after_sha,
             cwd=base, echo=False, capture=True, check=False)
-    git.git("checkout", target, cwd=base, echo=verbose, capture=not verbose)
+    git.git("checkout", target, cwd=base, **config.v())
     git.git("branch", "-D", branch,
             cwd=base, echo=False, capture=True, check=False)
 

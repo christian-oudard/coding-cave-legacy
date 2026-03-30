@@ -37,8 +37,8 @@ def _remove_agent(base: Path, agent_id: str, branches: list[str]):
                 shutil.rmtree(ws)
 
 
-def status(base: Path, verbose: bool = False, agent_filter: str | None = None):
-    git.git("fetch", "--prune", config.SHARED_REMOTE, cwd=base, echo=verbose, capture=not verbose)
+def status(base: Path, agent_filter: str | None = None):
+    git.git("fetch", "--prune", config.SHARED_REMOTE, cwd=base, **config.v())
 
     if not agent_filter:
         local_branch = git.current_branch(cwd=base)
@@ -85,8 +85,7 @@ def status(base: Path, verbose: bool = False, agent_filter: str | None = None):
             print("No running agents.")
         return
 
-    if agent_filter:
-        verbose = True
+    verbose = config.verbose or bool(agent_filter)
 
     MAX_COMMITS = 3
 

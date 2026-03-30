@@ -6,8 +6,8 @@ from pathlib import Path
 from . import config, git
 
 
-def pull(base: Path, force: bool = False, branch: str | None = None, verbose: bool = False):
-    git.git("fetch", "--prune", config.SHARED_REMOTE, cwd=base, echo=verbose, capture=not verbose)
+def pull(base: Path, force: bool = False, branch: str | None = None):
+    git.git("fetch", "--prune", config.SHARED_REMOTE, cwd=base, **config.v())
 
     local_branch = git.current_branch(cwd=base)
     parsed = config.parse_agent_branch(local_branch)
@@ -15,7 +15,7 @@ def pull(base: Path, force: bool = False, branch: str | None = None, verbose: bo
     if parsed and not branch:
         # On an agent branch: always reset to remote (agent is authoritative)
         target = config.resolve_target(local_branch)
-        _pull_agent(base, local_branch, target, verbose)
+        _pull_agent(base, local_branch, target)
     else:
         # On a shared branch (or explicit branch arg): ff-merge
         target_branch = branch or local_branch
@@ -23,10 +23,10 @@ def pull(base: Path, force: bool = False, branch: str | None = None, verbose: bo
             raise SystemExit(
                 f"--force is only allowed on agent branches, not '{target_branch}'."
             )
-        _pull_shared(base, local_branch, target_branch, force, verbose)
+        _pull_shared(base, local_branch, target_branch, force)
 
 
-def _pull_agent(base: Path, local_branch: str, target: str, verbose: bool = False):
+def _pull_agent(base: Path, local_branch: str, target: str):
     """Reset agent branch to match remote. Agent branches are ephemeral on the
     host, the cave agent is always authoritative."""
     remote_agent = f"{config.SHARED_REMOTE}/{local_branch}"
@@ -58,7 +58,7 @@ def _pull_agent(base: Path, local_branch: str, target: str, verbose: bool = Fals
         print("Already up to date.")
         return
 
-    git.git("reset", "--hard", remote_agent, cwd=base, echo=verbose, capture=not verbose)
+    git.git("reset", "--hard", remote_agent, cwd=base, **config.v())
 
     # Show what's on the agent branch relative to target
     try:
@@ -73,7 +73,7 @@ def _pull_agent(base: Path, local_branch: str, target: str, verbose: bool = Fals
         print(log)
 
 
-def _pull_shared(base: Path, local_branch: str, target_branch: str, force: bool, verbose: bool = False):
+def _pull_shared(base: Path, local_branch: str, target_branch: str, force: bool):
     """Fast-forward merge a shared branch."""
     remote_ref = f"{config.SHARED_REMOTE}/{target_branch}"
 
@@ -96,10 +96,10 @@ def _pull_shared(base: Path, local_branch: str, target_branch: str, force: bool,
     count = len(ahead.splitlines())
 
     if force:
-        git.git("reset", "--hard", remote_ref, cwd=base, echo=verbose, capture=not verbose)
+        git.git("reset", "--hard", remote_ref, cwd=base, **config.v())
     else:
         try:
-            git.git("merge", "--ff-only", remote_ref, cwd=base, echo=verbose, capture=not verbose)
+            git.git("merge", "--ff-only", remote_ref, cwd=base, **config.v())
         except subprocess.CalledProcessError:
             print(f"\nOn branch {local_branch}")
             print(f"Diverged from {remote_ref}.")
