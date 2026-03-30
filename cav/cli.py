@@ -152,34 +152,34 @@ def cmd_approve(args):
     base = find_repo_root()
     require_init(base)
     from .approve import approve
-    approve(base, yes=args.yes)
+    approve(base, yes=args.yes, verbose=args.verbose)
 
 
 def cmd_reject(args):
     base = find_repo_root()
     require_init(base)
     from .reject import reject
-    reject(base, agent_id=args.agent_id, yes=args.yes)
+    reject(base, agent_id=args.agent_id, yes=args.yes, verbose=args.verbose)
 
 
 def cmd_pull(args):
     base = find_repo_root()
     require_init(base)
     from .pull import pull
-    pull(base, force=args.force, branch=args.branch)
+    pull(base, force=args.force, branch=args.branch, verbose=args.verbose)
 
 
 def cmd_push(args):
     base = find_repo_root()
     require_init(base)
     from .push import push
-    push(base, args.force)
+    push(base, args.force, verbose=args.verbose)
 
 
 def cmd_prune_branches(args):
     base = find_repo_root()
     require_init(base)
-    git.git("fetch", "--prune", config.SHARED_REMOTE, cwd=base)
+    git.git("fetch", "--prune", config.SHARED_REMOTE, cwd=base, echo=args.verbose, capture=not args.verbose)
 
     # Find local agent branches that tracked cave/* but whose upstream is gone.
     # After fetch --prune, git marks these with [gone] in %(upstream:track).
@@ -230,7 +230,7 @@ def cmd_prune_branches(args):
         raise SystemExit("Aborted.")
 
     for b in orphans:
-        git.git("branch", "-D", b, cwd=base)
+        git.git("branch", "-D", b, cwd=base, echo=args.verbose, capture=not args.verbose)
 
 
 def cmd_remove_agent(args):
