@@ -326,6 +326,16 @@
         }
       );
 
+      devShells = eachSystem (pkgs: {
+        default = pkgs.mkShell {
+          packages = [
+            (pkgs.python3.withPackages (ps: [ ps.click ]))
+            pkgs.git
+            pkgs.socat
+          ];
+        };
+      });
+
       checks = eachSystem (pkgs: {
         unit = pkgs.runCommand "cav-unit-tests" {
           nativeBuildInputs = [ (pkgs.python3.withPackages (ps: [ ps.click ])) pkgs.git ];

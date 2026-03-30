@@ -92,15 +92,16 @@ class TestDaemon(unittest.TestCase):
         result = git("push", "cave", "agent-1/main", cwd=ws)
         self.assertEqual(result.returncode, 0)
 
-    def test_ff_push_shared_via_daemon(self):
-        """Agent can ff-push to shared branch through the daemon."""
+    def test_ff_push_shared_rejected_via_daemon(self):
+        """Agent cannot ff-push to shared branch through daemon."""
         ws = self._ws_with_daemon_remote("1")
         git("checkout", "main", cwd=ws)
         (ws / "fix.txt").write_text("fix\n")
         git("add", "fix.txt", cwd=ws)
         git("commit", "-m", "fix", cwd=ws)
-        result = git("push", "cave", "main", cwd=ws)
-        self.assertEqual(result.returncode, 0)
+        result = git("push", "cave", "main", cwd=ws, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("REJECTED", result.stderr)
 
     def test_non_ff_push_rejected_via_daemon(self):
         """Agent non-ff push rejected by hook running through daemon."""
