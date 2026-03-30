@@ -434,6 +434,12 @@ def main():
     # so check if the first arg looks like a subcommand.
     subcmds = {"init", "agent", "approve", "reject", "pull", "push", "status", "version", "remove-agent", "prune-branches", "cp"}
     argv = sys.argv[1:]
+
+    # Strip -v/--verbose anywhere in argv; it has the same effect regardless of position.
+    verbose_flags = {"-v", "--verbose"}
+    config.verbose = bool(set(argv) & verbose_flags)
+    argv = [a for a in argv if a not in verbose_flags]
+
     if not argv:
         argv = ["agent"]
     elif argv[0] == "help":
@@ -446,7 +452,6 @@ def main():
         else:
             parser.error(f"Unknown command '{argv[0]}'.")
     args = parser.parse_args(argv)
-    config.verbose = args.verbose
 
     dispatch = {
         "init": cmd_init,
