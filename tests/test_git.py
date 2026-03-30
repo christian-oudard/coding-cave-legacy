@@ -1264,5 +1264,97 @@ class TestCAV(unittest.TestCase):
         config.mark_agent_exited(id2)
 
 
+class TestPostCommitHook(unittest.TestCase):
+    """Tests for the post-commit hook's auto-rebase behavior."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.user_repo = Path(self.tmpdir) / "project"
+        self.data_dir = Path(self.tmpdir) / "data"
+        self.user_repo.mkdir()
+        git("init", "-b", "main", cwd=self.user_repo)
+        git("config", "user.email", "test@test.com", cwd=self.user_repo)
+        git("config", "user.name", "Test User", cwd=self.user_repo)
+        (self.user_repo / "README.md").write_text("# Project\n")
+        git("add", "README.md", cwd=self.user_repo)
+        git("commit", "-m", "Initial commit", cwd=self.user_repo)
+        os.environ["CAV_DATA_DIR"] = str(self.data_dir)
+        config.DATA_DIR = self.data_dir
+        from cav import init as cav_init
+        cav_init.init(str(self.user_repo))
+        self.a1 = workspace.create(self.user_repo, "1")
+        git("config", "user.email", "1@test.com", cwd=self.a1)
+        git("config", "user.name", "Agent 1", cwd=self.a1)
+        self._install_hook(self.a1)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir)
+
+    def _install_hook(self, ws):
+        from cav.sandbox import POST_COMMIT_HOOK
+        hook = ws / ".git" / "hooks" / "post-commit"
+        hook.parent.mkdir(parents=True, exist_ok=True)
+        hook.write_text(POST_COMMIT_HOOK)
+        hook.chmod(0o755)
+
+    def test_auto_rebase_on_commit(self):
+        """Post-commit hook rebases agent branch onto updated main."""
+        # Simulate approved work landing on main
+        (self.user_repo / "approved.py").write_text("# approved\n")
+        git("add", "approved.py", cwd=self.user_repo)
+        git("commit", "-m", "approved work", cwd=self.user_repo)
+        git("push", "cave", "main", cwd=self.user_repo)
+
+        # Agent commits (hook fires: fetch, rebase, push)
+        (self.a1 / "agent_work.py").write_text("# agent\n")
+        git("add", "agent_work.py", cwd=self.a1)
+        git("commit", "-m", "agent work", cwd=self.a1)
+
+        # Verify agent branch is a fast-forward from main
+        git("fetch", "cave", cwd=self.user_repo)
+        merge_base = git_out("merge-base", "cave/main", "cave/agent-1/main",
+                             cwd=self.user_repo)
+        main_sha = git_out("rev-parse", "cave/main", cwd=self.user_repo)
+        self.assertEqual(merge_base, main_sha,
+                         "agent branch should be a fast-forward from main")
+
+        # Verify both commits are in the agent branch history
+        log = git_out("log", "--oneline", "cave/agent-1/main", cwd=self.user_repo)
+        self.assertIn("approved work", log)
+        self.assertIn("agent work", log)
+
+    def test_conflict_warns_and_pushes(self):
+        """Post-commit hook warns on conflict, still pushes un-rebased branch."""
+        # Both sides edit the same file to create a conflict
+        (self.user_repo / "README.md").write_text("# User version\n")
+        git("add", "README.md", cwd=self.user_repo)
+        git("commit", "-m", "user edit", cwd=self.user_repo)
+        git("push", "cave", "main", cwd=self.user_repo)
+
+        (self.a1 / "README.md").write_text("# Agent version\n")
+        git("add", "README.md", cwd=self.a1)
+        result = git("commit", "-m", "agent edit", cwd=self.a1, check=False)
+
+        # Hook should warn about the conflict
+        self.assertIn("WARNING", result.stderr)
+        self.assertIn("rebase", result.stderr)
+
+        # Branch should still be pushed (un-rebased)
+        git("fetch", "cave", cwd=self.user_repo)
+        log = git_out("log", "--oneline", "cave/agent-1/main", cwd=self.user_repo)
+        self.assertIn("agent edit", log)
+
+    def test_no_rebase_needed(self):
+        """Post-commit hook is a no-op when already up to date with main."""
+        (self.a1 / "work.py").write_text("# work\n")
+        git("add", "work.py", cwd=self.a1)
+        git("commit", "-m", "simple commit", cwd=self.a1)
+
+        # Verify it pushed successfully
+        git("fetch", "cave", cwd=self.user_repo)
+        log = git_out("log", "--oneline", "cave/agent-1/main", cwd=self.user_repo)
+        self.assertIn("simple commit", log)
+
+
 if __name__ == "__main__":
     unittest.main()

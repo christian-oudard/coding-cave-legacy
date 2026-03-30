@@ -18,6 +18,15 @@ from . import config, daemon, git, user_env
 POST_COMMIT_HOOK = (
     "#!/bin/sh\n"
     "git fetch cave >/dev/null 2>&1 || true\n"
+    "branch=$(git symbolic-ref --short HEAD 2>/dev/null)\n"
+    "target=$(echo \"$branch\" | sed 's|^agent-[0-9]*/||')\n"
+    "if [ -n \"$target\" ] && git rev-parse \"cave/$target\" >/dev/null 2>&1; then\n"
+    "  if ! git rebase \"cave/$target\" >/dev/null 2>&1; then\n"
+    "    git rebase --abort >/dev/null 2>&1\n"
+    '    echo "WARNING: rebase onto cave/$target failed (conflicts). '
+    'Run: git fetch cave && git rebase cave/$target" >&2\n'
+    "  fi\n"
+    "fi\n"
     "git push --force cave HEAD >/dev/null 2>&1 || true\n"
 )
 
