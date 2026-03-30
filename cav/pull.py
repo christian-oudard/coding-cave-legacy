@@ -37,8 +37,8 @@ def _pull_agent(base: Path, local_branch: str, target: str):
         git.git_output("rev-parse", remote_target, cwd=base)
         try:
             git.git_output("rev-parse", target, cwd=base)
-            git.git("branch", "-f", target, remote_target, cwd=base, echo=False,
-                    check=False, capture=True)
+            git.git("branch", "-f", "--no-track", target, remote_target,
+                    cwd=base, echo=False, check=False, capture=True)
         except Exception:
             pass
     except Exception:

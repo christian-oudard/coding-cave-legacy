@@ -330,6 +330,34 @@ class TestCAV(unittest.TestCase):
         self.assertEqual(content, "# v2\n")
         self.assertFalse((self.user_repo / "local.py").exists())
 
+    def test_pull_agent_branch_preserves_main_upstream(self):
+        """cav pull on agent branch must not hijack main's upstream to cave."""
+        agents = self._init_and_agents("1")
+        ws = agents["1"]
+
+        # Simulate a real repo: main tracks an origin remote, not cave.
+        origin = Path(self.tmpdir) / "origin.git"
+        git("init", "--bare", str(origin))
+        git("remote", "add", "origin", str(origin), cwd=self.user_repo)
+        git("push", "origin", "main", cwd=self.user_repo)
+        git("branch", "--set-upstream-to=origin/main", "main", cwd=self.user_repo)
+
+        # Agent pushes work
+        (ws / "feature.py").write_text("# new\n")
+        git("add", "feature.py", cwd=ws)
+        git("commit", "-m", "Agent work", cwd=ws)
+        git("push", "cave", "agent-1/main", cwd=ws, env=agent_env("1"))
+
+        # User checks out agent branch and pulls
+        git("fetch", "cave", cwd=self.user_repo)
+        git("checkout", "-b", "agent-1/main", "cave/agent-1/main",
+            cwd=self.user_repo)
+        cav_cli("pull", cwd=self.user_repo)
+
+        # main must still track origin, not cave
+        remote = git_out("config", "branch.main.remote", cwd=self.user_repo)
+        self.assertEqual(remote, "origin")
+
     def test_nested_agent_branch_resolves_to_shared_target(self):
         """Nested agent branch agent-2/agent-1/main resolves target to main."""
         agents = self._init_and_agents("1", "2")
