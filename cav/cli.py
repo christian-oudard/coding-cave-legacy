@@ -340,6 +340,15 @@ def cmd_version(args):
 
 
 def cmd_status(args):
+    from .status import status
+    if args.all:
+        projects = config.all_projects()
+        if not projects:
+            raise SystemExit("No registered projects. Run: cav init")
+        for slug, path in projects:
+            print(f"=== {slug} ===")
+            status(Path(path), verbose=args.verbose)
+        return
     base = find_repo_root()
     require_init(base)
     agent_id = None
@@ -347,7 +356,6 @@ def cmd_status(args):
         agent_id = args.agent.lstrip("@").split("@")[-1]  # accept "3", "@3", "slug@3"
         if not config.AGENT_ID_RE.match(agent_id):
             raise SystemExit(f"Invalid agent ID '{args.agent}'. Use a number (e.g. 3).")
-    from .status import status
     status(base, verbose=args.verbose, agent_filter=agent_id)
 
 
@@ -385,21 +393,22 @@ def main():
     # cav pull [branch]
     p_pull = sub.add_parser("pull", help="Fetch from cave and fast-forward merge")
     p_pull.add_argument("branch", nargs="?", default=None, help="Remote branch to pull (default: current branch)")
-    p_pull.add_argument("--force", action="store_true", help="Hard reset to remote branch")
+    p_pull.add_argument("-f", "--force", action="store_true", help="Hard reset to remote branch")
 
     # cav push [--force]
     p_push = sub.add_parser("push", help="Push current branch to cave")
-    p_push.add_argument("--force", action="store_true", help="Force push")
+    p_push.add_argument("-f", "--force", action="store_true", help="Force push")
 
     # cav status [n]
     p_status = sub.add_parser("status", help="Show agent branch status")
     p_status.add_argument("agent", nargs="?", help="Agent ID to filter (e.g. 1)")
     p_status.add_argument("-v", "--verbose", action="store_true", help="Show all agents including idle/paused")
+    p_status.add_argument("-a", "--all", action="store_true", help="Show status for all registered projects")
 
     # cav remove-agent <n> | --all
     p_rm = sub.add_parser("remove-agent", help="Remove a paused agent and its branches")
     p_rm.add_argument("agent_id", nargs="?", help="Agent ID (e.g. 3)")
-    p_rm.add_argument("--all", action="store_true", help="Remove all agents and reset the database")
+    p_rm.add_argument("-a", "--all", action="store_true", help="Remove all agents and reset the database")
     p_rm.add_argument("--yes", "-y", action="store_true", help="Skip confirmation prompt")
 
     # cav prune-branches
