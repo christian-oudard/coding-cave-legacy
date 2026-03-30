@@ -138,11 +138,10 @@ def agent(continue_agent, resume_session, extra_projects, recursive):
                     recursive=recursive, session_id=session_id,
                     resuming=resuming)
     finally:
-        # Claude uses its own UUID regardless of --session-id. Capture what it
-        # actually wrote so the next cav -c resumes the right session.
-        actual_sid = config.most_recent_session(projects[0][1])
-        if actual_sid:
-            config.write_session_id(agent_id, actual_sid)
+        # If Claude exited before writing anything, clear the pre-generated
+        # session ID so cav -c doesn't try to resume a nonexistent session.
+        if session_id and not config.session_file_exists(projects[0][1], session_id):
+            config.clear_session_id(agent_id)
         config.mark_agent_exited(agent_id)
         _auto_cleanup_if_clean(base, agent_id)
     sys.exit(rc)

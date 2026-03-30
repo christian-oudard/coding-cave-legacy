@@ -95,31 +95,9 @@ def _claude_project_dir(slug: str) -> Path:
     return persistent_home() / ".claude" / "projects" / encoded
 
 
-def most_recent_session(slug: str) -> str | None:
-    """Find the most recent Claude session ID for a project by file mtime.
-
-    Scans the Claude session directory for .jsonl files and returns the
-    session ID (filename stem) with the highest modification time.
-    """
-    session_dir = _claude_project_dir(slug)
-    if not session_dir.is_dir():
-        return None
-    best_mtime = 0.0
-    best_session = None
-    for f in session_dir.iterdir():
-        if not f.is_file() or f.suffix != ".jsonl":
-            continue
-        # Skip agent subagent transcripts
-        if f.stem.startswith("agent-"):
-            continue
-        try:
-            mtime = f.stat().st_mtime
-        except OSError:
-            continue
-        if mtime > best_mtime:
-            best_mtime = mtime
-            best_session = f.stem
-    return best_session
+def session_file_exists(slug: str, session_id: str) -> bool:
+    """Check whether a session .jsonl file exists on disk."""
+    return (_claude_project_dir(slug) / f"{session_id}.jsonl").is_file()
 
 
 def project_slug(base: Path) -> str:
@@ -200,6 +178,19 @@ def write_session_id(agent_id: str, session_id: str) -> None:
         db.execute(
             "UPDATE agents SET session_id = ? WHERE agent_id = ?",
             (session_id, agent_id)
+        )
+        db.commit()
+    finally:
+        db.close()
+
+
+def clear_session_id(agent_id: str) -> None:
+    """Set an agent's session_id to NULL."""
+    db = _open_registry()
+    try:
+        db.execute(
+            "UPDATE agents SET session_id = NULL WHERE agent_id = ?",
+            (agent_id,)
         )
         db.commit()
     finally:
@@ -389,15 +380,10 @@ def continue_agent_id(base: Path, agent_id: str | None = None) -> str:
             (slug,)
         ).fetchone()
         if not row:
-            # No agent entry; acquire a fresh one and find the most
-            # recent session by file mtime so the caller can --resume it.
+            # No exited agent to continue; acquire a fresh one.
             db.rollback()
             db.close()
-            aid = acquire_agent_id(base)
-            sid = most_recent_session(slug)
-            if sid:
-                write_session_id(aid, sid)
-            return aid
+            return acquire_agent_id(base)
 
         aid = row[0]
         db.execute(

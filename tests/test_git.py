@@ -696,57 +696,14 @@ class TestCAV(unittest.TestCase):
         self.assertIsNotNone(sid)
         config.mark_agent_exited(aid)
 
-    def test_continue_no_agents_picks_recent_session(self):
-        """continue_agent_id with no agents finds the most recent session by mtime."""
+    def test_continue_no_agents_acquires_fresh(self):
+        """continue_agent_id with no agents acquires a fresh one with a pre-generated UUID."""
         self._init()
-        slug = config.project_slug(self.user_repo)
-        session_dir = config._claude_project_dir(slug)
-        session_dir.mkdir(parents=True)
-
-        # Create two session files with different mtimes
-        old = session_dir / "old-session-uuid.jsonl"
-        new = session_dir / "new-session-uuid.jsonl"
-        old.write_text('{"type":"user"}\n')
-        new.write_text('{"type":"user"}\n')
-        # Set old file to 1 hour ago
-        old_time = time.time() - 3600
-        os.utime(old, (old_time, old_time))
-
         aid = config.continue_agent_id(self.user_repo)
         sid = config.read_session_id(aid)
-        self.assertEqual(sid, "new-session-uuid")
+        self.assertIsNotNone(sid)
+        self.assertEqual(len(sid), 36)
         config.mark_agent_exited(aid)
-
-    def test_most_recent_session_skips_agent_files(self):
-        """most_recent_session ignores agent-*.jsonl subagent transcripts."""
-        self._init()
-        slug = config.project_slug(self.user_repo)
-        session_dir = config._claude_project_dir(slug)
-        session_dir.mkdir(parents=True)
-
-        # agent- file is newest but should be skipped
-        real = session_dir / "real-session.jsonl"
-        agent = session_dir / "agent-sub1.jsonl"
-        real.write_text('{"type":"user"}\n')
-        agent.write_text('{"type":"user"}\n')
-        real_time = time.time() - 100
-        os.utime(real, (real_time, real_time))
-        # agent file has default (current) mtime, so it's newer
-
-        self.assertEqual(config.most_recent_session(slug), "real-session")
-
-    def test_most_recent_session_empty_dir(self):
-        """most_recent_session returns None for empty session directory."""
-        self._init()
-        slug = config.project_slug(self.user_repo)
-        session_dir = config._claude_project_dir(slug)
-        session_dir.mkdir(parents=True)
-        self.assertIsNone(config.most_recent_session(slug))
-
-    def test_most_recent_session_no_dir(self):
-        """most_recent_session returns None when session directory doesn't exist."""
-        self._init()
-        self.assertIsNone(config.most_recent_session("nonexistent-project"))
 
     def test_claude_project_dir_encoding(self):
         """_claude_project_dir encodes path like Claude Code does."""
