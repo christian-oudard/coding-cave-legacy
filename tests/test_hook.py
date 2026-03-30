@@ -1,7 +1,6 @@
 """Unit tests for the pre-receive hook's check_ref logic.
 
 Tests the security boundary in isolation, without needing git repos.
-is_fast_forward is mocked since it requires a real git repo.
 """
 
 import os
@@ -80,34 +79,28 @@ class TestCheckRef(unittest.TestCase):
         self.assertIsNotNone(r)
         self.assertIn("REJECTED", r)
 
-    # -- Agent: shared branch --
+    # -- Agent: shared branch (all pushes rejected) --
 
-    @patch.object(hook, "is_fast_forward", return_value=True)
-    def test_agent_ff_push_shared(self, mock_ff):
-        r = hook.check_ref(SHA_A, SHA_B, "refs/heads/main", "1")
-        self.assertIsNone(r)
-        mock_ff.assert_called_once_with(SHA_A, SHA_B)
-
-    @patch.object(hook, "is_fast_forward", return_value=False)
-    def test_agent_non_ff_push_shared(self, mock_ff):
+    def test_agent_push_shared_rejected(self):
+        """Agents cannot push to shared branches at all."""
         r = hook.check_ref(SHA_A, SHA_B, "refs/heads/main", "1")
         self.assertIsNotNone(r)
         self.assertIn("REJECTED", r)
-        self.assertIn("Non-fast-forward", r)
-        self.assertIn("1", r)
+        self.assertIn("cannot push", r)
+        self.assertIn("shared branch", r)
 
-    def test_agent_delete_shared(self):
+    def test_agent_delete_shared_rejected(self):
         r = hook.check_ref(SHA_A, ZERO, "refs/heads/main", "1")
         self.assertIsNotNone(r)
         self.assertIn("REJECTED", r)
-        self.assertIn("cannot delete", r)
+        self.assertIn("cannot push", r)
 
     def test_agent_create_shared_rejected(self):
         """Agents cannot create new shared branches."""
         r = hook.check_ref(ZERO, SHA_A, "refs/heads/develop", "1")
         self.assertIsNotNone(r)
         self.assertIn("REJECTED", r)
-        self.assertIn("cannot create", r)
+        self.assertIn("cannot push", r)
 
     # -- Non-branch refs (tags, etc.) --
 

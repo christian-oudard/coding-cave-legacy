@@ -26,24 +26,24 @@ Each agent session has a primary project (the project directory where the sessio
 
 ## Branching
 
-**Shared branches** (`main`, `develop`, etc.) live on the `cave` remote and are what the user pulls from. Agents deliver work by fast-forward pushing to shared branches. The user may force-push shared branches (for rollback).
+**Shared branches** (`main`, `develop`, etc.) live on the `cave` remote and are what the user pulls from. Agents cannot push to shared branches. Only the user modifies shared branches, via `cav approve` and `cav reject`.
 
-**Agent branches** are named `agent-<n>/<target>` (e.g. `agent-1/main`, `agent-2/develop`). These are the agent's private working branches inside the cave. The user does not interact with agent branches directly. When an agent's work is ready, the agent merges into the target shared branch and pushes. The ff-only constraint forces agents to coordinate: if another agent pushed first, the agent must fetch and rebase before it can deliver.
+**Agent branches** are named `agent-<n>/<target>` (e.g. `agent-1/main`, `agent-2/develop`). These are the agent's working branches inside the cave. When an agent's work is ready, it stays on the agent branch until the user approves it.
 
 Force-push is allowed on agent branches (agents amend work in progress). Only the matching agent (or the user) can push to an agent branch.
 
-Agents are responsible for delivering a clean git history. WIP commits on agent branches must be squashed into focused, well-described commits before delivery to shared branches. Only the user may rewrite shared branch history.
+Agents are responsible for a clean git history. WIP commits on agent branches must be squashed into focused, well-described commits before the user approves them. Only the user may rewrite shared branch history.
 
 ## Branch Protection
 
 A pre-receive hook on the shared repo enforces:
 
-1. Agents cannot force-push shared branches.
+1. Agents cannot push to shared branches.
 2. Agents cannot push to other agents' branches.
 3. Agents cannot delete shared branches.
 4. The user can push anything.
 
-Agent branches persist until the agent is explicitly removed via `cav remove-agent`. When an agent exits with all work delivered, it is auto-removed (registry entry, branches, workspace). When an agent exits with undelivered work, it remains paused and can be continued with `cav -c`. Undelivered work is detected by patch-id comparison, so rebased or rewritten commits count as undelivered.
+Agent branches persist until the agent's work is approved or the agent is explicitly removed via `cav remove-agent`. When an agent exits with all work approved, it is auto-removed (registry entry, branches, workspace). When an agent exits with unapproved work, it remains paused and can be continued with `cav -c`. Unapproved work is detected by patch-id comparison, so rebased or rewritten commits count as unapproved.
 
 Every commit on an agent branch is automatically force-pushed to the cave remote. This keeps the remote branch in sync without manual pushes. Only the agent's own branch is pushed, never shared branches or other agents' branches.
 
@@ -81,13 +81,13 @@ Base packages are infrastructure only: claude-code, nix, git, coreutils, and sta
 
 Every session gets `~/.claude/CLAUDE.md` = system layer + cave.nix layer + user CLAUDE.md. The system portion describes the cave environment. The user portion comes from `~/.config/coding-cave/CLAUDE.md`.
 
-## Commands
-
 ## Data
 
-A global database in the data directory (`~/.local/share/coding-cave/`) tracks registered agents and projects. Each agent has an ID, project, session ID, and lifecycle state. Each project maps a slug to an absolute path.
+A global database in the data directory (`~/.local/share/coding-cave/`) tracks registered agents, projects, and approvals. Each agent has an ID, project, session ID, and lifecycle state. Each project maps a slug to an absolute path. Each approval maps one commit to its agent, recording the shared branch state before and after that commit. An approval batch (multiple commits from one agent) creates one record per commit.
 
 Slug collisions (two different paths producing the same slug) are rejected at init time. Rename the project directory to resolve.
+
+## Commands
 
 ### `cav init`
 
@@ -102,6 +102,22 @@ With `-c` / `--continue`, continues the most recent Claude session for this proj
 With `-p`, additional projects are mounted into the same cave. Each project must already have `cav init` done. The agent uses its globally unique ID across all projects, with separate workspaces and agent branches per project. All workspaces are mounted at `/projects/<slug>`. Fails with a helpful message if any project is not initialized.
 
 With `--recursive`, the cave can launch subcaves. Disabled by default.
+
+### `cav approve`
+
+Approves the current agent branch's work into its target shared branch. Must be run from an agent branch. The agent ID and target branch are inferred from the branch name (e.g. `agent-3/main` targets `main`).
+
+Displays the commit message(s) and prompts Y/n. Fails if the agent branch is not a fast-forward from the target shared branch. The agent must rebase first.
+
+On success: merges the commits into the target branch, records one approval per commit in the database, and pushes the updated shared branch to cave. The agent branch is reset to the new shared branch head. If the agent is running, it continues working from the updated base. If the agent is paused, it is removed (registry entry, branches, workspace) since no unapproved work remains.
+
+### `cav reject [agent-id]`
+
+Rejects the tip commit of the current shared branch. Must be run from a shared branch. Refuses if the commit has been pushed to `origin` (use `git revert` instead). Prompts Y/n for confirmation. Run repeatedly to reject multiple commits.
+
+Resets the shared branch by one commit and force-pushes to cave. Creates an agent branch at the rejected commit so the work can be reworked. Deletes the corresponding approval record.
+
+If the original agent is still in the registry, the branch is restored to that agent automatically. If the original agent was cleaned up, reject fails and instructs the user to start or continue an agent session first, then re-run with the agent ID: `cav reject <agent-id>`. The target agent must have no unapproved work of its own on that branch.
 
 ### `cav pull`
 
@@ -121,11 +137,11 @@ Pushes the current branch to the cave remote. With `--force`, force-pushes (for 
 
 ### `cav status`
 
-Fetches from the cave remote and shows agent activity. Agents are derived from the registry, not from branch names. For each registered agent, shows whether it is running, paused (has undelivered commits), or idle. Read-only aside from the fetch.
+Fetches from the cave remote and shows agent activity. Agents are derived from the registry, not from branch names. For each registered agent, shows whether it is running, paused (has unapproved commits), or idle. Read-only aside from the fetch.
 
 ### `cav remove-agent <n>`
 
-Removes a paused agent by ID. Deletes its session from the database, its remote agent branches, local agent branch checkouts, and its workspace. Warns about any undelivered commits being discarded. Refuses to remove a running agent.
+Removes a paused agent by ID. Deletes its session from the database, its remote agent branches, local agent branch checkouts, and its workspace. Warns about any unapproved commits being discarded. Refuses to remove a running agent.
 
 ### `cav remove-agent --all [--yes]`
 

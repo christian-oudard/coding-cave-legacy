@@ -19,7 +19,7 @@ DATA_DIR = Path(os.environ.get(
 ))
 CAVE_USER = "cave-coder"
 
-SCHEMA_VERSION = 3  # v1: (project,agent_id) PK; v2: agent_id PK; v3: +projects table
+SCHEMA_VERSION = 4  # v1: (project,agent_id) PK; v2: agent_id PK; v3: +projects; v4: +approvals
 
 
 def agent_branch(target: str, agent_id: str) -> str:
@@ -162,6 +162,19 @@ def _open_registry() -> sqlite3.Connection:
             CREATE TABLE IF NOT EXISTS projects (
                 slug TEXT PRIMARY KEY,
                 path TEXT NOT NULL UNIQUE
+            )
+        """)
+
+        # v4: add approvals table
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS approvals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project TEXT NOT NULL,
+                shared_branch TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                before_sha TEXT NOT NULL,
+                after_sha TEXT NOT NULL,
+                approved_at REAL NOT NULL
             )
         """)
 
@@ -580,5 +593,50 @@ def all_projects() -> list[tuple[str, str]]:
     db = _open_registry()
     try:
         return db.execute("SELECT slug, path FROM projects").fetchall()
+    finally:
+        db.close()
+
+
+# -- Approvals --
+
+def record_approval(project: str, shared_branch: str, agent_id: str,
+                    before_sha: str, after_sha: str) -> None:
+    """Record an approval in the database."""
+    db = _open_registry()
+    try:
+        db.execute(
+            "INSERT INTO approvals "
+            "(project, shared_branch, agent_id, before_sha, after_sha, approved_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (project, shared_branch, agent_id, before_sha, after_sha, time.time())
+        )
+        db.commit()
+    finally:
+        db.close()
+
+
+def lookup_approval_by_after(project: str, shared_branch: str,
+                             after_sha: str) -> dict | None:
+    """Find the approval that produced the given after_sha on a branch."""
+    db = _open_registry()
+    try:
+        row = db.execute(
+            "SELECT id, agent_id, before_sha, after_sha FROM approvals "
+            "WHERE project = ? AND shared_branch = ? AND after_sha = ?",
+            (project, shared_branch, after_sha)
+        ).fetchone()
+        if not row:
+            return None
+        return {"id": row[0], "agent_id": row[1], "before_sha": row[2], "after_sha": row[3]}
+    finally:
+        db.close()
+
+
+def delete_approval(approval_id: int) -> None:
+    """Delete an approval record by ID."""
+    db = _open_registry()
+    try:
+        db.execute("DELETE FROM approvals WHERE id = ?", (approval_id,))
+        db.commit()
     finally:
         db.close()

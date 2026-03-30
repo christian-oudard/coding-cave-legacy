@@ -109,7 +109,7 @@ def cmd_agent(args):
 
 
 def _auto_cleanup_if_clean(base, agent_id):
-    """Remove agent if all work is delivered. Keep if undelivered work remains."""
+    """Remove agent if all work is approved. Keep if unapproved work remains."""
     from .status import _remove_agent
     try:
         branches = git.remote_branches(config.SHARED_REMOTE, cwd=base)
@@ -134,11 +134,25 @@ def _auto_cleanup_if_clean(base, agent_id):
             if not git.has_merge_base(remote_agent, target_ref, cwd=base):
                 return  # can't determine, keep
             if git.cherry_undelivered(target_ref, remote_agent, cwd=base):
-                return  # has undelivered work, keep
+                return  # has unapproved work, keep
         except Exception:
             return  # can't check, keep
-    # All branches fully delivered
+    # All branches fully approved
     _remove_agent(base, agent_id, agent_branches)
+
+
+def cmd_approve(args):
+    base = find_repo_root()
+    require_init(base)
+    from .approve import approve
+    approve(base, yes=args.yes)
+
+
+def cmd_reject(args):
+    base = find_repo_root()
+    require_init(base)
+    from .reject import reject
+    reject(base, agent_id=args.agent_id, yes=args.yes)
 
 
 def cmd_pull(args):
@@ -242,7 +256,7 @@ def cmd_remove_agent(args):
         if (parsed := config.parse_agent_branch(b)) and parsed[1] == agent_id
     ]
 
-    # Warn about undelivered work (using cherry for accuracy)
+    # Warn about unapproved work (using cherry for accuracy)
     for b in agent_branches:
         parsed = config.parse_agent_branch(b)
         if not parsed:
@@ -255,7 +269,7 @@ def cmd_remove_agent(args):
                 lines = git.cherry_undelivered(target_ref, remote_agent, cwd=base)
                 if lines:
                     n = "commit" if len(lines) == 1 else "commits"
-                    print(f"Warning: discarding {len(lines)} undelivered {n} on {b}.")
+                    print(f"Warning: discarding {len(lines)} unapproved {n} on {b}.")
         except Exception:
             pass
 
@@ -345,6 +359,15 @@ def main():
     p_agent.add_argument("--recursive", action="store_true",
                          help="Allow agent to launch subcaves (exposes /dev/fuse)")
 
+    # cav approve [--yes]
+    p_approve = sub.add_parser("approve", help="Approve agent work into shared branch")
+    p_approve.add_argument("--yes", "-y", action="store_true", help="Skip confirmation")
+
+    # cav reject [agent-id] [--yes]
+    p_reject = sub.add_parser("reject", help="Reject tip commit of shared branch")
+    p_reject.add_argument("agent_id", nargs="?", help="Agent ID to assign rework")
+    p_reject.add_argument("--yes", "-y", action="store_true", help="Skip confirmation")
+
     # cav pull [branch]
     p_pull = sub.add_parser("pull", help="Fetch from cave and fast-forward merge")
     p_pull.add_argument("branch", nargs="?", default=None, help="Remote branch to pull (default: current branch)")
@@ -374,7 +397,7 @@ def main():
     # Default to "agent" subcommand when none given.
     # parse_known_args can't handle agent flags (-p, -c) at top level,
     # so check if the first arg looks like a subcommand.
-    subcmds = {"init", "agent", "pull", "push", "status", "version", "remove-agent", "prune-branches"}
+    subcmds = {"init", "agent", "approve", "reject", "pull", "push", "status", "version", "remove-agent", "prune-branches"}
     argv = sys.argv[1:]
     if not argv:
         argv = ["agent"]
@@ -392,6 +415,8 @@ def main():
     dispatch = {
         "init": cmd_init,
         "agent": cmd_agent,
+        "approve": cmd_approve,
+        "reject": cmd_reject,
         "pull": cmd_pull,
         "push": cmd_push,
         "status": cmd_status,

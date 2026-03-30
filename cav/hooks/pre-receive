@@ -2,7 +2,7 @@
 """Pre-receive hook for cave bare repo.
 
 Enforces Coding Cave branch protection:
-- Shared branches: agents can only fast-forward push.
+- Shared branches: agents cannot push.
 - Agent branches: only the matching agent (or user) can push.
 
 Agent identity: CAV_AGENT_ID env var (server-controlled, set by daemon
@@ -12,11 +12,9 @@ No identity = user (unrestricted).
 
 import os
 import re
-import subprocess
 import sys
 
 AGENT_BRANCH_RE = re.compile(r"^agent-(\d+)/(.+)$")
-ZERO_SHA = "0" * 40
 
 
 def get_agent_name() -> str | None:
@@ -31,15 +29,6 @@ def get_agent_name() -> str | None:
         if opt.startswith("agent="):
             return opt[len("agent="):]
     return None
-
-
-def is_fast_forward(old_sha: str, new_sha: str) -> bool:
-    """Check if old_sha is an ancestor of new_sha."""
-    result = subprocess.run(
-        ["git", "merge-base", "--is-ancestor", old_sha, new_sha],
-        capture_output=True,
-    )
-    return result.returncode == 0
 
 
 def check_ref(old_sha: str, new_sha: str, ref: str, agent: str | None) -> str | None:
@@ -66,20 +55,11 @@ def check_ref(old_sha: str, new_sha: str, ref: str, agent: str | None) -> str | 
             )
         return None
     else:
-        # Shared branch: agent can only fast-forward
-        if old_sha == ZERO_SHA:
-            return f"REJECTED: Agent {agent} cannot create shared branch '{branch}'."
-        if new_sha == ZERO_SHA:
-            # Deleting a branch, reject for agents
-            return f"REJECTED: Agent {agent} cannot delete shared branch '{branch}'."
-        if not is_fast_forward(old_sha, new_sha):
-            return (
-                f"REJECTED: Non-fast-forward push to '{branch}' by agent {agent}.\n"
-                f"Fetch the latest '{branch}' and rebase before pushing:\n"
-                f"  git fetch cave\n"
-                f"  git rebase cave/{branch}"
-            )
-        return None
+        # Shared branch: agents cannot push
+        return (
+            f"REJECTED: Agent {agent} cannot push to shared branch '{branch}'.\n"
+            f"Work stays on your agent branch until the user approves it."
+        )
 
 
 def main():

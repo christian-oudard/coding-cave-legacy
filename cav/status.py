@@ -100,7 +100,7 @@ def status(base: Path, verbose: bool = False, agent_filter: str | None = None):
         name = config.display_name(base, agent_id)
         running = config.is_agent_running(agent_id)
 
-        undelivered = []
+        unapproved = []
         last_activity = 0.0
         for branch, target in branches:
             remote_agent = f"{config.SHARED_REMOTE}/{branch}"
@@ -112,7 +112,7 @@ def status(base: Path, verbose: bool = False, agent_filter: str | None = None):
                 if git.has_merge_base(remote_agent, target_ref, cwd=base):
                     lines = git.cherry_undelivered(target_ref, remote_agent, cwd=base)
                     if lines:
-                        undelivered.append((branch, len(lines), lines))
+                        unapproved.append((branch, len(lines), lines))
             except Exception:
                 pass
 
@@ -122,7 +122,7 @@ def status(base: Path, verbose: bool = False, agent_filter: str | None = None):
             if exit_t:
                 last_activity = exit_t
 
-        total_ahead = sum(a for _, a, _ in undelivered)
+        total_ahead = sum(a for _, a, _ in unapproved)
 
         if running:
             state = "running"
@@ -131,27 +131,27 @@ def status(base: Path, verbose: bool = False, agent_filter: str | None = None):
         else:
             state = "idle"
 
-        agents.append((last_activity, agent_id, name, running, state, undelivered))
+        agents.append((last_activity, agent_id, name, running, state, unapproved))
 
     # Sort by last activity, oldest first
     agents.sort(key=lambda a: a[0])
 
     hidden = []
-    for last_activity, agent_id, name, running, state, undelivered in agents:
-        if not undelivered and not running:
+    for last_activity, agent_id, name, running, state, unapproved in agents:
+        if not unapproved and not running:
             hidden.append((name, last_activity))
             continue
 
         age = _format_age(last_activity) if last_activity else ""
         header = f"{name}  ({state})" + (f"  {age}" if age else "")
 
-        if not undelivered:
+        if not unapproved:
             print(header)
         else:
             print(header)
-            for branch, ahead, lines in undelivered:
+            for branch, ahead, lines in unapproved:
                 n = "commit" if ahead == 1 else "commits"
-                print(f"  {ahead} undelivered {n} on {branch}")
+                print(f"  {ahead} unapproved {n} on {branch}")
                 for line in lines[:MAX_COMMITS]:
                     print(f"    {line}")
                 if ahead > MAX_COMMITS:
