@@ -43,7 +43,7 @@ A pre-receive hook on the shared repo enforces:
 3. Agents cannot delete shared branches.
 4. The user can push anything.
 
-Agent branches persist until the agent's work is approved or the agent is explicitly removed via `cav remove-agent`. When an agent exits with all work approved, it is auto-removed (registry entry, branches, workspace). When an agent exits with unapproved work, it remains paused and can be continued with `cav -c`. Unapproved work is detected by patch-id comparison, so rebased or rewritten commits count as unapproved.
+Agent branches persist until the agent's work is approved or the agent is explicitly removed via `cav remove-agent`. When an agent exits with all work approved, it is auto-removed (registry entry, branches, workspace). When an agent exits with unapproved work, it remains paused and can be continued with `cav -c`. Unapproved work is detected by patch-id comparison, so rebased or rewritten commits count as unapproved. Any agents that were killed before cleanup could run are swept at the next `cav agent` invocation.
 
 Every commit on an agent branch is automatically force-pushed to the cave remote. This keeps the remote branch in sync without manual pushes. Only the agent's own branch is pushed, never shared branches or other agents' branches.
 
@@ -137,7 +137,9 @@ Pushes the current branch to the cave remote. With `--force`, force-pushes (for 
 
 ### `cav status`
 
-Fetches from the cave remote and shows agent activity. Agents are derived from the registry, not from branch names. For each registered agent, shows whether it is running, paused (has unapproved commits), or idle. Unapproved commits are listed newest-first, matching `git log` order. Read-only aside from the fetch. With `--all`, iterates all registered projects and shows status for each.
+Fetches from the cave remote and shows agent activity. Agents are derived from the registry, not from branch names. Agents with no pending work and no running process are not shown. For each active agent, shows whether it is running or paused (has unapproved commits). Unapproved commits are listed newest-first, matching `git log` order. With `--all`, iterates all registered projects and shows status for each.
+
+If the current local branch is behind its cave counterpart, shows a brief notice and prompts `cav pull`.
 
 ### `cav remove-agent <n>`
 
