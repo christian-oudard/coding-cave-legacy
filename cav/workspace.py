@@ -17,6 +17,13 @@ def create(base: Path, agent_id: str) -> Path:
             f"Invalid agent ID '{agent_id}'. Must be a number (e.g. 1, 2, 3)."
         )
 
+    user_branch = git.current_branch(cwd=base)
+    if config.parse_agent_branch(user_branch):
+        raise SystemExit(
+            f"Cannot launch an agent from agent branch '{user_branch}'.\n"
+            f"Switch to a shared branch first (e.g. 'git checkout main')."
+        )
+
     slug = config.project_slug(base)
     ws_path = config.worktree_dir(slug, agent_id)
 
@@ -33,12 +40,6 @@ def create(base: Path, agent_id: str) -> Path:
     git.git("remote", "rename", "origin", config.SHARED_REMOTE, cwd=ws_path, echo=False)
 
     # Create and checkout agent branch
-    user_branch = git.current_branch(cwd=base)
-    if config.parse_agent_branch(user_branch):
-        raise SystemExit(
-            f"Cannot launch an agent from agent branch '{user_branch}'.\n"
-            f"Switch to a shared branch first (e.g. 'git checkout main')."
-        )
     ab = config.agent_branch(user_branch, agent_id)
     git.git("checkout", "-b", ab, cwd=ws_path, echo=False)
 
