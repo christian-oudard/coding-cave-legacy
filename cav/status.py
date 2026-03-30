@@ -37,7 +37,7 @@ def _remove_agent(base: Path, agent_id: str, branches: list[str]):
                 shutil.rmtree(ws)
 
 
-def status(base: Path, agent_filter: str | None = None):
+def status(base: Path, agent_filter: str | None = None, scoped: bool = True):
     git.git("fetch", "--prune", config.SHARED_REMOTE, cwd=base, **config.v())
 
     if not agent_filter:
@@ -77,7 +77,7 @@ def status(base: Path, agent_filter: str | None = None):
         if agent_filter:
             print(f"No agent {agent_filter} in registry.")
         else:
-            print("No running agents.")
+            print(f"No running agents in {slug}." if scoped else "No running agents.")
         return
 
     verbose = config.verbose or bool(agent_filter)
@@ -132,7 +132,7 @@ def status(base: Path, agent_filter: str | None = None):
         if agent_filter:
             print(f"No agent {agent_filter} in registry.")
         else:
-            print("No running agents.")
+            print(f"No running agents in {slug}." if scoped else "No running agents.")
         return
 
     for last_activity, agent_id, name, running, state, unapproved in agents:

@@ -235,7 +235,7 @@ def status(agent, all_projects):
             if i > 0:
                 print()
             print(f"=== {slug} ===")
-            _status(Path(path))
+            _status(Path(path), scoped=False)
         return
     base = find_repo_root()
     require_init(base)
