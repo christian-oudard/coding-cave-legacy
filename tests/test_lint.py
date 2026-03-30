@@ -166,5 +166,63 @@ class TestSandboxEnvCompleteness(unittest.TestCase):
             )
 
 
+class TestClaudeCommandConstruction(unittest.TestCase):
+    """Verify launch() passes the right session flags to claude.
+
+    This would have caught bd12bd3, which removed --session-id and left only
+    --resume unconditionally. New sessions passed --resume <non-existent-uuid>,
+    claude ignored it and started fresh with its own UUID, leaving the DB with
+    a pre-generated UUID that never matched any session file on disk.
+    """
+
+    def _get_launch_source(self) -> str:
+        sandbox = CAV_DIR / "sandbox.py"
+        src = sandbox.read_text()
+        # Extract just the launch() function body
+        tree = ast.parse(src)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "launch":
+                lines = src.splitlines()
+                return "\n".join(lines[node.lineno - 1:node.end_lineno])
+        self.fail("launch() function not found in sandbox.py")
+
+    def test_launch_has_resuming_parameter(self):
+        """launch() must accept a 'resuming' parameter to distinguish new vs continue."""
+        src = self._get_launch_source()
+        self.assertIn("resuming", src,
+                      "launch() missing 'resuming' parameter — cannot distinguish "
+                      "--session-id (new) from --resume (continue)")
+
+    def test_launch_uses_session_id_for_new_sessions(self):
+        """launch() must pass --session-id when starting a new session."""
+        src = self._get_launch_source()
+        self.assertIn("--session-id", src,
+                      "launch() does not pass --session-id for new sessions. "
+                      "Without this, claude ignores the pre-generated UUID and "
+                      "the DB entry never matches the session file on disk.")
+
+    def test_launch_uses_resume_for_continuing(self):
+        """launch() must pass --resume when continuing an existing session."""
+        src = self._get_launch_source()
+        self.assertIn("--resume", src,
+                      "launch() does not pass --resume for continued sessions.")
+
+    def test_session_id_and_resume_are_conditional(self):
+        """--session-id and --resume must be under the resuming conditional, not both always."""
+        src = self._get_launch_source()
+        # Both flags present but mutually exclusive: resuming guards which is used
+        self.assertIn("resuming", src)
+        self.assertIn("--session-id", src)
+        self.assertIn("--resume", src)
+        # They must appear in the same conditional block — both after 'resuming'
+        resume_pos = src.index("--resume")
+        session_id_pos = src.index("--session-id")
+        resuming_pos = src.index("resuming")
+        self.assertLess(resuming_pos, resume_pos,
+                        "'resuming' check must appear before --resume")
+        self.assertLess(resuming_pos, session_id_pos,
+                        "'resuming' check must appear before --session-id")
+
+
 if __name__ == "__main__":
     unittest.main()

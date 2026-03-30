@@ -83,9 +83,12 @@ def agent(continue_agent, resume_session, extra_projects, recursive):
 
     if resume_session:
         owner = config.find_agent_by_session(resume_session)
-        if not owner:
-            raise SystemExit(f"No agent owns session {resume_session}.")
-        agent_id = config.continue_agent_id(base, owner)
+        if owner:
+            agent_id = config.continue_agent_id(base, owner)
+        else:
+            # Session not in registry — adopt it with a fresh agent slot.
+            agent_id = config.acquire_agent_id(base)
+            config.write_session_id(agent_id, resume_session)
         session_id = resume_session
         resuming = True
     elif continue_agent:
@@ -126,6 +129,11 @@ def agent(continue_agent, resume_session, extra_projects, recursive):
                     recursive=recursive, session_id=session_id,
                     resuming=resuming)
     finally:
+        # Claude uses its own UUID regardless of --session-id. Capture what it
+        # actually wrote so the next cav -c resumes the right session.
+        actual_sid = config.most_recent_session(projects[0][1])
+        if actual_sid:
+            config.write_session_id(agent_id, actual_sid)
         config.mark_agent_exited(agent_id)
         _auto_cleanup_if_clean(base, agent_id)
     sys.exit(rc)
