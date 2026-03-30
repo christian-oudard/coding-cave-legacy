@@ -117,10 +117,14 @@ class TestRequireInitWithRegistry(unittest.TestCase):
         cav_cli("init", cwd=self.repo)
         cav_cli("init", cwd=other)
 
-        from cav import config
-        slug = config.project_slug(other)
-        resolved = config.project_path(slug)
-        self.assertEqual(Path(resolved).resolve(), other.resolve())
+        slug = other.name  # project_slug uses the directory name
+        result = subprocess.run(
+            ["python3", "-c",
+             f"from cav import config; print(config.project_path({slug!r}) or '')"],
+            capture_output=True, text=True, cwd=PROJECT_ROOT,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(Path(result.stdout.strip()).resolve(), other.resolve())
 
 
 class TestInitDefaults(unittest.TestCase):

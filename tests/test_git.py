@@ -152,13 +152,36 @@ class TestCAV(unittest.TestCase):
             self.assertEqual(branch, f"agent-{name}/main")
 
     def test_post_commit_hook_force_pushes(self):
-        """Post-commit hook uses --force and only pushes this agent's branch."""
+        """Hook force-pushes so squashed history updates the remote."""
+        from cav.sandbox import POST_COMMIT_HOOK
         agents = self._init_and_agents("1")
         ws = agents["1"]
+
+        # Install the hook (normally done by sandbox.launch)
         hook = ws / ".git" / "hooks" / "post-commit"
-        content = hook.read_text()
-        self.assertIn("--force", content)
-        self.assertIn("agent-1/main", content)
+        hook.write_text(POST_COMMIT_HOOK)
+        hook.chmod(0o755)
+
+        # Make 2 commits and push
+        (ws / "a.py").write_text("a\n")
+        git("add", "a.py", cwd=ws)
+        git("commit", "-m", "commit 1", cwd=ws)
+        (ws / "b.py").write_text("b\n")
+        git("add", "b.py", cwd=ws)
+        git("commit", "-m", "commit 2", cwd=ws)
+        git("push", "cave", "agent-1/main", cwd=ws, env=agent_env("1"))
+
+        # Squash to 1 commit — creates diverging history
+        git("reset", "--soft", "HEAD~2", cwd=ws)
+        git("commit", "-m", "squashed", cwd=ws)
+
+        # Run the hook — must force-push or the remote stays on old history
+        run([str(hook)], cwd=ws)
+
+        git("fetch", "cave", cwd=ws)
+        local_sha = git_out("rev-parse", "HEAD", cwd=ws)
+        remote_sha = git_out("rev-parse", "cave/agent-1/main", cwd=ws)
+        self.assertEqual(local_sha, remote_sha)
 
     def test_invalid_agent_id(self):
         """Non-numeric agent IDs are rejected."""

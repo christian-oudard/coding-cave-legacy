@@ -15,6 +15,12 @@ from pathlib import Path
 
 from . import config, daemon, git, user_env
 
+POST_COMMIT_HOOK = (
+    "#!/bin/sh\n"
+    "git fetch cave >/dev/null 2>&1 || true\n"
+    "git push --force cave HEAD >/dev/null 2>&1 || true\n"
+)
+
 # Substituted at nix build time with the jail.nix sandbox binary path.
 SANDBOX_BIN = "@SANDBOX_BIN@"
 # Substituted at nix build time with the cav bin directory.
@@ -230,15 +236,10 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
     daemon_proc, daemon_dir = daemon.start(agent_id, shared_repos_for_daemon)
 
     # Ensure post-commit hook is installed in all workspaces (idempotent)
-    _post_commit_hook = (
-        "#!/bin/sh\n"
-        "git fetch cave >/dev/null 2>&1 || true\n"
-        "git push cave HEAD >/dev/null 2>&1 || true\n"
-    )
     for ws, _, _ in workspaces:
         hook = ws / ".git" / "hooks" / "post-commit"
-        if not hook.exists() or hook.read_text() != _post_commit_hook:
-            hook.write_text(_post_commit_hook)
+        if not hook.exists() or hook.read_text() != POST_COMMIT_HOOK:
+            hook.write_text(POST_COMMIT_HOOK)
             hook.chmod(0o755)
 
     # Update workspace remotes to use git:// via daemon

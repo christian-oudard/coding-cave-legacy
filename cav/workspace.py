@@ -46,14 +46,4 @@ def create(base: Path, agent_id: str) -> Path:
     git.git("push", config.SHARED_REMOTE, ab,
             f"--push-option=agent={agent_id}", cwd=ws_path, echo=False)
 
-    # Post-commit hook: force-push agent branch to remote on every commit.
-    # Only pushes when on this agent's specific branch (not main, not other agents').
-    hook = ws_path / ".git" / "hooks" / "post-commit"
-    hook.write_text(
-        f'#!/bin/sh\n'
-        f'[ "$(git rev-parse --abbrev-ref HEAD)" = "{ab}" ] && '
-        f'git push --force cave HEAD:{ab} >/dev/null 2>&1 || true\n'
-    )
-    hook.chmod(0o755)
-
     return ws_path
