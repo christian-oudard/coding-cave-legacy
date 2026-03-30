@@ -92,4 +92,4 @@ def approve(base: Path, yes: bool = False):
         _remove_agent(base, agent_id, agent_branches)
         print(f"\nApproved and removed {name}.")
     else:
-        print(f"\nApproved. {name} continues working.")
+        print(f"\nApproved.")
