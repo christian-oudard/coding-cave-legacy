@@ -197,6 +197,28 @@ class TestPushForceAllowed(unittest.TestCase):
         self.assertNotIn("agent branch", result.stderr.lower())
 
 
+class TestUnknownCommand(unittest.TestCase):
+    """Misspelled subcommands produce a clear error, not agent launch."""
+
+    def test_typo_gives_error(self):
+        """cav pul (typo) should error, not try to launch an agent."""
+        result = cav_cli("pul", cwd=PROJECT_ROOT, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Unknown command", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_nonsense_gives_error(self):
+        result = cav_cli("foobar", cwd=PROJECT_ROOT, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Unknown command", result.stderr)
+
+    def test_numeric_id_rejected(self):
+        """cav 3 should error, not silently route to agent."""
+        result = cav_cli("3", cwd=PROJECT_ROOT, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Unknown command", result.stderr)
+
+
 class TestContinueFlag(unittest.TestCase):
     """cav -c / cav --continue parses correctly."""
 

@@ -54,18 +54,12 @@ def cmd_agent(args):
     from .sandbox import launch
 
     if args.resume_session:
-        # Route --resume to the agent that owns this session
-        agent_id_arg = getattr(args, 'agent_id', None)
         owner = config.find_agent_by_session(args.resume_session)
-        if owner:
-            agent_id = config.continue_agent_id(base, owner)
-        elif agent_id_arg:
-            agent_id = config.continue_agent_id(base, agent_id_arg)
-        else:
+        if not owner:
             raise SystemExit(
-                f"No agent owns session {args.resume_session}.\n"
-                f"Specify the agent: cav agent -r {args.resume_session} <id>"
+                f"No agent owns session {args.resume_session}."
             )
+        agent_id = config.continue_agent_id(base, owner)
         session_id = args.resume_session
         resuming = True
     elif args.continue_agent:
@@ -346,8 +340,6 @@ def main():
                          help="Continue the most recently paused agent")
     p_agent.add_argument("-r", "--resume", dest="resume_session", metavar="UUID",
                          help="Resume a specific Claude session by UUID")
-    p_agent.add_argument("agent_id", nargs="?", default=None,
-                         help="Agent ID to resume (used with -r when mapping is lost)")
     p_agent.add_argument("-p", "--project", action="append", dest="extra_projects",
                          metavar="PATH", help="Additional project to mount (repeatable)")
     p_agent.add_argument("--recursive", action="store_true",
@@ -389,7 +381,12 @@ def main():
     elif argv[0] == "help":
         argv = argv[1:] + ["--help"] if len(argv) > 1 else ["--help"]
     elif argv[0] not in subcmds | {"-h", "--help"}:
-        argv = ["agent"] + argv
+        # Only default to "agent" for known agent flags.
+        agent_flags = {"-c", "--continue", "-r", "--resume", "-p", "--project", "--recursive"}
+        if argv[0] in agent_flags:
+            argv = ["agent"] + argv
+        else:
+            parser.error(f"Unknown command '{argv[0]}'.")
     args = parser.parse_args(argv)
 
     dispatch = {
