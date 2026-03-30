@@ -86,7 +86,7 @@ def cherry_undelivered(upstream: str, head: str, cwd=None) -> list[str]:
             sha_short = parts[0][:7]
             subject = parts[1] if len(parts) > 1 else ""
             lines.append(f"{sha_short} {subject}")
-    return lines
+    return list(reversed(lines))
 
 
 

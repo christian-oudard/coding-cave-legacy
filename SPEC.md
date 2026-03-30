@@ -137,7 +137,7 @@ Pushes the current branch to the cave remote. With `--force`, force-pushes (for 
 
 ### `cav status`
 
-Fetches from the cave remote and shows agent activity. Agents are derived from the registry, not from branch names. For each registered agent, shows whether it is running, paused (has unapproved commits), or idle. Read-only aside from the fetch.
+Fetches from the cave remote and shows agent activity. Agents are derived from the registry, not from branch names. For each registered agent, shows whether it is running, paused (has unapproved commits), or idle. Unapproved commits are listed newest-first, matching `git log` order. Read-only aside from the fetch.
 
 ### `cav remove-agent <n>`
 
