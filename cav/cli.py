@@ -39,6 +39,8 @@ def resolve_project(path: str) -> Path:
     if registered:
         return Path(registered)
     p = Path(path).resolve()
+    if not p.is_dir():
+        raise SystemExit(f"No project named '{path}'")
     if not (p / ".git").exists():
         raise SystemExit(f"Not a git repository: {p}")
     if not config.shared_repo_path(p).exists():

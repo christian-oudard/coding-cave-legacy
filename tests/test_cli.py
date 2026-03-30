@@ -103,6 +103,14 @@ class TestRequireInitWithRegistry(unittest.TestCase):
         self.assertIn("cav init", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
 
+    def test_resolve_project_unknown_slug(self):
+        """Unrecognised slug gives 'No project named' error, not git error."""
+        from cav.cli import resolve_project
+        with self.assertRaises(SystemExit) as cm:
+            resolve_project("no-such-project")
+        self.assertIn("No project named", str(cm.exception))
+        self.assertNotIn("Not a git repository", str(cm.exception))
+
     def test_resolve_project_by_slug(self):
         """-p accepts a registered project slug instead of a path."""
         # Set up a second project
