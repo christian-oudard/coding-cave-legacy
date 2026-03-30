@@ -597,6 +597,18 @@ def all_projects() -> list[tuple[str, str]]:
         db.close()
 
 
+def agent_project(agent_id: str) -> str | None:
+    """Return the primary project slug for an agent, or None."""
+    db = _open_registry()
+    try:
+        row = db.execute(
+            "SELECT project FROM agents WHERE agent_id = ?", (agent_id,)
+        ).fetchone()
+        return row[0] if row else None
+    finally:
+        db.close()
+
+
 # -- Approvals --
 
 def record_approval(project: str, shared_branch: str, agent_id: str,

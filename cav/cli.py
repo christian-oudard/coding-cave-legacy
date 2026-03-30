@@ -315,6 +315,13 @@ def _cmd_remove_all_agents(base, yes=False):
     print(f"Removed {n} agent {s}.")
 
 
+def cmd_cp(args):
+    from .cp import cp
+    if len(args.paths) < 2:
+        raise SystemExit("Usage: cav cp <src>... <dest>")
+    cp(args.paths[:-1], args.paths[-1], recursive=args.recursive, force=args.force)
+
+
 def cmd_version(args):
     ts = "@VERSION_DATE@"
     if ts.isdigit():
@@ -391,13 +398,23 @@ def main():
     # cav prune-branches
     sub.add_parser("prune-branches", help="Delete orphaned local agent branches")
 
+    # cav cp
+    p_cp = sub.add_parser("cp", help="Copy files to/from a cave agent worktree")
+    p_cp.add_argument("-R", "-r", "--recursive", action="store_true",
+                      help="Copy directories recursively")
+    p_cp.add_argument("-f", "--force", action="store_true",
+                      help="Overwrite existing files without prompting")
+    p_cp.add_argument("paths", nargs="+",
+                      help="Source(s) and destination. "
+                           "Cave paths: slug:path, slug@N:path, cave:path, slug:~/path")
+
     # cav version
     sub.add_parser("version", help="Show version")
 
     # Default to "agent" subcommand when none given.
     # parse_known_args can't handle agent flags (-p, -c) at top level,
     # so check if the first arg looks like a subcommand.
-    subcmds = {"init", "agent", "approve", "reject", "pull", "push", "status", "version", "remove-agent", "prune-branches"}
+    subcmds = {"init", "agent", "approve", "reject", "pull", "push", "status", "version", "remove-agent", "prune-branches", "cp"}
     argv = sys.argv[1:]
     if not argv:
         argv = ["agent"]
@@ -422,6 +439,7 @@ def main():
         "status": cmd_status,
         "remove-agent": cmd_remove_agent,
         "prune-branches": cmd_prune_branches,
+        "cp": cmd_cp,
         "version": cmd_version,
     }
     dispatch[args.command](args)

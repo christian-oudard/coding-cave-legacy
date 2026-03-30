@@ -147,6 +147,20 @@ Removes a paused agent by ID. Deletes its session from the database, its remote 
 
 Removes all paused agents and resets the database. Also deletes local agent branch checkouts. Refuses if any agents are currently running. Prompts for confirmation unless `--yes` is given.
 
+### `cav cp [-R] [-f] <src>... <dest>`
+
+Copies files between the host and a cave agent worktree or persistent home. One of the paths must use a cave prefix:
+
+- `slug:path` - project-relative path in the agent's worktree
+- `slug@N:path` - specific agent N's worktree
+- `cave:path` - auto-detect slug from CWD (project must be registered)
+- `slug:~/path` - persistent cave home (no worktree required)
+- `slug:/projects/slug/path` - absolute cave path inside the project
+
+Direction is determined by which path has the cave prefix. If the destination has a cave prefix, copies host files into the worktree. If a source has a cave prefix, copies from the worktree to the host.
+
+If multiple agents have worktrees for a slug, the `@N` form is required. Refuses to copy symlinks out of the cave. Prompts before overwriting existing host files unless `-f` is given.
+
 ### `cav prune-branches`
 
 Deletes orphaned local agent branch checkouts. An agent branch is orphaned if it has no upstream or its cave upstream no longer exists. Refuses to touch agent-named branches tracking a non-cave remote. Prompts for confirmation before deleting.
