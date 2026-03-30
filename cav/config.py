@@ -73,6 +73,43 @@ def worktree_dir(slug: str, agent_id: str) -> Path:
     return DATA_DIR / "worktrees" / slug / agent_id
 
 
+def _claude_project_dir(slug: str) -> Path:
+    """Return the Claude session directory for a project slug.
+
+    Mirrors Claude Code's encoding: the sandbox cwd (/projects/<slug>)
+    with every non-alphanumeric character replaced by '-'.
+    """
+    encoded = re.sub(r"[^a-zA-Z0-9]", "-", f"/projects/{slug}")
+    return persistent_home() / ".claude" / "projects" / encoded
+
+
+def most_recent_session(slug: str) -> str | None:
+    """Find the most recent Claude session ID for a project by file mtime.
+
+    Scans the Claude session directory for .jsonl files and returns the
+    session ID (filename stem) with the highest modification time.
+    """
+    session_dir = _claude_project_dir(slug)
+    if not session_dir.is_dir():
+        return None
+    best_mtime = 0.0
+    best_session = None
+    for f in session_dir.iterdir():
+        if not f.is_file() or f.suffix != ".jsonl":
+            continue
+        # Skip agent subagent transcripts
+        if f.stem.startswith("agent-"):
+            continue
+        try:
+            mtime = f.stat().st_mtime
+        except OSError:
+            continue
+        if mtime > best_mtime:
+            best_mtime = mtime
+            best_session = f.stem
+    return best_session
+
+
 def project_slug(base: Path) -> str:
     """Derive a slug from the project path."""
     name = base.name.lower()
@@ -409,7 +446,15 @@ def continue_agent_id(base: Path, agent_id: str | None = None) -> str:
             (slug,)
         ).fetchone()
         if not row:
-            raise SystemExit("No paused agents to continue.")
+            # No agent entry; acquire a fresh one and find the most
+            # recent session by file mtime so the caller can --resume it.
+            db.rollback()
+            db.close()
+            aid = acquire_agent_id(base)
+            sid = most_recent_session(slug)
+            if sid:
+                write_session_id(aid, sid)
+            return aid
 
         aid = row[0]
         db.execute(

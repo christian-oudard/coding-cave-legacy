@@ -97,7 +97,7 @@ Initializes Coding Cave in a project directory. Sets up the shared bare repo, br
 
 Launches an agent. Auto-assigns the next available numeric ID. Creates the workspace and sandbox, starts Claude with full permissions inside the cave.
 
-With `-c` / `--continue`, resumes the most recently paused agent whose primary project matches the current directory. A paused agent is one that exited but still has a session in the registry. If multiple paused agents exist, the one with the most recent exit timestamp is chosen. Fails if no paused agents exist.
+With `-c` / `--continue`, continues the most recent Claude session for this project via `claude --resume <session-id>`. If a paused agent exists in the registry, it is reused. Otherwise, a fresh agent ID is allocated. In both cases, the session ID is resolved before launching Claude to avoid TOCTOU races with other agents. When no session ID is in the registry (agent was auto-cleaned), the most recent session is found by scanning `~/.claude/projects/<encoded-cwd>/*.jsonl` by file mtime, matching Claude's own recency metric. Since all agents for a project share the same sandbox cwd (`/projects/<slug>`), sessions from any agent are visible.
 
 With `-p`, additional projects are mounted into the same cave. Each project must already have `cav init` done. The agent uses its globally unique ID across all projects, with separate workspaces and agent branches per project. All workspaces are mounted at `/projects/<slug>`. Fails with a helpful message if any project is not initialized.
 

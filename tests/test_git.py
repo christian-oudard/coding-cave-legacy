@@ -637,11 +637,82 @@ class TestCAV(unittest.TestCase):
         config.mark_agent_exited(id1)
         config.mark_agent_exited(cid)
 
-    def test_continue_no_agents(self):
-        """continue_agent_id raises SystemExit when no agents exist."""
+    def test_continue_no_agents_no_sessions(self):
+        """continue_agent_id with no agents and no sessions acquires fresh agent."""
         self._init()
-        with self.assertRaises(SystemExit):
-            config.continue_agent_id(self.user_repo)
+        aid = config.continue_agent_id(self.user_repo)
+        self.assertEqual(aid, "1")
+        # Fresh agent gets a generated session ID, not a resumed one
+        sid = config.read_session_id(aid)
+        self.assertIsNotNone(sid)
+        config.mark_agent_exited(aid)
+
+    def test_continue_no_agents_picks_recent_session(self):
+        """continue_agent_id with no agents finds the most recent session by mtime."""
+        self._init()
+        slug = config.project_slug(self.user_repo)
+        session_dir = config._claude_project_dir(slug)
+        session_dir.mkdir(parents=True)
+
+        # Create two session files with different mtimes
+        old = session_dir / "old-session-uuid.jsonl"
+        new = session_dir / "new-session-uuid.jsonl"
+        old.write_text('{"type":"user"}\n')
+        new.write_text('{"type":"user"}\n')
+        # Set old file to 1 hour ago
+        old_time = time.time() - 3600
+        os.utime(old, (old_time, old_time))
+
+        aid = config.continue_agent_id(self.user_repo)
+        sid = config.read_session_id(aid)
+        self.assertEqual(sid, "new-session-uuid")
+        config.mark_agent_exited(aid)
+
+    def test_most_recent_session_skips_agent_files(self):
+        """most_recent_session ignores agent-*.jsonl subagent transcripts."""
+        self._init()
+        slug = config.project_slug(self.user_repo)
+        session_dir = config._claude_project_dir(slug)
+        session_dir.mkdir(parents=True)
+
+        # agent- file is newest but should be skipped
+        real = session_dir / "real-session.jsonl"
+        agent = session_dir / "agent-sub1.jsonl"
+        real.write_text('{"type":"user"}\n')
+        agent.write_text('{"type":"user"}\n')
+        real_time = time.time() - 100
+        os.utime(real, (real_time, real_time))
+        # agent file has default (current) mtime, so it's newer
+
+        self.assertEqual(config.most_recent_session(slug), "real-session")
+
+    def test_most_recent_session_empty_dir(self):
+        """most_recent_session returns None for empty session directory."""
+        self._init()
+        slug = config.project_slug(self.user_repo)
+        session_dir = config._claude_project_dir(slug)
+        session_dir.mkdir(parents=True)
+        self.assertIsNone(config.most_recent_session(slug))
+
+    def test_most_recent_session_no_dir(self):
+        """most_recent_session returns None when session directory doesn't exist."""
+        self._init()
+        self.assertIsNone(config.most_recent_session("nonexistent-project"))
+
+    def test_claude_project_dir_encoding(self):
+        """_claude_project_dir encodes path like Claude Code does."""
+        # /projects/coding-cave -> -projects-coding-cave
+        self.assertTrue(
+            str(config._claude_project_dir("coding-cave")).endswith(
+                ".claude/projects/-projects-coding-cave"
+            )
+        )
+        # Dots, underscores become dashes
+        self.assertTrue(
+            str(config._claude_project_dir("my.project_v2")).endswith(
+                "-projects-my-project-v2"
+            )
+        )
 
     def test_session_id_generated_on_acquire(self):
         """acquire_agent_id generates a UUID v4 session ID."""
@@ -782,6 +853,27 @@ class TestCAV(unittest.TestCase):
         self.assertIn("still running", str(ctx.exception))
 
         config.mark_agent_exited(id1)
+
+    def test_remove_nonexistent_agent(self):
+        """remove-agent on an agent not in registry gives 'not found'."""
+        self._init()
+        result = cav_cli("remove-agent", "99", cwd=self.user_repo, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not found", result.stderr.lower())
+
+    def test_remove_agent_idempotent_gives_error(self):
+        """remove-agent twice on the same agent gives 'not found' the second time."""
+        self._init()
+        aid = config.acquire_agent_id(self.user_repo)
+        config.mark_agent_exited(aid)
+
+        result = cav_cli("remove-agent", aid, cwd=self.user_repo)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("Removed", result.stdout)
+
+        result = cav_cli("remove-agent", aid, cwd=self.user_repo, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not found", result.stderr.lower())
 
     def test_remove_all_agents(self):
         """remove-agent --all clears registry and agent branches."""
