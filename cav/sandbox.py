@@ -9,6 +9,7 @@ import os
 import shutil
 import signal
 import socket
+import sqlite3
 import subprocess
 import time
 from pathlib import Path
@@ -157,12 +158,43 @@ def _start_crinj() -> str:
     return f"127.0.0.1:{CRINJ_PORT}"
 
 
-def _setup_nix_overlay() -> str:
-    """Mount a writable nix store overlay. Returns merged path."""
-    overlay_dir = config.nix_overlay_dir()
-    upper = overlay_dir / "upper"
-    work = overlay_dir / "work"
-    merged = overlay_dir / "merged"
+def _seed_nix_db() -> Path | None:
+    """Copy host nix DB so the cave knows about existing store paths.
+
+    Without this, nix tries to re-download and chmod host store paths,
+    which fails because they're owned by uid 65534 (nix daemon) and
+    the cave runs as uid 1000.
+
+    Returns the DB directory path, or None if the host DB doesn't exist.
+    """
+    host_db = Path("/nix/var/nix/db/db.sqlite")
+    if not host_db.exists():
+        return None
+
+    db_dir = config.nix_state_dir() / "db"
+    db_dir.mkdir(parents=True, exist_ok=True)
+    cave_db = db_dir / "db.sqlite"
+
+    # Always overwrite with fresh host DB. Cave-installed packages
+    # lose their registration but the files persist in the overlay
+    # upper (owned by cave user), so nix re-registers on demand.
+    for wal in db_dir.glob("db.sqlite-*"):
+        wal.unlink()
+    src = sqlite3.connect(f"file:{host_db}?mode=ro", uri=True)
+    dst = sqlite3.connect(str(cave_db))
+    src.backup(dst)
+    dst.close()
+    src.close()
+
+    return db_dir
+
+
+def _setup_nix_overlay(agent_id: str) -> str:
+    """Mount a per-agent writable nix store overlay. Returns merged path."""
+    agent_dir = config.nix_overlay_dir() / agent_id
+    upper = agent_dir / "upper"
+    work = agent_dir / "work"
+    merged = agent_dir / "merged"
 
     for d in (upper, work, merged):
         d.mkdir(parents=True, exist_ok=True)
@@ -185,9 +217,9 @@ def _setup_nix_overlay() -> str:
     return str(merged)
 
 
-def _teardown_nix_overlay():
-    """Unmount the nix store overlay."""
-    merged = config.nix_overlay_dir() / "merged"
+def _teardown_nix_overlay(agent_id: str):
+    """Unmount the per-agent nix store overlay."""
+    merged = config.nix_overlay_dir() / agent_id / "merged"
     if merged.exists():
         subprocess.run(["fusermount", "-u", str(merged)], check=False)
 
@@ -274,7 +306,8 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
     # Build user environment from cave.nix (cached)
     user_env_path = user_env.build()
 
-    nix_merged = _setup_nix_overlay()
+    nix_db_dir = _seed_nix_db()
+    nix_merged = _setup_nix_overlay(agent_id)
 
     # Encode multiple workspaces as colon-separated lists
     ws_paths = ":".join(str(ws) for ws, _, _ in workspaces)
@@ -300,6 +333,9 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
         "CODING_CAVE_HOST_HOME": os.environ.get(
             "CODING_CAVE_HOST_HOME", str(Path.home())),
     }
+
+    if nix_db_dir:
+        env["CODING_CAVE_NIX_DB_DIR"] = str(nix_db_dir)
 
     if recursive:
         env["CODING_CAVE_RECURSIVE"] = "1"
@@ -381,4 +417,4 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
 
     finally:
         daemon.stop(daemon_proc, daemon_dir)
-        _teardown_nix_overlay()
+        _teardown_nix_overlay(agent_id)

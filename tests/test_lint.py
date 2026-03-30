@@ -155,6 +155,7 @@ class TestSandboxEnvCompleteness(unittest.TestCase):
             "CODING_CAVE_GPG_PUBRING",   # only if gpg keyring exists
             "CODING_CAVE_USER_ENV",      # only if cave.nix exists
             "CODING_CAVE_USER_CLAUDE_MD",  # only if user CLAUDE.md exists
+            "CODING_CAVE_NIX_DB_DIR",    # only if host has nix DB
         }
 
         missing = nix_refs - launch_sets - conditional

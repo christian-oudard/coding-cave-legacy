@@ -73,6 +73,10 @@ def nix_overlay_dir() -> Path:
     return DATA_DIR / "nix-overlay"
 
 
+def nix_state_dir() -> Path:
+    return DATA_DIR / "nix-state"
+
+
 def persistent_home() -> Path:
     return DATA_DIR / "home"
 

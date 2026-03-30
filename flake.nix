@@ -80,6 +80,9 @@
               if [ -n "''${CODING_CAVE_NIX_MERGED:-}" ]; then
                 RUNTIME_ARGS+=(--bind "$CODING_CAVE_NIX_MERGED" /nix/store)
                 RUNTIME_ARGS+=(--tmpfs /nix/var --dir /nix/var/nix)
+                if [ -n "''${CODING_CAVE_NIX_DB_DIR:-}" ] && [ -d "''${CODING_CAVE_NIX_DB_DIR}" ]; then
+                  RUNTIME_ARGS+=(--bind "''${CODING_CAVE_NIX_DB_DIR}" /nix/var/nix/db)
+                fi
               fi
             '')
 

@@ -58,5 +58,37 @@ class TestGPGSigning(unittest.TestCase):
         self.assertIn(key[-16:], signer)
 
 
+class TestNixStore(unittest.TestCase):
+    """Verify nix operations work inside the cave.
+
+    The cave mounts a fuse-overlayfs on /nix/store and seeds the nix DB
+    from the host so nix knows about existing store paths. Without DB
+    seeding, nix tries to re-download and chmod host store paths, which
+    fails because they're owned by uid 65534 (nix daemon).
+    """
+
+    def test_nix_develop(self):
+        """nix develop must be able to evaluate and enter a dev shell."""
+        result = subprocess.run(
+            ["nix", "develop", "--command", "true"],
+            capture_output=True, text=True, timeout=120,
+        )
+        self.assertEqual(result.returncode, 0, f"nix develop failed: {result.stderr}")
+
+    def test_host_store_paths_registered(self):
+        """Host store paths must be registered in the cave's nix DB."""
+        # Pick a store path we know exists (nix itself)
+        nix_paths = list(Path("/nix/store").glob("*-nix-2.*"))
+        if not nix_paths:
+            self.skipTest("no nix store path found")
+        result = subprocess.run(
+            ["nix-store", "--query", "--hash", str(nix_paths[0])],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0,
+                         f"Store path not registered in DB: {nix_paths[0]}\n"
+                         f"This means nix DB seeding from host is not working.")
+
+
 if __name__ == "__main__":
     unittest.main()
