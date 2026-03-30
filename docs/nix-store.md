@@ -6,25 +6,20 @@ how to manage it.
 
 ## Architecture
 
-The cave uses a three-layer fuse-overlayfs mount for `/nix/store`:
+The cave uses a per-agent fuse-overlayfs mount for `/nix/store`:
 
 ```
-upper:  per-agent writable layer (ephemeral, small)
-lower1: cave shared store (read-only to agents)
-lower2: host /nix/store (read-only to agents)
+upper:  per-agent writable layer (persists across sessions)
+lower:  host /nix/store (read-only)
 ```
 
 - **Host store** (`/nix/store` on the host). Read-only lower layer.
   Agents can use all host packages but cannot modify the host store.
   This preserves the sandbox boundary.
 
-- **Cave shared store** (`~/.local/share/coding-cave/nix-store/`).
-  Read-only lower layer shared across all agents. When an agent exits,
-  `cav` promotes completed store paths from the agent's upper into this
-  shared store so other agents can use them without re-downloading.
-
-- **Per-agent upper** (ephemeral). Holds in-progress installs. Small
-  and cleaned up on agent exit after promotion.
+- **Per-agent upper** (`~/.local/share/coding-cave/nix-overlay/<id>/upper`).
+  Holds packages installed by the agent via `nix shell` etc. Persists
+  across sessions so agents don't re-download packages.
 
 The cave also maintains its own nix state directory
 (`~/.local/share/coding-cave/nix-state/`) with a separate DB and GC
@@ -32,57 +27,66 @@ roots, independent from the host's `/nix/var/nix/`.
 
 ## Nix DB Seeding
 
-The cave's nix DB is seeded from the host's DB on each agent startup
-(simple copy, not merge). This tells nix about all host store paths so
-it doesn't try to re-download or `chmod` them. without seeding, nix
-fails with `Operation not permitted` because lower-layer store paths
-are owned by the host nix daemon (uid 65534) and the cave user (uid
-1000) cannot `chmod` them.
+Each agent startup takes a fresh backup of the host nix DB, then
+merges back cave-only paths (packages the agent installed) whose files
+still exist on disk. This tells nix about all host store paths so it
+doesn't try to re-download or `chmod` them. Without seeding, nix fails
+with `Operation not permitted` because lower-layer store paths are
+owned by the host nix daemon (uid 65534) and the cave user (uid 1000)
+cannot `chmod` them.
 
-Cave-installed packages from previous sessions may lose their DB
-registration after a fresh seed, but the files persist in the shared
-store. Nix re-registers them on demand, which works because shared
-store paths (promoted from agent uppers) are owned by the cave user.
+The "backup + merge-back" approach is self-cleaning: paths the host
+has GC'd are dropped from the fresh backup, and cave-only paths are
+only preserved if their files still exist. This prevents the DB from
+growing unboundedly.
+
+Cave-only paths must be preserved because nix would otherwise try to
+re-substitute them, which fails with EPERM on chmod of the existing
+overlay path.
+
+### Cache pruning
+
+The DB seed also prunes stale entries from two nix caches in the
+persistent home (`~/.cache/nix/`):
+
+- **Fetcher cache** (`fetcher-cache-*.sqlite`): maps flake URLs to
+  store paths. Individual rows referencing GC'd paths are deleted.
+  Nix re-validates pruned entries cheaply via HTTP etags.
+
+- **Eval cache** (`eval-cache-v6/*.sqlite`): maps flake fingerprints
+  to derivation paths. Each file is one flake evaluation. If any
+  sampled path is missing, the whole file is removed. Nixpkgs eval
+  rebuild costs ~10s, so this only triggers when actually stale.
 
 ## Garbage Collection
 
-The cave shared store is a standard nix store with its own state
-directory. Standard nix GC works on it:
+The per-agent overlay upper can be cleaned up manually:
 
 ```
-$ NIX_STATE_DIR=~/.local/share/coding-cave/nix-state \
-  nix-store --gc
+$ rm -rf ~/.local/share/coding-cave/nix-overlay/<id>/upper
 ```
 
-This follows GC roots and deletes unreachable paths from the cave
-shared store. It does not affect the host store.
+This removes all cave-installed packages for that agent. They will be
+re-downloaded on next use.
 
 ## Promoting Packages to Host
 
-To permanently keep a cave-installed package on the host:
+To permanently keep a cave-installed package on the host, copy it from
+the agent's overlay upper:
 
 ```
-$ nix copy --no-check-sigs \
-  --from ~/.local/share/coding-cave/nix-store \
-  /nix/store/abc123-some-package
+$ cp -a ~/.local/share/coding-cave/nix-overlay/<id>/upper/<hash>-<name> /nix/store/
+$ nix-store --register-validity <<< "<path> <hash> <narSize> <deriver> 0"
 ```
 
-This registers the path in the host nix DB. The package becomes a
-first-class host store path, survives host `nix-store --gc`, and
-appears in the lower layer for all future caves.
+The package then becomes a first-class host store path, survives host
+`nix-store --gc`, and appears in the lower layer for all future caves.
 
-## Why Not Overlay the Host Store Directly?
+## Why Per-Agent Overlays?
 
-Earlier versions tried sharing a single overlayfs upper across agents
-or writing directly to the host store. Problems encountered:
+Each agent gets its own overlay to avoid:
 
 - **Host store pollution**: agent-installed packages leak outside the
   sandbox. Security boundary violation.
 - **Concurrent upper writes**: multiple agents sharing one overlayfs
   upper is unsupported by fuse-overlayfs and can corrupt it.
-- **Duplication**: per-agent uppers without promotion duplicate large
-  packages across agents.
-
-The three-layer design avoids all three: host store is untouched, each
-agent has its own upper, and promotion deduplicates into the shared
-store.

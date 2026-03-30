@@ -158,12 +158,68 @@ def _start_crinj() -> str:
     return f"127.0.0.1:{CRINJ_PORT}"
 
 
-def _seed_nix_db() -> Path | None:
-    """Copy host nix DB so the cave knows about existing store paths.
+def _prune_nix_caches() -> None:
+    """Remove nix cache entries that reference store paths no longer on disk.
 
-    Without this, nix tries to re-download and chmod host store paths,
-    which fails because they're owned by uid 65534 (nix daemon) and
-    the cave runs as uid 1000.
+    The fetcher cache (flake URL -> store path) and eval cache (flake
+    fingerprint -> drv paths) persist across sessions but can reference
+    paths the host has since GC'd.
+    """
+    nix_cache = config.persistent_home() / ".cache" / "nix"
+
+    # Fetcher cache: delete individual rows with dead store paths
+    for db_path in nix_cache.glob("fetcher-cache-*.sqlite"):
+        try:
+            conn = sqlite3.connect(str(db_path))
+            rows = conn.execute(
+                "SELECT domain, key, value FROM Cache"
+                " WHERE value LIKE '%storePath%'"
+            ).fetchall()
+            for domain, key, val in rows:
+                idx = val.find('"storePath":"')
+                if idx < 0:
+                    continue
+                sp = val[idx + 13:].split('"', 1)[0]
+                if not (Path("/nix/store") / sp).exists():
+                    conn.execute(
+                        "DELETE FROM Cache WHERE domain=? AND key=?",
+                        (domain, key),
+                    )
+            conn.commit()
+            conn.close()
+        except (sqlite3.Error, OSError):
+            db_path.unlink(missing_ok=True)
+            for wal in nix_cache.glob(db_path.name + "-*"):
+                wal.unlink(missing_ok=True)
+
+    # Eval cache: each file is one flake evaluation. If any sampled
+    # path is gone, the whole file is stale.
+    eval_dir = nix_cache / "eval-cache-v6"
+    if not eval_dir.is_dir():
+        return
+    for db_path in eval_dir.glob("*.sqlite"):
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            rows = conn.execute(
+                "SELECT value FROM Attributes"
+                " WHERE value LIKE '/nix/store/%' LIMIT 5"
+            ).fetchall()
+            conn.close()
+        except (sqlite3.Error, OSError):
+            db_path.unlink(missing_ok=True)
+            continue
+        if rows and any(not Path(r[0]).exists() for r in rows):
+            db_path.unlink(missing_ok=True)
+
+
+def _seed_nix_db() -> Path | None:
+    """Backup host nix DB, preserving cave-installed package registrations.
+
+    Always starts from a fresh host backup (fast, self-cleaning), then
+    merges back cave-only paths whose files still exist on disk. This
+    avoids unbounded DB growth from stale entries while preserving
+    cave-installed packages (which would fail with EPERM on re-substitute
+    because nix tries to chmod the existing overlay path).
 
     Returns the DB directory path, or None if the host DB doesn't exist.
     """
@@ -175,16 +231,46 @@ def _seed_nix_db() -> Path | None:
     db_dir.mkdir(parents=True, exist_ok=True)
     cave_db = db_dir / "db.sqlite"
 
-    # Always overwrite with fresh host DB. Cave-installed packages
-    # lose their registration but the files persist in the overlay
-    # upper (owned by cave user), so nix re-registers on demand.
-    for wal in db_dir.glob("db.sqlite-*"):
-        wal.unlink()
-    src = sqlite3.connect(f"file:{host_db}?mode=ro", uri=True)
-    dst = sqlite3.connect(str(cave_db))
-    src.backup(dst)
-    dst.close()
-    src.close()
+    try:
+        # Collect cave-only paths before overwriting
+        cave_only_rows = []
+        if cave_db.exists():
+            old = sqlite3.connect(f"file:{cave_db}?mode=ro", uri=True)
+            host = sqlite3.connect(f"file:{host_db}?mode=ro", uri=True)
+            host_paths = {r[0] for r in host.execute("SELECT path FROM ValidPaths")}
+            for row in old.execute(
+                "SELECT path, hash, registrationTime, deriver, narSize, "
+                "ultimate, sigs, ca FROM ValidPaths"
+            ):
+                if row[0] not in host_paths and Path(row[0]).exists():
+                    cave_only_rows.append(row)
+            host.close()
+            old.close()
+
+        # Fresh backup from host
+        for wal in db_dir.glob("db.sqlite-*"):
+            wal.unlink()
+        src = sqlite3.connect(f"file:{host_db}?mode=ro", uri=True)
+        dst = sqlite3.connect(str(cave_db))
+        src.backup(dst)
+
+        # Merge back verified cave-only paths
+        if cave_only_rows:
+            for path, h, reg_time, deriver, nar_size, ult, sigs, ca in cave_only_rows:
+                dst.execute(
+                    "INSERT OR IGNORE INTO ValidPaths "
+                    "(path, hash, registrationTime, deriver, narSize, "
+                    "ultimate, sigs, ca) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (path, h, reg_time, deriver, nar_size, ult, sigs, ca),
+                )
+            dst.commit()
+
+        dst.close()
+        src.close()
+    except sqlite3.Error:
+        pass
+
+    _prune_nix_caches()
 
     return db_dir
 
