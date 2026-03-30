@@ -9,7 +9,7 @@ def git(*args, cwd=None, check=True, capture=False, echo=True):
     """Run a git command. Returns CompletedProcess."""
     cmd = ["git"] + list(args)
     if echo:
-        print(f"\n+ {shlex.join(cmd)}", file=sys.stderr)
+        print(f"+ {shlex.join(cmd)}", file=sys.stderr)
     return subprocess.run(
         cmd,
         cwd=cwd,

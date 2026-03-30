@@ -55,7 +55,7 @@ def approve(base: Path, yes: bool = False):
 
     if not yes:
         try:
-            answer = input(f"\nApprove into {target}? [Y/n] ")
+            answer = input(f"\nApprove and merge into {target}? [Y/n] ")
         except (EOFError, KeyboardInterrupt):
             raise SystemExit("\nAborted.")
         if answer.strip().lower() in ("n", "no"):
