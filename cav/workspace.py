@@ -18,17 +18,20 @@ def create(base: Path, agent_id: str) -> Path:
         )
 
     user_branch = git.current_branch(cwd=base)
-    if config.parse_agent_branch(user_branch):
-        raise SystemExit(
-            f"Cannot launch an agent from agent branch '{user_branch}'.\n"
-            f"Switch to a shared branch first (e.g. 'git checkout main')."
-        )
+    target = config.resolve_target(user_branch)
 
     slug = config.project_slug(base)
     ws_path = config.worktree_dir(slug, agent_id)
 
     if ws_path.exists():
         return ws_path
+
+    # New workspace: only allowed from shared branches.
+    if target != user_branch:
+        raise SystemExit(
+            f"Cannot launch a new agent from agent branch '{user_branch}'.\n"
+            f"Switch to a shared branch first (e.g. 'git checkout {target}')."
+        )
 
     ws_path.parent.mkdir(parents=True, exist_ok=True)
     shared = config.shared_repo_path(base)
@@ -40,7 +43,7 @@ def create(base: Path, agent_id: str) -> Path:
     git.git("remote", "rename", "origin", config.SHARED_REMOTE, cwd=ws_path, echo=False)
 
     # Create and checkout agent branch
-    ab = config.agent_branch(user_branch, agent_id)
+    ab = config.agent_branch(target, agent_id)
     git.git("checkout", "-b", ab, cwd=ws_path, echo=False)
 
     # Push agent branch immediately so it's visible in cav status

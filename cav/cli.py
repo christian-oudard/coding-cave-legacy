@@ -81,6 +81,10 @@ def agent(continue_agent, resume_session, extra_projects, recursive):
     from .workspace import create
     from .sandbox import launch
 
+    # Resolve branch context upfront. Agent branches carry routing info:
+    # agent-1/main tells us which agent to continue.
+    on_agent_branch = config.parse_agent_branch(git.current_branch(cwd=base))
+
     if resume_session:
         owner = config.find_agent_by_session(resume_session)
         if owner:
@@ -92,7 +96,10 @@ def agent(continue_agent, resume_session, extra_projects, recursive):
         session_id = resume_session
         resuming = True
     elif continue_agent:
-        agent_id = config.continue_agent_id(base)
+        if on_agent_branch:
+            agent_id = config.continue_agent_id(base, on_agent_branch[1])
+        else:
+            agent_id = config.continue_agent_id(base)
         session_id = config.read_session_id(agent_id)
         resuming = bool(session_id)
     else:
