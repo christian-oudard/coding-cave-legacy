@@ -70,6 +70,59 @@ class TestRequireInit(unittest.TestCase):
         self.assertIn("not initialized", result.stderr)
 
 
+class TestRequireInitWithRegistry(unittest.TestCase):
+    """require_init checks the projects table, not just .coding-cave."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.repo = Path(self.tmpdir) / "project"
+        self.repo.mkdir()
+        git("init", "-b", "main", cwd=self.repo)
+        git("config", "user.email", "test@test.com", cwd=self.repo)
+        git("config", "user.name", "Test", cwd=self.repo)
+        (self.repo / "file.txt").write_text("content\n")
+        git("add", "file.txt", cwd=self.repo)
+        git("commit", "-m", "init", cwd=self.repo)
+        os.symlink(PROJECT_ROOT / "cav", self.repo / "cav")
+        self.data_dir = Path(self.tmpdir) / "data"
+        os.environ["CAV_DATA_DIR"] = str(self.data_dir)
+
+    def tearDown(self):
+        os.environ.pop("CAV_DATA_DIR", None)
+        shutil.rmtree(self.tmpdir)
+
+    def test_agent_without_registry_entry(self):
+        """.coding-cave exists but project not in DB gives friendly error."""
+        cav_cli("init", cwd=self.repo)
+        # Wipe the database
+        (self.data_dir / "coding-cave.db").unlink()
+        result = cav_cli(cwd=self.repo, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not registered", result.stderr)
+        self.assertIn("cav init", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_resolve_project_by_slug(self):
+        """-p accepts a registered project slug instead of a path."""
+        # Set up a second project
+        other = Path(self.tmpdir) / "other"
+        other.mkdir()
+        git("init", "-b", "main", cwd=other)
+        git("config", "user.email", "test@test.com", cwd=other)
+        git("config", "user.name", "Test", cwd=other)
+        (other / "file.txt").write_text("content\n")
+        git("add", "file.txt", cwd=other)
+        git("commit", "-m", "init", cwd=other)
+        os.symlink(PROJECT_ROOT / "cav", other / "cav")
+        cav_cli("init", cwd=self.repo)
+        cav_cli("init", cwd=other)
+
+        from cav import config
+        slug = config.project_slug(other)
+        resolved = config.project_path(slug)
+        self.assertEqual(Path(resolved).resolve(), other.resolve())
+
+
 class TestInitDefaults(unittest.TestCase):
     """cav init defaults to current directory."""
 

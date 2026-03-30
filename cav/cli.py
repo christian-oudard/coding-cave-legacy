@@ -18,6 +18,8 @@ def find_repo_root() -> Path:
 
 def require_init(base: Path):
     if config.shared_repo_path(base).exists():
+        if not config.project_path(config.project_slug(base)):
+            raise SystemExit("Project not registered. Run: cav init")
         return
     # Inside a cave the local bare repo isn't mounted, but the remote is.
     if int(os.environ.get("CODING_CAVE_DEPTH", "0")) > 0:
@@ -35,7 +37,10 @@ def cmd_init(args):
 
 
 def resolve_project(path: str) -> Path:
-    """Resolve a project path to its git root and validate init."""
+    """Resolve a project slug or path to its git root and validate init."""
+    registered = config.project_path(path)
+    if registered:
+        return Path(registered)
     p = Path(path).resolve()
     if not (p / ".git").exists():
         raise SystemExit(f"Not a git repository: {p}")
@@ -44,6 +49,8 @@ def resolve_project(path: str) -> Path:
             f"Coding Cave not initialized in {p}\n"
             f"Run: cav init {p}"
         )
+    if not config.project_path(config.project_slug(p)):
+        raise SystemExit(f"Project not registered: {p}\nRun: cav init {p}")
     return p
 
 
