@@ -113,7 +113,7 @@ class TestCAV(unittest.TestCase):
     def test_init(self):
         """cav init creates shared repo with hook."""
         result = cav_cli("init", str(self.user_repo), cwd=self.user_repo)
-        self.assertIn("Initialized Coding Cave", result.stdout)
+        self.assertIn("Coding Cave initialized", result.stdout)
 
         shared = self.user_repo / ".coding-cave" / "cave-shared.git"
         self.assertTrue(shared.exists())
@@ -196,32 +196,32 @@ class TestCAV(unittest.TestCase):
         git("checkout", "develop", cwd=ws)
         git("pull", cwd=ws, check=True)
 
-    def test_post_commit_hook_force_pushes(self):
-        """Hook force-pushes so squashed history updates the remote."""
-        from cav.sandbox import POST_COMMIT_HOOK
+    def test_git_wrapper_force_pushes(self):
+        """Wrapper force-pushes so squashed history updates the remote."""
+        from cav.sandbox import GIT_WRAPPER
         agents = self._init_and_agents("1")
         ws = agents["1"]
 
-        # Install the hook (normally done by sandbox.launch)
-        hook = ws / ".git" / "hooks" / "post-commit"
-        hook.write_text(POST_COMMIT_HOOK)
-        hook.chmod(0o755)
+        # Install the wrapper (normally done by sandbox.launch)
+        bin_dir = Path(self.tmpdir) / "wrapper_bin"
+        bin_dir.mkdir()
+        wrapper = bin_dir / "git"
+        wrapper.write_text(GIT_WRAPPER)
+        wrapper.chmod(0o755)
+        env = {**os.environ, "PATH": f"{bin_dir}:{os.environ.get('PATH', '')}"}
 
         # Make 2 commits and push
         (ws / "a.py").write_text("a\n")
         git("add", "a.py", cwd=ws)
-        git("commit", "-m", "commit 1", cwd=ws)
+        git("commit", "-m", "commit 1", cwd=ws, env=env)
         (ws / "b.py").write_text("b\n")
         git("add", "b.py", cwd=ws)
-        git("commit", "-m", "commit 2", cwd=ws)
-        git("push", "host-cave", "agent-1/main", cwd=ws, env=agent_env("1"))
+        git("commit", "-m", "commit 2", cwd=ws, env=env)
 
         # Squash to 1 commit — creates diverging history
         git("reset", "--soft", "HEAD~2", cwd=ws)
-        git("commit", "-m", "squashed", cwd=ws)
-
-        # Run the hook — must force-push or the remote stays on old history
-        run([str(hook)], cwd=ws)
+        # Commit via wrapper — must force-push or remote stays on old history
+        git("commit", "-m", "squashed", cwd=ws, env=env)
 
         git("fetch", "host-cave", cwd=ws)
         local_sha = git_out("rev-parse", "HEAD", cwd=ws)
@@ -1630,8 +1630,8 @@ class TestCAV(unittest.TestCase):
                          "Zero-commit agent should be cleaned up")
 
 
-class TestPostCommitHook(unittest.TestCase):
-    """Tests for the post-commit hook's auto-rebase behavior."""
+class TestGitWrapper(unittest.TestCase):
+    """Tests for the git wrapper's auto-rebase and sync behavior."""
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
@@ -1651,30 +1651,38 @@ class TestPostCommitHook(unittest.TestCase):
         self.a1 = workspace.create(self.user_repo, "1")
         git("config", "user.email", "1@test.com", cwd=self.a1)
         git("config", "user.name", "Agent 1", cwd=self.a1)
-        self._install_hook(self.a1)
+        self._install_wrapper()
 
     def tearDown(self):
         shutil.rmtree(self.tmpdir)
 
-    def _install_hook(self, ws):
-        from cav.sandbox import POST_COMMIT_HOOK
-        hook = ws / ".git" / "hooks" / "post-commit"
-        hook.parent.mkdir(parents=True, exist_ok=True)
-        hook.write_text(POST_COMMIT_HOOK)
-        hook.chmod(0o755)
+    def _install_wrapper(self):
+        from cav.sandbox import GIT_WRAPPER
+        bin_dir = Path(self.tmpdir) / "bin"
+        bin_dir.mkdir(exist_ok=True)
+        wrapper = bin_dir / "git"
+        wrapper.write_text(GIT_WRAPPER)
+        wrapper.chmod(0o755)
+        self._wrapper_bin = str(bin_dir)
+
+    def _env(self):
+        """Return env with the git wrapper on PATH."""
+        env = os.environ.copy()
+        env["PATH"] = self._wrapper_bin + ":" + env.get("PATH", "")
+        return env
 
     def test_auto_rebase_on_commit(self):
-        """Post-commit hook rebases agent branch onto updated main."""
+        """Git wrapper rebases agent branch onto updated main after commit."""
         # Simulate approved work landing on main
         (self.user_repo / "approved.py").write_text("# approved\n")
         git("add", "approved.py", cwd=self.user_repo)
         git("commit", "-m", "approved work", cwd=self.user_repo)
         git("push", "cave", "main", cwd=self.user_repo)
 
-        # Agent commits (hook fires: fetch, rebase, push)
+        # Agent commits via wrapper (triggers: fetch, rebase, push)
         (self.a1 / "agent_work.py").write_text("# agent\n")
         git("add", "agent_work.py", cwd=self.a1)
-        git("commit", "-m", "agent work", cwd=self.a1)
+        git("commit", "-m", "agent work", cwd=self.a1, env=self._env())
 
         # Verify agent branch is a fast-forward from main
         git("fetch", "cave", cwd=self.user_repo)
@@ -1690,7 +1698,7 @@ class TestPostCommitHook(unittest.TestCase):
         self.assertIn("agent work", log)
 
     def test_conflict_warns_and_pushes(self):
-        """Post-commit hook warns on conflict, still pushes un-rebased branch."""
+        """Git wrapper warns on conflict, still pushes un-rebased branch."""
         # Both sides edit the same file to create a conflict
         (self.user_repo / "README.md").write_text("# User version\n")
         git("add", "README.md", cwd=self.user_repo)
@@ -1699,9 +1707,10 @@ class TestPostCommitHook(unittest.TestCase):
 
         (self.a1 / "README.md").write_text("# Agent version\n")
         git("add", "README.md", cwd=self.a1)
-        result = git("commit", "-m", "agent edit", cwd=self.a1, check=False)
+        result = git("commit", "-m", "agent edit", cwd=self.a1,
+                     env=self._env(), check=False)
 
-        # Hook should warn about the conflict
+        # Wrapper should warn about the conflict
         self.assertIn("WARNING", result.stderr)
         self.assertIn("rebase", result.stderr)
 
@@ -1711,10 +1720,10 @@ class TestPostCommitHook(unittest.TestCase):
         self.assertIn("agent edit", log)
 
     def test_no_rebase_needed(self):
-        """Post-commit hook is a no-op when already up to date with main."""
+        """Git wrapper pushes when already up to date with main."""
         (self.a1 / "work.py").write_text("# work\n")
         git("add", "work.py", cwd=self.a1)
-        git("commit", "-m", "simple commit", cwd=self.a1)
+        git("commit", "-m", "simple commit", cwd=self.a1, env=self._env())
 
         # Verify it pushed successfully
         git("fetch", "cave", cwd=self.user_repo)
@@ -1722,17 +1731,17 @@ class TestPostCommitHook(unittest.TestCase):
         self.assertIn("simple commit", log)
 
     def test_manual_rebase_pushes_to_remote(self):
-        """Hook must push the rebased branch during a manual rebase.
+        """Wrapper must push the rebased branch after a manual rebase.
 
-        During a rebase, HEAD is detached, so 'git push cave HEAD' fails
-        because git can't resolve the remote branch. The hook must read
-        the branch name from .git/rebase-merge/head-name and push with
-        an explicit refspec.
+        During a rebase, HEAD is detached, so 'git push host-cave HEAD'
+        fails because git can't resolve the remote branch. The wrapper
+        must read the branch name from .git/rebase-merge/head-name and
+        push with an explicit refspec.
         """
-        # Agent commits first.
+        # Agent commits first (via wrapper so it's pushed).
         (self.a1 / "agent_work.py").write_text("# agent\n")
         git("add", "agent_work.py", cwd=self.a1)
-        git("commit", "-m", "agent work", cwd=self.a1)
+        git("commit", "-m", "agent work", cwd=self.a1, env=self._env())
 
         # Then main diverges.
         (self.user_repo / "diverge.py").write_text("# diverge\n")
@@ -1742,9 +1751,9 @@ class TestPostCommitHook(unittest.TestCase):
 
         pre_rebase_sha = git_out("rev-parse", "HEAD", cwd=self.a1)
 
-        # Manual rebase (what the agent does before cav approve).
+        # Manual rebase via wrapper (triggers light sync: push).
         git("fetch", "host-cave", cwd=self.a1)
-        git("rebase", "host-cave/main", cwd=self.a1)
+        git("rebase", "host-cave/main", cwd=self.a1, env=self._env())
 
         post_rebase_sha = git_out("rev-parse", "HEAD", cwd=self.a1)
 
@@ -1757,7 +1766,7 @@ class TestPostCommitHook(unittest.TestCase):
         remote_sha = git_out("rev-parse", "cave/agent-1/main",
                              cwd=self.user_repo)
         self.assertEqual(remote_sha, post_rebase_sha,
-                         "hook did not push the rebased branch to the remote")
+                         "wrapper did not push the rebased branch to the remote")
 
         # Agent branch should be a fast-forward from main.
         merge_base = git_out("merge-base", "cave/main", "cave/agent-1/main",
@@ -1768,15 +1777,15 @@ class TestPostCommitHook(unittest.TestCase):
 
 
     def test_detached_head_no_spurious_branch(self):
-        """Post-commit hook on detached HEAD must not create spurious branches."""
+        """Git wrapper on detached HEAD must not create spurious branches."""
         # Detach HEAD at the current commit
         sha = git_out("rev-parse", "HEAD", cwd=self.a1)
         git("checkout", sha, cwd=self.a1)
 
-        # Commit on detached HEAD (hook fires)
+        # Commit on detached HEAD (wrapper fires)
         (self.a1 / "detached.py").write_text("# detached\n")
         git("add", "detached.py", cwd=self.a1)
-        git("commit", "-m", "detached commit", cwd=self.a1)
+        git("commit", "-m", "detached commit", cwd=self.a1, env=self._env())
 
         # No branch named HEAD should exist on the remote
         git("fetch", "cave", cwd=self.user_repo)
@@ -1787,6 +1796,27 @@ class TestPostCommitHook(unittest.TestCase):
                 continue
             self.assertNotIn("HEAD", branch,
                              f"spurious branch '{branch}' created from detached HEAD")
+
+    def test_reset_syncs_to_remote(self):
+        """Git wrapper pushes after git reset (the gap the wrapper fills)."""
+        # Agent makes two commits via wrapper
+        (self.a1 / "a.py").write_text("a\n")
+        git("add", "a.py", cwd=self.a1)
+        git("commit", "-m", "commit 1", cwd=self.a1, env=self._env())
+        (self.a1 / "b.py").write_text("b\n")
+        git("add", "b.py", cwd=self.a1)
+        git("commit", "-m", "commit 2", cwd=self.a1, env=self._env())
+
+        # Reset back one commit via wrapper (light sync: push)
+        git("reset", "--hard", "HEAD~1", cwd=self.a1, env=self._env())
+
+        # Remote should reflect the reset
+        git("fetch", "cave", cwd=self.user_repo)
+        local_sha = git_out("rev-parse", "HEAD", cwd=self.a1)
+        remote_sha = git_out("rev-parse", "cave/agent-1/main",
+                             cwd=self.user_repo)
+        self.assertEqual(local_sha, remote_sha,
+                         "reset was not synced to remote")
 
 
 if __name__ == "__main__":

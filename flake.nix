@@ -258,6 +258,8 @@
                   cd /
                 fi
               fi
+              # Git wrapper (syncs agent branches to host-cave on state changes)
+              [ -d "$HOME/bin" ] && export PATH="$HOME/bin:$PATH"
               # Git identity (fallback when no .gitconfig was copied)
               if [ ! -f "$HOME/.gitconfig" ]; then
                 [ -n "''${CAV_GIT_NAME:-}" ] && git config --global user.name "$CAV_GIT_NAME"

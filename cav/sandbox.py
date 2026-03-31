@@ -16,46 +16,80 @@ from pathlib import Path
 
 from . import config, daemon, git, user_env
 
-POST_COMMIT_HOOK = (
-    "#!/bin/sh\n"
-    "# Resolve the branch name. During a rebase HEAD is detached, so read\n"
-    "# the original branch from the rebase state directory.\n"
-    "branch=$(git symbolic-ref --short HEAD 2>/dev/null)\n"
-    "if [ -z \"$branch\" ] && [ -f .git/rebase-merge/head-name ]; then\n"
-    "  branch=$(sed 's|^refs/heads/||' .git/rebase-merge/head-name)\n"
-    "elif [ -z \"$branch\" ] && [ -f .git/rebase-apply/head-name ]; then\n"
-    "  branch=$(sed 's|^refs/heads/||' .git/rebase-apply/head-name)\n"
-    "fi\n"
-    "# Only push agent branches. Bail on detached HEAD, shared branches,\n"
-    "# or anything unexpected (e.g. 'detached HEAD' from rebase state).\n"
-    "case \"$branch\" in agent-[0-9]*/*) ;; *) exit 0 ;; esac\n"
-    "# During a rebase, skip the auto-rebase (would abort the outer one)\n"
-    "# but still push so the remote stays current.\n"
-    "if [ -d .git/rebase-merge ] || [ -d .git/rebase-apply ]; then\n"
-    "  git push --force host-cave \"HEAD:refs/heads/$branch\" >/dev/null 2>&1 || true\n"
-    "  exit 0\n"
-    "fi\n"
-    "git fetch host-cave >/dev/null 2>&1 || true\n"
-    "target=$(echo \"$branch\" | sed 's|^agent-[0-9]*/||')\n"
-    "if [ -n \"$target\" ] && git rev-parse \"host-cave/$target\" >/dev/null 2>&1; then\n"
-    "  if ! git rebase \"host-cave/$target\" >/dev/null 2>&1; then\n"
-    "    git rebase --abort >/dev/null 2>&1\n"
-    '    echo "WARNING: rebase onto host-cave/$target failed (conflicts). '
-    'Run: git fetch host-cave && git rebase host-cave/$target" >&2\n'
-    "  fi\n"
-    "fi\n"
-    "# Trap: detect if we are about to push a HEAD branch.\n"
-    "case \"$branch\" in *HEAD*)\n"
-    "  echo \"BUG: post-commit hook about to push HEAD branch\" >&2\n"
-    "  echo \"  branch=[$branch] HEAD=$(git rev-parse --short HEAD)\" >&2\n"
-    "  echo \"  symbolic-ref=$(git symbolic-ref HEAD 2>&1)\" >&2\n"
-    "  echo \"  rebase-merge=$(cat .git/rebase-merge/head-name 2>/dev/null)\" >&2\n"
-    "  echo \"  rebase-apply=$(cat .git/rebase-apply/head-name 2>/dev/null)\" >&2\n"
-    "  exit 1\n"
-    "  ;;\n"
-    "esac\n"
-    "git push --force host-cave HEAD >/dev/null 2>&1 || true\n"
-)
+GIT_WRAPPER = """\
+#!/bin/sh
+# Git wrapper: syncs agent branches to host-cave after state changes.
+# Installed at $HOME/bin/git inside the cave, shadowing the real git.
+# This replaces per-repo post-commit hooks, leaving .git/hooks/ free
+# for project use.
+
+# Prevent recursive sync (our own git calls shouldn't trigger again).
+if [ -n "$_CAV_GIT_SYNC" ]; then
+  exec "$_CAV_REAL_GIT" "$@"
+fi
+
+# Find the real git by searching PATH with our wrapper dir removed.
+_wrapper_dir="$(dirname "$(readlink -f "$0")")"
+_opath="$PATH"
+PATH=$(printf '%s' "$_opath" | tr ':' '\\n' | grep -v "^${_wrapper_dir}$" | paste -sd:)
+_CAV_REAL_GIT=$(command -v git)
+PATH="$_opath"
+export _CAV_REAL_GIT
+
+"$_CAV_REAL_GIT" "$@"
+_rc=$?
+[ $_rc -ne 0 ] && exit $_rc
+
+_cmd="$1"
+
+# Resolve branch name. During a rebase HEAD is detached, so read
+# the original branch from the rebase state directory.
+_branch=$("$_CAV_REAL_GIT" symbolic-ref --short HEAD 2>/dev/null)
+if [ -z "$_branch" ] && [ -f .git/rebase-merge/head-name ]; then
+  _branch=$(sed 's|^refs/heads/||' .git/rebase-merge/head-name)
+elif [ -z "$_branch" ] && [ -f .git/rebase-apply/head-name ]; then
+  _branch=$(sed 's|^refs/heads/||' .git/rebase-apply/head-name)
+fi
+
+# Only sync agent branches.
+case "$_branch" in agent-[0-9]*/*) ;; *) exit $_rc ;; esac
+
+# Trap: refuse to push a branch with HEAD in the name.
+case "$_branch" in *HEAD*)
+  echo "BUG: git wrapper about to push HEAD branch" >&2
+  echo "  branch=[$_branch] HEAD=$("$_CAV_REAL_GIT" rev-parse --short HEAD)" >&2
+  exit $_rc
+  ;;
+esac
+
+export _CAV_GIT_SYNC=1
+
+case "$_cmd" in
+  commit|cherry-pick|revert|am)
+    # Full sync: fetch, auto-rebase onto target, push.
+    # During a rebase, just push (don't start a nested rebase).
+    if [ -d .git/rebase-merge ] || [ -d .git/rebase-apply ]; then
+      "$_CAV_REAL_GIT" push --force host-cave "HEAD:refs/heads/$_branch" >/dev/null 2>&1 || true
+      exit $_rc
+    fi
+    "$_CAV_REAL_GIT" fetch host-cave >/dev/null 2>&1 || true
+    _target=$(echo "$_branch" | sed 's|^agent-[0-9]*/||')
+    if [ -n "$_target" ] && "$_CAV_REAL_GIT" rev-parse "host-cave/$_target" >/dev/null 2>&1; then
+      if ! "$_CAV_REAL_GIT" rebase "host-cave/$_target" >/dev/null 2>&1; then
+        "$_CAV_REAL_GIT" rebase --abort >/dev/null 2>&1
+        echo "WARNING: rebase onto host-cave/$_target failed (conflicts). Run: git fetch host-cave && git rebase host-cave/$_target" >&2
+      fi
+    fi
+    "$_CAV_REAL_GIT" push --force host-cave HEAD >/dev/null 2>&1 || true
+    ;;
+  reset|checkout|switch|merge|rebase)
+    # Light sync: just push current state.
+    "$_CAV_REAL_GIT" push --force host-cave "HEAD:refs/heads/$_branch" >/dev/null 2>&1 || true
+    ;;
+esac
+
+exit $_rc
+"""
 
 # Substituted at nix build time with the jail.nix sandbox binary path.
 SANDBOX_BIN = "@SANDBOX_BIN@"
@@ -406,12 +440,13 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
     daemon_proc, daemon_dir = daemon.start(agent_id, shared_repos_for_daemon)
 
 
-    # Ensure post-commit hook is installed in all workspaces (idempotent)
-    for ws, _, _ in workspaces:
-        hook = ws / ".git" / "hooks" / "post-commit"
-        if not hook.exists() or hook.read_text() != POST_COMMIT_HOOK:
-            hook.write_text(POST_COMMIT_HOOK)
-            hook.chmod(0o755)
+    # Install git wrapper in shared home (shadows real git on PATH).
+    agent_bin = home / "bin"
+    agent_bin.mkdir(parents=True, exist_ok=True)
+    wrapper = agent_bin / "git"
+    if not wrapper.exists() or wrapper.read_text() != GIT_WRAPPER:
+        wrapper.write_text(GIT_WRAPPER)
+        wrapper.chmod(0o755)
 
     # Network isolation: top-level caves get a pasta network namespace so
     # agents can only reach their own daemon port, not other agents'.
@@ -534,6 +569,7 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
 
     # cav bin dir (so agents can run `cav version` etc. inside the cave)
     env["CODING_CAVE_CAV_BIN"] = CAV_BIN
+
 
     # User environment from cave.nix
     if user_env_path:

@@ -226,26 +226,26 @@ class TestClaudeCommandConstruction(unittest.TestCase):
 
 
 
-class TestPostCommitHookGuard(unittest.TestCase):
-    """The post-commit hook must not auto-rebase during an active rebase.
+class TestGitWrapperGuard(unittest.TestCase):
+    """The git wrapper must not auto-rebase during an active rebase.
 
-    If the hook runs git rebase while an outer rebase is in progress,
+    If the wrapper runs git rebase while an outer rebase is in progress,
     the inner rebase fails and git rebase --abort kills the outer rebase.
     The branch silently stays at the old SHA.
     """
 
-    def test_hook_skips_rebase_when_rebase_in_progress(self):
-        """POST_COMMIT_HOOK must check for .git/rebase-merge or rebase-apply."""
-        from cav.sandbox import POST_COMMIT_HOOK
-        self.assertIn("rebase-merge", POST_COMMIT_HOOK,
-                      "Hook must check for .git/rebase-merge to avoid "
+    def test_wrapper_skips_rebase_when_rebase_in_progress(self):
+        """GIT_WRAPPER must check for .git/rebase-merge or rebase-apply."""
+        from cav.sandbox import GIT_WRAPPER
+        self.assertIn("rebase-merge", GIT_WRAPPER,
+                      "Wrapper must check for .git/rebase-merge to avoid "
                       "nested rebase aborting the outer rebase")
-        self.assertIn("rebase-apply", POST_COMMIT_HOOK,
-                      "Hook must check for .git/rebase-apply to avoid "
+        self.assertIn("rebase-apply", GIT_WRAPPER,
+                      "Wrapper must check for .git/rebase-apply to avoid "
                       "nested rebase aborting the outer rebase")
         # The guard must appear before the rebase command
-        guard_pos = POST_COMMIT_HOOK.index("rebase-merge")
-        rebase_pos = POST_COMMIT_HOOK.index("git rebase")
+        guard_pos = GIT_WRAPPER.index("rebase-merge")
+        rebase_pos = GIT_WRAPPER.index("$_CAV_REAL_GIT\" rebase")
         self.assertLess(guard_pos, rebase_pos,
                         "rebase-merge guard must come before git rebase command")
 
