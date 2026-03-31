@@ -23,6 +23,29 @@ def install_hooks(shared: Path):
         dst.chmod(0o755)
 
 
+def _require_commits(base: Path):
+    """Error if the repo has no commits."""
+    has_refs = git.git("rev-parse", "HEAD", cwd=base, check=False, capture=True, echo=False).returncode == 0
+    if not has_refs:
+        raise SystemExit(
+            "No commits yet. Commit your files first:\n"
+            "  git add -A && git commit -m 'Initial commit'")
+
+
+def _warn_dirty(base: Path):
+    """Warn if the working tree has uncommitted changes."""
+    dirty = git.git("status", "--porcelain", "--ignore-submodules",
+                    cwd=base, capture=True, echo=False).stdout
+    # Filter out .coding-cave/ which we just created.
+    dirty = "\n".join(
+        l for l in dirty.splitlines()
+        if not l.endswith(".coding-cave/") and not l.endswith(".coding-cave")
+    ).strip()
+    if dirty:
+        print("Warning: uncommitted changes will not be visible to agents.", file=sys.stderr)
+        print("Commit them first, or use 'cav cp' to copy files in later.\n", file=sys.stderr)
+
+
 def init(path: str):
     base = Path(path).resolve()
     if not (base / ".git").exists():
@@ -35,6 +58,10 @@ def init(path: str):
     if shared.exists():
         install_hooks(shared)
         config.register_project(base)
+        # Re-sync: push any commits added since last init.
+        _require_commits(base)
+        _warn_dirty(base)
+        git.git("push", "--no-set-upstream", config.SHARED_REMOTE, "--all", cwd=base, echo=False)
         print(f"Updated hooks at {shared}")
         return
 
@@ -49,6 +76,8 @@ def init(path: str):
     except subprocess.CalledProcessError:
         pass  # No conflicting remote, good
 
+    _require_commits(base)
+
     # Create bare repo
     cav.mkdir(parents=True, exist_ok=True)
     git.git("init", "--bare", str(shared), echo=False)
@@ -62,10 +91,8 @@ def init(path: str):
     # Add cave remote
     git.git("remote", "add", config.SHARED_REMOTE, str(shared), cwd=base, echo=False)
 
-    # Push all branches to cave (skip if repo has no commits yet)
-    has_refs = git.git("rev-parse", "HEAD", cwd=base, check=False, capture=True, echo=False).returncode == 0
-    if has_refs:
-        git.git("push", "--no-set-upstream", config.SHARED_REMOTE, "--all", cwd=base, echo=False)
+    _warn_dirty(base)
+    git.git("push", "--no-set-upstream", config.SHARED_REMOTE, "--all", cwd=base, echo=False)
 
     config.register_project(base)
     print(f"Initialized Coding Cave at {cav}")

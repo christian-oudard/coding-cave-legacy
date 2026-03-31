@@ -47,6 +47,11 @@ def create(base: Path, agent_id: str) -> Path:
     ws_path.parent.mkdir(parents=True, exist_ok=True)
     shared = config.shared_repo_path(base)
 
+    # Sync user repo to shared repo so the clone has all branches.
+    if not empty:
+        git.git("push", "--no-set-upstream", config.SHARED_REMOTE, "--all",
+                cwd=base, echo=False)
+
     # Lightweight clone sharing objects with the bare repo
     git.git("clone", "--shared", str(shared), str(ws_path), echo=False)
 

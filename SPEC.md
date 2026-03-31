@@ -10,7 +10,7 @@ Coding Cave gives multiple Claude agents full autonomy inside a security boundar
 
 **Git is the sole coordination mechanism.** No external messaging system. Agents discover state changes through normal git operations. Branch protection hooks enforce safety.
 
-**The host is the source of truth.** The host repo is canonical. The cave works on an overlay copy. Only commits cross the boundary. Uncommitted changes, working tree state, and staging area never cross.
+**The host is the source of truth.** The host repo is canonical. The cave works on an overlay copy. Only commits cross the boundary via git. Uncommitted changes, working tree state, and staging area never cross. `cav cp` is the escape hatch for moving individual files that should not be committed (data files, credentials, etc.).
 
 **Nix for reproducibility, overlays for mutability.** The environment is defined in a Nix flake. The nix store is mounted as a writable overlay so agents can install additional packages. Project files are also on overlays: host files are the read-only lower layer, cave modifications go to the upper layer.
 
@@ -91,7 +91,9 @@ Slug collisions (two different paths producing the same slug) are rejected at in
 
 ### `cav init`
 
-Initializes Coding Cave in a project directory. Sets up the shared bare repo, branch protection hooks, and registers the project in the global database.
+Initializes Coding Cave in a project directory. Sets up the shared bare repo, branch protection hooks, and registers the project in the global database. If the directory is not a git repo, runs `git init` first.
+
+Requires at least one commit. Agents clone from the shared repo, so there must be something to clone. Errors with a message telling the user to commit their files. Warns if there are uncommitted changes, since those won't be visible to agents.
 
 ### `cav [-c] [-p path ...] [--recursive]`
 
