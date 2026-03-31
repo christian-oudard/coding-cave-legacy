@@ -20,7 +20,7 @@ def approve(base: Path, agent_id: str | None = None, yes: bool = False):
             raise SystemExit(
                 f"Not on an agent branch (current: '{branch}').\n"
                 f"Usage: cav approve <agent-id>  (from any branch)\n"
-                f"   or: switch to an agent branch first."
+                f"  or switch to an agent branch first."
             )
         target = config.resolve_target(branch)
         agent_id = parsed[1]
