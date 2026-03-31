@@ -153,13 +153,13 @@ def status(base: Path, agent_filter: str | None = None, scoped: bool = True) -> 
         last_activity = 0.0
         for branch, target in branches:
             remote_agent = f"{config.CAVE_REMOTE}/{branch}"
-            target_ref = f"{config.CAVE_REMOTE}/{target}"
+            remote_target = f"{config.CAVE_REMOTE}/{target}"
             ts = git.commit_timestamp(remote_agent, cwd=base)
             if ts and ts > last_activity:
                 last_activity = ts
             try:
-                if git.has_merge_base(remote_agent, target_ref, cwd=base):
-                    lines = git.cherry_undelivered(target_ref, remote_agent, cwd=base)
+                if git.has_merge_base(remote_agent, remote_target, cwd=base):
+                    lines = git.cherry_undelivered(remote_target, remote_agent, cwd=base)
                     if lines:
                         unapproved.append((branch, len(lines), lines))
             except Exception:

@@ -23,7 +23,7 @@ def require_init(base: Path):
         if not config.project_path(config.project_slug(base)):
             raise SystemExit("Project not registered. Run: cav init")
         return
-    # Inside a cave the local bare repo isn't mounted, but the remote is.
+    # Inside a cave the bare repo is on the host; check for the cave remote instead.
     if int(os.environ.get("CODING_CAVE_DEPTH", "0")) > 0:
         try:
             git.git_output("remote", "get-url", config.CAVE_REMOTE, cwd=base)

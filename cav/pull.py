@@ -76,16 +76,16 @@ def _pull_agent(base: Path, local_branch: str, target: str):
 
 def _pull_shared(base: Path, local_branch: str, target_branch: str, force: bool):
     """Fast-forward merge a shared branch."""
-    remote_ref = f"{config.CAVE_REMOTE}/{target_branch}"
+    remote_target = f"{config.CAVE_REMOTE}/{target_branch}"
 
     try:
-        git.git_output("rev-parse", remote_ref, cwd=base)
+        git.git_output("rev-parse", remote_target, cwd=base)
     except Exception:
-        print(f"No remote branch '{remote_ref}'.")
+        print(f"No remote branch '{remote_target}'.")
         return
 
     local_sha = git.git_output("rev-parse", local_branch, cwd=base)
-    remote_sha = git.git_output("rev-parse", remote_ref, cwd=base)
+    remote_sha = git.git_output("rev-parse", remote_target, cwd=base)
 
     if local_sha == remote_sha:
         print("Already up to date.")
@@ -93,7 +93,7 @@ def _pull_shared(base: Path, local_branch: str, target_branch: str, force: bool)
 
     # Show incoming commits
     ahead = git.git_output(
-        "log", "--oneline", f"{local_branch}..{remote_ref}", cwd=base)
+        "log", "--oneline", f"{local_branch}..{remote_target}", cwd=base)
 
     if not ahead:
         print("Already up to date.")
@@ -102,13 +102,13 @@ def _pull_shared(base: Path, local_branch: str, target_branch: str, force: bool)
     count = len(ahead.splitlines())
 
     if force:
-        git.git("reset", "--hard", remote_ref, cwd=base, **config.v())
+        git.git("reset", "--hard", remote_target, cwd=base, **config.v())
     else:
         try:
-            git.git("merge", "--ff-only", remote_ref, cwd=base, **config.v())
+            git.git("merge", "--ff-only", remote_target, cwd=base, **config.v())
         except subprocess.CalledProcessError:
             print(f"\nOn branch {local_branch}")
-            print(f"Diverged from {remote_ref}.")
+            print(f"Diverged from {remote_target}.")
             if config.parse_agent_branch(local_branch):
                 print(f"  ** cav pull --force                # accept remote version **")
             else:

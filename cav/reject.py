@@ -15,11 +15,11 @@ def reject(base: Path, agent_id: str | None = None, yes: bool = False):
 
     git.git("fetch", "--prune", config.CAVE_REMOTE, cwd=base, **config.v())
 
-    remote_ref = f"{config.CAVE_REMOTE}/{branch}"
+    remote_target = f"{config.CAVE_REMOTE}/{branch}"
     try:
-        tip_sha = git.git_output("rev-parse", remote_ref, cwd=base)
+        tip_sha = git.git_output("rev-parse", remote_target, cwd=base)
     except Exception:
-        raise SystemExit(f"No remote branch '{remote_ref}'.")
+        raise SystemExit(f"No remote branch '{remote_target}'.")
 
     local_sha = git.git_output("rev-parse", "HEAD", cwd=base)
     if local_sha != tip_sha:
