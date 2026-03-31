@@ -336,8 +336,20 @@ def _setup_nix_overlay(agent_id: str) -> str:
 def _teardown_nix_overlay(agent_id: str):
     """Unmount the per-agent nix store overlay."""
     merged = config.nix_overlay_dir() / agent_id / "merged"
-    if merged.exists():
-        subprocess.run(["fusermount", "-u", str(merged)], check=False)
+    if not merged.exists():
+        return
+    r = subprocess.run(["fusermount3", "-uz", str(merged)],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        # Nix store fusermount3 isn't setuid; try system paths (NixOS).
+        for p in ["/run/wrappers/bin/fusermount3", "/usr/bin/fusermount3"]:
+            if Path(p).is_file():
+                r = subprocess.run([p, "-uz", str(merged)],
+                                   capture_output=True, text=True)
+                if r.returncode == 0:
+                    return
+        print(f"fusermount3 -uz {merged}: {r.stderr.strip()}",
+              file=sys.stderr)
 
 
 def _host_claude_json() -> Path | None:
@@ -440,9 +452,16 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
 
     user_env_path = user_env.build()
 
-    nix_db_dir = _seed_nix_db()
-
-    nix_merged = _setup_nix_overlay(agent_id)
+    # Nested caves inherit the parent's writable nix store overlay.
+    # At depth 0, mount a fresh fuse-overlayfs. At depth > 0, the parent's
+    # /nix/store is already writable; skip the mount (fusermount3 isn't
+    # setuid inside the cave) and let the jail inherit it.
+    if parent_depth == 0:
+        nix_db_dir = _seed_nix_db()
+        nix_merged = _setup_nix_overlay(agent_id)
+    else:
+        nix_db_dir = None
+        nix_merged = ""
 
     # Encode multiple workspaces as colon-separated lists
     ws_paths = ":".join(str(ws) for ws, _, _ in workspaces)
@@ -573,4 +592,5 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
 
     finally:
         daemon.stop(daemon_proc, daemon_dir)
-        _teardown_nix_overlay(agent_id)
+        if parent_depth == 0:
+            _teardown_nix_overlay(agent_id)

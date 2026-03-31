@@ -1521,11 +1521,11 @@ class TestCAV(unittest.TestCase):
         """cav -c must still work when the previous session made no commits.
 
         Repro: user runs `cav`, agent talks but makes zero commits, exits.
-        Then `cav -c` should resume the same agent. But _auto_cleanup_if_clean
-        sees no remote agent branches and deletes the agent from the registry,
-        so resolve_continue finds nothing and launches a fresh agent instead.
+        Then `cav -c` should resume the same agent. The finally block only
+        marks the agent as exited (no cleanup). The sweep at next launch
+        runs AFTER resolve_continue claims the agent, so it survives.
         """
-        from cav.cli import _auto_cleanup_if_clean
+        from cav.cli import _sweep_stale_agents
         from cav.init import init
 
         init(str(self.user_repo))
@@ -1536,18 +1536,18 @@ class TestCAV(unittest.TestCase):
         session_id = config.read_session_id(aid)
         self.assertIsNotNone(session_id)
 
-        # Agent exits (simulates the finally block in cli.agent)
+        # Agent exits (simulates the finally block: just mark exited)
         config.mark_agent_exited(aid)
-        _auto_cleanup_if_clean(self.user_repo, aid)
 
-        # Simulate `cav -c`: sweep stale agents, then resolve_continue
-        from cav.cli import _sweep_stale_agents
-        _sweep_stale_agents(self.user_repo)
-
+        # Simulate `cav -c`: resolve first (claims the agent), then sweep
         continued = config.continue_agent_id(self.user_repo)
         self.assertEqual(continued, aid,
-                         "Agent with no commits should survive cleanup "
-                         "so cav -c can resume it")
+                         "Agent with no commits should survive for cav -c")
+
+        # Sweep runs after resolve; agent is now running so it's skipped
+        _sweep_stale_agents(self.user_repo)
+        self.assertIn(continued, config.all_agent_ids(),
+                      "Running agent must not be swept")
         config.mark_agent_exited(continued)
 
 

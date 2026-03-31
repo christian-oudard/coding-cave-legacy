@@ -335,7 +335,8 @@
               # Wrap with runtime dependencies on PATH
               wrapProgram $out/bin/cav \
                 --prefix PATH : ${pkgs.lib.makeBinPath [
-                  pkgs.fuse-overlayfs pkgs.git pkgs.gnupg pkgs.passt
+                  pkgs.fuse-overlayfs pkgs.fuse3.bin
+                  pkgs.git pkgs.gnupg pkgs.passt
                   crinj.packages.${pkgs.stdenv.hostPlatform.system}.default
                 ]}
             '';

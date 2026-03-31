@@ -80,7 +80,6 @@ def agent(continue_agent, resume_session, extra_projects, recursive):
     """Launch an agent in a sandbox."""
     base = find_repo_root()
     require_init(base)
-    _sweep_stale_agents(base)
     from .workspace import create
     from .sandbox import launch
 
@@ -105,6 +104,10 @@ def agent(continue_agent, resume_session, extra_projects, recursive):
         agent_id = config.acquire_agent_id(base)
         session_id = config.read_session_id(agent_id)
         resuming = False
+
+    # Sweep after resolution so the continued agent is already marked
+    # running (pid set) and won't be cleaned up.
+    _sweep_stale_agents(base)
 
     projects = [(base, config.project_slug(base))]
 
@@ -140,7 +143,6 @@ def agent(continue_agent, resume_session, extra_projects, recursive):
         if session_id and not config.session_file_exists(projects[0][1], session_id):
             config.clear_session_id(agent_id)
         config.mark_agent_exited(agent_id)
-        _auto_cleanup_if_clean(base, agent_id)
     sys.exit(rc)
 
 
