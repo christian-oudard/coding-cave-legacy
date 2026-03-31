@@ -44,7 +44,7 @@ def start(agent_id: str, shared_repos: list[tuple[Path, str]]) -> tuple[subproce
     handler_module = Path(__file__).parent / "handler.py"
 
     proc = subprocess.Popen(
-        ["socat", f"TCP-LISTEN:{port},fork,reuseaddr",
+        ["socat", f"TCP-LISTEN:{port},fork,reuseaddr,bind=127.0.0.1",
          f"EXEC:{python_bin} {handler_module}"],
         start_new_session=True,
         stderr=subprocess.PIPE,
@@ -82,10 +82,10 @@ def _agent_port(agent_id: str) -> int:
     return config.DAEMON_BASE_PORT + depth * 100 + int(agent_id)
 
 
-def remote_url(agent_id: str, slug: str) -> str:
+def remote_url(agent_id: str, slug: str, host: str = "127.0.0.1") -> str:
     """Git remote URL for an agent to access a project's bare repo."""
     port = _agent_port(agent_id)
-    return f"git://127.0.0.1:{port}/{slug}"
+    return f"git://{host}:{port}/{slug}"
 
 
 def _kill_stale_listener(port: int) -> None:

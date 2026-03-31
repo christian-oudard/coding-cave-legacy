@@ -151,6 +151,18 @@ class TestCAV(unittest.TestCase):
             branch = git_out("rev-parse", "--abbrev-ref", "HEAD", cwd=ws)
             self.assertEqual(branch, f"agent-{name}/main")
 
+    def test_workspace_rejects_detached_head(self):
+        """New workspace from detached HEAD must fail, not create agent-N/HEAD."""
+        from cav.init import init
+        init(str(self.user_repo))
+
+        # Detach HEAD
+        head = git_out("rev-parse", "HEAD", cwd=self.user_repo)
+        git("checkout", head, cwd=self.user_repo)
+
+        with self.assertRaises(SystemExit):
+            workspace.create(self.user_repo, "1")
+
     def test_workspace_branch_sync_sets_tracking(self):
         """branch -f in workspace sync must set cave tracking for new branches.
 
@@ -1435,6 +1447,69 @@ class TestCAV(unittest.TestCase):
 
         config.mark_agent_exited(id1)
         config.mark_agent_exited(id2)
+
+    # -- stale-ref cleanup bug --
+
+    def test_cleanup_fetches_before_checking_branches(self):
+        """Cleanup must not remove agent whose branch is only in the bare repo.
+
+        Repro of the agent-fork bug: workspace pushes agent-1/main to the
+        bare repo, but the user's project dir never fetches. Without a
+        fetch, git branch -r sees no agent branches and the cleanup
+        deletes the agent from the registry. Then cav -c creates agent 2
+        instead of continuing agent 1.
+        """
+        from cav import git as cavgit
+        from cav.init import init
+        init(str(self.user_repo))
+
+        aid = config.acquire_agent_id(self.user_repo)
+        ws = self._create_agent(aid)
+
+        # Agent does work and pushes from its workspace
+        (ws / "work.txt").write_text("agent work\n")
+        git("add", "work.txt", cwd=ws)
+        git("commit", "-m", "agent work", cwd=ws)
+        ab = config.agent_branch("main", aid)
+        git("push", config.SHARED_REMOTE, ab,
+            f"--push-option=agent={aid}", cwd=ws)
+
+        # Agent exits
+        config.mark_agent_exited(aid)
+
+        # User's project dir has NOT fetched. Verify it can't see the
+        # agent branch locally.
+        stale_branches = cavgit.remote_branches(
+            config.SHARED_REMOTE, cwd=self.user_repo)
+        agent_visible = any(
+            config.parse_agent_branch(b) and
+            config.parse_agent_branch(b)[1] == aid
+            for b in stale_branches
+        )
+        self.assertFalse(agent_visible,
+                         "pre-condition: user repo must NOT see agent branch "
+                         "before fetching")
+
+        # After fetching, the agent branch becomes visible
+        cavgit.git("fetch", config.SHARED_REMOTE, cwd=self.user_repo,
+                   echo=False, check=False, capture=True)
+        fresh_branches = cavgit.remote_branches(
+            config.SHARED_REMOTE, cwd=self.user_repo)
+        agent_visible_after = any(
+            config.parse_agent_branch(b) and
+            config.parse_agent_branch(b)[1] == aid
+            for b in fresh_branches
+        )
+        self.assertTrue(agent_visible_after,
+                        "agent branch must be visible after fetching")
+
+        # Agent should still be in the registry (not erroneously swept)
+        self.assertIn(aid, config.all_agent_ids())
+
+        # cav -c should continue the same agent, not create a new one
+        continued = config.continue_agent_id(self.user_repo)
+        self.assertEqual(continued, aid)
+        config.mark_agent_exited(continued)
 
 
 class TestPostCommitHook(unittest.TestCase):

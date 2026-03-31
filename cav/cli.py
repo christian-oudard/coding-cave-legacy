@@ -156,6 +156,8 @@ def _auto_cleanup_if_clean(base, agent_id):
     """Remove agent if all work is approved."""
     from .status import _remove_agent
     try:
+        git.git("fetch", config.SHARED_REMOTE, cwd=base, echo=False,
+                check=False, capture=True)
         branches = git.remote_branches(config.SHARED_REMOTE, cwd=base)
     except Exception:
         return

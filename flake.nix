@@ -201,7 +201,21 @@
               fi
             '')
 
+            # DNS: override resolv.conf when inside a pasta network namespace.
+            # The host's resolv.conf may point to a loopback resolver (e.g.
+            # systemd-resolved at 127.0.0.53) which is unreachable in the
+            # namespace's isolated loopback. Point to the mapped host address
+            # instead; pasta's --dns-forward handles the actual forwarding.
+            (add-runtime ''
+              if [ -n "''${CODING_CAVE_DNS_SERVER:-}" ]; then
+                _RESOLV=$(mktemp)
+                echo "nameserver ''${CODING_CAVE_DNS_SERVER}" > "$_RESOLV"
+                RUNTIME_ARGS+=(--ro-bind "$_RESOLV" /etc/resolv.conf)
+              fi
+            '')
+
             # Forward identity and config into the cave
+            (try-fwd-env "CODING_CAVE_DNS_SERVER")
             (try-fwd-env "CAV_GIT_NAME")
             (try-fwd-env "CAV_GIT_EMAIL")
             (try-fwd-env "CAV_GIT_SIGNINGKEY")
@@ -281,7 +295,7 @@
             nativeBuildInputs = [ pkgs.makeWrapper ];
             buildInputs = [ python ];
             propagatedBuildInputs = with pkgs; [
-              fuse-overlayfs git socat
+              fuse-overlayfs git socat passt
             ];
 
             installPhase = ''
@@ -315,7 +329,7 @@
               # Wrap with runtime dependencies on PATH
               wrapProgram $out/bin/cav \
                 --prefix PATH : ${pkgs.lib.makeBinPath [
-                  pkgs.fuse-overlayfs pkgs.git pkgs.gnupg
+                  pkgs.fuse-overlayfs pkgs.git pkgs.gnupg pkgs.passt
                   crinj.packages.${pkgs.stdenv.hostPlatform.system}.default
                 ]}
             '';

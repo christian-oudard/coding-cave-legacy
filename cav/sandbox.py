@@ -124,6 +124,10 @@ def _gpg_socket() -> str | None:
 
 
 CRINJ_PORT = 10255
+# Inside pasta's network namespace, 127.0.0.1 is the namespace's own
+# loopback. Host loopback is mapped to this address via pasta's
+# --map-host-loopback so the cave can reach host-side services.
+PASTA_HOST_LOOPBACK = "10.0.2.2"
 
 
 def _host_home() -> Path:
@@ -372,8 +376,10 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
     agent_id = agent_name.split("@")[-1]
 
     # Start git daemon for remote isolation (bare repos served over git://)
+
     shared_repos_for_daemon = [(sr, slug) for _, sr, slug in workspaces]
     daemon_proc, daemon_dir = daemon.start(agent_id, shared_repos_for_daemon)
+
 
     # Ensure post-commit hook is installed in all workspaces (idempotent)
     for ws, _, _ in workspaces:
@@ -382,13 +388,22 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
             hook.write_text(POST_COMMIT_HOOK)
             hook.chmod(0o755)
 
-    # Update workspace remotes to use git:// via daemon
+    # Network isolation: top-level caves get a pasta network namespace so
+    # agents can only reach their own daemon port, not other agents'.
+    # Nested caves inherit the parent's namespace (already isolated).
+    parent_depth = int(os.environ.get("CODING_CAVE_DEPTH", "0"))
+    use_pasta = parent_depth == 0
+    daemon_host = PASTA_HOST_LOOPBACK if use_pasta else "127.0.0.1"
+
+    # Update workspace remotes to use git:// via daemon (localhost for
+    # host-side sync, then switch to pasta address for inside the namespace)
     for ws, _, slug in workspaces:
         url = daemon.remote_url(agent_id, slug)
         git.git("remote", "set-url", config.SHARED_REMOTE, url,
                 cwd=ws, echo=False)
 
     # Sync: fetch latest and fast-forward local shared branches
+
     for ws, _, _ in workspaces:
         git.git("fetch", config.SHARED_REMOTE, cwd=ws, echo=False, check=False,
                 capture=True)
@@ -402,10 +417,18 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
             git.git("branch", "-f", branch, remote_ref, cwd=ws,
                     echo=False, check=False, capture=True)
 
+    # Now set the remote to the pasta-reachable address for inside the namespace
+    for ws, _, slug in workspaces:
+        url = daemon.remote_url(agent_id, slug, host=daemon_host)
+        git.git("remote", "set-url", config.SHARED_REMOTE, url,
+                cwd=ws, echo=False)
+
     # Build user environment from cave.nix (cached)
+
     user_env_path = user_env.build()
 
     nix_db_dir = _seed_nix_db()
+
     nix_merged = _setup_nix_overlay(agent_id)
 
     # Encode multiple workspaces as colon-separated lists
@@ -438,6 +461,9 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
 
     if recursive:
         env["CODING_CAVE_RECURSIVE"] = "1"
+
+    if use_pasta:
+        env["CODING_CAVE_DNS_SERVER"] = PASTA_HOST_LOOPBACK
 
     # Lineage: build dot-separated chain of parent agent names
     parent_lineage = os.environ.get("CODING_CAVE_LINEAGE", "")
@@ -481,7 +507,8 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
     # Crinj proxy (required for API auth).
     # Claude Code requires a token env var to consider itself "logged in",
     # but the actual credential is injected by crinj at the HTTP level.
-    env["CODING_CAVE_PROXY_ADDR"] = _start_crinj()
+    _start_crinj()
+    env["CODING_CAVE_PROXY_ADDR"] = f"{daemon_host}:{CRINJ_PORT}"
     env["CODING_CAVE_PROXY_CA"] = str(_crinj_ca_path())
     # Placeholder token so Claude Code considers itself "logged in".
     # Crinj replaces the Authorization header, so this never hits the API.
@@ -498,7 +525,24 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
                 claude_cmd += ["--resume", session_id]
             else:
                 claude_cmd += ["--session-id", session_id]
-        proc = subprocess.Popen(claude_cmd, env=env)
+        if use_pasta:
+            pasta_bin = shutil.which("pasta")
+            if not pasta_bin:
+                raise SystemExit("pasta not found on PATH (install passt package)")
+            daemon_port = daemon._agent_port(agent_id)
+            pasta_cmd = [
+                pasta_bin, "--quiet", "--config-net",
+                "--map-host-loopback", PASTA_HOST_LOOPBACK,
+                "--dns-forward", PASTA_HOST_LOOPBACK,
+                "-T", f"{daemon_port},{CRINJ_PORT}",
+                "-t", "none",
+                "-u", "none", "-U", "none",
+                "--",
+            ]
+        else:
+            pasta_cmd = []
+
+        proc = subprocess.Popen(pasta_cmd + claude_cmd, env=env)
 
         def fwd(s, _f):
             _signal_descendants(proc.pid, s)

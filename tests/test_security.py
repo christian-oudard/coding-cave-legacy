@@ -307,6 +307,38 @@ class TestAgentIsolation(DaemonSecurityBase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("REJECTED", result.stderr)
 
+    def test_cross_daemon_port_hopping(self):
+        """Agent 1 connecting to agent 2's daemon port gains agent-2 identity.
+
+        At the daemon level, identity is bound to which daemon serves the
+        connection, not which client connects. This test confirms the daemon
+        behavior. The actual mitigation is in sandbox.py: each top-level
+        agent runs inside a pasta network namespace that only forwards its
+        own daemon port, making other agents' ports unreachable.
+        """
+        # Start a second daemon for agent 2
+        daemon2_proc, daemon2_dir = daemon.start(
+            "2", [(self.shared, self.slug)])
+        try:
+            ws1 = self._ws("1")
+            (ws1 / "poison.txt").write_text("injected by agent 1\n")
+            git("add", "poison.txt", cwd=ws1)
+            git("commit", "-m", "malicious commit", cwd=ws1)
+
+            # Agent 1 pushes through agent 2's daemon port
+            port2 = daemon._agent_port("2")
+            url2 = f"git://127.0.0.1:{port2}/{self.slug}"
+            result = git(
+                "push", url2, "HEAD:refs/heads/agent-2/main",
+                cwd=ws1, check=False,
+            )
+            # At the daemon level this succeeds (agent 2's daemon sets
+            # CAV_AGENT_ID=2). Mitigated by pasta network isolation.
+            self.assertEqual(result.returncode, 0,
+                "Expected port-hop push to succeed (mitigated by pasta)")
+        finally:
+            daemon.stop(daemon2_proc, daemon2_dir)
+
     def test_non_branch_ref_push(self):
         """Agent pushing a tag or note ref. Documents current behavior."""
         ws = self._ws("1")
