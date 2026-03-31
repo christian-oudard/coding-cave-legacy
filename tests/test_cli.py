@@ -395,13 +395,13 @@ class TestContinueFlag(unittest.TestCase):
         self.assertNotIn("unrecognized arguments", result.stderr)
 
     def test_resume_flag_recognized(self):
-        """cav -r <uuid> is a valid argument."""
-        result = cav_cli("-r", "some-uuid", cwd="/tmp", check=False)
+        """cav -r @3 is a valid argument."""
+        result = cav_cli("-r", "@3", cwd="/tmp", check=False)
         self.assertNotIn("unrecognized arguments", result.stderr)
 
     def test_resume_long_flag_recognized(self):
-        """cav --resume <uuid> is a valid argument."""
-        result = cav_cli("--resume", "some-uuid", cwd="/tmp", check=False)
+        """cav --resume coding-cave@3 is a valid argument."""
+        result = cav_cli("--resume", "coding-cave@3", cwd="/tmp", check=False)
         self.assertNotIn("unrecognized arguments", result.stderr)
 
 
@@ -443,11 +443,12 @@ class TestSessionResume(unittest.TestCase):
         from cav import config
         self.assertIsNone(config.find_agent_by_session("deadbeef-dead-dead-dead-deadbeefcafe"))
 
-    def test_resume_unknown_uuid_does_not_error_on_no_agent(self):
-        """cav --resume <unknown-uuid> no longer errors with 'No agent owns session'."""
-        result = cav_cli("--resume", "deadbeef-dead-dead-dead-deadbeefcafe",
-                         cwd="/tmp", check=False)
-        self.assertNotIn("No agent owns session", result.stderr)
+    def test_resume_invalid_agent_gives_error(self):
+        """cav --resume with a non-numeric ID gives a clear error."""
+        from cav.cli import cli
+        from click.testing import CliRunner
+        result = CliRunner().invoke(cli, ["agent", "--resume", "not-a-number"])
+        self.assertIn("Invalid agent", result.output)
 
     def test_write_then_find_session(self):
         """write_session_id + find_agent_by_session round-trip."""

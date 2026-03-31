@@ -70,13 +70,13 @@ def init(path):
 @cli.command()
 @click.option("-c", "--continue", "continue_agent", is_flag=True,
               help="Continue the most recently paused agent")
-@click.option("-r", "--resume", "resume_session", metavar="UUID",
-              help="Resume a specific Claude session by UUID")
+@click.option("-r", "--resume", "resume_agent", metavar="AGENT",
+              help="Resume a specific agent (e.g. @3, coding-cave@3)")
 @click.option("-p", "--project", "extra_projects", multiple=True, metavar="PATH",
               help="Additional project to mount (repeatable)")
 @click.option("--recursive", is_flag=True,
               help="Allow agent to launch subcaves (exposes /dev/fuse)")
-def agent(continue_agent, resume_session, extra_projects, recursive):
+def agent(continue_agent, resume_agent, extra_projects, recursive):
     """Launch an agent in a sandbox."""
     base = find_repo_root()
     require_init(base)
@@ -87,16 +87,12 @@ def agent(continue_agent, resume_session, extra_projects, recursive):
     # agent-1/main tells us which agent to continue.
     on_agent_branch = config.parse_agent_branch(git.current_branch(cwd=base))
 
-    if resume_session:
-        owner = config.find_agent_by_session(resume_session)
-        if owner:
-            agent_id = config.continue_agent_id(base, owner)
-        else:
-            # Session not in registry — adopt it with a fresh agent slot.
-            agent_id = config.acquire_agent_id(base)
-            config.write_session_id(agent_id, resume_session)
-        session_id = resume_session
-        resuming = True
+    if resume_agent:
+        aid = resume_agent.lstrip("@").split("@")[-1]
+        if not config.AGENT_ID_RE.match(aid):
+            raise SystemExit(
+                f"Invalid agent '{resume_agent}'. Use @<id> or <slug>@<id>.")
+        agent_id, session_id, resuming = config.resolve_continue(base, aid)
     elif continue_agent:
         hint = on_agent_branch[1] if on_agent_branch else None
         agent_id, session_id, resuming = config.resolve_continue(base, hint)
@@ -106,7 +102,7 @@ def agent(continue_agent, resume_session, extra_projects, recursive):
         resuming = False
 
     # Restore saved launch options when continuing
-    if continue_agent or resume_session:
+    if continue_agent or resume_agent:
         saved_slugs, saved_recursive = config.read_agent_launch_opts(agent_id)
         if not extra_projects and saved_slugs:
             extra_projects = tuple(
