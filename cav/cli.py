@@ -368,6 +368,17 @@ def _cmd_remove_all_agents(base, yes=False):
     print(f"Removed {n} agent {s}.")
 
 
+@cli.command()
+@click.argument("branch")
+@click.argument("agent_id", required=False)
+def checkout(branch, agent_id):
+    """Retarget an agent to deliver to a different branch."""
+    base = find_repo_root()
+    require_init(base)
+    from .checkout import checkout as _checkout
+    _checkout(base, branch, agent_id=agent_id)
+
+
 @cli.command("prune-branches")
 def prune_branches():
     """Delete orphaned local agent branches."""
@@ -421,7 +432,7 @@ def main():
     argv = clean
 
     subcmds = {
-        "init", "agent", "approve", "reject", "pull", "push",
+        "init", "agent", "approve", "reject", "pull", "push", "checkout",
         "status", "version", "remove-agent", "prune-branches", "cp",
     }
     if not argv:

@@ -131,6 +131,12 @@ On **agent branches**, always hard-resets to the remote agent branch. Agent bran
 
 Pushes the current branch to the cave remote. With `--force`, force-pushes (for rollback).
 
+### `cav checkout <branch> [agent-id]`
+
+Retargets an agent to deliver to a different shared branch. Creates the target branch on cave if it doesn't exist (forked from the old target). Agent ID is inferred from the current branch if on an agent branch, otherwise required.
+
+On the host: renames the agent branch in the bare repo and the agent's workspace directly. On an agent branch (inside cave): renames the local branch, attempts a rebase onto the new target (aborts silently on conflict), and pushes. The post-commit hook handles ongoing rebase on subsequent commits.
+
 ### Idempotency
 
 `cav pull` and `cav push` are idempotent. Running them multiple times is equivalent to running once. A pull with nothing new says "Already up to date." A push with nothing new is a no-op.

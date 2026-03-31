@@ -1412,6 +1412,94 @@ class TestCAV(unittest.TestCase):
         self.assertNotIn("bad.py", files)
 
 
+    # -- cav checkout --
+
+    def test_checkout_retargets_agent_from_cave(self):
+        """cav checkout on an agent branch retargets to new shared branch."""
+        from cav.checkout import checkout as _checkout
+
+        agents = self._init_and_agents("1")
+        ws = agents["1"]
+
+        (ws / "work.py").write_text("# work\n")
+        git("add", "work.py", cwd=ws)
+        git("commit", "-m", "Agent work", cwd=ws)
+        git("push", "cave", "agent-1/main", cwd=ws, env=agent_env("1"))
+
+        # Agent retargets (auto-creates standalone from main)
+        _checkout(ws, "standalone")
+
+        # Branch renamed
+        current = git_out("branch", "--show-current", cwd=ws)
+        self.assertEqual(current, "agent-1/standalone")
+
+        # Remote has new branch and target, old agent branch gone
+        git("fetch", "cave", "--prune", cwd=self.user_repo)
+        branches = git_out("branch", "-r", cwd=self.user_repo)
+        self.assertIn("cave/agent-1/standalone", branches)
+        self.assertIn("cave/standalone", branches)
+        self.assertNotIn("cave/agent-1/main", branches)
+
+        # Agent's commit is still there
+        log = git_out("log", "--oneline", cwd=ws)
+        self.assertIn("Agent work", log)
+
+    def test_checkout_retargets_from_host(self):
+        """cav checkout from the host renames bare repo and workspace."""
+        from cav.checkout import checkout as _checkout
+
+        agents = self._init_and_agents("1")
+        ws = agents["1"]
+
+        (ws / "work.py").write_text("# work\n")
+        git("add", "work.py", cwd=ws)
+        git("commit", "-m", "Agent work", cwd=ws)
+        git("push", "cave", "agent-1/main", cwd=ws, env=agent_env("1"))
+
+        # Host retargets agent 1 from main
+        cav_cli("checkout", "standalone", "1", cwd=self.user_repo)
+
+        # Bare repo has renamed branch
+        shared = self.user_repo / ".coding-cave" / "cave-shared.git"
+        bare_branches = git_out("branch", cwd=shared)
+        self.assertIn("agent-1/standalone", bare_branches)
+        self.assertNotIn("agent-1/main", bare_branches)
+        # Target branch was auto-created
+        self.assertIn("standalone", bare_branches)
+
+        # Workspace branch also renamed
+        ws_branch = git_out("branch", "--show-current", cwd=ws)
+        self.assertEqual(ws_branch, "agent-1/standalone")
+
+    def test_checkout_creates_target_branch(self):
+        """cav checkout auto-creates the target branch if it doesn't exist."""
+        from cav.checkout import checkout as _checkout
+
+        agents = self._init_and_agents("1")
+        ws = agents["1"]
+
+        (ws / "work.py").write_text("# work\n")
+        git("add", "work.py", cwd=ws)
+        git("commit", "-m", "Agent work", cwd=ws)
+        git("push", "cave", "agent-1/main", cwd=ws, env=agent_env("1"))
+
+        # Target doesn't exist yet
+        _checkout(ws, "new-feature")
+
+        # Target was created from main
+        git("fetch", "cave", cwd=self.user_repo)
+        main_sha = git_out("rev-parse", "cave/main", cwd=self.user_repo)
+        new_sha = git_out("rev-parse", "cave/new-feature", cwd=self.user_repo)
+        self.assertEqual(main_sha, new_sha)
+
+    def test_checkout_rejects_agent_name(self):
+        """cav checkout rejects agent-named branches."""
+        self._init()
+        result = cav_cli("checkout", "agent-1/main", cwd=self.user_repo,
+                         check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("agent branch", result.stderr)
+
     # -- cross-depth isolation --
 
     def test_daemon_port_isolated_by_depth(self):
