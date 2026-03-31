@@ -245,8 +245,8 @@ def status(agent, all_projects):
         for slug, path in projects:
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
-                has_agents = _status(Path(path), scoped=False)
-            entries.append((has_agents, slug, buf.getvalue()))
+                last_activity = _status(Path(path), scoped=False)
+            entries.append((last_activity, slug, buf.getvalue()))
         print(format_all(entries))
         return
     base = find_repo_root()

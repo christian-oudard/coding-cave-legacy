@@ -7,14 +7,15 @@ from pathlib import Path
 from . import config, git
 
 
-def format_all(entries: list[tuple[bool, str, str]]) -> str:
-    """Format multi-project status from (has_agents, slug, output) tuples."""
-    active = [(s, o) for has, s, o in entries if has]
-    inactive = sorted(s for has, s, _ in entries if not has)
+def format_all(entries: list[tuple[float, str, str]]) -> str:
+    """Format multi-project status from (last_activity, slug, output) tuples."""
+    active = [(ts, s, o) for ts, s, o in entries if ts]
+    inactive = sorted(s for ts, s, _ in entries if not ts)
     if not active:
         return "No running agents in any project."
+    active.sort(key=lambda a: a[0], reverse=True)
     parts = []
-    for slug, output in active:
+    for _, slug, output in active:
         parts.append(f"=== {slug} ===\n{output}")
     if inactive:
         parts.append(f"No running agents in: {', '.join(inactive)}")
@@ -31,6 +32,34 @@ def _format_age(timestamp: float) -> str:
     if delta < 86400:
         return f"{delta // 3600}h ago"
     return f"{delta // 86400}d ago"
+
+
+# Agent info tuple: (last_activity, agent_id, name, running, state, unapproved)
+# unapproved: list of (branch, ahead_count, commit_lines)
+AgentInfo = tuple[float, str, str, bool, str, list[tuple[str, int, list[str]]]]
+
+
+def sort_agents(agents: list[AgentInfo]) -> list[AgentInfo]:
+    """Sort agents by last activity (most recent first), drop idle ones."""
+    agents = sorted(agents, key=lambda a: a[0], reverse=True)
+    return [a for a in agents if a[3] or a[5]]  # running or has unapproved
+
+
+def format_agents(agents: list[AgentInfo], max_commits: int | None = 3) -> str:
+    """Format sorted agent list into display text."""
+    lines = []
+    for last_activity, _, name, _, state, unapproved in agents:
+        age = _format_age(last_activity) if last_activity else ""
+        header = f"{name}  ({state})" + (f"  {age}" if age else "")
+        lines.append(header)
+        for branch, ahead, commit_lines in unapproved:
+            n = "commit" if ahead == 1 else "commits"
+            lines.append(f"  {ahead} unapproved {n} on {branch}")
+            for line in (commit_lines if max_commits is None else commit_lines[:max_commits]):
+                lines.append(f"    {line}")
+            if max_commits and ahead > max_commits:
+                lines.append(f"    ... and {ahead - max_commits} more")
+    return "\n".join(lines)
 
 
 def _remove_agent(base: Path, agent_id: str, branches: list[str]):
@@ -51,8 +80,8 @@ def _remove_agent(base: Path, agent_id: str, branches: list[str]):
                 shutil.rmtree(ws)
 
 
-def status(base: Path, agent_filter: str | None = None, scoped: bool = True) -> bool:
-    """Show agent status. Returns True if any active agents were displayed."""
+def status(base: Path, agent_filter: str | None = None, scoped: bool = True) -> float:
+    """Show agent status. Returns the most recent activity timestamp (0.0 if none)."""
     git.git("fetch", "--prune", config.SHARED_REMOTE, cwd=base, **config.v())
 
     if not agent_filter:
@@ -93,14 +122,14 @@ def status(base: Path, agent_filter: str | None = None, scoped: bool = True) -> 
             print(f"No agent {agent_filter} in registry.")
         elif scoped:
             print(f"No running agents in {slug}.")
-        return False
+        return 0.0
 
     verbose = config.verbose or bool(agent_filter)
 
-    MAX_COMMITS = None if verbose else 3
+    max_commits = None if verbose else 3
 
-    # Collect agent info and sort by last activity (oldest first)
-    agents = []
+    # Collect agent info
+    agents: list[AgentInfo] = []
     for agent_id, branches in by_agent.items():
         name = config.display_name(base, agent_id)
         running = config.is_agent_running(agent_id)
@@ -138,31 +167,14 @@ def status(base: Path, agent_filter: str | None = None, scoped: bool = True) -> 
 
         agents.append((last_activity, agent_id, name, running, state, unapproved))
 
-    # Sort by last activity, most recent first; drop idle (not running, no pending work)
-    agents.sort(key=lambda a: a[0], reverse=True)
-    agents = [(ts, aid, name, run, state, un) for ts, aid, name, run, state, un in agents
-              if run or un]
+    agents = sort_agents(agents)
 
     if not agents:
         if agent_filter:
             print(f"No agent {agent_filter} in registry.")
         elif scoped:
             print(f"No running agents in {slug}.")
-        return False
+        return 0.0
 
-    for last_activity, agent_id, name, running, state, unapproved in agents:
-        age = _format_age(last_activity) if last_activity else ""
-        header = f"{name}  ({state})" + (f"  {age}" if age else "")
-
-        if not unapproved:
-            print(header)
-        else:
-            print(header)
-            for branch, ahead, lines in unapproved:
-                n = "commit" if ahead == 1 else "commits"
-                print(f"  {ahead} unapproved {n} on {branch}")
-                for line in (lines if MAX_COMMITS is None else lines[:MAX_COMMITS]):
-                    print(f"    {line}")
-                if MAX_COMMITS and ahead > MAX_COMMITS:
-                    print(f"    ... and {ahead - MAX_COMMITS} more")
-    return True
+    print(format_agents(agents, max_commits))
+    return agents[0][0]  # most recent activity timestamp

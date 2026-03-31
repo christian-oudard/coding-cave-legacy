@@ -526,17 +526,17 @@ class TestFormatAll(unittest.TestCase):
 
     def test_no_agents_anywhere(self):
         entries = [
-            (False, "alpha", ""),
-            (False, "beta", ""),
+            (0.0, "alpha", ""),
+            (0.0, "beta", ""),
         ]
         self.assertEqual(self.format_all(entries),
                          "No running agents in any project.")
 
     def test_active_shown_inactive_summarized(self):
         entries = [
-            (True, "onecli", "onecli@3  (running)  1h ago\n"),
-            (False, "coding-cave", ""),
-            (False, "dotfiles", ""),
+            (1000.0, "onecli", "onecli@3  (running)  1h ago\n"),
+            (0.0, "coding-cave", ""),
+            (0.0, "dotfiles", ""),
         ]
         out = self.format_all(entries)
         self.assertIn("=== onecli ===", out)
@@ -548,18 +548,18 @@ class TestFormatAll(unittest.TestCase):
 
     def test_inactive_sorted_alphabetically(self):
         entries = [
-            (True, "zoo", "zoo@1  (running)\n"),
-            (False, "delta", ""),
-            (False, "alpha", ""),
-            (False, "charlie", ""),
+            (1000.0, "zoo", "zoo@1  (running)\n"),
+            (0.0, "delta", ""),
+            (0.0, "alpha", ""),
+            (0.0, "charlie", ""),
         ]
         out = self.format_all(entries)
         self.assertIn("No running agents in: alpha, charlie, delta", out)
 
     def test_all_active(self):
         entries = [
-            (True, "proj-a", "a@1  (running)\n"),
-            (True, "proj-b", "b@2  (paused)\n"),
+            (2000.0, "proj-a", "a@1  (running)\n"),
+            (1000.0, "proj-b", "b@2  (paused)\n"),
         ]
         out = self.format_all(entries)
         self.assertIn("=== proj-a ===", out)
@@ -568,11 +568,93 @@ class TestFormatAll(unittest.TestCase):
 
     def test_single_inactive(self):
         entries = [
-            (True, "active", "active@1  (running)\n"),
-            (False, "lonely", ""),
+            (1000.0, "active", "active@1  (running)\n"),
+            (0.0, "lonely", ""),
         ]
         out = self.format_all(entries)
         self.assertIn("No running agents in: lonely", out)
+
+    def test_projects_sorted_by_most_recent_activity(self):
+        """Projects with more recent activity appear first."""
+        entries = [
+            (1000.0, "oldest", "oldest@1  (running)\n"),
+            (3000.0, "newest", "newest@2  (running)\n"),
+            (2000.0, "middle", "middle@3  (running)\n"),
+            (0.0, "inactive", ""),
+        ]
+        out = self.format_all(entries)
+        newest_pos = out.index("=== newest ===")
+        middle_pos = out.index("=== middle ===")
+        oldest_pos = out.index("=== oldest ===")
+        self.assertLess(newest_pos, middle_pos)
+        self.assertLess(middle_pos, oldest_pos)
+
+
+class TestAgentSorting(unittest.TestCase):
+    """Unit tests for agent sorting and formatting (no git needed)."""
+
+    def setUp(self):
+        from cav.status import sort_agents, format_agents
+        self.sort_agents = sort_agents
+        self.format_agents = format_agents
+
+    def _agent(self, ts, aid, name, running, state="running", unapproved=None):
+        return (ts, aid, name, running, state, unapproved or [])
+
+    def test_sort_most_recent_first(self):
+        agents = [
+            self._agent(1000.0, "1", "proj@1", True),
+            self._agent(3000.0, "3", "proj@3", True),
+            self._agent(2000.0, "2", "proj@2", True),
+        ]
+        result = self.sort_agents(agents)
+        ids = [a[1] for a in result]
+        self.assertEqual(ids, ["3", "2", "1"])
+
+    def test_sort_drops_idle(self):
+        agents = [
+            self._agent(2000.0, "1", "proj@1", True),
+            self._agent(3000.0, "2", "proj@2", False, "idle"),
+            self._agent(1000.0, "3", "proj@3", False, "paused",
+                        [("agent-3/main", 1, ["abc feat"])]),
+        ]
+        result = self.sort_agents(agents)
+        ids = [a[1] for a in result]
+        self.assertEqual(ids, ["1", "3"])
+
+    def test_format_agents_order_preserved(self):
+        agents = [
+            self._agent(3000.0, "2", "proj@2", True),
+            self._agent(2000.0, "3", "proj@3", True),
+            self._agent(1000.0, "1", "proj@1", True),
+        ]
+        out = self.format_agents(agents)
+        pos2 = out.index("proj@2")
+        pos3 = out.index("proj@3")
+        pos1 = out.index("proj@1")
+        self.assertLess(pos2, pos3)
+        self.assertLess(pos3, pos1)
+
+    def test_format_agents_unapproved_commits(self):
+        agents = [
+            self._agent(1000.0, "1", "proj@1", False, "paused",
+                        [("agent-1/main", 2, ["abc feat: add X", "def fix: Y"])]),
+        ]
+        out = self.format_agents(agents)
+        self.assertIn("2 unapproved commits on agent-1/main", out)
+        self.assertIn("abc feat: add X", out)
+        self.assertIn("def fix: Y", out)
+
+    def test_format_agents_truncates_long_commit_lists(self):
+        lines = [f"{chr(97+i)*7} commit {i}" for i in range(5)]
+        agents = [
+            self._agent(1000.0, "1", "proj@1", False, "paused",
+                        [("agent-1/main", 5, lines)]),
+        ]
+        out = self.format_agents(agents, max_commits=3)
+        self.assertIn("... and 2 more", out)
+        self.assertNotIn("commit 3", out)
+        self.assertNotIn("commit 4", out)
 
 
 if __name__ == "__main__":
