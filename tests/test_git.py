@@ -915,17 +915,21 @@ class TestCAV(unittest.TestCase):
         config.mark_agent_exited(id1)
         config.mark_agent_exited(cid)
 
-    def test_continue_no_agents_returns_none(self):
-        """continue_agent_id with no agents returns None."""
-        self._init()
-        self.assertIsNone(config.continue_agent_id(self.user_repo))
-
-    def test_resolve_continue_no_agents_acquires_fresh(self):
-        """resolve_continue with no agents acquires a fresh one."""
+    def test_continue_no_agents_no_sessions(self):
+        """resolve_continue with no agents acquires fresh agent."""
         self._init()
         aid, sid, resuming = config.resolve_continue(self.user_repo)
         self.assertEqual(aid, "1")
+        self.assertFalse(resuming)
         self.assertIsNotNone(sid)
+        config.mark_agent_exited(aid)
+
+    def test_continue_no_agents_acquires_fresh(self):
+        """resolve_continue with no agents acquires a fresh one with a UUID session."""
+        self._init()
+        aid, sid, resuming = config.resolve_continue(self.user_repo)
+        self.assertIsNotNone(sid)
+        self.assertEqual(len(sid), 36)
         self.assertFalse(resuming)
         config.mark_agent_exited(aid)
 
