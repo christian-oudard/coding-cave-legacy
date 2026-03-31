@@ -915,23 +915,18 @@ class TestCAV(unittest.TestCase):
         config.mark_agent_exited(id1)
         config.mark_agent_exited(cid)
 
-    def test_continue_no_agents_no_sessions(self):
-        """continue_agent_id with no agents and no sessions acquires fresh agent."""
+    def test_continue_no_agents_returns_none(self):
+        """continue_agent_id with no agents returns None."""
         self._init()
-        aid = config.continue_agent_id(self.user_repo)
-        self.assertEqual(aid, "1")
-        # Fresh agent gets a generated session ID, not a resumed one
-        sid = config.read_session_id(aid)
-        self.assertIsNotNone(sid)
-        config.mark_agent_exited(aid)
+        self.assertIsNone(config.continue_agent_id(self.user_repo))
 
-    def test_continue_no_agents_acquires_fresh(self):
-        """continue_agent_id with no agents acquires a fresh one with a pre-generated UUID."""
+    def test_resolve_continue_no_agents_acquires_fresh(self):
+        """resolve_continue with no agents acquires a fresh one."""
         self._init()
-        aid = config.continue_agent_id(self.user_repo)
-        sid = config.read_session_id(aid)
+        aid, sid, resuming = config.resolve_continue(self.user_repo)
+        self.assertEqual(aid, "1")
         self.assertIsNotNone(sid)
-        self.assertEqual(len(sid), 36)
+        self.assertFalse(resuming)
         config.mark_agent_exited(aid)
 
     def test_claude_project_dir_encoding(self):
@@ -1517,38 +1512,26 @@ class TestCAV(unittest.TestCase):
         self.assertEqual(continued, aid)
         config.mark_agent_exited(continued)
 
-    def test_continue_after_no_commits(self):
-        """cav -c must still work when the previous session made no commits.
+    def test_zero_commit_agent_cleaned_up_on_exit(self):
+        """Agent with no commits is garbage collected in the finally block.
 
-        Repro: user runs `cav`, agent talks but makes zero commits, exits.
-        Then `cav -c` should resume the same agent. The finally block only
-        marks the agent as exited (no cleanup). The sweep at next launch
-        runs AFTER resolve_continue claims the agent, so it survives.
+        Zero-commit agents have no branches to preserve, so cleanup
+        removes them immediately. cav -c will launch a fresh agent.
         """
-        from cav.cli import _sweep_stale_agents
+        from cav.cli import _auto_cleanup_if_clean
         from cav.init import init
 
         init(str(self.user_repo))
 
-        # Simulate `cav`: acquire agent, create workspace, but make NO commits
         aid = config.acquire_agent_id(self.user_repo)
         self._create_agent(aid)
-        session_id = config.read_session_id(aid)
-        self.assertIsNotNone(session_id)
 
-        # Agent exits (simulates the finally block: just mark exited)
+        # Agent exits with no commits (simulates the finally block)
         config.mark_agent_exited(aid)
+        _auto_cleanup_if_clean(self.user_repo, aid)
 
-        # Simulate `cav -c`: resolve first (claims the agent), then sweep
-        continued = config.continue_agent_id(self.user_repo)
-        self.assertEqual(continued, aid,
-                         "Agent with no commits should survive for cav -c")
-
-        # Sweep runs after resolve; agent is now running so it's skipped
-        _sweep_stale_agents(self.user_repo)
-        self.assertIn(continued, config.all_agent_ids(),
-                      "Running agent must not be swept")
-        config.mark_agent_exited(continued)
+        self.assertNotIn(aid, config.all_agent_ids(),
+                         "Zero-commit agent should be cleaned up")
 
 
 class TestPostCommitHook(unittest.TestCase):

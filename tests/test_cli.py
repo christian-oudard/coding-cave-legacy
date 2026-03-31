@@ -753,5 +753,61 @@ class TestAgentSorting(unittest.TestCase):
         self.assertNotIn("commit 4", out)
 
 
+class TestLaunchOpts(unittest.TestCase):
+    """Launch options (extra projects, recursive) persist for cav -c."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        import cav.config as cfg
+        self._orig_data_dir = cfg.DATA_DIR
+        cfg.DATA_DIR = Path(self.tmpdir) / "data"
+        os.environ["CAV_DATA_DIR"] = str(cfg.DATA_DIR)
+        self.base = Path(self.tmpdir) / "project"
+        self.base.mkdir()
+
+    def tearDown(self):
+        import cav.config as cfg
+        cfg.DATA_DIR = self._orig_data_dir
+        os.environ.pop("CAV_DATA_DIR", None)
+        shutil.rmtree(self.tmpdir)
+
+    def test_save_and_read_round_trip(self):
+        """save_agent_launch_opts round-trips through read."""
+        from cav import config
+        aid = config.acquire_agent_id(self.base)
+        config.save_agent_launch_opts(aid, ["coding-cave", "other"], True)
+        slugs, recursive = config.read_agent_launch_opts(aid)
+        self.assertEqual(slugs, ["coding-cave", "other"])
+        self.assertTrue(recursive)
+
+    def test_read_defaults_without_save(self):
+        """read_agent_launch_opts returns defaults when nothing saved."""
+        from cav import config
+        aid = config.acquire_agent_id(self.base)
+        slugs, recursive = config.read_agent_launch_opts(aid)
+        self.assertEqual(slugs, [])
+        self.assertFalse(recursive)
+
+    def test_opts_survive_exit_and_continue(self):
+        """Launch opts persist through exit and are available on continue."""
+        from cav import config
+        aid = config.acquire_agent_id(self.base)
+        config.save_agent_launch_opts(aid, ["extra-proj"], True)
+        config.mark_agent_exited(aid)
+
+        continued = config.continue_agent_id(self.base)
+        self.assertEqual(continued, aid)
+        slugs, recursive = config.read_agent_launch_opts(continued)
+        self.assertEqual(slugs, ["extra-proj"])
+        self.assertTrue(recursive)
+
+    def test_nonexistent_agent_returns_defaults(self):
+        """read_agent_launch_opts returns defaults for unknown agent."""
+        from cav import config
+        slugs, recursive = config.read_agent_launch_opts("999")
+        self.assertEqual(slugs, [])
+        self.assertFalse(recursive)
+
+
 if __name__ == "__main__":
     unittest.main()

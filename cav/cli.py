@@ -105,8 +105,17 @@ def agent(continue_agent, resume_session, extra_projects, recursive):
         session_id = config.read_session_id(agent_id)
         resuming = False
 
-    # Sweep after resolution so the continued agent is already marked
-    # running (pid set) and won't be cleaned up.
+    # Restore saved launch options when continuing
+    if continue_agent or resume_session:
+        saved_slugs, saved_recursive = config.read_agent_launch_opts(agent_id)
+        if not extra_projects and saved_slugs:
+            extra_projects = tuple(
+                config.project_path(s) for s in saved_slugs
+                if config.project_path(s)
+            )
+        if not recursive and saved_recursive:
+            recursive = True
+
     _sweep_stale_agents(base)
 
     projects = [(base, config.project_slug(base))]
@@ -121,6 +130,9 @@ def agent(continue_agent, resume_session, extra_projects, recursive):
             )
         projects.append((extra, slug))
 
+    config.save_agent_launch_opts(
+        agent_id, [slug for _, slug in projects[1:]], recursive)
+
     workspaces = []
     for project_base, slug in projects:
         ws = create(project_base, agent_id)
@@ -132,17 +144,20 @@ def agent(continue_agent, resume_session, extra_projects, recursive):
     if lineage:
         name += f" (depth {int(os.environ.get('CODING_CAVE_DEPTH', '0')) + 1}, parent {lineage})"
     verb = "Continuing" if resuming else "Launching"
-    print(f"{verb} {name} ...")
+    opts = [f"-p {s}" for _, s in projects[1:]]
+    if recursive:
+        opts.append("--recursive")
+    suffix = ", " + ", ".join(opts) if opts else ""
+    print(f"{verb} {name}{suffix} ...")
     try:
         rc = launch(workspaces, name, project_slug=projects[0][1],
                     recursive=recursive, session_id=session_id,
                     resuming=resuming)
     finally:
-        # If Claude exited before writing anything, clear the pre-generated
-        # session ID so cav -c doesn't try to resume a nonexistent session.
         if session_id and not config.session_file_exists(projects[0][1], session_id):
             config.clear_session_id(agent_id)
         config.mark_agent_exited(agent_id)
+        _auto_cleanup_if_clean(base, agent_id)
     sys.exit(rc)
 
 
@@ -156,8 +171,6 @@ def _sweep_stale_agents(base: Path):
 
 def _auto_cleanup_if_clean(base, agent_id):
     """Remove agent if all work is approved."""
-    if config.read_session_id(agent_id):
-        return  # Has a resumable session; keep it for cav -c
     from .status import _remove_agent
     try:
         git.git("fetch", config.SHARED_REMOTE, cwd=base, echo=False,

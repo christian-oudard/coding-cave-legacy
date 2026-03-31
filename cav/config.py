@@ -1,5 +1,6 @@
 """Constants and naming helpers for Coding Cave."""
 
+import json
 import os
 import re
 import sqlite3
@@ -17,8 +18,6 @@ DATA_DIR = Path(os.environ.get(
     "CAV_DATA_DIR",
     Path.home() / ".local" / "share" / "coding-cave",
 ))
-
-SCHEMA_VERSION = 1
 
 # Runtime flags set once in main() before dispatch
 verbose: bool = False
@@ -99,6 +98,18 @@ def session_file_exists(slug: str, session_id: str) -> bool:
     return (_claude_project_dir(slug) / f"{session_id}.jsonl").is_file()
 
 
+def latest_session_file(slug: str) -> str | None:
+    """Return the session ID of the most recent .jsonl file, or None."""
+    d = _claude_project_dir(slug)
+    if not d.is_dir():
+        return None
+    best, best_mtime = None, 0.0
+    for f in d.iterdir():
+        if f.suffix == ".jsonl" and f.stat().st_mtime > best_mtime:
+            best, best_mtime = f.stem, f.stat().st_mtime
+    return best
+
+
 def project_slug(base: Path) -> str:
     """Derive a slug from the project path."""
     name = base.name.lower()
@@ -116,44 +127,19 @@ def _registry_path() -> Path:
     return DATA_DIR / "coding-cave.db"
 
 
+_SCHEMA = (Path(__file__).parent / "schema.sql").read_text()
+
+
 def _open_registry() -> sqlite3.Connection:
-    """Open the agent registry, creating tables as needed."""
+    """Open the agent registry, creating tables on first use."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     db = sqlite3.connect(str(_registry_path()), timeout=10)
     db.execute("PRAGMA journal_mode=WAL")
-
-    version = db.execute("PRAGMA user_version").fetchone()[0]
-    if version < SCHEMA_VERSION:
-        db.execute("""
-            CREATE TABLE IF NOT EXISTS agents (
-                agent_id TEXT PRIMARY KEY,
-                project TEXT NOT NULL,
-                session_id TEXT UNIQUE,
-                pid INTEGER,
-                started_at REAL,
-                exited_at REAL
-            )
-        """)
-        db.execute("""
-            CREATE TABLE IF NOT EXISTS projects (
-                slug TEXT PRIMARY KEY,
-                path TEXT NOT NULL UNIQUE
-            )
-        """)
-        db.execute("""
-            CREATE TABLE IF NOT EXISTS approvals (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                project TEXT NOT NULL,
-                shared_branch TEXT NOT NULL,
-                agent_id TEXT NOT NULL,
-                before_sha TEXT NOT NULL,
-                after_sha TEXT NOT NULL,
-                approved_at REAL NOT NULL
-            )
-        """)
-        db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-        db.commit()
-
+    has_tables = db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='agents'"
+    ).fetchone()
+    if not has_tables:
+        db.executescript(_SCHEMA)
     return db
 
 
@@ -218,6 +204,40 @@ def find_agent_by_session(session_id: str) -> str | None:
             (session_id,)
         ).fetchone()
         return row[0] if row else None
+    finally:
+        db.close()
+
+
+# -- Launch options --
+
+def save_agent_launch_opts(agent_id: str, extra_slugs: list[str],
+                           recursive: bool) -> None:
+    """Persist launch options so cav -c can restore them."""
+    db = _open_registry()
+    try:
+        db.execute(
+            "UPDATE agents SET extra_projects = ?, recursive = ? "
+            "WHERE agent_id = ?",
+            (json.dumps(extra_slugs) if extra_slugs else None,
+             int(recursive), agent_id)
+        )
+        db.commit()
+    finally:
+        db.close()
+
+
+def read_agent_launch_opts(agent_id: str) -> tuple[list[str], bool]:
+    """Read saved launch options. Returns (extra_project_slugs, recursive)."""
+    db = _open_registry()
+    try:
+        row = db.execute(
+            "SELECT extra_projects, recursive FROM agents WHERE agent_id = ?",
+            (agent_id,)
+        ).fetchone()
+        if not row:
+            return [], False
+        extras = json.loads(row[0]) if row[0] else []
+        return extras, bool(row[1])
     finally:
         db.close()
 
@@ -375,8 +395,14 @@ def resolve_continue(base: Path, agent_id_hint: str | None = None):
     """
     agent_id = continue_agent_id(base, agent_id_hint)
     if agent_id is None:
-        # Nothing to continue; launch fresh.
+        # Nothing in the registry. Check for a session file on disk
+        # (e.g. a zero-commit agent that was cleaned up on exit).
         agent_id = acquire_agent_id(base)
+        slug = project_slug(base)
+        found = latest_session_file(slug)
+        if found:
+            write_session_id(agent_id, found)
+            return agent_id, found, True
         return agent_id, read_session_id(agent_id), False
 
     session_id = read_session_id(agent_id)

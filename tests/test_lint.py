@@ -260,11 +260,17 @@ class TestDeadCode(unittest.TestCase):
     vulture sees the name used. This lets us run at min_confidence=0.
     """
 
+    # Click commands registered via @cli.command() that vulture can't trace.
+    CLICK_COMMANDS = {"version"}
+
     def test_no_dead_code(self):
         import vulture
         v = vulture.Vulture()
         v.scavenge([str(CAV_DIR)])
-        unused = v.get_unused_code(min_confidence=0)
+        unused = [
+            item for item in v.get_unused_code(min_confidence=0)
+            if item.name not in self.CLICK_COMMANDS
+        ]
         if unused:
             self.fail(
                 "Dead code detected:\n"
