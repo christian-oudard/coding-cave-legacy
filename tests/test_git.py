@@ -1340,18 +1340,23 @@ class TestCAV(unittest.TestCase):
         self.assertIn("Commit 2", log)
         self.assertNotIn("Commit 3", log)
 
-        # Agent-1 now has unapproved work, so reject Commit 2 to agent-2
-        cav_cli("reject", "2", "--yes", cwd=self.user_repo)
+        # Reject Commit 2 → stacks onto agent-1 (Commit 2 is ancestor of
+        # Commit 3, which is already on agent-1/main)
+        cav_cli("reject", "--yes", cwd=self.user_repo)
         log = git_out("log", "--oneline", cwd=self.user_repo)
         self.assertIn("Commit 1", log)
         self.assertNotIn("Commit 2", log)
 
-        # Reject Commit 1 → agent-2 already has work, agent-1 already has work
-        # Must fail (both agents busy)
-        r = cav_cli("reject", "1", "--yes", cwd=self.user_repo, check=False)
-        self.assertNotEqual(r.returncode, 0)
-        r = cav_cli("reject", "2", "--yes", cwd=self.user_repo, check=False)
-        self.assertNotEqual(r.returncode, 0)
+        # Reject Commit 1 → also stacks onto agent-1
+        cav_cli("reject", "--yes", cwd=self.user_repo)
+        log = git_out("log", "--oneline", cwd=self.user_repo)
+        self.assertNotIn("Commit 1", log)
+
+        # Agent-1 branch should still have all 3 commits
+        git("fetch", "--prune", "cave", cwd=self.user_repo)
+        log = git_out("log", "--oneline", "cave/agent-1/main", cwd=self.user_repo)
+        self.assertIn("Commit 3", log)
+        self.assertIn("Commit 1", log)
 
         config.mark_agent_exited(id1)
         config.mark_agent_exited(id2)

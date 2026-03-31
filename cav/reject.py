@@ -53,7 +53,8 @@ def reject(base: Path, agent_id: str | None = None, yes: bool = False):
     before_sha = approval["before_sha"]
     original_agent_id = approval["agent_id"]
 
-    target_agent = _resolve_target_agent(base, branch, agent_id, original_agent_id)
+    target_agent = _resolve_target_agent(
+        base, branch, agent_id, original_agent_id, tip_sha)
 
     commits = git.commit_oneline(f"{before_sha}..{tip_sha}", cwd=base)
     n = len(commits)
@@ -72,10 +73,12 @@ def reject(base: Path, agent_id: str | None = None, yes: bool = False):
         if answer.strip().lower() in ("n", "no"):
             raise SystemExit("Aborted.")
 
-    # Create agent branch on cave (before resetting, so commits stay reachable)
+    # Create agent branch on cave (before resetting, so commits stay reachable).
+    # Skip if the agent branch already contains this commit (stacked rejection).
     ab = config.agent_branch(branch, target_agent)
-    git.git("push", "--force", config.SHARED_REMOTE,
-            f"{tip_sha}:refs/heads/{ab}", cwd=base, **config.v())
+    if not _agent_covers_tip(base, ab, tip_sha):
+        git.git("push", "--force", config.SHARED_REMOTE,
+                f"{tip_sha}:refs/heads/{ab}", cwd=base, **config.v())
 
     # Reset shared branch on cave
     git.git("push", "--force", config.SHARED_REMOTE,
@@ -89,12 +92,24 @@ def reject(base: Path, agent_id: str | None = None, yes: bool = False):
     print(f"\nRejected. Agent branch '{ab}' restored for rework.")
 
 
-def _resolve_target_agent(base, branch, agent_id, original_agent_id):
+def _agent_covers_tip(base, agent_branch_name, tip_sha):
+    """True if the agent branch already contains tip_sha (from a prior rejection)."""
+    remote_agent = f"{config.SHARED_REMOTE}/{agent_branch_name}"
+    try:
+        git.git_output("rev-parse", remote_agent, cwd=base)
+    except Exception:
+        return False
+    r = git.git("merge-base", "--is-ancestor", tip_sha, remote_agent,
+                cwd=base, check=False, capture=True, echo=False)
+    return r.returncode == 0
+
+
+def _resolve_target_agent(base, branch, agent_id, original_agent_id, tip_sha):
     """Determine which agent should handle the rejected work."""
     if agent_id:
         if agent_id not in config.all_agent_ids():
             raise SystemExit(f"Agent {agent_id} not found in registry.")
-        _check_no_unapproved(base, branch, agent_id)
+        _check_no_unapproved(base, branch, agent_id, tip_sha)
         return agent_id
 
     if original_agent_id not in config.all_agent_ids():
@@ -104,12 +119,16 @@ def _resolve_target_agent(base, branch, agent_id, original_agent_id):
             f"  cav reject <agent-id>"
         )
 
-    _check_no_unapproved(base, branch, original_agent_id)
+    _check_no_unapproved(base, branch, original_agent_id, tip_sha)
     return original_agent_id
 
 
-def _check_no_unapproved(base, target_branch, agent_id):
-    """Fail if the agent has unapproved work on the target branch."""
+def _check_no_unapproved(base, target_branch, agent_id, tip_sha):
+    """Fail if the agent has unapproved work on the target branch.
+
+    Allows stacking: if tip_sha is already an ancestor of the agent branch
+    (from a prior rejection in the same chain), the rejection proceeds.
+    """
     ab = config.agent_branch(target_branch, agent_id)
     remote_agent = f"{config.SHARED_REMOTE}/{ab}"
     remote_target = f"{config.SHARED_REMOTE}/{target_branch}"
@@ -123,6 +142,8 @@ def _check_no_unapproved(base, target_branch, agent_id):
             f"Choose an agent with no existing work on '{target_branch}'."
         )
     if git.cherry_undelivered(remote_target, remote_agent, cwd=base):
+        if _agent_covers_tip(base, ab, tip_sha):
+            return  # tip already on agent branch from prior rejection
         raise SystemExit(
             f"Agent {agent_id} has unapproved work on '{ab}'.\n"
             f"Approve or remove it first, or choose a different agent."
