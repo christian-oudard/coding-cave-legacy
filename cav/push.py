@@ -25,10 +25,17 @@ def push(base: Path, force: bool = False):
     if force:
         args.insert(1, "--force")
     try:
-        git.git(*args, cwd=base, **config.v())
+        r = git.git(*args, cwd=base, **config.v())
     except subprocess.CalledProcessError as e:
         if e.stderr:
             print(e.stderr.rstrip(), file=sys.stderr)
         if not force:
             print(f"\n  cav push --force                # overwrite cave with local branch")
         raise SystemExit(1)
+
+    if not config.verbose:
+        stderr = getattr(r, "stderr", "") or ""
+        if "up-to-date" in stderr:
+            print(f"Already up to date.")
+        else:
+            print(f"Pushed {branch} to cave.")
