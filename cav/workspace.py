@@ -27,12 +27,11 @@ def create(base: Path, agent_id: str) -> Path:
     if ws_path.exists():
         return ws_path
 
-    # New workspace: only allowed from shared branches.
     # "HEAD" means detached HEAD, which is not a valid target.
-    if target == "HEAD" or target != user_branch:
+    if target == "HEAD":
         raise SystemExit(
-            f"Cannot launch a new agent from agent branch '{user_branch}'.\n"
-            f"Switch to a shared branch first (e.g. 'git checkout {target}')."
+            f"Cannot launch a new agent from detached HEAD.\n"
+            f"Switch to a branch first (e.g. 'git checkout main')."
         )
 
     ws_path.parent.mkdir(parents=True, exist_ok=True)

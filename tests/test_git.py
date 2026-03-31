@@ -234,13 +234,14 @@ class TestCAV(unittest.TestCase):
         with self.assertRaises(SystemExit):
             workspace.create(self.user_repo, "bad_name")
 
-    def test_launch_from_agent_branch_rejected(self):
-        """Cannot launch a new agent while on an agent branch."""
+    def test_launch_from_agent_branch_resolves_target(self):
+        """Launching from an agent branch targets the underlying shared branch."""
         self._init()
         git("checkout", "-b", "agent-1/main", cwd=self.user_repo)
-        with self.assertRaises(SystemExit) as ctx:
-            workspace.create(self.user_repo, "2")
-        self.assertIn("agent branch", str(ctx.exception))
+        ws = workspace.create(self.user_repo, "2")
+        # Should create agent-2/main (not agent-2/agent-1/main)
+        branch = git_out("rev-parse", "--abbrev-ref", "HEAD", cwd=ws)
+        self.assertEqual(branch, "agent-2/main")
 
     def test_auto_agent_id(self):
         """acquire_agent_id auto-assigns 1, 2, 3 when all are running."""
