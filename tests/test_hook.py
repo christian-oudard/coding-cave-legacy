@@ -102,6 +102,25 @@ class TestCheckRef(unittest.TestCase):
         self.assertIn("REJECTED", r)
         self.assertIn("cannot push", r)
 
+    # -- HEAD branch trap (diagnostic for spurious agent-N/HEAD branches) --
+
+    def test_agent_push_head_branch_rejected(self):
+        r = hook.check_ref(SHA_A, SHA_B, "refs/heads/agent-1/HEAD", "1")
+        self.assertIsNotNone(r)
+        self.assertIn("REJECTED", r)
+        self.assertIn("HEAD", r)
+
+    def test_user_push_head_branch_rejected(self):
+        """Even users cannot create HEAD branches (it's always a bug)."""
+        r = hook.check_ref(SHA_A, SHA_B, "refs/heads/agent-1/HEAD", None)
+        self.assertIsNotNone(r)
+        self.assertIn("REJECTED", r)
+
+    def test_bare_head_branch_rejected(self):
+        r = hook.check_ref(ZERO, SHA_A, "refs/heads/HEAD", "1")
+        self.assertIsNotNone(r)
+        self.assertIn("REJECTED", r)
+
     # -- Non-branch refs (tags, etc.) --
 
     def test_tag_push_by_agent_allowed(self):

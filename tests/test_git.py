@@ -1649,5 +1649,27 @@ class TestPostCommitHook(unittest.TestCase):
                          "agent branch should be a fast-forward from main")
 
 
+    def test_detached_head_no_spurious_branch(self):
+        """Post-commit hook on detached HEAD must not create spurious branches."""
+        # Detach HEAD at the current commit
+        sha = git_out("rev-parse", "HEAD", cwd=self.a1)
+        git("checkout", sha, cwd=self.a1)
+
+        # Commit on detached HEAD (hook fires)
+        (self.a1 / "detached.py").write_text("# detached\n")
+        git("add", "detached.py", cwd=self.a1)
+        git("commit", "-m", "detached commit", cwd=self.a1)
+
+        # No branch named HEAD should exist on the remote
+        git("fetch", "cave", cwd=self.user_repo)
+        raw = git_out("branch", "-r", "--list", "cave/*", cwd=self.user_repo)
+        for line in raw.splitlines():
+            branch = line.strip()
+            if " -> " in branch:
+                continue
+            self.assertNotIn("HEAD", branch,
+                             f"spurious branch '{branch}' created from detached HEAD")
+
+
 if __name__ == "__main__":
     unittest.main()

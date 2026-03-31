@@ -39,6 +39,25 @@ def check_ref(old_sha: str, new_sha: str, ref: str, agent: str | None) -> str | 
     else:
         return None  # Not a branch ref, allow
 
+    # Reject any branch with HEAD in the name. This should never happen,
+    # but something has been creating agent-N/HEAD branches and we need
+    # to catch it. Log diagnostics so we can find the root cause.
+    if "HEAD" in branch:
+        import json, traceback
+        diag = {
+            "ref": ref, "branch": branch,
+            "old": old_sha, "new": new_sha,
+            "agent": agent,
+            "env": {k: v for k, v in os.environ.items()
+                    if k.startswith(("CAV_", "GIT_", "CODING_CAVE_"))},
+            "stack": traceback.format_stack(),
+        }
+        print(json.dumps(diag, indent=2), file=sys.stderr)
+        return (
+            f"REJECTED: branch name '{branch}' contains 'HEAD'.\n"
+            f"This is a bug. Diagnostics printed above."
+        )
+
     # User can do anything
     if agent is None:
         return None
