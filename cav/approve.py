@@ -5,17 +5,25 @@ from pathlib import Path
 from . import config, git
 
 
-def approve(base: Path, yes: bool = False):
-    branch = git.current_branch(cwd=base)
-    parsed = config.parse_agent_branch(branch)
-    if not parsed:
-        raise SystemExit(
-            f"Not on an agent branch (current: '{branch}').\n"
-            f"Switch to an agent branch first (e.g. 'git checkout agent-1/main')."
-        )
-
-    target = config.resolve_target(branch)
-    _, agent_id = parsed
+def approve(base: Path, agent_id: str | None = None, yes: bool = False):
+    current = git.current_branch(cwd=base)
+    if agent_id:
+        # Explicit agent ID: resolve target from current branch
+        parsed = config.parse_agent_branch(current)
+        target = parsed[0] if parsed else current
+        branch = config.agent_branch(target, agent_id)
+    else:
+        # No agent ID: must be on an agent branch
+        branch = current
+        parsed = config.parse_agent_branch(branch)
+        if not parsed:
+            raise SystemExit(
+                f"Not on an agent branch (current: '{branch}').\n"
+                f"Usage: cav approve <agent-id>  (from any branch)\n"
+                f"   or: switch to an agent branch first."
+            )
+        target = config.resolve_target(branch)
+        agent_id = parsed[1]
     name = config.display_name(base, agent_id)
 
     git.git("fetch", "--prune", config.SHARED_REMOTE, cwd=base, **config.v())
@@ -31,6 +39,33 @@ def approve(base: Path, yes: bool = False):
         before_sha = git.git_output("rev-parse", remote_target, cwd=base)
     except Exception:
         raise SystemExit(f"No remote branch '{remote_target}'.")
+
+    # Local target must not be ahead of cave target (would create
+    # unresolvable divergence since we don't rebase on the host side)
+    r = git.git("rev-parse", "--verify", target,
+                cwd=base, check=False, capture=True, echo=False)
+    if r.returncode == 0:
+        local_sha = r.stdout.strip()
+        if local_sha != before_sha:
+            is_behind = git.git(
+                "merge-base", "--is-ancestor", local_sha, before_sha,
+                cwd=base, check=False, capture=True, echo=False,
+            ).returncode == 0
+            if not is_behind:
+                is_ahead = git.git(
+                    "merge-base", "--is-ancestor", before_sha, local_sha,
+                    cwd=base, check=False, capture=True, echo=False,
+                ).returncode == 0
+                if is_ahead:
+                    raise SystemExit(
+                        f"Local '{target}' is ahead of '{remote_target}'.\n"
+                        f"Push local commits first: git push {config.SHARED_REMOTE} {target}"
+                    )
+                else:
+                    raise SystemExit(
+                        f"Local '{target}' has diverged from '{remote_target}'.\n"
+                        f"Run 'cav pull' first to sync with cave."
+                    )
 
     if before_sha == after_sha:
         print(f"No commits to approve on {branch}.")
@@ -61,9 +96,19 @@ def approve(base: Path, yes: bool = False):
         if answer.strip().lower() in ("n", "no"):
             raise SystemExit("Aborted.")
 
-    # Push agent branch to shared branch (as user, no agent identity)
+    # Push to cave (the authoritative operation)
     git.git("push", config.SHARED_REMOTE,
             f"{after_sha}:refs/heads/{target}", cwd=base, **config.v())
+
+    # Update local target branch (safe: we verified local is not ahead)
+    if current == target:
+        git.git("merge", "--ff-only", after_sha, cwd=base, echo=False, capture=True)
+    else:
+        git.git("branch", "-f", target, after_sha,
+                cwd=base, echo=False, capture=True, check=False)
+        git.git("checkout", target, cwd=base, **config.v())
+    git.git("branch", "-D", branch,
+            cwd=base, echo=False, capture=True, check=False)
 
     # Record one approval per commit (enables per-commit rejection)
     slug = config.project_slug(base)
@@ -74,13 +119,6 @@ def approve(base: Path, yes: bool = False):
     for sha in shas:
         config.record_approval(slug, target, agent_id, prev, sha)
         prev = sha
-
-    # Update local target branch and switch to it
-    git.git("branch", "-f", target, after_sha,
-            cwd=base, echo=False, capture=True, check=False)
-    git.git("checkout", target, cwd=base, **config.v())
-    git.git("branch", "-D", branch,
-            cwd=base, echo=False, capture=True, check=False)
 
     if not config.is_agent_running(agent_id):
         from .status import _remove_agent

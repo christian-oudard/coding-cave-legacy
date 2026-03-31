@@ -184,13 +184,14 @@ def _auto_cleanup_if_clean(base, agent_id):
 
 
 @cli.command()
+@click.argument("agent_id", required=False)
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
-def approve(yes):
+def approve(agent_id, yes):
     """Approve agent work into shared branch."""
     base = find_repo_root()
     require_init(base)
     from .approve import approve as _approve
-    _approve(base, yes=yes)
+    _approve(base, agent_id=agent_id, yes=yes)
 
 
 @cli.command()
