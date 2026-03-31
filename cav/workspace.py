@@ -11,6 +11,12 @@ from pathlib import Path
 from . import config, git
 
 
+def _repo_is_empty(path: Path) -> bool:
+    """True if the repo has no commits."""
+    r = git.git("rev-parse", "HEAD", cwd=path, check=False, capture=True, echo=False)
+    return r.returncode != 0
+
+
 def create(base: Path, agent_id: str) -> Path:
     """Create a workspace for an agent. Returns the clone path."""
     if not config.AGENT_ID_RE.match(agent_id):
@@ -18,8 +24,12 @@ def create(base: Path, agent_id: str) -> Path:
             f"Invalid agent ID '{agent_id}'. Must be a number (e.g. 1, 2, 3)."
         )
 
-    user_branch = git.current_branch(cwd=base)
-    target = config.resolve_target(user_branch)
+    empty = _repo_is_empty(base)
+    if empty:
+        target = "main"
+    else:
+        user_branch = git.current_branch(cwd=base)
+        target = config.resolve_target(user_branch)
 
     slug = config.project_slug(base)
     ws_path = config.worktree_dir(slug, agent_id)
@@ -44,6 +54,12 @@ def create(base: Path, agent_id: str) -> Path:
     git.git("remote", "rename", "origin", config.SHARED_REMOTE, cwd=ws_path, echo=False)
 
     ab = config.agent_branch(target, agent_id)
+
+    if empty:
+        # No commits yet, create an orphan branch so the agent can make the first commit.
+        git.git("checkout", "--orphan", ab, cwd=ws_path, echo=False)
+        return ws_path
+
     remote_ref = f"refs/remotes/{config.SHARED_REMOTE}/{ab}"
 
     # If the agent branch already exists on the remote (re-creating a

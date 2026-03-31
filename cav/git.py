@@ -26,7 +26,12 @@ def git_output(*args, cwd=None) -> str:
 
 
 def current_branch(cwd=None) -> str:
-    return git_output("rev-parse", "--abbrev-ref", "HEAD", cwd=cwd)
+    """Return current branch name. Works on orphan branches (no commits yet)."""
+    try:
+        return git_output("rev-parse", "--abbrev-ref", "HEAD", cwd=cwd)
+    except subprocess.CalledProcessError:
+        # Orphan branch: HEAD is a symbolic ref but has no commit yet
+        return git_output("symbolic-ref", "--short", "HEAD", cwd=cwd)
 
 
 def repo_root(cwd=None) -> str:

@@ -26,7 +26,8 @@ def install_hooks(shared: Path):
 def init(path: str):
     base = Path(path).resolve()
     if not (base / ".git").exists():
-        raise SystemExit(f"Not a git repository: {base}")
+        git.git("init", str(base))
+        print()
 
     cav = config.cav_dir(base)
     shared = config.shared_repo_path(base)
@@ -61,8 +62,10 @@ def init(path: str):
     # Add cave remote
     git.git("remote", "add", config.SHARED_REMOTE, str(shared), cwd=base, echo=False)
 
-    # Push all branches to cave
-    git.git("push", "--no-set-upstream", config.SHARED_REMOTE, "--all", cwd=base, echo=False)
+    # Push all branches to cave (skip if repo has no commits yet)
+    has_refs = git.git("rev-parse", "HEAD", cwd=base, check=False, capture=True, echo=False).returncode == 0
+    if has_refs:
+        git.git("push", "--no-set-upstream", config.SHARED_REMOTE, "--all", cwd=base, echo=False)
 
     config.register_project(base)
     print(f"Initialized Coding Cave at {cav}")

@@ -35,53 +35,59 @@ def approve(base: Path, agent_id: str | None = None, yes: bool = False):
         after_sha = git.git_output("rev-parse", remote_agent, cwd=base)
     except Exception:
         raise SystemExit(f"No remote branch '{remote_agent}'.")
-    try:
-        before_sha = git.git_output("rev-parse", remote_target, cwd=base)
-    except Exception:
-        raise SystemExit(f"No remote branch '{remote_target}'.")
 
-    # Local target must not be ahead of cave target (would create
-    # unresolvable divergence since we don't rebase on the host side)
-    r = git.git("rev-parse", "--verify", target,
+    # Target branch may not exist yet (first commit in repo)
+    r = git.git("rev-parse", "--verify", remote_target,
                 cwd=base, check=False, capture=True, echo=False)
-    if r.returncode == 0:
-        local_sha = r.stdout.strip()
-        if local_sha != before_sha:
-            is_behind = git.git(
-                "merge-base", "--is-ancestor", local_sha, before_sha,
-                cwd=base, check=False, capture=True, echo=False,
-            ).returncode == 0
-            if not is_behind:
-                is_ahead = git.git(
-                    "merge-base", "--is-ancestor", before_sha, local_sha,
+    creating_branch = r.returncode != 0
+    before_sha = None if creating_branch else r.stdout.strip()
+
+    if not creating_branch:
+        # Local target must not be ahead of cave target (would create
+        # unresolvable divergence since we don't rebase on the host side)
+        r = git.git("rev-parse", "--verify", target,
+                    cwd=base, check=False, capture=True, echo=False)
+        if r.returncode == 0:
+            local_sha = r.stdout.strip()
+            if local_sha != before_sha:
+                is_behind = git.git(
+                    "merge-base", "--is-ancestor", local_sha, before_sha,
                     cwd=base, check=False, capture=True, echo=False,
                 ).returncode == 0
-                if is_ahead:
-                    raise SystemExit(
-                        f"Local '{target}' is ahead of '{remote_target}'.\n"
-                        f"Push local commits first: git push {config.SHARED_REMOTE} {target}"
-                    )
-                else:
-                    raise SystemExit(
-                        f"Local '{target}' has diverged from '{remote_target}'.\n"
-                        f"Run 'cav pull' first to sync with cave."
-                    )
+                if not is_behind:
+                    is_ahead = git.git(
+                        "merge-base", "--is-ancestor", before_sha, local_sha,
+                        cwd=base, check=False, capture=True, echo=False,
+                    ).returncode == 0
+                    if is_ahead:
+                        raise SystemExit(
+                            f"Local '{target}' is ahead of '{remote_target}'.\n"
+                            f"Push local commits first: git push {config.SHARED_REMOTE} {target}"
+                        )
+                    else:
+                        raise SystemExit(
+                            f"Local '{target}' has diverged from '{remote_target}'.\n"
+                            f"Run 'cav pull' first to sync with cave."
+                        )
 
-    if before_sha == after_sha:
-        print(f"No commits to approve on {branch}.")
-        return
+        if before_sha == after_sha:
+            print(f"No commits to approve on {branch}.")
+            return
 
-    # Check fast-forward
-    r = git.git("merge-base", "--is-ancestor", before_sha, after_sha,
-                cwd=base, check=False, capture=True, echo=False)
-    if r.returncode != 0:
-        raise SystemExit(
-            f"Cannot approve: {branch} is not a fast-forward from {target}.\n"
-            f"The agent must rebase first:\n"
-            f"  git fetch cave && git rebase cave/{target}"
-        )
+        # Check fast-forward
+        r = git.git("merge-base", "--is-ancestor", before_sha, after_sha,
+                    cwd=base, check=False, capture=True, echo=False)
+        if r.returncode != 0:
+            raise SystemExit(
+                f"Cannot approve: {branch} is not a fast-forward from {target}.\n"
+                f"The agent must rebase first:\n"
+                f"  git fetch cave && git rebase cave/{target}"
+            )
 
-    commits = git.commit_oneline(f"{remote_target}..{remote_agent}", cwd=base)
+    if creating_branch:
+        commits = git.commit_oneline(remote_agent, cwd=base)
+    else:
+        commits = git.commit_oneline(f"{remote_target}..{remote_agent}", cwd=base)
     n = len(commits)
     word = "commit" if n == 1 else "commits"
     print(f"\n{n} {word} from {name} to approve into {target}:\n")
@@ -100,8 +106,12 @@ def approve(base: Path, agent_id: str | None = None, yes: bool = False):
     git.git("push", config.SHARED_REMOTE,
             f"{after_sha}:refs/heads/{target}", cwd=base, **config.v())
 
-    # Update local target branch (safe: we verified local is not ahead)
-    if current == target:
+    # Update local target branch
+    if creating_branch:
+        # First commit: create the local branch pointing at approved SHA
+        git.git("checkout", "-B", target, after_sha,
+                cwd=base, echo=False, capture=True)
+    elif current == target:
         git.git("merge", "--ff-only", after_sha, cwd=base, echo=False, capture=True)
     else:
         git.git("branch", "-f", target, after_sha,
@@ -112,10 +122,15 @@ def approve(base: Path, agent_id: str | None = None, yes: bool = False):
 
     # Record one approval per commit (enables per-commit rejection)
     slug = config.project_slug(base)
+    if creating_branch:
+        range_spec = after_sha
+    else:
+        range_spec = f"{before_sha}..{after_sha}"
     shas = git.git_output(
-        "rev-list", "--reverse", f"{before_sha}..{after_sha}", cwd=base
+        "rev-list", "--reverse", range_spec, cwd=base
     ).splitlines()
-    prev = before_sha
+    NULL_SHA = "0" * 40
+    prev = before_sha or NULL_SHA
     for sha in shas:
         config.record_approval(slug, target, agent_id, prev, sha)
         prev = sha

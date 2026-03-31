@@ -163,6 +163,102 @@ class TestInitDefaults(unittest.TestCase):
         self.assertTrue((self.repo / ".coding-cave" / "cave-shared.git").exists())
 
 
+class TestInitNewProject(unittest.TestCase):
+    """cav init handles empty directories and empty git repos."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        os.environ["CAV_DATA_DIR"] = str(Path(self.tmpdir) / "data")
+
+    def tearDown(self):
+        os.environ.pop("CAV_DATA_DIR", None)
+        shutil.rmtree(self.tmpdir)
+
+    def test_init_creates_git_repo(self):
+        """cav init on a plain directory creates a git repo."""
+        project = Path(self.tmpdir) / "newproject"
+        project.mkdir()
+        from cav.init import init
+        init(str(project))
+        self.assertTrue((project / ".git").exists())
+        self.assertTrue((project / ".coding-cave" / "cave-shared.git").exists())
+
+    def test_init_empty_git_repo(self):
+        """cav init on a git repo with no commits succeeds."""
+        project = Path(self.tmpdir) / "emptyrepo"
+        project.mkdir()
+        git("init", "-b", "main", cwd=project)
+        from cav.init import init
+        init(str(project))
+        self.assertTrue((project / ".coding-cave" / "cave-shared.git").exists())
+
+    def test_init_repo_with_commits(self):
+        """cav init on a repo with commits pushes branches to cave."""
+        project = Path(self.tmpdir) / "withcommits"
+        project.mkdir()
+        git("init", "-b", "main", cwd=project)
+        git("config", "user.email", "test@test.com", cwd=project)
+        git("config", "user.name", "Test", cwd=project)
+        (project / "f.txt").write_text("hi\n")
+        git("add", "f.txt", cwd=project)
+        git("commit", "-m", "init", cwd=project)
+        from cav.init import init
+        init(str(project))
+        shared = project / ".coding-cave" / "cave-shared.git"
+        # Verify the branch was pushed
+        refs = subprocess.run(
+            ["git", "branch"], cwd=shared,
+            capture_output=True, text=True).stdout
+        self.assertIn("main", refs)
+
+    def test_workspace_on_empty_repo(self):
+        """Workspace creation on empty repo uses orphan branch."""
+        project = Path(self.tmpdir) / "emptyws"
+        project.mkdir()
+        git("init", "-b", "main", cwd=project)
+        from cav.init import init
+        from cav import config, workspace
+        config.DATA_DIR = Path(self.tmpdir) / "data"
+        init(str(project))
+        ws = workspace.create(project, "1")
+        self.assertTrue(ws.exists())
+        # Should be on agent-1/main orphan branch
+        branch = subprocess.run(
+            ["git", "symbolic-ref", "--short", "HEAD"], cwd=ws,
+            capture_output=True, text=True).stdout.strip()
+        self.assertEqual(branch, "agent-1/main")
+
+    def test_approve_first_commit(self):
+        """cav approve works when approving the repo's first-ever commit."""
+        project = Path(self.tmpdir) / "firstcommit"
+        project.mkdir()
+        git("init", "-b", "main", cwd=project)
+        from cav.init import init
+        from cav import config, workspace
+        from cav.approve import approve
+        config.DATA_DIR = Path(self.tmpdir) / "data"
+        init(str(project))
+        ws = workspace.create(project, "1")
+        # Agent makes the first commit on the orphan branch
+        git("config", "user.email", "test@test.com", cwd=ws)
+        git("config", "user.name", "Test", cwd=ws)
+        (ws / "README.md").write_text("# Hello\n")
+        git("add", "README.md", cwd=ws)
+        git("commit", "-m", "initial commit", cwd=ws)
+        # Push agent branch to cave (simulating post-commit hook)
+        shared = config.shared_repo_path(project)
+        git("push", str(shared), "agent-1/main", cwd=ws)
+        # Fetch so user repo sees the agent branch
+        git("fetch", "cave", cwd=project)
+        # Approve
+        approve(project, agent_id="1", yes=True)
+        # Verify main now exists and has the commit
+        log = subprocess.run(
+            ["git", "log", "--oneline", "main"], cwd=project,
+            capture_output=True, text=True).stdout
+        self.assertIn("initial commit", log)
+
+
 class TestTopLevelHelp(unittest.TestCase):
     """cav --help shows top-level usage, not agent subcommand."""
 

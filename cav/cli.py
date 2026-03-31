@@ -15,7 +15,7 @@ def find_repo_root() -> Path:
     try:
         return Path(git.repo_root())
     except subprocess.CalledProcessError:
-        raise SystemExit("Not in a git repository.")
+        raise SystemExit("Not a git repository. Run: cav init")
 
 
 def require_init(base: Path):
