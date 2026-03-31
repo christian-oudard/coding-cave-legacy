@@ -151,6 +151,39 @@ class TestCAV(unittest.TestCase):
             branch = git_out("rev-parse", "--abbrev-ref", "HEAD", cwd=ws)
             self.assertEqual(branch, f"agent-{name}/main")
 
+    def test_workspace_branch_sync_sets_tracking(self):
+        """branch -f in workspace sync must set cave tracking for new branches.
+
+        The sandbox syncs shared branches with:
+            git branch -f <branch> cave/<branch>
+        This must NOT use --no-track. The clone only sets up tracking for
+        branches that existed at clone time. If a new shared branch (e.g.
+        develop) appears on cave later, the sync loop creates it locally,
+        and git's autoSetupMerge gives it cave tracking. With --no-track,
+        the new branch would have no upstream and git pull would fail.
+        """
+        agents = self._init_and_agents("1")
+        ws = agents["1"]
+
+        # Create a new shared branch on cave (after workspace already exists)
+        git("checkout", "-b", "develop", cwd=self.user_repo)
+        (self.user_repo / "dev.py").write_text("# develop\n")
+        git("add", "dev.py", cwd=self.user_repo)
+        git("commit", "-m", "develop branch", cwd=self.user_repo)
+        git("push", "cave", "develop", cwd=self.user_repo)
+
+        # Simulate the sandbox sync loop (sandbox.py:378-390)
+        git("fetch", "cave", cwd=ws)
+        git("branch", "-f", "develop", "cave/develop", cwd=ws)
+
+        # New branch must track cave so git pull works
+        remote = git_out("config", "branch.develop.remote", cwd=ws)
+        self.assertEqual(remote, "cave")
+
+        # Verify pull actually works
+        git("checkout", "develop", cwd=ws)
+        git("pull", cwd=ws, check=True)
+
     def test_post_commit_hook_force_pushes(self):
         """Hook force-pushes so squashed history updates the remote."""
         from cav.sandbox import POST_COMMIT_HOOK
