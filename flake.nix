@@ -6,13 +6,17 @@
       url = "github:christian-oudard/crinj";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    claude-code-nix = {
+      url = "github:sadjow/claude-code-nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
     nix-claude = {
       url = "github:christian-oudard/nix-claude";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
 
-  outputs = { self, nixpkgs, jail-nix, crinj, nix-claude }:
+  outputs = { self, nixpkgs, jail-nix, crinj, claude-code-nix, nix-claude }:
     let
       systems = [ "x86_64-linux" "aarch64-linux" ];
       eachSystem = f: nixpkgs.lib.genAttrs systems (system: f (import nixpkgs {
@@ -24,6 +28,7 @@
         let
           jail = jail-nix.lib.init pkgs;
           python = pkgs.python3.withPackages (ps: [ ps.click ]);
+          claude-code = claude-code-nix.packages.${pkgs.stdenv.hostPlatform.system}.default;
           mkClaudeConfig = nix-claude.lib.mkClaudeConfig;
           defaultStatusline = ./defaults/statusline.sh;
           claudeConfig = mkClaudeConfig {
@@ -50,12 +55,13 @@
             network
 
             # Packages available inside the cave
-            (add-pkg-deps (with pkgs; [
+            (add-pkg-deps ([
               claude-code
+            ] ++ (with pkgs; [
               nix git gnupg jq
               coreutils bash gnugrep gnused gawk findutils
               curl wget
-            ]))
+            ])))
 
             # Standard POSIX environment
             (set-env "SHELL" "${pkgs.bashInteractive}/bin/bash")
