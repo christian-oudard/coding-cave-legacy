@@ -102,7 +102,7 @@ def approve(base: Path, agent_id: str | None = None, yes: bool = False):
         r = git.git("merge", "--ff-only", after_sha,
                     cwd=base, echo=False, capture=True, check=False)
         if r.returncode != 0:
-            print(f"\nApproved to cave, but local '{target}' could not be updated.")
+            print(f"Approved and merged to cave, but local '{target}' could not be updated.")
             print(f"Run 'cav pull' to sync.")
     else:
         git.git("branch", "-f", target, after_sha,
@@ -116,8 +116,8 @@ def approve(base: Path, agent_id: str | None = None, yes: bool = False):
         from .cli import _auto_cleanup_if_clean
         _auto_cleanup_if_clean(base, agent_id)
         if agent_id not in [a for a in config.all_agent_ids()]:
-            print(f"\nApproved and removed {name}.")
+            print(f"Approved and removed {name}.")
         else:
-            print(f"\nApproved (agent has work in other projects).")
+            print(f"Approved (agent has work in other projects).")
     else:
-        print(f"\nApproved.")
+        print(f"Approved.")
