@@ -224,6 +224,13 @@ class TestClaudeCommandConstruction(unittest.TestCase):
         self.assertLess(resuming_pos, session_id_pos,
                         "'resuming' check must appear before --session-id")
 
+    def test_launch_passes_name_flag(self):
+        """launch() must pass --name so sessions are identifiable in /resume."""
+        src = self._get_launch_source()
+        self.assertIn("--name", src,
+                      "launch() does not pass --name. Agent sessions should be "
+                      "labeled with the display name for the /resume picker.")
+
 
 class TestPostCommitHookGuard(unittest.TestCase):
     """The post-commit hook must not auto-rebase during an active rebase.

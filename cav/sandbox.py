@@ -519,7 +519,8 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
     )
 
     try:
-        claude_cmd = [SANDBOX_BIN, "claude", "--dangerously-skip-permissions"]
+        claude_cmd = [SANDBOX_BIN, "claude", "--dangerously-skip-permissions",
+                      "--name", agent_name]
         if session_id:
             if resuming:
                 claude_cmd += ["--resume", session_id]
