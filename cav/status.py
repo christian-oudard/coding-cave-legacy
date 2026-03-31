@@ -40,9 +40,9 @@ AgentInfo = tuple[float, str, str, bool, str, list[tuple[str, int, list[str]]]]
 
 
 def sort_agents(agents: list[AgentInfo]) -> list[AgentInfo]:
-    """Sort agents by last activity (most recent first), drop idle ones."""
-    agents = sorted(agents, key=lambda a: a[0], reverse=True)
-    return [a for a in agents if a[3] or a[5]]  # running or has unapproved
+    """Sort agents: running first, then exited, then orphaned. Within each group, most recent first."""
+    order = {"running": 0, "exited": 1, "orphaned": 2}
+    return sorted(agents, key=lambda a: (order.get(a[4], 9), -a[0]))
 
 
 def format_agents(agents: list[AgentInfo], max_commits: int | None = 3) -> str:
@@ -176,9 +176,9 @@ def status(base: Path, agent_filter: str | None = None, scoped: bool = True) -> 
         if running:
             state = "running"
         elif total_ahead > 0:
-            state = "paused"
+            state = "exited"
         else:
-            state = "idle"
+            state = "orphaned"
 
         agents.append((last_activity, agent_id, name, running, state, unapproved))
 

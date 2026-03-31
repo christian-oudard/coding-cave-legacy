@@ -159,28 +159,44 @@ def agent(continue_agent, resume_agent, extra_projects, recursive):
 
 def _sweep_stale_agents(base: Path):
     """Clean up exited agents with no pending work before launching."""
-    slug = config.project_slug(base)
-    for agent_id in config.all_agent_ids(project=slug):
+    before = {aid: config.display_name(base, aid)
+              for aid in config.all_agent_ids()}
+    for agent_id in before:
         if not config.is_agent_running(agent_id):
             _auto_cleanup_if_clean(base, agent_id)
+    removed = set(before) - set(config.all_agent_ids())
+    for aid in sorted(removed, key=int):
+        print(f"Warning: cleaned up stale agent {before[aid]}.")
 
 
 def _auto_cleanup_if_clean(base, agent_id):
-    """Remove agent if all work is approved across all its projects."""
+    """Remove agent if all work is approved or irrecoverable across all projects."""
     from .status import _remove_agent
 
     all_agent_branches = []  # (base_path, branch) pairs for removal
     for slug in config.agent_all_slugs(agent_id):
+        # Check for uncommitted work in the worktree.
+        ws = config.worktree_dir(slug, agent_id)
+        if ws.is_dir():
+            try:
+                st = git.git_output("status", "--porcelain", cwd=ws)
+                if st.strip():
+                    return  # uncommitted changes, keep agent
+            except Exception:
+                return  # can't verify worktree state, keep agent
+
         path = config.project_path(slug)
         if not path:
             continue
         proj_base = Path(path)
+        if not config.shared_repo_path(proj_base).is_dir():
+            continue  # shared repo gone, nothing to preserve
         try:
             git.git("fetch", config.SHARED_REMOTE, cwd=proj_base, echo=False,
                     check=False, capture=True)
             branches = git.remote_branches(config.SHARED_REMOTE, cwd=proj_base)
         except Exception:
-            return  # Can't verify; keep the agent
+            return  # project exists but git failed, keep agent
         for b in branches:
             parsed = config.parse_agent_branch(b)
             if not parsed or parsed[1] != agent_id:
@@ -197,7 +213,8 @@ def _auto_cleanup_if_clean(base, agent_id):
             except Exception:
                 return
 
-    # All branches in all projects are approved (or none exist).
+    # All branches in all projects are approved (or irrecoverable),
+    # and no worktrees have uncommitted changes.
     primary_branches = [b for p, b in all_agent_branches if p == base]
     _remove_agent(base, agent_id, primary_branches)
 

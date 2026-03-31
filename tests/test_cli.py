@@ -682,7 +682,7 @@ class TestFormatAll(unittest.TestCase):
     def test_all_active(self):
         entries = [
             (2000.0, "proj-a", "a@1  (running)\n"),
-            (1000.0, "proj-b", "b@2  (paused)\n"),
+            (1000.0, "proj-b", "b@2  (exited)\n"),
         ]
         out = self.format_all(entries)
         self.assertIn("=== proj-a ===", out)
@@ -734,16 +734,16 @@ class TestAgentSorting(unittest.TestCase):
         ids = [a[1] for a in result]
         self.assertEqual(ids, ["3", "2", "1"])
 
-    def test_sort_drops_idle(self):
+    def test_sort_orphaned_last(self):
         agents = [
             self._agent(2000.0, "1", "proj@1", True),
-            self._agent(3000.0, "2", "proj@2", False, "idle"),
-            self._agent(1000.0, "3", "proj@3", False, "paused",
+            self._agent(3000.0, "2", "proj@2", False, "orphaned"),
+            self._agent(1000.0, "3", "proj@3", False, "exited",
                         [("agent-3/main", 1, ["abc feat"])]),
         ]
         result = self.sort_agents(agents)
         ids = [a[1] for a in result]
-        self.assertEqual(ids, ["1", "3"])
+        self.assertEqual(ids, ["1", "3", "2"])
 
     def test_format_agents_order_preserved(self):
         agents = [
@@ -760,7 +760,7 @@ class TestAgentSorting(unittest.TestCase):
 
     def test_format_agents_unapproved_commits(self):
         agents = [
-            self._agent(1000.0, "1", "proj@1", False, "paused",
+            self._agent(1000.0, "1", "proj@1", False, "exited",
                         [("agent-1/main", 2, ["abc feat: add X", "def fix: Y"])]),
         ]
         out = self.format_agents(agents)
@@ -771,7 +771,7 @@ class TestAgentSorting(unittest.TestCase):
     def test_format_agents_truncates_long_commit_lists(self):
         lines = [f"{chr(97+i)*7} commit {i}" for i in range(5)]
         agents = [
-            self._agent(1000.0, "1", "proj@1", False, "paused",
+            self._agent(1000.0, "1", "proj@1", False, "exited",
                         [("agent-1/main", 5, lines)]),
         ]
         out = self.format_agents(agents, max_commits=3)

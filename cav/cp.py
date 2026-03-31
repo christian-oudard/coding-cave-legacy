@@ -47,7 +47,7 @@ def _worktree_for_slug(slug: str, agent_id: str | None) -> Path:
     by_key = {}
     for ws in agents:
         aid = ws.name
-        state = "running" if config.is_agent_running(aid) else "paused"
+        state = "running" if config.is_agent_running(aid) else "exited"
         print(f"  {aid}) {slug}@{aid}  [{state}]", file=sys.stderr)
         by_key[aid] = ws
     try:
