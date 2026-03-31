@@ -64,20 +64,35 @@ def format_agents(agents: list[AgentInfo], max_commits: int | None = 3) -> str:
 
 def _remove_agent(base: Path, agent_id: str, branches: list[str]):
     """Remove an agent's remote branches, local branches, and local state."""
+    # Clean branches in the primary project.
     for branch in branches:
         git.git("push", config.SHARED_REMOTE, f":refs/heads/{branch}",
                 cwd=base, echo=False, capture=True)
-        # Also delete the local checkout if it exists
         git.git("branch", "-D", branch,
                 cwd=base, echo=False, capture=True, check=False)
+    # Clean branches and worktrees in all associated projects.
+    primary_slug = config.project_slug(base)
+    for slug in config.agent_all_slugs(agent_id):
+        ws = config.worktree_dir(slug, agent_id)
+        if ws.exists():
+            shutil.rmtree(ws)
+        if slug == primary_slug:
+            continue
+        path = config.project_path(slug)
+        if not path:
+            continue
+        try:
+            sec_base = Path(path)
+            for b in git.remote_branches(config.SHARED_REMOTE, cwd=sec_base):
+                parsed = config.parse_agent_branch(b)
+                if parsed and parsed[1] == agent_id:
+                    git.git("push", config.SHARED_REMOTE, f":refs/heads/{b}",
+                            cwd=sec_base, echo=False, capture=True, check=False)
+                    git.git("branch", "-D", b,
+                            cwd=sec_base, echo=False, capture=True, check=False)
+        except Exception:
+            pass
     config.remove_agent(agent_id)
-    # Clean up workspaces for all projects (agent ID is globally unique)
-    worktrees_dir = config.DATA_DIR / "worktrees"
-    if worktrees_dir.exists():
-        for slug_dir in worktrees_dir.iterdir():
-            ws = slug_dir / agent_id
-            if ws.exists():
-                shutil.rmtree(ws)
 
 
 def status(base: Path, agent_filter: str | None = None, scoped: bool = True) -> float:

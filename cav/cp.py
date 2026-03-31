@@ -33,7 +33,9 @@ def _worktree_for_slug(slug: str, agent_id: str | None) -> Path:
     if not slug_dir.exists():
         raise SystemExit(f"No worktrees found for project '{slug}'.")
 
-    agents = sorted([p for p in slug_dir.iterdir() if p.is_dir()],
+    registered = set(config.all_agent_ids(slug))
+    agents = sorted([p for p in slug_dir.iterdir()
+                     if p.is_dir() and p.name in registered],
                    key=lambda p: int(p.name) if p.name.isdigit() else p.name)
     if not agents:
         raise SystemExit(f"No worktrees found for project '{slug}'.")

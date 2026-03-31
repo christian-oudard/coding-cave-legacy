@@ -136,13 +136,11 @@ def approve(base: Path, agent_id: str | None = None, yes: bool = False):
         prev = sha
 
     if not config.is_agent_running(agent_id):
-        from .status import _remove_agent
-        branches = git.remote_branches(config.SHARED_REMOTE, cwd=base)
-        agent_branches = [
-            b for b in branches
-            if (p := config.parse_agent_branch(b)) and p[1] == agent_id
-        ]
-        _remove_agent(base, agent_id, agent_branches)
-        print(f"\nApproved and removed {name}.")
+        from .cli import _auto_cleanup_if_clean
+        _auto_cleanup_if_clean(base, agent_id)
+        if agent_id not in [a for a in config.all_agent_ids()]:
+            print(f"\nApproved and removed {name}.")
+        else:
+            print(f"\nApproved (agent has work in other projects).")
     else:
         print(f"\nApproved.")

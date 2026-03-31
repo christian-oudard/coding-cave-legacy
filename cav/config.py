@@ -431,6 +431,24 @@ def mark_agent_exited(agent_id: str) -> None:
         db.close()
 
 
+def agent_all_slugs(agent_id: str) -> list[str]:
+    """Return primary + extra project slugs for an agent."""
+    db = _open_registry()
+    try:
+        row = db.execute(
+            "SELECT project, extra_projects FROM agents WHERE agent_id = ?",
+            (agent_id,)
+        ).fetchone()
+        if not row:
+            return []
+        slugs = [row[0]]
+        if row[1]:
+            slugs.extend(json.loads(row[1]))
+        return slugs
+    finally:
+        db.close()
+
+
 def remove_agent(agent_id: str) -> None:
     """Remove an agent from the registry."""
     db = _open_registry()
@@ -442,16 +460,26 @@ def remove_agent(agent_id: str) -> None:
 
 
 def all_agent_ids(project: str | None = None) -> list[str]:
-    """Return all agent IDs in the registry, optionally filtered by project slug."""
+    """Return all agent IDs in the registry, optionally filtered by project slug.
+
+    When project is given, includes agents whose primary project matches
+    AND agents that have the project in their extra_projects list.
+    """
     db = _open_registry()
     try:
         if project:
             rows = db.execute(
-                "SELECT agent_id FROM agents WHERE project = ?", (project,)
+                "SELECT agent_id, project, extra_projects FROM agents"
             ).fetchall()
+            ids = []
+            for aid, primary, extras_json in rows:
+                if primary == project:
+                    ids.append(aid)
+                elif extras_json and project in json.loads(extras_json):
+                    ids.append(aid)
         else:
-            rows = db.execute("SELECT agent_id FROM agents").fetchall()
-        return sorted([r[0] for r in rows], key=int)
+            ids = [r[0] for r in db.execute("SELECT agent_id FROM agents").fetchall()]
+        return sorted(ids, key=int)
     finally:
         db.close()
 

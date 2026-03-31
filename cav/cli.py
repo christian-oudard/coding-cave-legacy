@@ -170,36 +170,40 @@ def _sweep_stale_agents(base: Path):
 
 
 def _auto_cleanup_if_clean(base, agent_id):
-    """Remove agent if all work is approved."""
+    """Remove agent if all work is approved across all its projects."""
     from .status import _remove_agent
-    try:
-        git.git("fetch", config.SHARED_REMOTE, cwd=base, echo=False,
-                check=False, capture=True)
-        branches = git.remote_branches(config.SHARED_REMOTE, cwd=base)
-    except Exception:
-        return
-    agent_branches = [
-        b for b in branches
-        if (parsed := config.parse_agent_branch(b)) and parsed[1] == agent_id
-    ]
-    if not agent_branches:
-        _remove_agent(base, agent_id, [])
-        return
-    for b in agent_branches:
-        parsed = config.parse_agent_branch(b)
-        if not parsed:
+
+    all_agent_branches = []  # (base_path, branch) pairs for removal
+    for slug in config.agent_all_slugs(agent_id):
+        path = config.project_path(slug)
+        if not path:
             continue
-        target = config.resolve_target(b)
-        remote_agent = f"{config.SHARED_REMOTE}/{b}"
-        target_ref = f"{config.SHARED_REMOTE}/{target}"
+        proj_base = Path(path)
         try:
-            if not git.has_merge_base(remote_agent, target_ref, cwd=base):
-                return
-            if git.cherry_undelivered(target_ref, remote_agent, cwd=base):
-                return
+            git.git("fetch", config.SHARED_REMOTE, cwd=proj_base, echo=False,
+                    check=False, capture=True)
+            branches = git.remote_branches(config.SHARED_REMOTE, cwd=proj_base)
         except Exception:
-            return
-    _remove_agent(base, agent_id, agent_branches)
+            return  # Can't verify; keep the agent
+        for b in branches:
+            parsed = config.parse_agent_branch(b)
+            if not parsed or parsed[1] != agent_id:
+                continue
+            all_agent_branches.append((proj_base, b))
+            target = config.resolve_target(b)
+            remote_agent = f"{config.SHARED_REMOTE}/{b}"
+            target_ref = f"{config.SHARED_REMOTE}/{target}"
+            try:
+                if not git.has_merge_base(remote_agent, target_ref, cwd=proj_base):
+                    return
+                if git.cherry_undelivered(target_ref, remote_agent, cwd=proj_base):
+                    return
+            except Exception:
+                return
+
+    # All branches in all projects are approved (or none exist).
+    primary_branches = [b for p, b in all_agent_branches if p == base]
+    _remove_agent(base, agent_id, primary_branches)
 
 
 @cli.command()
