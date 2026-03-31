@@ -94,6 +94,11 @@ def _pull_shared(base: Path, local_branch: str, target_branch: str, force: bool)
     # Show incoming commits
     ahead = git.git_output(
         "log", "--oneline", f"{local_branch}..{remote_ref}", cwd=base)
+
+    if not ahead:
+        print("Already up to date.")
+        return
+
     count = len(ahead.splitlines())
 
     if force:
