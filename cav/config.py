@@ -52,7 +52,8 @@ def resolve_target(branch: str) -> str:
 
 def display_name(base: Path, agent_id: str) -> str:
     """Display name: <slug>@<id>."""
-    return f"{project_slug(base)}@{agent_id}"
+    slug = agent_project(agent_id) or project_slug(base)
+    return f"{slug}@{agent_id}"
 
 
 # -- Project-level paths (inside the project repo) --
