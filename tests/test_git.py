@@ -133,7 +133,7 @@ class TestCAV(unittest.TestCase):
 
         # Re-init should update hooks, not error
         result = cav_cli("init", str(self.user_repo), cwd=self.user_repo)
-        self.assertIn("Updated hooks", result.stdout)
+        self.assertIn("Coding Cave initialized", result.stdout)
         self.assertTrue((shared / "hooks" / "post-receive").exists())
 
     # -- workspace creation --

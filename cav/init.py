@@ -74,7 +74,7 @@ def init(path: str):
         _require_commits(base)
         _warn_dirty(base)
         _push_shared_branches(base)
-        print(f"Updated hooks at {shared}")
+        print(f"Coding Cave initialized at {cav}")
         return
 
     # Check for conflicting remote before creating anything
@@ -107,4 +107,4 @@ def init(path: str):
     _push_shared_branches(base)
 
     config.register_project(base)
-    print(f"Initialized Coding Cave at {cav}")
+    print(f"Coding Cave initialized at {cav}")
