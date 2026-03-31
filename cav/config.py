@@ -313,13 +313,13 @@ def acquire_agent_id(base: Path) -> str:
         db.close()
 
 
-def continue_agent_id(base: Path, agent_id: str | None = None) -> str:
+def continue_agent_id(base: Path, agent_id: str | None = None) -> str | None:
     """Reacquire a paused agent.
 
     If agent_id is given, continue that specific agent (regardless of project).
     Otherwise, continue the most recently exited agent whose primary project
     matches base.
-    Returns agent_id or raises SystemExit.
+    Returns agent_id, None if nothing to continue, or raises SystemExit.
     """
     slug = project_slug(base)
     now = time.time()
@@ -354,10 +354,7 @@ def continue_agent_id(base: Path, agent_id: str | None = None) -> str:
             (slug,)
         ).fetchone()
         if not row:
-            # No exited agent to continue; acquire a fresh one.
-            db.rollback()
-            db.close()
-            return acquire_agent_id(base)
+            return None
 
         aid = row[0]
         db.execute(
@@ -369,6 +366,30 @@ def continue_agent_id(base: Path, agent_id: str | None = None) -> str:
         return aid
     finally:
         db.close()
+
+
+def resolve_continue(base: Path, agent_id_hint: str | None = None):
+    """Resolve agent_id, session_id, resuming for cav -c.
+
+    Returns (agent_id, session_id, resuming).
+    """
+    agent_id = continue_agent_id(base, agent_id_hint)
+    if agent_id is None:
+        # Nothing to continue; launch fresh.
+        agent_id = acquire_agent_id(base)
+        return agent_id, read_session_id(agent_id), False
+
+    session_id = read_session_id(agent_id)
+    slug = project_slug(base)
+    if session_id and session_file_exists(slug, session_id):
+        return agent_id, session_id, True
+
+    # Session file gone or never created; start fresh.
+    if session_id:
+        clear_session_id(agent_id)
+    session_id = str(uuid.uuid4())
+    write_session_id(agent_id, session_id)
+    return agent_id, session_id, False
 
 
 def mark_agent_exited(agent_id: str) -> None:

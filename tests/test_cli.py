@@ -417,14 +417,10 @@ class TestSessionLifecycle(unittest.TestCase):
         self.assertEqual(continued, aid)
         self.assertEqual(config.read_session_id(continued), sid)
 
-    def test_continue_fallback_acquires_fresh(self):
-        """When no exited agent exists, continue_agent_id acquires a fresh one."""
+    def test_continue_returns_none_when_nothing_to_continue(self):
+        """When no exited agent exists, continue_agent_id returns None."""
         from cav import config
-        aid = config.continue_agent_id(self.base)
-        # Should have a pre-generated session UUID
-        sid = config.read_session_id(aid)
-        self.assertIsNotNone(sid)
-        self.assertEqual(len(sid), 36)
+        self.assertIsNone(config.continue_agent_id(self.base))
 
     def test_clear_session_id(self):
         """clear_session_id sets session to NULL."""
@@ -433,6 +429,77 @@ class TestSessionLifecycle(unittest.TestCase):
         self.assertIsNotNone(config.read_session_id(aid))
         config.clear_session_id(aid)
         self.assertIsNone(config.read_session_id(aid))
+
+    def test_sweep_then_continue_does_not_resume(self):
+        """Exact repro: sweep removes agent, cav -c must not --resume the fresh UUID.
+
+        Sequence that triggered the original bug:
+        1. Agent 1 runs, exits. Registry has agent 1 + session UUID.
+        2. User approves work. Agent branches deleted from remote.
+        3. _sweep_stale_agents removes agent 1 from registry.
+        4. cav -c calls continue_agent_id, finds nothing, old code fell
+           through to acquire_agent_id which created a NEW agent 1 with
+           a new pre-generated UUID.
+        5. resuming = bool(session_id) was True because the new UUID is
+           non-None. Claude got --resume with a UUID it never saw.
+        """
+        from cav import config
+        from cav.config import resolve_continue
+
+        # Step 1: agent runs and exits.
+        aid = config.acquire_agent_id(self.base)
+        old_sid = config.read_session_id(aid)
+        config.mark_agent_exited(aid)
+
+        # Step 2-3: simulate sweep removing the agent entirely.
+        config.remove_agent(aid)
+
+        # Step 4-5: cav -c resolve logic.
+        new_aid, session_id, resuming = resolve_continue(self.base)
+
+        self.assertFalse(resuming,
+                         "must not --resume after sweep created a fresh agent")
+        self.assertNotEqual(session_id, old_sid,
+                            "session_id should be a fresh UUID, not the swept one")
+
+    def test_continue_with_valid_session_resumes(self):
+        """cav -c resumes when the session file exists on disk."""
+        from cav import config
+        from cav.config import resolve_continue
+
+        aid = config.acquire_agent_id(self.base)
+        sid = config.read_session_id(aid)
+        config.mark_agent_exited(aid)
+
+        # Simulate Claude having written the session file.
+        self._make_session_file(config.project_slug(self.base), sid)
+
+        _, session_id, resuming = resolve_continue(self.base)
+
+        self.assertTrue(resuming)
+        self.assertEqual(session_id, sid)
+
+    def test_continue_with_missing_session_file_does_not_resume(self):
+        """cav -c with agent in registry but session file gone starts fresh."""
+        from cav import config
+        from cav.config import resolve_continue
+
+        aid = config.acquire_agent_id(self.base)
+        old_sid = config.read_session_id(aid)
+        config.mark_agent_exited(aid)
+
+        # Agent still in registry, but no session file on disk.
+        slug = config.project_slug(self.base)
+        self.assertFalse(config.session_file_exists(slug, old_sid))
+
+        returned_aid, session_id, resuming = resolve_continue(self.base)
+
+        self.assertFalse(resuming,
+                         "must not --resume when session file is missing")
+        self.assertEqual(returned_aid, aid,
+                         "should reuse the same agent slot")
+        self.assertNotEqual(session_id, old_sid,
+                            "should generate a fresh session UUID")
 
     def test_find_agent_by_session_after_capture(self):
         """find_agent_by_session works after post-exit capture overwrites the UUID."""

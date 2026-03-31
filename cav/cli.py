@@ -53,6 +53,7 @@ def resolve_project(path: str) -> Path:
     return p
 
 
+
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
 def cli():
     pass
@@ -98,12 +99,8 @@ def agent(continue_agent, resume_session, extra_projects, recursive):
         session_id = resume_session
         resuming = True
     elif continue_agent:
-        if on_agent_branch:
-            agent_id = config.continue_agent_id(base, on_agent_branch[1])
-        else:
-            agent_id = config.continue_agent_id(base)
-        session_id = config.read_session_id(agent_id)
-        resuming = bool(session_id)
+        hint = on_agent_branch[1] if on_agent_branch else None
+        agent_id, session_id, resuming = config.resolve_continue(base, hint)
     else:
         agent_id = config.acquire_agent_id(base)
         session_id = config.read_session_id(agent_id)
