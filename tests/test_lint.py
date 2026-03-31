@@ -225,5 +225,27 @@ class TestClaudeCommandConstruction(unittest.TestCase):
                         "'resuming' check must appear before --session-id")
 
 
+class TestDeadCode(unittest.TestCase):
+    """Detect unused code with vulture.
+
+    Catches: unused functions, variables, imports, and classes.
+    Vulture gives decorated functions lower confidence since it can't trace
+    decorator dispatch. We avoid false positives by following a consistent
+    pattern: click commands delegate to a module via lazy import, so
+    vulture sees the name used. This lets us run at min_confidence=0.
+    """
+
+    def test_no_dead_code(self):
+        import vulture
+        v = vulture.Vulture()
+        v.scavenge([str(CAV_DIR)])
+        unused = v.get_unused_code(min_confidence=0)
+        if unused:
+            self.fail(
+                "Dead code detected:\n"
+                + "\n".join(str(item) for item in unused)
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

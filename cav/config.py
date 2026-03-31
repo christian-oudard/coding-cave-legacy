@@ -17,7 +17,6 @@ DATA_DIR = Path(os.environ.get(
     "CAV_DATA_DIR",
     Path.home() / ".local" / "share" / "coding-cave",
 ))
-CAVE_USER = "cave-coder"
 
 SCHEMA_VERSION = 1
 
@@ -263,31 +262,6 @@ def agent_exit_time(agent_id: str) -> float | None:
     finally:
         db.close()
 
-
-def running_agent_ids(base: Path) -> list[str]:
-    """Return agent IDs that are currently running for a given project."""
-    slug = project_slug(base)
-    db = _open_registry()
-    try:
-        rows = db.execute(
-            "SELECT agent_id, pid FROM agents "
-            "WHERE project = ? AND exited_at IS NULL AND pid IS NOT NULL",
-            (slug,)
-        ).fetchall()
-        result = []
-        for aid, pid in rows:
-            if _is_pid_alive(pid):
-                result.append(aid)
-            else:
-                db.execute(
-                    "UPDATE agents SET exited_at = ?, pid = NULL "
-                    "WHERE agent_id = ?",
-                    (time.time(), aid)
-                )
-        db.commit()
-        return sorted(result, key=int)
-    finally:
-        db.close()
 
 
 def acquire_agent_id(base: Path) -> str:

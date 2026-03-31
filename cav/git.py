@@ -59,9 +59,6 @@ def commits_ahead(branch_a: str, branch_b: str, exclude: list[str] | None = None
     return int(out)
 
 
-def short_sha(ref: str, cwd=None) -> str:
-    return git_output("rev-parse", "--short", ref, cwd=cwd)
-
 
 def has_merge_base(ref_a: str, ref_b: str, cwd=None) -> bool:
     """Check if two refs share a common ancestor."""
