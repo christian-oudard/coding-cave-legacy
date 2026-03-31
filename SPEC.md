@@ -109,9 +109,9 @@ With `--recursive`, the cave can launch subcaves. Disabled by default.
 
 Approves an agent branch's work into a shared branch. With an explicit agent ID (e.g. `cav approve 3`), the target branch is inferred from the current branch. Without an agent ID, must be run from an agent branch, where the agent ID and target are inferred from the branch name.
 
-Displays the commit message(s) and prompts Y/n. Fails if the agent branch is not a fast-forward from the target shared branch (the agent must rebase first), or if local target is ahead of cave target (the user must push local commits to cave first). Local target behind cave is allowed.
+Displays the commit message(s) and prompts Y/n. Fails if the agent branch is not a fast-forward from the target shared branch (the agent must rebase first).
 
-On success: pushes the agent branch tip to the shared branch on cave and records one approval per commit in the database. The local target branch is advanced via fast-forward. If the agent is running, it continues working from the updated base. If the agent is paused, it is removed (registry entry, branches, workspace) since no unapproved work remains.
+On success: pushes the agent branch tip to the shared branch on cave and records one approval per commit in the database. Then pulls the updated target branch locally as a courtesy. The approval (push to cave) is never blocked by local worktree state. If the courtesy pull fails, the approval still stands and the user can `cav pull` later. If the agent is running, it continues working from the updated base. If the agent is paused, it is removed (registry entry, branches, workspace) since no unapproved work remains.
 
 ### `cav reject [agent-id]`
 

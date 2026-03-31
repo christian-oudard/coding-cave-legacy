@@ -43,38 +43,11 @@ def approve(base: Path, agent_id: str | None = None, yes: bool = False):
     before_sha = None if creating_branch else r.stdout.strip()
 
     if not creating_branch:
-        # Local target must not be ahead of cave target (would create
-        # unresolvable divergence since we don't rebase on the host side)
-        r = git.git("rev-parse", "--verify", target,
-                    cwd=base, check=False, capture=True, echo=False)
-        if r.returncode == 0:
-            local_sha = r.stdout.strip()
-            if local_sha != before_sha:
-                is_behind = git.git(
-                    "merge-base", "--is-ancestor", local_sha, before_sha,
-                    cwd=base, check=False, capture=True, echo=False,
-                ).returncode == 0
-                if not is_behind:
-                    is_ahead = git.git(
-                        "merge-base", "--is-ancestor", before_sha, local_sha,
-                        cwd=base, check=False, capture=True, echo=False,
-                    ).returncode == 0
-                    if is_ahead:
-                        raise SystemExit(
-                            f"Local '{target}' is ahead of '{remote_target}'.\n"
-                            f"Push local commits first: git push {config.CAVE_REMOTE} {target}"
-                        )
-                    else:
-                        raise SystemExit(
-                            f"Local '{target}' has diverged from '{remote_target}'.\n"
-                            f"Run 'cav pull' first to sync with cave."
-                        )
-
         if before_sha == after_sha:
             print(f"No commits to approve on {branch}.")
             return
 
-        # Check fast-forward
+        # Agent branch must be a fast-forward from the target
         r = git.git("merge-base", "--is-ancestor", before_sha, after_sha,
                     cwd=base, check=False, capture=True, echo=False)
         if r.returncode != 0:
@@ -102,23 +75,9 @@ def approve(base: Path, agent_id: str | None = None, yes: bool = False):
         if answer.strip().lower() in ("n", "no"):
             raise SystemExit("Aborted.")
 
-    # Push to cave (the authoritative operation)
+    # Push to cave (the approval)
     git.git("push", config.CAVE_REMOTE,
             f"{after_sha}:refs/heads/{target}", cwd=base, **config.v())
-
-    # Update local target branch
-    if creating_branch:
-        # First commit: create the local branch pointing at approved SHA
-        git.git("checkout", "-B", target, after_sha,
-                cwd=base, echo=False, capture=True)
-    elif current == target:
-        git.git("merge", "--ff-only", after_sha, cwd=base, echo=False, capture=True)
-    else:
-        git.git("branch", "-f", target, after_sha,
-                cwd=base, echo=False, capture=True, check=False)
-        git.git("checkout", target, cwd=base, **config.v())
-    git.git("branch", "-D", branch,
-            cwd=base, echo=False, capture=True, check=False)
 
     # Record one approval per commit (enables per-commit rejection)
     slug = config.project_slug(base)
@@ -134,6 +93,24 @@ def approve(base: Path, agent_id: str | None = None, yes: bool = False):
     for sha in shas:
         config.record_approval(slug, target, agent_id, prev, sha)
         prev = sha
+
+    # Courtesy: sync local target branch (best-effort)
+    if creating_branch:
+        git.git("checkout", "-B", target, after_sha,
+                cwd=base, echo=False, capture=True, check=False)
+    elif current == target:
+        r = git.git("merge", "--ff-only", after_sha,
+                    cwd=base, echo=False, capture=True, check=False)
+        if r.returncode != 0:
+            print(f"\nApproved to cave, but local '{target}' could not be updated.")
+            print(f"Run 'cav pull' to sync.")
+    else:
+        git.git("branch", "-f", target, after_sha,
+                cwd=base, echo=False, capture=True, check=False)
+        git.git("checkout", target,
+                cwd=base, echo=False, capture=True, check=False)
+    git.git("branch", "-D", branch,
+            cwd=base, echo=False, capture=True, check=False)
 
     if not config.is_agent_running(agent_id):
         from .cli import _auto_cleanup_if_clean

@@ -717,8 +717,8 @@ class TestCAV(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("No remote branch", result.stderr)
 
-    def test_approve_blocked_when_local_ahead(self):
-        """cav approve refuses when local main is ahead of cave/main."""
+    def test_approve_succeeds_when_local_ahead(self):
+        """cav approve pushes to cave even when local main is ahead."""
         agents = self._init_and_agents("1")
         ws = agents["1"]
 
@@ -733,34 +733,14 @@ class TestCAV(unittest.TestCase):
         git("add", "local.py", cwd=self.user_repo)
         git("commit", "-m", "Local only", cwd=self.user_repo)
 
-        # Approve should fail: would create divergence
+        # Approve succeeds: cave gets the agent's work
         result = cav_cli("approve", "1", "--yes", cwd=self.user_repo, check=False)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("ahead", result.stderr)
-        self.assertIn("git push", result.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_approve_blocked_from_agent_branch_when_local_ahead(self):
-        """cav approve from agent branch refuses when local main is ahead."""
-        agents = self._init_and_agents("1")
-        ws = agents["1"]
-
-        (ws / "feature.py").write_text("# feature\n")
-        git("add", "feature.py", cwd=ws)
-        git("commit", "-m", "Agent 1 feature", cwd=ws)
-        git("push", "host-cave", "agent-1/main", cwd=ws, env=agent_env("1"))
-
-        # User makes a local-only commit on main
-        (self.user_repo / "local.py").write_text("# local\n")
-        git("add", "local.py", cwd=self.user_repo)
-        git("commit", "-m", "Local only", cwd=self.user_repo)
-
-        # Switch to agent branch and try approve
+        # cave/main has the agent's commit
         git("fetch", "cave", cwd=self.user_repo)
-        git("checkout", "-b", "agent-1/main", "cave/agent-1/main",
-            cwd=self.user_repo)
-        result = cav_cli("approve", "--yes", cwd=self.user_repo, check=False)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("ahead", result.stderr)
+        cave_log = git_out("log", "--oneline", "cave/main", cwd=self.user_repo)
+        self.assertIn("Agent 1 feature", cave_log)
 
     def test_approve_ok_when_local_behind(self):
         """cav approve works when local main is behind cave/main."""
@@ -796,6 +776,30 @@ class TestCAV(unittest.TestCase):
         self.assertIn("Agent 2 work", log)
 
         config.mark_agent_exited(id1)
+
+    def test_approve_succeeds_with_dirty_worktree(self):
+        """cav approve pushes to cave even when local worktree has conflicts."""
+        agents = self._init_and_agents("1")
+
+        a1 = agents["1"]
+        (a1 / "feature.py").write_text("# feature\n")
+        git("add", "feature.py", cwd=a1)
+        git("commit", "-m", "Agent 1 feature", cwd=a1)
+        git("push", "host-cave", "agent-1/main", cwd=a1, env=agent_env("1"))
+
+        # Create a dirty worktree conflict on the target branch
+        (self.user_repo / "feature.py").write_text("# conflict\n")
+
+        result = cav_cli("approve", "1", "--yes", cwd=self.user_repo, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        # cave/main has the agent's commit (approval succeeded)
+        git("fetch", "cave", cwd=self.user_repo)
+        cave_log = git_out("log", "--oneline", "cave/main", cwd=self.user_repo)
+        self.assertIn("Agent 1 feature", cave_log)
+
+        # Local could not be updated, user is told to cav pull
+        self.assertIn("could not be updated", result.stdout)
 
     def test_multi_agent_status(self):
         """cav status shows commits ahead after approving work to main."""
