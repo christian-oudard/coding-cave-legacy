@@ -138,8 +138,8 @@ def status(base: Path, agent_filter: str | None = None, scoped: bool = True) -> 
 
         agents.append((last_activity, agent_id, name, running, state, unapproved))
 
-    # Sort by last activity, oldest first; drop idle (not running, no pending work)
-    agents.sort(key=lambda a: a[0])
+    # Sort by last activity, most recent first; drop idle (not running, no pending work)
+    agents.sort(key=lambda a: a[0], reverse=True)
     agents = [(ts, aid, name, run, state, un) for ts, aid, name, run, state, un in agents
               if run or un]
 
