@@ -7,7 +7,7 @@ from . import config, git
 
 
 def pull(base: Path, force: bool = False, branch: str | None = None):
-    git.git("fetch", "--prune", config.SHARED_REMOTE, cwd=base, **config.v())
+    git.git("fetch", "--prune", config.CAVE_REMOTE, cwd=base, **config.v())
 
     local_branch = git.current_branch(cwd=base)
     parsed = config.parse_agent_branch(local_branch)
@@ -29,8 +29,8 @@ def pull(base: Path, force: bool = False, branch: str | None = None):
 def _pull_agent(base: Path, local_branch: str, target: str):
     """Reset agent branch to match remote. Agent branches are ephemeral on the
     host, the cave agent is always authoritative."""
-    remote_agent = f"{config.SHARED_REMOTE}/{local_branch}"
-    remote_target = f"{config.SHARED_REMOTE}/{target}"
+    remote_agent = f"{config.CAVE_REMOTE}/{local_branch}"
+    remote_target = f"{config.CAVE_REMOTE}/{target}"
 
     # Update local target branch if it exists
     try:
@@ -76,7 +76,7 @@ def _pull_agent(base: Path, local_branch: str, target: str):
 
 def _pull_shared(base: Path, local_branch: str, target_branch: str, force: bool):
     """Fast-forward merge a shared branch."""
-    remote_ref = f"{config.SHARED_REMOTE}/{target_branch}"
+    remote_ref = f"{config.CAVE_REMOTE}/{target_branch}"
 
     try:
         git.git_output("rev-parse", remote_ref, cwd=base)

@@ -46,6 +46,18 @@ def _warn_dirty(base: Path):
         print("Commit them first, or use 'cav cp' to copy files in later.\n", file=sys.stderr)
 
 
+def _push_shared_branches(base: Path):
+    """Push only shared branches (not agent branches) to the cave remote."""
+    branches = git.git_output(
+        "for-each-ref", "--format=%(refname:short)", "refs/heads/",
+        cwd=base)
+    for branch in branches.splitlines():
+        if config.parse_agent_branch(branch):
+            continue
+        git.git("push", "--no-set-upstream", config.CAVE_REMOTE, branch,
+                cwd=base, echo=False, check=False, capture=True)
+
+
 def init(path: str):
     base = Path(path).resolve()
     if not (base / ".git").exists():
@@ -61,18 +73,18 @@ def init(path: str):
         # Re-sync: push any commits added since last init.
         _require_commits(base)
         _warn_dirty(base)
-        git.git("push", "--no-set-upstream", config.SHARED_REMOTE, "--all", cwd=base, echo=False)
+        _push_shared_branches(base)
         print(f"Updated hooks at {shared}")
         return
 
     # Check for conflicting remote before creating anything
     try:
         existing_url = git.git_output(
-            "remote", "get-url", config.SHARED_REMOTE, cwd=base)
+            "remote", "get-url", config.CAVE_REMOTE, cwd=base)
         raise SystemExit(
-            f"Remote '{config.SHARED_REMOTE}' already exists, pointing to:\n"
+            f"Remote '{config.CAVE_REMOTE}' already exists, pointing to:\n"
             f"  {existing_url}\n"
-            f"Remove it first: git remote remove {config.SHARED_REMOTE}")
+            f"Remove it first: git remote remove {config.CAVE_REMOTE}")
     except subprocess.CalledProcessError:
         pass  # No conflicting remote, good
 
@@ -89,10 +101,10 @@ def init(path: str):
     install_hooks(shared)
 
     # Add cave remote
-    git.git("remote", "add", config.SHARED_REMOTE, str(shared), cwd=base, echo=False)
+    git.git("remote", "add", config.CAVE_REMOTE, str(shared), cwd=base, echo=False)
 
     _warn_dirty(base)
-    git.git("push", "--no-set-upstream", config.SHARED_REMOTE, "--all", cwd=base, echo=False)
+    _push_shared_branches(base)
 
     config.register_project(base)
     print(f"Initialized Coding Cave at {cav}")

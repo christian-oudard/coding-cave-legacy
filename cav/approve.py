@@ -26,10 +26,10 @@ def approve(base: Path, agent_id: str | None = None, yes: bool = False):
         agent_id = parsed[1]
     name = config.display_name(base, agent_id)
 
-    git.git("fetch", "--prune", config.SHARED_REMOTE, cwd=base, **config.v())
+    git.git("fetch", "--prune", config.CAVE_REMOTE, cwd=base, **config.v())
 
-    remote_agent = f"{config.SHARED_REMOTE}/{branch}"
-    remote_target = f"{config.SHARED_REMOTE}/{target}"
+    remote_agent = f"{config.CAVE_REMOTE}/{branch}"
+    remote_target = f"{config.CAVE_REMOTE}/{target}"
 
     try:
         after_sha = git.git_output("rev-parse", remote_agent, cwd=base)
@@ -62,7 +62,7 @@ def approve(base: Path, agent_id: str | None = None, yes: bool = False):
                     if is_ahead:
                         raise SystemExit(
                             f"Local '{target}' is ahead of '{remote_target}'.\n"
-                            f"Push local commits first: git push {config.SHARED_REMOTE} {target}"
+                            f"Push local commits first: git push {config.CAVE_REMOTE} {target}"
                         )
                     else:
                         raise SystemExit(
@@ -103,7 +103,7 @@ def approve(base: Path, agent_id: str | None = None, yes: bool = False):
             raise SystemExit("Aborted.")
 
     # Push to cave (the authoritative operation)
-    git.git("push", config.SHARED_REMOTE,
+    git.git("push", config.CAVE_REMOTE,
             f"{after_sha}:refs/heads/{target}", cwd=base, **config.v())
 
     # Update local target branch

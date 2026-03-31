@@ -6,7 +6,7 @@ from . import config, git
 
 
 def prune_branches(base: Path):
-    git.git("fetch", "--prune", config.SHARED_REMOTE, cwd=base, **config.v())
+    git.git("fetch", "--prune", config.CAVE_REMOTE, cwd=base, **config.v())
 
     local_out = git.git_output(
         "for-each-ref",
@@ -16,7 +16,7 @@ def prune_branches(base: Path):
         print("No orphaned agent branches.")
         return
 
-    cave_prefix = f"{config.SHARED_REMOTE}/"
+    cave_prefix = f"{config.CAVE_REMOTE}/"
     orphans = []
     for line in local_out.splitlines():
         parts = line.split("\t")

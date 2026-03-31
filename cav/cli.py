@@ -26,7 +26,7 @@ def require_init(base: Path):
     # Inside a cave the local bare repo isn't mounted, but the remote is.
     if int(os.environ.get("CODING_CAVE_DEPTH", "0")) > 0:
         try:
-            git.git_output("remote", "get-url", config.SHARED_REMOTE, cwd=base)
+            git.git_output("remote", "get-url", config.CAVE_REMOTE, cwd=base)
             return
         except Exception:
             pass
@@ -192,9 +192,9 @@ def _auto_cleanup_if_clean(base, agent_id):
         if not config.shared_repo_path(proj_base).is_dir():
             continue  # shared repo gone, nothing to preserve
         try:
-            git.git("fetch", config.SHARED_REMOTE, cwd=proj_base, echo=False,
+            git.git("fetch", config.CAVE_REMOTE, cwd=proj_base, echo=False,
                     check=False, capture=True)
-            branches = git.remote_branches(config.SHARED_REMOTE, cwd=proj_base)
+            branches = git.remote_branches(config.CAVE_REMOTE, cwd=proj_base)
         except Exception:
             return  # project exists but git failed, keep agent
         for b in branches:
@@ -203,8 +203,8 @@ def _auto_cleanup_if_clean(base, agent_id):
                 continue
             all_agent_branches.append((proj_base, b))
             target = config.resolve_target(b)
-            remote_agent = f"{config.SHARED_REMOTE}/{b}"
-            target_ref = f"{config.SHARED_REMOTE}/{target}"
+            remote_agent = f"{config.CAVE_REMOTE}/{b}"
+            target_ref = f"{config.CAVE_REMOTE}/{target}"
             try:
                 if not git.has_merge_base(remote_agent, target_ref, cwd=proj_base):
                     return
@@ -322,7 +322,7 @@ def remove_agent(agent_id, all_agents, yes):
     if config.is_agent_running(aid):
         raise SystemExit(f"{name} is running. Stop it first.")
 
-    branches = git.remote_branches(config.SHARED_REMOTE, cwd=base)
+    branches = git.remote_branches(config.CAVE_REMOTE, cwd=base)
     agent_branches = [
         b for b in branches
         if (parsed := config.parse_agent_branch(b)) and parsed[1] == aid
@@ -333,8 +333,8 @@ def remove_agent(agent_id, all_agents, yes):
         if not parsed:
             continue
         target = parsed[0]
-        remote_agent = f"{config.SHARED_REMOTE}/{b}"
-        target_ref = f"{config.SHARED_REMOTE}/{target}"
+        remote_agent = f"{config.CAVE_REMOTE}/{b}"
+        target_ref = f"{config.CAVE_REMOTE}/{target}"
         try:
             if git.has_merge_base(remote_agent, target_ref, cwd=base):
                 commits = git.cherry_undelivered(target_ref, remote_agent, cwd=base)
@@ -361,7 +361,7 @@ def _cmd_remove_all_agents(base, yes=False):
         print("No agents in registry.")
         return
 
-    branches = git.remote_branches(config.SHARED_REMOTE, cwd=base)
+    branches = git.remote_branches(config.CAVE_REMOTE, cwd=base)
     agent_branches = [b for b in branches if config.parse_agent_branch(b)]
 
     n = len(all_ids)
@@ -391,7 +391,11 @@ def _cmd_remove_all_agents(base, yes=False):
 def checkout(branch, agent_id):
     """Retarget an agent to deliver to a different branch."""
     base = find_repo_root()
-    require_init(base)
+    # Self-retarget (on an agent branch) uses host-cave, not cave,
+    # so it works inside a cave without cav init.
+    current = git.current_branch(cwd=base)
+    if not config.parse_agent_branch(current):
+        require_init(base)
     from .checkout import checkout as _checkout
     _checkout(base, branch, agent_id=agent_id)
 

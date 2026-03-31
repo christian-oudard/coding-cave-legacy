@@ -8,7 +8,8 @@ import time
 import uuid
 from pathlib import Path
 
-SHARED_REMOTE = "cave"
+CAVE_REMOTE = "cave"
+HOST_REMOTE = "host-cave"
 AGENT_ID_RE = re.compile(r"^\d+$")
 # agent-<id>/<target>, e.g. agent-1/develop
 AGENT_BRANCH_RE = re.compile(r"^agent-(\d+)/(.+)$")

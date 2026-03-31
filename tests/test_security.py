@@ -179,7 +179,7 @@ class DaemonSecurityBase(unittest.TestCase):
         git("config", "user.email", f"{agent_id}@test.com", cwd=ws)
         git("config", "user.name", f"Agent {agent_id}", cwd=ws)
         url = daemon.remote_url(agent_id, self.slug)
-        git("remote", "set-url", config.SHARED_REMOTE, url, cwd=ws)
+        git("remote", "set-url", config.HOST_REMOTE, url, cwd=ws)
         return ws
 
     def raw_pkt(self, data: bytes, port: int | None = None) -> int:
@@ -287,7 +287,7 @@ class TestAgentIsolation(DaemonSecurityBase):
         git("add", "x.txt", cwd=ws)
         git("commit", "-m", "work", cwd=ws)
         result = git(
-            "push", "cave", "HEAD:refs/heads/agent-2/main",
+            "push", "host-cave", "HEAD:refs/heads/agent-2/main",
             cwd=ws, check=False, env={"CAV_AGENT_ID": "2"},
         )
         self.assertNotEqual(result.returncode, 0)
@@ -300,7 +300,7 @@ class TestAgentIsolation(DaemonSecurityBase):
         git("add", "x.txt", cwd=ws)
         git("commit", "-m", "work", cwd=ws)
         result = git(
-            "push", "cave", "HEAD:refs/heads/agent-2/main",
+            "push", "host-cave", "HEAD:refs/heads/agent-2/main",
             "--push-option=agent=2",
             cwd=ws, check=False,
         )
@@ -346,7 +346,7 @@ class TestAgentIsolation(DaemonSecurityBase):
         git("add", "x.txt", cwd=ws)
         git("commit", "-m", "work", cwd=ws)
         result = git(
-            "push", "cave", "HEAD:refs/tags/v1.0",
+            "push", "host-cave", "HEAD:refs/tags/v1.0",
             cwd=ws, check=False,
         )
         # KNOWN GAP: non-branch refs are currently unprotected.

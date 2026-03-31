@@ -32,16 +32,16 @@ POST_COMMIT_HOOK = (
     "# During a rebase, skip the auto-rebase (would abort the outer one)\n"
     "# but still push so the remote stays current.\n"
     "if [ -d .git/rebase-merge ] || [ -d .git/rebase-apply ]; then\n"
-    "  git push --force cave \"HEAD:refs/heads/$branch\" >/dev/null 2>&1 || true\n"
+    "  git push --force host-cave \"HEAD:refs/heads/$branch\" >/dev/null 2>&1 || true\n"
     "  exit 0\n"
     "fi\n"
-    "git fetch cave >/dev/null 2>&1 || true\n"
+    "git fetch host-cave >/dev/null 2>&1 || true\n"
     "target=$(echo \"$branch\" | sed 's|^agent-[0-9]*/||')\n"
-    "if [ -n \"$target\" ] && git rev-parse \"cave/$target\" >/dev/null 2>&1; then\n"
-    "  if ! git rebase \"cave/$target\" >/dev/null 2>&1; then\n"
+    "if [ -n \"$target\" ] && git rev-parse \"host-cave/$target\" >/dev/null 2>&1; then\n"
+    "  if ! git rebase \"host-cave/$target\" >/dev/null 2>&1; then\n"
     "    git rebase --abort >/dev/null 2>&1\n"
-    '    echo "WARNING: rebase onto cave/$target failed (conflicts). '
-    'Run: git fetch cave && git rebase cave/$target" >&2\n'
+    '    echo "WARNING: rebase onto host-cave/$target failed (conflicts). '
+    'Run: git fetch host-cave && git rebase host-cave/$target" >&2\n'
     "  fi\n"
     "fi\n"
     "# Trap: detect if we are about to push a HEAD branch.\n"
@@ -54,7 +54,7 @@ POST_COMMIT_HOOK = (
     "  exit 1\n"
     "  ;;\n"
     "esac\n"
-    "git push --force cave HEAD >/dev/null 2>&1 || true\n"
+    "git push --force host-cave HEAD >/dev/null 2>&1 || true\n"
 )
 
 # Substituted at nix build time with the jail.nix sandbox binary path.
@@ -420,32 +420,40 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
     use_pasta = parent_depth == 0
     daemon_host = PASTA_HOST_LOOPBACK if use_pasta else "127.0.0.1"
 
+    # Migrate old workspaces: rename "cave" -> "host-cave" if needed.
+    for ws, _, _ in workspaces:
+        r = git.git("remote", "get-url", config.HOST_REMOTE, cwd=ws,
+                    echo=False, check=False, capture=True)
+        if r.returncode != 0:
+            git.git("remote", "rename", config.CAVE_REMOTE, config.HOST_REMOTE,
+                    cwd=ws, echo=False, check=False, capture=True)
+
     # Update workspace remotes to use git:// via daemon (localhost for
     # host-side sync, then switch to pasta address for inside the namespace)
     for ws, _, slug in workspaces:
         url = daemon.remote_url(agent_id, slug)
-        git.git("remote", "set-url", config.SHARED_REMOTE, url,
+        git.git("remote", "set-url", config.HOST_REMOTE, url,
                 cwd=ws, echo=False)
 
     # Sync: fetch latest and fast-forward local shared branches
 
     for ws, _, _ in workspaces:
-        git.git("fetch", config.SHARED_REMOTE, cwd=ws, echo=False, check=False,
+        git.git("fetch", config.HOST_REMOTE, cwd=ws, echo=False, check=False,
                 capture=True)
         current = git.current_branch(cwd=ws)
-        for branch in git.remote_branches(config.SHARED_REMOTE, cwd=ws):
+        for branch in git.remote_branches(config.HOST_REMOTE, cwd=ws):
             if config.parse_agent_branch(branch):
                 continue
             if branch == current:
                 continue  # Can't force-update the checked-out branch
-            remote_ref = f"{config.SHARED_REMOTE}/{branch}"
+            remote_ref = f"{config.HOST_REMOTE}/{branch}"
             git.git("branch", "-f", branch, remote_ref, cwd=ws,
                     echo=False, check=False, capture=True)
 
     # Now set the remote to the pasta-reachable address for inside the namespace
     for ws, _, slug in workspaces:
         url = daemon.remote_url(agent_id, slug, host=daemon_host)
-        git.git("remote", "set-url", config.SHARED_REMOTE, url,
+        git.git("remote", "set-url", config.HOST_REMOTE, url,
                 cwd=ws, echo=False)
 
     # Build user environment from cave.nix (cached)

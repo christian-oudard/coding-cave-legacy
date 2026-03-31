@@ -74,13 +74,13 @@ class TestDaemon(unittest.TestCase):
         git("config", "user.email", f"{agent_id}@test.com", cwd=ws)
         git("config", "user.name", f"Agent {agent_id}", cwd=ws)
         url = daemon.remote_url(agent_id, self.slug)
-        git("remote", "set-url", config.SHARED_REMOTE, url, cwd=ws)
+        git("remote", "set-url", config.HOST_REMOTE, url, cwd=ws)
         return ws
 
     def test_fetch_via_daemon(self):
         """Agent can fetch from the bare repo through the daemon."""
         ws = self._ws_with_daemon_remote("1")
-        result = git("fetch", "cave", cwd=ws)
+        result = git("fetch", "host-cave", cwd=ws)
         self.assertEqual(result.returncode, 0)
 
     def test_push_own_branch_via_daemon(self):
@@ -89,7 +89,7 @@ class TestDaemon(unittest.TestCase):
         (ws / "new.txt").write_text("new\n")
         git("add", "new.txt", cwd=ws)
         git("commit", "-m", "agent work", cwd=ws)
-        result = git("push", "cave", "agent-1/main", cwd=ws)
+        result = git("push", "host-cave", "agent-1/main", cwd=ws)
         self.assertEqual(result.returncode, 0)
 
     def test_ff_push_shared_rejected_via_daemon(self):
@@ -99,7 +99,7 @@ class TestDaemon(unittest.TestCase):
         (ws / "fix.txt").write_text("fix\n")
         git("add", "fix.txt", cwd=ws)
         git("commit", "-m", "fix", cwd=ws)
-        result = git("push", "cave", "main", cwd=ws, check=False)
+        result = git("push", "host-cave", "main", cwd=ws, check=False)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("REJECTED", result.stderr)
 
@@ -110,7 +110,7 @@ class TestDaemon(unittest.TestCase):
         (ws / "bad.txt").write_text("bad\n")
         git("add", "bad.txt", cwd=ws)
         git("commit", "--amend", "-m", "rewritten", cwd=ws)
-        result = git("push", "--force", "cave", "main", cwd=ws, check=False)
+        result = git("push", "--force", "host-cave", "main", cwd=ws, check=False)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("REJECTED", result.stderr)
 
@@ -121,7 +121,7 @@ class TestDaemon(unittest.TestCase):
         git("add", "x.txt", cwd=ws)
         git("commit", "-m", "work", cwd=ws)
         result = git(
-            "push", "cave", "HEAD:refs/heads/agent-2/main",
+            "push", "host-cave", "HEAD:refs/heads/agent-2/main",
             cwd=ws, check=False,
         )
         self.assertNotEqual(result.returncode, 0)
@@ -130,7 +130,7 @@ class TestDaemon(unittest.TestCase):
     def test_delete_shared_rejected_via_daemon(self):
         """Agent cannot delete shared branch through daemon."""
         ws = self._ws_with_daemon_remote("1")
-        result = git("push", "cave", "--delete", "main",
+        result = git("push", "host-cave", "--delete", "main",
                       cwd=ws, check=False)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("REJECTED", result.stderr)
@@ -145,7 +145,7 @@ class TestDaemon(unittest.TestCase):
         # on the client side. The daemon sets CAV_AGENT_ID=1 server-side,
         # so this should still be rejected.
         result = git(
-            "push", "cave", "HEAD:refs/heads/agent-2/main",
+            "push", "host-cave", "HEAD:refs/heads/agent-2/main",
             cwd=ws, check=False, env={"CAV_AGENT_ID": "2"},
         )
         self.assertNotEqual(result.returncode, 0)

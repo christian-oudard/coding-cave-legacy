@@ -70,6 +70,74 @@ class TestRequireInit(unittest.TestCase):
         self.assertIn("not initialized", result.stderr)
 
 
+class TestRequireInitInsideCave(unittest.TestCase):
+    """Commands require cav init inside a cave.
+
+    Inside a cave, host-cave points to the parent's bare repo but cave
+    (CAVE_REMOTE) does not exist until cav init is run.  require_init
+    must reject commands that need the local bare repo.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.repo = Path(self.tmpdir) / "project"
+        self.repo.mkdir()
+        git("init", "-b", "main", cwd=self.repo)
+        git("config", "user.email", "test@test.com", cwd=self.repo)
+        git("config", "user.name", "Test", cwd=self.repo)
+        (self.repo / "file.txt").write_text("content\n")
+        git("add", "file.txt", cwd=self.repo)
+        git("commit", "-m", "init", cwd=self.repo)
+        os.symlink(PROJECT_ROOT / "cav", self.repo / "cav")
+        # Add host-cave remote like the sandbox does (points to parent).
+        bare = Path(self.tmpdir) / "host-bare.git"
+        bare.mkdir()
+        git("init", "--bare", cwd=bare)
+        git("remote", "add", "host-cave", str(bare), cwd=self.repo)
+        # Simulate being inside a cave.
+        os.environ["CODING_CAVE_DEPTH"] = "1"
+
+    def tearDown(self):
+        os.environ.pop("CODING_CAVE_DEPTH", None)
+        shutil.rmtree(self.tmpdir)
+
+    def test_agent_blocked_inside_cave(self):
+        """cav agent inside a cave without init is rejected."""
+        result = cav_cli(cwd=self.repo, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not initialized", result.stderr)
+
+    def test_status_blocked_inside_cave(self):
+        result = cav_cli("status", cwd=self.repo, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not initialized", result.stderr)
+
+    def test_approve_blocked_inside_cave(self):
+        result = cav_cli("approve", cwd=self.repo, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not initialized", result.stderr)
+
+    def test_push_blocked_inside_cave(self):
+        result = cav_cli("push", cwd=self.repo, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not initialized", result.stderr)
+
+    def test_pull_blocked_inside_cave(self):
+        result = cav_cli("pull", cwd=self.repo, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not initialized", result.stderr)
+
+    def test_checkout_blocked_inside_cave(self):
+        result = cav_cli("checkout", "main", cwd=self.repo, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not initialized", result.stderr)
+
+    def test_version_still_works_inside_cave(self):
+        """version does not need init and must always work."""
+        result = cav_cli("version", cwd=self.repo, check=False)
+        self.assertEqual(result.returncode, 0)
+
+
 class TestRequireInitWithRegistry(unittest.TestCase):
     """require_init checks the projects table, not just .coding-cave."""
 
@@ -473,7 +541,9 @@ class TestSessionResume(unittest.TestCase):
         """cav --resume with a non-numeric ID gives a clear error."""
         from cav.cli import cli
         from click.testing import CliRunner
-        result = CliRunner().invoke(cli, ["agent", "--resume", "not-a-number"])
+        from unittest.mock import patch
+        with patch("cav.cli.require_init"):
+            result = CliRunner().invoke(cli, ["agent", "--resume", "not-a-number"])
         self.assertIn("Invalid agent", result.output)
 
     def test_write_then_find_session(self):

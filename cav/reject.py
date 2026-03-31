@@ -13,9 +13,9 @@ def reject(base: Path, agent_id: str | None = None, yes: bool = False):
             f"Switch to a shared branch first (e.g. 'git checkout main')."
         )
 
-    git.git("fetch", "--prune", config.SHARED_REMOTE, cwd=base, **config.v())
+    git.git("fetch", "--prune", config.CAVE_REMOTE, cwd=base, **config.v())
 
-    remote_ref = f"{config.SHARED_REMOTE}/{branch}"
+    remote_ref = f"{config.CAVE_REMOTE}/{branch}"
     try:
         tip_sha = git.git_output("rev-parse", remote_ref, cwd=base)
     except Exception:
@@ -77,11 +77,11 @@ def reject(base: Path, agent_id: str | None = None, yes: bool = False):
     # Skip if the agent branch already contains this commit (stacked rejection).
     ab = config.agent_branch(branch, target_agent)
     if not _agent_covers_tip(base, ab, tip_sha):
-        git.git("push", "--force", config.SHARED_REMOTE,
+        git.git("push", "--force", config.CAVE_REMOTE,
                 f"{tip_sha}:refs/heads/{ab}", cwd=base, **config.v())
 
     # Reset shared branch on cave
-    git.git("push", "--force", config.SHARED_REMOTE,
+    git.git("push", "--force", config.CAVE_REMOTE,
             f"{before_sha}:refs/heads/{branch}", cwd=base, **config.v())
 
     # Update local branch
@@ -94,7 +94,7 @@ def reject(base: Path, agent_id: str | None = None, yes: bool = False):
 
 def _agent_covers_tip(base, agent_branch_name, tip_sha):
     """True if the agent branch already contains tip_sha (from a prior rejection)."""
-    remote_agent = f"{config.SHARED_REMOTE}/{agent_branch_name}"
+    remote_agent = f"{config.CAVE_REMOTE}/{agent_branch_name}"
     try:
         git.git_output("rev-parse", remote_agent, cwd=base)
     except Exception:
@@ -130,8 +130,8 @@ def _check_no_unapproved(base, target_branch, agent_id, tip_sha):
     (from a prior rejection in the same chain), the rejection proceeds.
     """
     ab = config.agent_branch(target_branch, agent_id)
-    remote_agent = f"{config.SHARED_REMOTE}/{ab}"
-    remote_target = f"{config.SHARED_REMOTE}/{target_branch}"
+    remote_agent = f"{config.CAVE_REMOTE}/{ab}"
+    remote_target = f"{config.CAVE_REMOTE}/{target_branch}"
     try:
         git.git_output("rev-parse", remote_agent, cwd=base)
     except Exception:

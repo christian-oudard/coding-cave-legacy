@@ -21,7 +21,7 @@ def push(base: Path, force: bool = False):
             )
         raise SystemExit("Detached HEAD. Check out a branch before pushing.")
 
-    args = ["push", "--no-set-upstream", config.SHARED_REMOTE, branch]
+    args = ["push", "--no-set-upstream", config.CAVE_REMOTE, branch]
     if force:
         args.insert(1, "--force")
     try:

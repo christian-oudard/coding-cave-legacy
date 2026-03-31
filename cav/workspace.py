@@ -48,15 +48,23 @@ def create(base: Path, agent_id: str) -> Path:
     shared = config.shared_repo_path(base)
 
     # Sync user repo to shared repo so the clone has all branches.
+    # Only push shared branches; agent branches are managed by agents
+    # and the host's local copies can be stale (behind the bare repo).
     if not empty:
-        git.git("push", "--no-set-upstream", config.SHARED_REMOTE, "--all",
-                cwd=base, echo=False)
+        branches = git.git_output(
+            "for-each-ref", "--format=%(refname:short)", "refs/heads/",
+            cwd=base)
+        for branch in branches.splitlines():
+            if config.parse_agent_branch(branch):
+                continue
+            git.git("push", "--no-set-upstream", config.CAVE_REMOTE, branch,
+                    cwd=base, echo=False, check=False, capture=True)
 
     # Lightweight clone sharing objects with the bare repo
     git.git("clone", "--shared", str(shared), str(ws_path), echo=False)
 
-    # Rename origin -> cave
-    git.git("remote", "rename", "origin", config.SHARED_REMOTE, cwd=ws_path, echo=False)
+    # Rename origin -> host-cave (points up to the parent's bare repo)
+    git.git("remote", "rename", "origin", config.HOST_REMOTE, cwd=ws_path, echo=False)
 
     ab = config.agent_branch(target, agent_id)
 
@@ -65,7 +73,7 @@ def create(base: Path, agent_id: str) -> Path:
         git.git("checkout", "--orphan", ab, cwd=ws_path, echo=False)
         return ws_path
 
-    remote_ref = f"refs/remotes/{config.SHARED_REMOTE}/{ab}"
+    remote_ref = f"refs/remotes/{config.HOST_REMOTE}/{ab}"
 
     # If the agent branch already exists on the remote (re-creating a
     # workspace for a continuing agent), check it out with tracking.
@@ -75,7 +83,7 @@ def create(base: Path, agent_id: str) -> Path:
         git.git("checkout", ab, cwd=ws_path, echo=False)
     except subprocess.CalledProcessError:
         git.git("checkout", "-b", ab, cwd=ws_path, echo=False)
-        git.git("push", config.SHARED_REMOTE, ab,
+        git.git("push", config.HOST_REMOTE, ab,
                 f"--push-option=agent={agent_id}", cwd=ws_path,
                 echo=False, capture=True)
 
