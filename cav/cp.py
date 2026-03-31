@@ -43,11 +43,11 @@ def _worktree_for_slug(slug: str, agent_id: str | None) -> Path:
     # Multiple agents: prompt the user to pick one.
     print(f"Multiple agents for '{slug}':", file=sys.stderr)
     by_key = {}
-    for i, ws in enumerate(agents, 1):
+    for ws in agents:
         aid = ws.name
         state = "running" if config.is_agent_running(aid) else "paused"
-        print(f"  {i}) {slug}@{aid}  [{state}]", file=sys.stderr)
-        by_key[str(i)] = ws
+        print(f"  {aid}) {slug}@{aid}  [{state}]", file=sys.stderr)
+        by_key[aid] = ws
     try:
         choice = input("Agent: ").strip()
         return by_key[choice]
