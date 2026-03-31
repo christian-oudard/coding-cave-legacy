@@ -1517,6 +1517,39 @@ class TestCAV(unittest.TestCase):
         self.assertEqual(continued, aid)
         config.mark_agent_exited(continued)
 
+    def test_continue_after_no_commits(self):
+        """cav -c must still work when the previous session made no commits.
+
+        Repro: user runs `cav`, agent talks but makes zero commits, exits.
+        Then `cav -c` should resume the same agent. But _auto_cleanup_if_clean
+        sees no remote agent branches and deletes the agent from the registry,
+        so resolve_continue finds nothing and launches a fresh agent instead.
+        """
+        from cav.cli import _auto_cleanup_if_clean
+        from cav.init import init
+
+        init(str(self.user_repo))
+
+        # Simulate `cav`: acquire agent, create workspace, but make NO commits
+        aid = config.acquire_agent_id(self.user_repo)
+        self._create_agent(aid)
+        session_id = config.read_session_id(aid)
+        self.assertIsNotNone(session_id)
+
+        # Agent exits (simulates the finally block in cli.agent)
+        config.mark_agent_exited(aid)
+        _auto_cleanup_if_clean(self.user_repo, aid)
+
+        # Simulate `cav -c`: sweep stale agents, then resolve_continue
+        from cav.cli import _sweep_stale_agents
+        _sweep_stale_agents(self.user_repo)
+
+        continued = config.continue_agent_id(self.user_repo)
+        self.assertEqual(continued, aid,
+                         "Agent with no commits should survive cleanup "
+                         "so cav -c can resume it")
+        config.mark_agent_exited(continued)
+
 
 class TestPostCommitHook(unittest.TestCase):
     """Tests for the post-commit hook's auto-rebase behavior."""

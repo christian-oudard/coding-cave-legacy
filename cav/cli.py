@@ -154,6 +154,8 @@ def _sweep_stale_agents(base: Path):
 
 def _auto_cleanup_if_clean(base, agent_id):
     """Remove agent if all work is approved."""
+    if config.read_session_id(agent_id):
+        return  # Has a resumable session; keep it for cav -c
     from .status import _remove_agent
     try:
         git.git("fetch", config.SHARED_REMOTE, cwd=base, echo=False,
