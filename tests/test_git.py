@@ -1528,6 +1528,51 @@ class TestPostCommitHook(unittest.TestCase):
         log = git_out("log", "--oneline", "cave/agent-1/main", cwd=self.user_repo)
         self.assertIn("simple commit", log)
 
+    def test_manual_rebase_pushes_to_remote(self):
+        """Hook must push the rebased branch during a manual rebase.
+
+        During a rebase, HEAD is detached, so 'git push cave HEAD' fails
+        because git can't resolve the remote branch. The hook must read
+        the branch name from .git/rebase-merge/head-name and push with
+        an explicit refspec.
+        """
+        # Agent commits first.
+        (self.a1 / "agent_work.py").write_text("# agent\n")
+        git("add", "agent_work.py", cwd=self.a1)
+        git("commit", "-m", "agent work", cwd=self.a1)
+
+        # Then main diverges.
+        (self.user_repo / "diverge.py").write_text("# diverge\n")
+        git("add", "diverge.py", cwd=self.user_repo)
+        git("commit", "-m", "main diverges", cwd=self.user_repo)
+        git("push", "cave", "main", cwd=self.user_repo)
+
+        pre_rebase_sha = git_out("rev-parse", "HEAD", cwd=self.a1)
+
+        # Manual rebase (what the agent does before cav approve).
+        git("fetch", "cave", cwd=self.a1)
+        git("rebase", "cave/main", cwd=self.a1)
+
+        post_rebase_sha = git_out("rev-parse", "HEAD", cwd=self.a1)
+
+        # The rebase must have actually moved the branch.
+        self.assertNotEqual(pre_rebase_sha, post_rebase_sha,
+                            "rebase did not move HEAD")
+
+        # The remote must have the rebased commit.
+        git("fetch", "cave", cwd=self.user_repo)
+        remote_sha = git_out("rev-parse", "cave/agent-1/main",
+                             cwd=self.user_repo)
+        self.assertEqual(remote_sha, post_rebase_sha,
+                         "hook did not push the rebased branch to the remote")
+
+        # Agent branch should be a fast-forward from main.
+        merge_base = git_out("merge-base", "cave/main", "cave/agent-1/main",
+                             cwd=self.user_repo)
+        main_sha = git_out("rev-parse", "cave/main", cwd=self.user_repo)
+        self.assertEqual(merge_base, main_sha,
+                         "agent branch should be a fast-forward from main")
+
 
 if __name__ == "__main__":
     unittest.main()
