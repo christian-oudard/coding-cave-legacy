@@ -59,6 +59,7 @@ def _pull_agent(base: Path, local_branch: str, target: str):
         return
 
     git.git("reset", "--hard", remote_agent, cwd=base, **config.v())
+    print(f"Reset '{local_branch}' to '{remote_agent}'.")
 
     # Show what's on the agent branch relative to target
     try:
@@ -69,7 +70,7 @@ def _pull_agent(base: Path, local_branch: str, target: str):
     if log:
         count = len(log.splitlines())
         n = "commit" if count == 1 else "commits"
-        print(f"\n{count} {n} ahead of {target}:")
+        print(f"{count} {n} ahead of {target}:")
         print(log)
 
 
