@@ -303,10 +303,12 @@ def remove_agent(agent_id, all_agents, yes):
         target_ref = f"{config.SHARED_REMOTE}/{target}"
         try:
             if git.has_merge_base(remote_agent, target_ref, cwd=base):
-                lines = git.cherry_undelivered(target_ref, remote_agent, cwd=base)
-                if lines:
-                    n = "commit" if len(lines) == 1 else "commits"
-                    print(f"Warning: discarding {len(lines)} unapproved {n} on {b}.")
+                commits = git.cherry_undelivered(target_ref, remote_agent, cwd=base)
+                if commits:
+                    n = "commit" if len(commits) == 1 else "commits"
+                    print(f"Warning: discarding {len(commits)} unapproved {n} on {b}:")
+                    for c in git.commit_oneline(f"{target_ref}..{remote_agent}", cwd=base):
+                        print(f"  {c}")
         except Exception:
             pass
 
