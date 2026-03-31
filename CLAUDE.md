@@ -2,20 +2,25 @@
 
 Coordinates multiple Claude agents working in parallel on a Git project, using Git as the sole coordination mechanism. Each agent runs in a bwrap sandbox with nix packages.
 
+## Development
+
+The base Python in the cave does not include project dependencies (click, vulture). Prefix commands with `nix develop --command` to get them, or use `nix flake check` / `nix build` which bring their own dependencies.
+
+To add a new Python dependency, add it to the `python3.withPackages` calls in `flake.nix` (build, devShell, and checks). There is no pyproject.toml.
+
 ## Testing
 
 Three test tiers, separated by what they require:
 
 - **Fast (pure Python):** `nix flake check` runs `test_hook`, `test_cli`, `test_alternates`, `test_nixdb`, `test_lint`. No git subprocesses.
-- **Git integration:** `python3 -m unittest -v tests.test_git tests.test_daemon tests.test_security`. Spawns real git repos, exercises CLI and daemon isolation.
-- **Cave integration:** `python3 -m unittest -v tests.test_cave`. Requires running inside a cave (GPG socket, git identity). Tests environment features.
+- **Git integration:** `nix develop --command python3 -m unittest -v tests.test_git tests.test_daemon tests.test_security`. Spawns real git repos, exercises CLI and daemon isolation.
+- **Cave integration:** `nix develop --command python3 -m unittest -v tests.test_cave`. Requires running inside a cave (GPG socket, git identity). Tests environment features.
 
 Run fast + git tests before committing changes to core modules. Run cave tests when changing sandbox or environment setup.
 
 ## Build
 
-Nix-only. `nix build` produces the `cav` binary. `cave-env` is a symlinkJoin of all packages available inside the sandbox. The `@CAVE_ENV@` placeholder in `sandbox.py` is substituted at build time.
-
+Nix-only. `nix build` produces the `cav` binary. Build-time placeholders (`@VERSION@`, `@VERSION_DATE@`, `@SANDBOX_BIN@`, `@CAV_BIN@`) in cli.py and sandbox.py are substituted by the Nix derivation. Running from source via `nix develop` works for tests and most CLI commands, but `cav version` and `cav agent` require a full `nix build` since they depend on substituted values.
 ## Layout
 
 - `cav/` - Python package (cli, config, daemon, handler, init, sandbox, workspace, pull, push, status, git, hooks/)
