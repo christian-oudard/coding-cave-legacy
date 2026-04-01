@@ -11,7 +11,7 @@ from unittest.mock import patch
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from cav import config
+from cav import config, registry
 from cav.cp import cp, _resolve_cave_path, _worktree_for_slug
 
 
@@ -440,7 +440,7 @@ class TestCpPathResolution(CpTestCase):
         src = Path(self.tmpdir) / "g.txt"
         src.write_text("from branch\n")
 
-        db = config._open_registry()
+        db = registry._open()
         db.execute(
             "INSERT OR REPLACE INTO agents (agent_id, project, started_at) VALUES (?, ?, ?)",
             ("5", "branchproj", 0.0)
@@ -460,7 +460,7 @@ class TestCpPathResolution(CpTestCase):
         src = Path(self.tmpdir) / "h.txt"
         src.write_text("for agent 2\n")
 
-        db = config._open_registry()
+        db = registry._open()
         for aid in ("1", "2"):
             db.execute(
                 "INSERT OR REPLACE INTO agents (agent_id, project, started_at) VALUES (?, ?, ?)",
@@ -481,7 +481,7 @@ class TestCpPathResolution(CpTestCase):
         src = Path(self.tmpdir) / "i.txt"
         src.write_text("via registry\n")
 
-        db = config._open_registry()
+        db = registry._open()
         db.execute(
             "INSERT OR REPLACE INTO agents (agent_id, project, started_at) VALUES (?, ?, ?)",
             ("7", "regproj", 0.0)

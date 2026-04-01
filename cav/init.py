@@ -4,7 +4,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import config, git
+from . import config, git, registry
 
 
 def install_hooks(shared: Path):
@@ -69,7 +69,7 @@ def init(path: str):
 
     if shared.exists():
         install_hooks(shared)
-        config.register_project(base)
+        registry.register_project(base)
         # Re-sync: push any commits added since last init.
         _require_commits(base)
         _warn_dirty(base)
@@ -106,5 +106,5 @@ def init(path: str):
     _warn_dirty(base)
     _push_shared_branches(base)
 
-    config.register_project(base)
+    registry.register_project(base)
     print(f"Coding Cave initialized at {cav}")

@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from . import config, git
+from . import config, git, registry
 
 
 def approve(base: Path, agent_id: str | None = None, yes: bool = False):
@@ -24,7 +24,7 @@ def approve(base: Path, agent_id: str | None = None, yes: bool = False):
             )
         target = config.resolve_target(branch)
         agent_id = parsed[1]
-    name = config.display_name(base, agent_id)
+    name = registry.display_name(base, agent_id)
 
     git.git("fetch", "--prune", config.CAVE_REMOTE, cwd=base, **config.v())
 
@@ -91,7 +91,7 @@ def approve(base: Path, agent_id: str | None = None, yes: bool = False):
     NULL_SHA = "0" * 40
     prev = before_sha or NULL_SHA
     for sha in shas:
-        config.record_approval(slug, target, agent_id, prev, sha)
+        registry.record_approval(slug, target, agent_id, prev, sha)
         prev = sha
 
     # Courtesy: sync local target branch (best-effort)
@@ -112,10 +112,10 @@ def approve(base: Path, agent_id: str | None = None, yes: bool = False):
     git.git("branch", "-D", branch,
             cwd=base, echo=False, capture=True, check=False)
 
-    if not config.is_agent_running(agent_id):
+    if not registry.is_agent_running(agent_id):
         from .cli import _auto_cleanup_if_clean
         _auto_cleanup_if_clean(base, agent_id)
-        if agent_id not in [a for a in config.all_agent_ids()]:
+        if agent_id not in [a for a in registry.all_agent_ids()]:
             print(f"Approved and removed {name}.")
         else:
             print(f"Approved (agent has work in other projects).")

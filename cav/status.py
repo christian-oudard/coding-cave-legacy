@@ -4,7 +4,7 @@ import shutil
 import time
 from pathlib import Path
 
-from . import config, git
+from . import config, git, registry
 
 
 def format_all(entries: list[tuple[float, str, str]]) -> str:
@@ -72,13 +72,13 @@ def _remove_agent(base: Path, agent_id: str, branches: list[str]):
                 cwd=base, echo=False, capture=True, check=False)
     # Clean branches and worktrees in all associated projects.
     primary_slug = config.project_slug(base)
-    for slug in config.agent_all_slugs(agent_id):
+    for slug in registry.agent_all_slugs(agent_id):
         ws = config.worktree_dir(slug, agent_id)
         if ws.exists():
             shutil.rmtree(ws)
         if slug == primary_slug:
             continue
-        path = config.project_path(slug)
+        path = registry.project_path(slug)
         if not path:
             continue
         try:
@@ -92,7 +92,7 @@ def _remove_agent(base: Path, agent_id: str, branches: list[str]):
                             cwd=sec_base, echo=False, capture=True, check=False)
         except Exception:
             pass
-    config.remove_agent(agent_id)
+    registry.remove_agent(agent_id)
 
 
 def status(base: Path, agent_filter: str | None = None, scoped: bool = True) -> float:
@@ -116,7 +116,7 @@ def status(base: Path, agent_filter: str | None = None, scoped: bool = True) -> 
 
     # Agents come from the registry, branches provide detail
     slug = config.project_slug(base)
-    registered = config.all_agent_ids(slug)
+    registered = registry.all_agent_ids(slug)
     if agent_filter:
         registered = [a for a in registered if a == agent_filter]
 
@@ -146,8 +146,8 @@ def status(base: Path, agent_filter: str | None = None, scoped: bool = True) -> 
     # Collect agent info
     agents: list[AgentInfo] = []
     for agent_id, branches in by_agent.items():
-        name = config.display_name(base, agent_id)
-        running = config.is_agent_running(agent_id)
+        name = registry.display_name(base, agent_id)
+        running = registry.is_agent_running(agent_id)
 
         unapproved = []
         last_activity = 0.0
@@ -167,7 +167,7 @@ def status(base: Path, agent_filter: str | None = None, scoped: bool = True) -> 
 
         # Fall back to registry timestamps if no branches
         if not last_activity:
-            exit_t = config.agent_exit_time(agent_id)
+            exit_t = registry.agent_exit_time(agent_id)
             if exit_t:
                 last_activity = exit_t
 

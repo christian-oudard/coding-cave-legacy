@@ -1,6 +1,6 @@
 """Shared test utilities."""
 
-from cav import config
+from cav import registry
 
 
 def find_agent_by_session(session_id: str) -> str | None:
@@ -9,7 +9,7 @@ def find_agent_by_session(session_id: str) -> str | None:
     Removed from production code (no longer called by CLI), but kept
     here so tests can verify session-ID storage round-trips.
     """
-    db = config._open_registry()
+    db = registry._open()
     try:
         row = db.execute(
             "SELECT agent_id FROM agents WHERE session_id = ?",

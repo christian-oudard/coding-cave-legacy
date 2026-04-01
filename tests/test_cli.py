@@ -196,7 +196,7 @@ class TestRequireInitWithRegistry(unittest.TestCase):
         slug = other.name  # project_slug uses the directory name
         result = subprocess.run(
             ["python3", "-c",
-             f"from cav import config; print(config.project_path({slug!r}) or '')"],
+             f"from cav import registry; print(registry.project_path({slug!r}) or '')"],
             capture_output=True, text=True, cwd=PROJECT_ROOT,
         )
         self.assertEqual(result.returncode, 0)
@@ -550,14 +550,14 @@ class TestSessionResume(unittest.TestCase):
 
     def test_write_then_find_session(self):
         """write_session_id + find_agent_by_session round-trip."""
-        from cav import config
+        from cav import config, registry
         from tests import find_agent_by_session
         config.DATA_DIR.mkdir(parents=True, exist_ok=True)
-        db = config._open_registry()
+        db = registry._open()
         db.execute("INSERT INTO agents (agent_id, project, session_id) VALUES ('5', 'proj', NULL)")
         db.commit()
         db.close()
-        config.write_session_id("5", "test-session-uuid")
+        registry.write_session_id("5", "test-session-uuid")
         self.assertEqual(find_agent_by_session("test-session-uuid"), "5")
 
 
@@ -594,9 +594,9 @@ class TestSessionLifecycle(unittest.TestCase):
 
     def test_acquire_stores_readable_session_id(self):
         """acquire_agent_id pre-generates a UUID retrievable via read_session_id."""
-        from cav import config
-        aid = config.acquire_agent_id(self.base)
-        sid = config.read_session_id(aid)
+        from cav import registry
+        aid = registry.acquire_agent_id(self.base)
+        sid = registry.read_session_id(aid)
         self.assertIsNotNone(sid)
         # Must look like a UUID (contains dashes, 36 chars)
         self.assertEqual(len(sid), 36)
@@ -604,27 +604,27 @@ class TestSessionLifecycle(unittest.TestCase):
 
     def test_continue_sees_pre_generated_session(self):
         """continue_agent_id returns an agent whose pre-generated session is intact."""
-        from cav import config
-        aid = config.acquire_agent_id(self.base)
-        sid = config.read_session_id(aid)
-        config.mark_agent_exited(aid)
+        from cav import registry
+        aid = registry.acquire_agent_id(self.base)
+        sid = registry.read_session_id(aid)
+        registry.mark_agent_exited(aid)
 
-        continued = config.continue_agent_id(self.base)
+        continued = registry.continue_agent_id(self.base)
         self.assertEqual(continued, aid)
-        self.assertEqual(config.read_session_id(continued), sid)
+        self.assertEqual(registry.read_session_id(continued), sid)
 
     def test_continue_returns_none_when_nothing_to_continue(self):
         """When no exited agent exists, continue_agent_id returns None."""
-        from cav import config
-        self.assertIsNone(config.continue_agent_id(self.base))
+        from cav import registry
+        self.assertIsNone(registry.continue_agent_id(self.base))
 
     def test_clear_session_id(self):
         """clear_session_id sets session to NULL."""
-        from cav import config
-        aid = config.acquire_agent_id(self.base)
-        self.assertIsNotNone(config.read_session_id(aid))
-        config.clear_session_id(aid)
-        self.assertIsNone(config.read_session_id(aid))
+        from cav import registry
+        aid = registry.acquire_agent_id(self.base)
+        self.assertIsNotNone(registry.read_session_id(aid))
+        registry.clear_session_id(aid)
+        self.assertIsNone(registry.read_session_id(aid))
 
     def test_sweep_then_continue_does_not_resume(self):
         """Exact repro: sweep removes agent, cav -c must not --resume the fresh UUID.
@@ -639,16 +639,16 @@ class TestSessionLifecycle(unittest.TestCase):
         5. resuming = bool(session_id) was True because the new UUID is
            non-None. Claude got --resume with a UUID it never saw.
         """
-        from cav import config
-        from cav.config import resolve_continue
+        from cav import registry
+        from cav.registry import resolve_continue
 
         # Step 1: agent runs and exits.
-        aid = config.acquire_agent_id(self.base)
-        old_sid = config.read_session_id(aid)
-        config.mark_agent_exited(aid)
+        aid = registry.acquire_agent_id(self.base)
+        old_sid = registry.read_session_id(aid)
+        registry.mark_agent_exited(aid)
 
         # Step 2-3: simulate sweep removing the agent entirely.
-        config.remove_agent(aid)
+        registry.remove_agent(aid)
 
         # Step 4-5: cav -c resolve logic.
         new_aid, session_id, resuming = resolve_continue(self.base)
@@ -660,12 +660,12 @@ class TestSessionLifecycle(unittest.TestCase):
 
     def test_continue_with_valid_session_resumes(self):
         """cav -c resumes when the session file exists on disk."""
-        from cav import config
-        from cav.config import resolve_continue
+        from cav import config, registry
+        from cav.registry import resolve_continue
 
-        aid = config.acquire_agent_id(self.base)
-        sid = config.read_session_id(aid)
-        config.mark_agent_exited(aid)
+        aid = registry.acquire_agent_id(self.base)
+        sid = registry.read_session_id(aid)
+        registry.mark_agent_exited(aid)
 
         # Simulate Claude having written the session file.
         self._make_session_file(config.project_slug(self.base), sid)
@@ -677,12 +677,12 @@ class TestSessionLifecycle(unittest.TestCase):
 
     def test_continue_with_missing_session_file_does_not_resume(self):
         """cav -c with agent in registry but session file gone starts fresh."""
-        from cav import config
-        from cav.config import resolve_continue
+        from cav import config, registry
+        from cav.registry import resolve_continue
 
-        aid = config.acquire_agent_id(self.base)
-        old_sid = config.read_session_id(aid)
-        config.mark_agent_exited(aid)
+        aid = registry.acquire_agent_id(self.base)
+        old_sid = registry.read_session_id(aid)
+        registry.mark_agent_exited(aid)
 
         # Agent still in registry, but no session file on disk.
         slug = config.project_slug(self.base)
@@ -699,14 +699,14 @@ class TestSessionLifecycle(unittest.TestCase):
 
     def test_find_agent_by_session_after_capture(self):
         """find_agent_by_session works after post-exit capture overwrites the UUID."""
-        from cav import config
+        from cav import registry
         from tests import find_agent_by_session
-        aid = config.acquire_agent_id(self.base)
-        pre_generated = config.read_session_id(aid)
+        aid = registry.acquire_agent_id(self.base)
+        pre_generated = registry.read_session_id(aid)
 
         # Overwrite with real UUID (simulates post-exit capture)
         real_uuid = "after-capture-real-uuid-sessionfile"
-        config.write_session_id(aid, real_uuid)
+        registry.write_session_id(aid, real_uuid)
 
         # Old UUID no longer resolves
         self.assertIsNone(find_agent_by_session(pre_generated))
@@ -874,38 +874,38 @@ class TestLaunchOpts(unittest.TestCase):
 
     def test_save_and_read_round_trip(self):
         """save_agent_launch_opts round-trips through read."""
-        from cav import config
-        aid = config.acquire_agent_id(self.base)
-        config.save_agent_launch_opts(aid, ["coding-cave", "other"], True)
-        slugs, recursive = config.read_agent_launch_opts(aid)
+        from cav import registry
+        aid = registry.acquire_agent_id(self.base)
+        registry.save_agent_launch_opts(aid, ["coding-cave", "other"], True)
+        slugs, recursive = registry.read_agent_launch_opts(aid)
         self.assertEqual(slugs, ["coding-cave", "other"])
         self.assertTrue(recursive)
 
     def test_read_defaults_without_save(self):
         """read_agent_launch_opts returns defaults when nothing saved."""
-        from cav import config
-        aid = config.acquire_agent_id(self.base)
-        slugs, recursive = config.read_agent_launch_opts(aid)
+        from cav import registry
+        aid = registry.acquire_agent_id(self.base)
+        slugs, recursive = registry.read_agent_launch_opts(aid)
         self.assertEqual(slugs, [])
         self.assertFalse(recursive)
 
     def test_opts_survive_exit_and_continue(self):
         """Launch opts persist through exit and are available on continue."""
-        from cav import config
-        aid = config.acquire_agent_id(self.base)
-        config.save_agent_launch_opts(aid, ["extra-proj"], True)
-        config.mark_agent_exited(aid)
+        from cav import registry
+        aid = registry.acquire_agent_id(self.base)
+        registry.save_agent_launch_opts(aid, ["extra-proj"], True)
+        registry.mark_agent_exited(aid)
 
-        continued = config.continue_agent_id(self.base)
+        continued = registry.continue_agent_id(self.base)
         self.assertEqual(continued, aid)
-        slugs, recursive = config.read_agent_launch_opts(continued)
+        slugs, recursive = registry.read_agent_launch_opts(continued)
         self.assertEqual(slugs, ["extra-proj"])
         self.assertTrue(recursive)
 
     def test_nonexistent_agent_returns_defaults(self):
         """read_agent_launch_opts returns defaults for unknown agent."""
-        from cav import config
-        slugs, recursive = config.read_agent_launch_opts("999")
+        from cav import registry
+        slugs, recursive = registry.read_agent_launch_opts("999")
         self.assertEqual(slugs, [])
         self.assertFalse(recursive)
 

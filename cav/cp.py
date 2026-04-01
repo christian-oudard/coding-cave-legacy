@@ -5,7 +5,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from . import config, git
+from . import config, git, registry
 
 
 def _norm(base: Path, rel: str) -> Path:
@@ -33,7 +33,7 @@ def _worktree_for_slug(slug: str, agent_id: str | None) -> Path:
     if not slug_dir.exists():
         raise SystemExit(f"No worktrees found for project '{slug}'.")
 
-    registered = set(config.all_agent_ids(slug))
+    registered = set(registry.all_agent_ids(slug))
     agents = sorted([p for p in slug_dir.iterdir()
                      if p.is_dir() and p.name in registered],
                    key=lambda p: int(p.name) if p.name.isdigit() else p.name)
@@ -47,7 +47,7 @@ def _worktree_for_slug(slug: str, agent_id: str | None) -> Path:
     by_key = {}
     for ws in agents:
         aid = ws.name
-        state = "running" if config.is_agent_running(aid) else "exited"
+        state = "running" if registry.is_agent_running(aid) else "exited"
         print(f"  {aid}) {slug}@{aid}  [{state}]", file=sys.stderr)
         by_key[aid] = ws
     try:
@@ -66,7 +66,7 @@ def _cwd_info() -> tuple[str, str | None]:
     and implicitly selects that agent's worktree.
     """
     cwd = Path.cwd().resolve()
-    for slug, path in config.all_projects():
+    for slug, path in registry.all_projects():
         proj = Path(path).resolve()
         if cwd == proj or cwd.is_relative_to(proj):
             return slug, None
@@ -76,7 +76,7 @@ def _cwd_info() -> tuple[str, str | None]:
         parsed = config.parse_agent_branch(branch)
         if parsed:
             _, agent_id = parsed
-            slug = config.agent_project(agent_id)
+            slug = registry.agent_project(agent_id)
             if slug:
                 return slug, agent_id
     except Exception:
@@ -111,7 +111,7 @@ def _resolve_cave_path(spec: str) -> tuple[Path, str] | tuple[None, None]:
     if prefix == "cave":
         if agent_id is not None:
             # Explicit cave@N:path — look up slug from the registry, no CWD needed.
-            slug = config.agent_project(agent_id)
+            slug = registry.agent_project(agent_id)
             if not slug:
                 raise SystemExit(f"No agent {agent_id} found in registry.")
         else:

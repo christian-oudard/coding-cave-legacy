@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from . import config, git
+from . import config, git, registry
 
 
 def reject(base: Path, agent_id: str | None = None, yes: bool = False):
@@ -43,7 +43,7 @@ def reject(base: Path, agent_id: str | None = None, yes: bool = False):
         pass  # origin doesn't exist or branch not tracked, OK to proceed
 
     slug = config.project_slug(base)
-    approval = config.lookup_approval_by_after(slug, branch, tip_sha)
+    approval = registry.lookup_approval_by_after(slug, branch, tip_sha)
     if not approval:
         raise SystemExit(
             f"No approval record found for the tip of '{branch}'.\n"
@@ -59,7 +59,7 @@ def reject(base: Path, agent_id: str | None = None, yes: bool = False):
     commits = git.commit_oneline(f"{before_sha}..{tip_sha}", cwd=base)
     n = len(commits)
     word = "commit" if n == 1 else "commits"
-    target_name = config.display_name(base, target_agent)
+    target_name = registry.display_name(base, target_agent)
     print(f"\nRejecting {n} {word} from tip of {branch}:\n")
     for line in commits:
         print(f"  {line}")
@@ -87,7 +87,7 @@ def reject(base: Path, agent_id: str | None = None, yes: bool = False):
     # Update local branch
     git.git("reset", "--hard", before_sha, cwd=base, **config.v())
 
-    config.delete_approval(approval["id"])
+    registry.delete_approval(approval["id"])
 
     print(f"\nRejected. Agent branch '{ab}' restored for rework.")
 
@@ -107,12 +107,12 @@ def _agent_covers_tip(base, agent_branch_name, tip_sha):
 def _resolve_target_agent(base, branch, agent_id, original_agent_id, tip_sha):
     """Determine which agent should handle the rejected work."""
     if agent_id:
-        if agent_id not in config.all_agent_ids():
+        if agent_id not in registry.all_agent_ids():
             raise SystemExit(f"Agent {agent_id} not found in registry.")
         _check_no_unapproved(base, branch, agent_id, tip_sha)
         return agent_id
 
-    if original_agent_id not in config.all_agent_ids():
+    if original_agent_id not in registry.all_agent_ids():
         raise SystemExit(
             f"Original agent {original_agent_id} is no longer in the registry.\n"
             f"Start or continue an agent session, then re-run:\n"

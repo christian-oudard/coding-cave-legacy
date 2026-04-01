@@ -8,7 +8,7 @@ from pathlib import Path
 
 import click
 
-from . import config, git
+from . import config, git, registry
 
 
 def find_repo_root() -> Path:
@@ -20,7 +20,7 @@ def find_repo_root() -> Path:
 
 def require_init(base: Path):
     if config.shared_repo_path(base).exists():
-        if not config.project_path(config.project_slug(base)):
+        if not registry.project_path(config.project_slug(base)):
             raise SystemExit("Project not registered. Run: cav init")
         return
     # Inside a cave the bare repo is on the host; check for the cave remote instead.
@@ -35,7 +35,7 @@ def require_init(base: Path):
 
 def resolve_project(path: str) -> Path:
     """Resolve a project slug or path to its git root and validate init."""
-    registered = config.project_path(path)
+    registered = registry.project_path(path)
     if registered:
         return Path(registered)
     p = Path(path).resolve()
@@ -48,7 +48,7 @@ def resolve_project(path: str) -> Path:
             f"Coding Cave not initialized in {p}\n"
             f"Run: cav init {p}"
         )
-    if not config.project_path(config.project_slug(p)):
+    if not registry.project_path(config.project_slug(p)):
         raise SystemExit(f"Project not registered: {p}\nRun: cav init {p}")
     return p
 
@@ -92,22 +92,22 @@ def agent(continue_agent, resume_agent, extra_projects, recursive):
         if not config.AGENT_ID_RE.match(aid):
             raise SystemExit(
                 f"Invalid agent '{resume_agent}'. Use @<id> or <slug>@<id>.")
-        agent_id, session_id, resuming = config.resolve_continue(base, aid)
+        agent_id, session_id, resuming = registry.resolve_continue(base, aid)
     elif continue_agent:
         hint = on_agent_branch[1] if on_agent_branch else None
-        agent_id, session_id, resuming = config.resolve_continue(base, hint)
+        agent_id, session_id, resuming = registry.resolve_continue(base, hint)
     else:
-        agent_id = config.acquire_agent_id(base)
-        session_id = config.read_session_id(agent_id)
+        agent_id = registry.acquire_agent_id(base)
+        session_id = registry.read_session_id(agent_id)
         resuming = False
 
     # Restore saved launch options when continuing
     if continue_agent or resume_agent:
-        saved_slugs, saved_recursive = config.read_agent_launch_opts(agent_id)
+        saved_slugs, saved_recursive = registry.read_agent_launch_opts(agent_id)
         if not extra_projects and saved_slugs:
             extra_projects = tuple(
-                config.project_path(s) for s in saved_slugs
-                if config.project_path(s)
+                registry.project_path(s) for s in saved_slugs
+                if registry.project_path(s)
             )
         if not recursive and saved_recursive:
             recursive = True
@@ -126,7 +126,7 @@ def agent(continue_agent, resume_agent, extra_projects, recursive):
             )
         projects.append((extra, slug))
 
-    config.save_agent_launch_opts(
+    registry.save_agent_launch_opts(
         agent_id, [slug for _, slug in projects[1:]], recursive)
 
     workspaces = []
@@ -135,7 +135,7 @@ def agent(continue_agent, resume_agent, extra_projects, recursive):
         shared = config.shared_repo_path(project_base)
         workspaces.append((ws, shared, slug))
 
-    name = config.display_name(base, agent_id)
+    name = registry.display_name(base, agent_id)
     lineage = os.environ.get("CODING_CAVE_LINEAGE", "")
     if lineage:
         name += f" (depth {int(os.environ.get('CODING_CAVE_DEPTH', '0')) + 1}, parent {lineage})"
@@ -145,20 +145,20 @@ def agent(continue_agent, resume_agent, extra_projects, recursive):
                     resuming=resuming)
     finally:
         if session_id and not config.session_file_exists(projects[0][1], session_id):
-            config.clear_session_id(agent_id)
-        config.mark_agent_exited(agent_id)
+            registry.clear_session_id(agent_id)
+        registry.mark_agent_exited(agent_id)
         _auto_cleanup_if_clean(base, agent_id)
     sys.exit(rc)
 
 
 def _sweep_stale_agents(base: Path):
     """Clean up exited agents with no pending work before launching."""
-    before = {aid: config.display_name(base, aid)
-              for aid in config.all_agent_ids()}
+    before = {aid: registry.display_name(base, aid)
+              for aid in registry.all_agent_ids()}
     for agent_id in before:
-        if not config.is_agent_running(agent_id):
+        if not registry.is_agent_running(agent_id):
             _auto_cleanup_if_clean(base, agent_id)
-    removed = set(before) - set(config.all_agent_ids())
+    removed = set(before) - set(registry.all_agent_ids())
     for aid in sorted(removed, key=int):
         print(f"Warning: cleaned up stale agent {before[aid]}.")
 
@@ -168,7 +168,7 @@ def _auto_cleanup_if_clean(base, agent_id):
     from .status import _remove_agent
 
     all_agent_branches = []  # (base_path, branch) pairs for removal
-    for slug in config.agent_all_slugs(agent_id):
+    for slug in registry.agent_all_slugs(agent_id):
         # Check for uncommitted work in the worktree.
         ws = config.worktree_dir(slug, agent_id)
         if ws.is_dir():
@@ -179,7 +179,7 @@ def _auto_cleanup_if_clean(base, agent_id):
             except Exception:
                 return  # can't verify worktree state, keep agent
 
-        path = config.project_path(slug)
+        path = registry.project_path(slug)
         if not path:
             continue
         proj_base = Path(path)
@@ -266,16 +266,25 @@ def status(agent, all_projects):
     if all_projects:
         import io, contextlib
         from .status import format_all
-        projects = config.all_projects()
+        projects = registry.all_projects()
         if not projects:
             raise SystemExit("No registered projects. Run: cav init")
         entries = []
+        missing = []
         for slug, path in projects:
+            if not Path(path).is_dir():
+                missing.append((slug, path))
+                continue
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
                 last_activity = _status(Path(path), scoped=False)
             entries.append((last_activity, slug, buf.getvalue()))
         print(format_all(entries))
+        for slug, path in missing:
+            click.echo(
+                f"\"{slug}\" is registered but {path} is missing."
+                f" Restore directory or remove with: cav remove-project {slug}",
+                err=True)
         return
     base = find_repo_root()
     require_init(base)
@@ -309,11 +318,11 @@ def remove_agent(agent_id, all_agents, yes):
     if not config.AGENT_ID_RE.match(aid):
         raise SystemExit(f"Invalid agent ID '{agent_id}'. Use a number (e.g. 3).")
 
-    name = config.display_name(base, aid)
-    if aid not in config.all_agent_ids():
+    name = registry.display_name(base, aid)
+    if aid not in registry.all_agent_ids():
         raise SystemExit(f"{name} not found.")
 
-    if config.is_agent_running(aid):
+    if registry.is_agent_running(aid):
         raise SystemExit(f"{name} is running. Stop it first.")
 
     branches = git.remote_branches(config.CAVE_REMOTE, cwd=base)
@@ -341,16 +350,16 @@ def remove_agent(agent_id, all_agents, yes):
             pass
 
     _remove_agent(base, aid, agent_branches)
-    print(f"Removed {config.display_name(base, aid)}.")
+    print(f"Removed {registry.display_name(base, aid)}.")
 
 
 def _cmd_remove_all_agents(base, yes=False):
     from .status import _remove_agent
 
-    if config.any_agent_running():
+    if registry.any_agent_running():
         raise SystemExit("Cannot remove all: some agents are still running.")
 
-    all_ids = config.all_agent_ids()
+    all_ids = registry.all_agent_ids()
     if not all_ids:
         print("No agents in registry.")
         return
@@ -375,8 +384,19 @@ def _cmd_remove_all_agents(base, yes=False):
               if (p := config.parse_agent_branch(b)) and p[1] == aid]
         _remove_agent(base, aid, ab)
 
-    config.clear_registry()
+    registry.clear_registry()
     print(f"Removed {n} agent {s}.")
+
+
+@cli.command("remove-project")
+@click.argument("slug")
+def remove_project(slug):
+    """Unregister a project from the cave."""
+    projects = dict(registry.all_projects())
+    if slug not in projects:
+        raise SystemExit(f"No project \"{slug}\" in registry.")
+    registry.remove_project(slug)
+    print(f"Removed project \"{slug}\".")
 
 
 @cli.command()
@@ -439,7 +459,7 @@ def main():
 
     subcmds = {
         "init", "agent", "approve", "reject", "pull", "push", "checkout",
-        "status", "version", "remove-agent", "cp",
+        "status", "version", "remove-agent", "remove-project", "cp",
     }
     if not argv:
         argv = ["agent"]

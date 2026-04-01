@@ -19,7 +19,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from cav import config, workspace
+from cav import config, registry, workspace
 from tests import find_agent_by_session
 
 
@@ -248,52 +248,52 @@ class TestCAV(unittest.TestCase):
         """acquire_agent_id auto-assigns 1, 2, 3 when all are running."""
         self._init()
 
-        id1 = config.acquire_agent_id(self.user_repo)
+        id1 = registry.acquire_agent_id(self.user_repo)
         self.assertEqual(id1, "1")
         self._create_agent(id1)
 
-        id2 = config.acquire_agent_id(self.user_repo)
+        id2 = registry.acquire_agent_id(self.user_repo)
         self.assertEqual(id2, "2")
         self._create_agent(id2)
 
-        config.mark_agent_exited(id1)
-        config.mark_agent_exited(id2)
+        registry.mark_agent_exited(id1)
+        registry.mark_agent_exited(id2)
 
     def test_agent_id_reuse_after_remove(self):
         """acquire_agent_id reuses IDs after they are removed from registry."""
         self._init()
 
-        id1 = config.acquire_agent_id(self.user_repo)
+        id1 = registry.acquire_agent_id(self.user_repo)
         self.assertEqual(id1, "1")
         self._create_agent(id1)
 
-        id2 = config.acquire_agent_id(self.user_repo)
+        id2 = registry.acquire_agent_id(self.user_repo)
         self.assertEqual(id2, "2")
         self._create_agent(id2)
 
         # Remove agent 1 from registry
-        config.mark_agent_exited(id1)
-        config.remove_agent(id1)
+        registry.mark_agent_exited(id1)
+        registry.remove_agent(id1)
 
         # Next agent should reuse ID 1
-        id3 = config.acquire_agent_id(self.user_repo)
+        id3 = registry.acquire_agent_id(self.user_repo)
         self.assertEqual(id3, "1")
 
-        config.mark_agent_exited(id2)
-        config.mark_agent_exited(id3)
+        registry.mark_agent_exited(id2)
+        registry.mark_agent_exited(id3)
 
     def test_paused_agent_keeps_id(self):
         """Exited agents keep their ID reserved until explicitly removed."""
         self._init()
 
-        id1 = config.acquire_agent_id(self.user_repo)
+        id1 = registry.acquire_agent_id(self.user_repo)
         self.assertEqual(id1, "1")
-        config.mark_agent_exited(id1)
+        registry.mark_agent_exited(id1)
 
         # Paused agent keeps its ID, next agent gets 2
-        id2 = config.acquire_agent_id(self.user_repo)
+        id2 = registry.acquire_agent_id(self.user_repo)
         self.assertEqual(id2, "2")
-        config.mark_agent_exited(id2)
+        registry.mark_agent_exited(id2)
 
     # -- agent work + pull --
 
@@ -410,7 +410,7 @@ class TestCAV(unittest.TestCase):
         agents = self._init_and_agents("1", "2")
         # Register so status can see them
         for name in agents:
-            config.acquire_agent_id(self.user_repo)
+            registry.acquire_agent_id(self.user_repo)
         ws1 = agents["1"]
 
         # Agent 1 pushes work on their branch
@@ -647,7 +647,7 @@ class TestCAV(unittest.TestCase):
         """cav approve <id> approves from main without checking out agent branch."""
         agents = self._init_and_agents("1")
         ws = agents["1"]
-        id1 = config.acquire_agent_id(self.user_repo)
+        id1 = registry.acquire_agent_id(self.user_repo)
 
         (ws / "feature.py").write_text("# feature\n")
         git("add", "feature.py", cwd=ws)
@@ -667,7 +667,7 @@ class TestCAV(unittest.TestCase):
         log = git_out("log", "--oneline", cwd=self.user_repo)
         self.assertIn("Agent 1 feature", log)
 
-        config.mark_agent_exited(id1)
+        registry.mark_agent_exited(id1)
 
     def test_approve_by_agent_id_contention(self):
         """cav approve <id> fails on non-FF, succeeds after rebase."""
@@ -746,7 +746,7 @@ class TestCAV(unittest.TestCase):
     def test_approve_ok_when_local_behind(self):
         """cav approve works when local main is behind cave/main."""
         agents = self._init_and_agents("1", "2")
-        id1 = config.acquire_agent_id(self.user_repo)
+        id1 = registry.acquire_agent_id(self.user_repo)
 
         # Approve agent 1 directly (advances cave/main, local follows)
         a1 = agents["1"]
@@ -776,7 +776,7 @@ class TestCAV(unittest.TestCase):
         self.assertIn("Agent 1 work", log)
         self.assertIn("Agent 2 work", log)
 
-        config.mark_agent_exited(id1)
+        registry.mark_agent_exited(id1)
 
     def test_approve_succeeds_with_dirty_worktree(self):
         """cav approve pushes to cave even when local worktree has conflicts."""
@@ -834,7 +834,7 @@ class TestCAV(unittest.TestCase):
     def test_status_dedup_multi_branch_agent(self):
         """cav status shows one line per agent even when agent has multiple branches."""
         agents = self._init_and_agents("1")
-        config.acquire_agent_id(self.user_repo)  # register agent 1
+        registry.acquire_agent_id(self.user_repo)  # register agent 1
         a1 = agents["1"]
 
         # Agent 1 pushes work on their main branch
@@ -870,28 +870,28 @@ class TestCAV(unittest.TestCase):
         git("push", "host-cave", "HEAD", cwd=ws, env=agent_env("1"))
 
         # Agent 1 acquires and exits
-        id1 = config.acquire_agent_id(self.user_repo)
+        id1 = registry.acquire_agent_id(self.user_repo)
         self.assertEqual(id1, "1")
-        config.mark_agent_exited(id1)
+        registry.mark_agent_exited(id1)
 
         # continue_agent_id should return ID 1
-        cid = config.continue_agent_id(self.user_repo)
+        cid = registry.continue_agent_id(self.user_repo)
         self.assertEqual(cid, "1")
-        config.mark_agent_exited(cid)
+        registry.mark_agent_exited(cid)
 
     def test_continue_picks_most_recent(self):
         """continue_agent_id picks the most recently exited agent."""
         self._init_and_agents("1", "2")
 
-        id1 = config.acquire_agent_id(self.user_repo)
-        id2 = config.acquire_agent_id(self.user_repo)
+        id1 = registry.acquire_agent_id(self.user_repo)
+        id2 = registry.acquire_agent_id(self.user_repo)
 
         # Both exit, manipulate timestamps so agent 2 exited more recently
-        config.mark_agent_exited(id1)
-        config.mark_agent_exited(id2)
+        registry.mark_agent_exited(id1)
+        registry.mark_agent_exited(id2)
 
         now = time.time()
-        db = config._open_registry()
+        db = registry._open()
         db.execute(
             "UPDATE agents SET exited_at = ? WHERE agent_id = ?",
             (now - 100, id1)
@@ -899,44 +899,44 @@ class TestCAV(unittest.TestCase):
         db.commit()
         db.close()
 
-        cid = config.continue_agent_id(self.user_repo)
+        cid = registry.continue_agent_id(self.user_repo)
         self.assertEqual(cid, "2")
-        config.mark_agent_exited(cid)
+        registry.mark_agent_exited(cid)
 
     def test_continue_skips_running(self):
         """continue_agent_id skips agents that are still running."""
         self._init_and_agents("1", "2")
 
         # Agent 1 is running
-        id1 = config.acquire_agent_id(self.user_repo)
+        id1 = registry.acquire_agent_id(self.user_repo)
 
         # Agent 2 exited
-        id2 = config.acquire_agent_id(self.user_repo)
-        config.mark_agent_exited(id2)
+        id2 = registry.acquire_agent_id(self.user_repo)
+        registry.mark_agent_exited(id2)
 
-        cid = config.continue_agent_id(self.user_repo)
+        cid = registry.continue_agent_id(self.user_repo)
         self.assertEqual(cid, "2")
 
-        config.mark_agent_exited(id1)
-        config.mark_agent_exited(cid)
+        registry.mark_agent_exited(id1)
+        registry.mark_agent_exited(cid)
 
     def test_continue_no_agents_no_sessions(self):
         """resolve_continue with no agents acquires fresh agent."""
         self._init()
-        aid, sid, resuming = config.resolve_continue(self.user_repo)
+        aid, sid, resuming = registry.resolve_continue(self.user_repo)
         self.assertEqual(aid, "1")
         self.assertFalse(resuming)
         self.assertIsNotNone(sid)
-        config.mark_agent_exited(aid)
+        registry.mark_agent_exited(aid)
 
     def test_continue_no_agents_acquires_fresh(self):
         """resolve_continue with no agents acquires a fresh one with a UUID session."""
         self._init()
-        aid, sid, resuming = config.resolve_continue(self.user_repo)
+        aid, sid, resuming = registry.resolve_continue(self.user_repo)
         self.assertIsNotNone(sid)
         self.assertEqual(len(sid), 36)
         self.assertFalse(resuming)
-        config.mark_agent_exited(aid)
+        registry.mark_agent_exited(aid)
 
     def test_claude_project_dir_encoding(self):
         """_claude_project_dir encodes path like Claude Code does."""
@@ -957,91 +957,91 @@ class TestCAV(unittest.TestCase):
         """acquire_agent_id generates a UUID v4 session ID."""
         import uuid as uuid_mod
         self._init()
-        aid = config.acquire_agent_id(self.user_repo)
-        sid = config.read_session_id(aid)
+        aid = registry.acquire_agent_id(self.user_repo)
+        sid = registry.read_session_id(aid)
         self.assertIsNotNone(sid)
         # Must be a valid UUID v4
         parsed = uuid_mod.UUID(sid)
         self.assertEqual(parsed.version, 4)
-        config.mark_agent_exited(aid)
+        registry.mark_agent_exited(aid)
 
     def test_session_id_unique_per_agent(self):
         """Each agent gets a distinct session UUID."""
         self._init()
-        id1 = config.acquire_agent_id(self.user_repo)
+        id1 = registry.acquire_agent_id(self.user_repo)
         self._create_agent(id1)
-        id2 = config.acquire_agent_id(self.user_repo)
+        id2 = registry.acquire_agent_id(self.user_repo)
         self._create_agent(id2)
 
-        sid1 = config.read_session_id(id1)
-        sid2 = config.read_session_id(id2)
+        sid1 = registry.read_session_id(id1)
+        sid2 = registry.read_session_id(id2)
         self.assertNotEqual(sid1, sid2)
 
-        config.mark_agent_exited(id1)
-        config.mark_agent_exited(id2)
+        registry.mark_agent_exited(id1)
+        registry.mark_agent_exited(id2)
 
     def test_session_id_missing_returns_none(self):
         """read_session_id returns None when no agent exists in registry."""
         self._init()
-        self.assertIsNone(config.read_session_id("99"))
+        self.assertIsNone(registry.read_session_id("99"))
 
     def test_session_id_persists_after_exit(self):
         """Session ID is retained after agent exits, for resume."""
         self._init()
-        aid = config.acquire_agent_id(self.user_repo)
-        sid = config.read_session_id(aid)
-        config.mark_agent_exited(aid)
-        self.assertEqual(config.read_session_id(aid), sid)
+        aid = registry.acquire_agent_id(self.user_repo)
+        sid = registry.read_session_id(aid)
+        registry.mark_agent_exited(aid)
+        self.assertEqual(registry.read_session_id(aid), sid)
 
     def test_find_agent_by_session(self):
         """find_agent_by_session returns the agent that owns a given UUID."""
         self._init()
-        id1 = config.acquire_agent_id(self.user_repo)
+        id1 = registry.acquire_agent_id(self.user_repo)
         self._create_agent(id1)
-        id2 = config.acquire_agent_id(self.user_repo)
+        id2 = registry.acquire_agent_id(self.user_repo)
         self._create_agent(id2)
 
-        sid1 = config.read_session_id(id1)
-        sid2 = config.read_session_id(id2)
+        sid1 = registry.read_session_id(id1)
+        sid2 = registry.read_session_id(id2)
 
         self.assertEqual(find_agent_by_session(sid1), id1)
         self.assertEqual(find_agent_by_session(sid2), id2)
         self.assertIsNone(find_agent_by_session("unknown-uuid"))
 
-        config.mark_agent_exited(id1)
-        config.mark_agent_exited(id2)
+        registry.mark_agent_exited(id1)
+        registry.mark_agent_exited(id2)
 
     def test_resume_routes_to_owning_agent(self):
         """find_agent_by_session + continue_agent_id routes to the correct agent."""
         self._init_and_agents("1", "2")
 
-        id1 = config.acquire_agent_id(self.user_repo)
-        id2 = config.acquire_agent_id(self.user_repo)
-        sid1 = config.read_session_id(id1)
-        sid2 = config.read_session_id(id2)
-        config.mark_agent_exited(id1)
-        config.mark_agent_exited(id2)
+        id1 = registry.acquire_agent_id(self.user_repo)
+        id2 = registry.acquire_agent_id(self.user_repo)
+        sid1 = registry.read_session_id(id1)
+        sid2 = registry.read_session_id(id2)
+        registry.mark_agent_exited(id1)
+        registry.mark_agent_exited(id2)
 
         # Resuming agent 2's session should route to agent 2
         owner = find_agent_by_session(sid2)
         self.assertEqual(owner, "2")
-        cid = config.continue_agent_id(self.user_repo, owner)
+        cid = registry.continue_agent_id(self.user_repo, owner)
         self.assertEqual(cid, "2")
-        config.mark_agent_exited(cid)
+        registry.mark_agent_exited(cid)
 
         # Resuming agent 1's session should route to agent 1
         owner = find_agent_by_session(sid1)
         self.assertEqual(owner, "1")
-        cid = config.continue_agent_id(self.user_repo, owner)
+        cid = registry.continue_agent_id(self.user_repo, owner)
         self.assertEqual(cid, "1")
-        config.mark_agent_exited(cid)
+        registry.mark_agent_exited(cid)
 
     def test_resume_unknown_uuid_returns_none(self):
         """find_agent_by_session returns None for unknown UUIDs."""
         self._init_and_agents("1")
 
-        id1 = config.acquire_agent_id(self.user_repo)
-        config.mark_agent_exited(id1)
+        id1 = registry.acquire_agent_id(self.user_repo)
+        registry.mark_agent_exited(id1)
 
         owner = find_agent_by_session("nonexistent-uuid")
         self.assertIsNone(owner)
@@ -1049,25 +1049,25 @@ class TestCAV(unittest.TestCase):
     def test_write_session_id_overwrites(self):
         """write_session_id can update a session ID (e.g. when resuming a different session)."""
         self._init()
-        aid = config.acquire_agent_id(self.user_repo)
-        original_sid = config.read_session_id(aid)
-        config.write_session_id(aid, "new-uuid")
-        self.assertEqual(config.read_session_id(aid), "new-uuid")
+        aid = registry.acquire_agent_id(self.user_repo)
+        original_sid = registry.read_session_id(aid)
+        registry.write_session_id(aid, "new-uuid")
+        self.assertEqual(registry.read_session_id(aid), "new-uuid")
         self.assertNotEqual(original_sid, "new-uuid")
-        config.mark_agent_exited(aid)
+        registry.mark_agent_exited(aid)
 
     def test_continue_specific_agent_not_most_recent(self):
         """continue_agent_id(base, '1') returns agent 1 even when agent 2 exited more recently."""
         self._init_and_agents("1", "2")
 
         # Both agents exit, agent 2 more recently
-        id1 = config.acquire_agent_id(self.user_repo)
-        id2 = config.acquire_agent_id(self.user_repo)
-        config.mark_agent_exited(id1)
-        config.mark_agent_exited(id2)
+        id1 = registry.acquire_agent_id(self.user_repo)
+        id2 = registry.acquire_agent_id(self.user_repo)
+        registry.mark_agent_exited(id1)
+        registry.mark_agent_exited(id2)
 
         now = time.time()
-        db = config._open_registry()
+        db = registry._open()
         db.execute(
             "UPDATE agents SET exited_at = ? WHERE agent_id = ?",
             (now - 100, id1)
@@ -1076,22 +1076,22 @@ class TestCAV(unittest.TestCase):
         db.close()
 
         # Explicitly requesting agent 1 should return 1, not 2
-        cid = config.continue_agent_id(self.user_repo, "1")
+        cid = registry.continue_agent_id(self.user_repo, "1")
         self.assertEqual(cid, "1")
-        config.mark_agent_exited(cid)
+        registry.mark_agent_exited(cid)
 
     def test_continue_running_agent_errors(self):
         """continue_agent_id errors when the requested agent is still running."""
         self._init_and_agents("1")
 
         # Agent 1 is running (registered with our PID)
-        id1 = config.acquire_agent_id(self.user_repo)
+        id1 = registry.acquire_agent_id(self.user_repo)
 
         with self.assertRaises(SystemExit) as ctx:
-            config.continue_agent_id(self.user_repo, "1")
+            registry.continue_agent_id(self.user_repo, "1")
         self.assertIn("still running", str(ctx.exception))
 
-        config.mark_agent_exited(id1)
+        registry.mark_agent_exited(id1)
 
     def test_remove_nonexistent_agent(self):
         """remove-agent on an agent not in registry gives 'not found'."""
@@ -1103,8 +1103,8 @@ class TestCAV(unittest.TestCase):
     def test_remove_agent_idempotent_gives_error(self):
         """remove-agent twice on the same agent gives 'not found' the second time."""
         self._init()
-        aid = config.acquire_agent_id(self.user_repo)
-        config.mark_agent_exited(aid)
+        aid = registry.acquire_agent_id(self.user_repo)
+        registry.mark_agent_exited(aid)
 
         result = cav_cli("remove-agent", aid, cwd=self.user_repo)
         self.assertEqual(result.returncode, 0)
@@ -1126,10 +1126,10 @@ class TestCAV(unittest.TestCase):
             git("push", "host-cave", f"agent-{name}/main", cwd=ws, env=agent_env(name))
 
         # Register them in the registry and mark exited
-        id1 = config.acquire_agent_id(self.user_repo)
-        id2 = config.acquire_agent_id(self.user_repo)
-        config.mark_agent_exited(id1)
-        config.mark_agent_exited(id2)
+        id1 = registry.acquire_agent_id(self.user_repo)
+        id2 = registry.acquire_agent_id(self.user_repo)
+        registry.mark_agent_exited(id1)
+        registry.mark_agent_exited(id2)
 
         # Verify agent branches exist
         git("fetch", "--prune", "cave", cwd=self.user_repo)
@@ -1142,7 +1142,7 @@ class TestCAV(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
 
         # Registry should be empty
-        self.assertEqual(config.all_agent_ids(), [])
+        self.assertEqual(registry.all_agent_ids(), [])
 
         # Agent branches should be gone
         git("fetch", "--prune", "cave", cwd=self.user_repo)
@@ -1153,13 +1153,13 @@ class TestCAV(unittest.TestCase):
     def test_remove_all_refuses_running(self):
         """remove-agent --all refuses if any agent is running."""
         self._init()
-        id1 = config.acquire_agent_id(self.user_repo)
+        id1 = registry.acquire_agent_id(self.user_repo)
 
         result = cav_cli("remove-agent", "--all", "--yes", cwd=self.user_repo, check=False)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("still running", result.stderr)
 
-        config.mark_agent_exited(id1)
+        registry.mark_agent_exited(id1)
 
     def test_remove_all_empty_registry(self):
         """remove-agent --all on empty registry is a no-op."""
@@ -1171,7 +1171,7 @@ class TestCAV(unittest.TestCase):
         """Agent IDs are globally unique across projects, not per-project."""
         self._init()
         # Acquire agents for this project
-        id1 = config.acquire_agent_id(self.user_repo)
+        id1 = registry.acquire_agent_id(self.user_repo)
         self.assertEqual(id1, "1")
 
         # Simulate a second project acquiring an agent (same registry)
@@ -1185,20 +1185,31 @@ class TestCAV(unittest.TestCase):
         git("commit", "-m", "init", cwd=other)
 
         # Next ID should be 2, not 1 (global uniqueness)
-        id2 = config.acquire_agent_id(other)
+        id2 = registry.acquire_agent_id(other)
         self.assertEqual(id2, "2")
 
-        config.mark_agent_exited(id1)
-        config.mark_agent_exited(id2)
+        registry.mark_agent_exited(id1)
+        registry.mark_agent_exited(id2)
 
     def test_init_registers_project(self):
         """cav init registers the project slug and path."""
         self._init()
-        projects = config.all_projects()
+        projects = registry.all_projects()
         self.assertEqual(len(projects), 1)
         slug, path = projects[0]
         self.assertEqual(slug, config.project_slug(self.user_repo))
         self.assertEqual(path, str(self.user_repo.resolve()))
+
+    def test_remove_project(self):
+        """remove_project unregisters a project and its agents."""
+        self._init()
+        slug = config.project_slug(self.user_repo)
+        agent_id = registry.acquire_agent_id(self.user_repo)
+        self.assertEqual(len(registry.all_projects()), 1)
+        self.assertIsNotNone(registry.agent_project(agent_id))
+        registry.remove_project(slug)
+        self.assertEqual(len(registry.all_projects()), 0)
+        self.assertIsNone(registry.agent_project(agent_id))
 
     def test_init_slug_collision_different_path(self):
         """cav init rejects a slug collision from a different path."""
@@ -1215,7 +1226,7 @@ class TestCAV(unittest.TestCase):
         git("add", "f", cwd=other)
         git("commit", "-m", "init", cwd=other)
         with self.assertRaises(SystemExit):
-            config.register_project(other)
+            registry.register_project(other)
 
     def test_depth_and_lineage_propagation(self):
         """Verify depth increments and lineage chains across 3 levels of nesting."""
@@ -1280,7 +1291,7 @@ class TestCAV(unittest.TestCase):
         """User approves agent work via cav approve, then rejects via cav reject."""
         agents = self._init_and_agents("1")
         ws = agents["1"]
-        id1 = config.acquire_agent_id(self.user_repo)
+        id1 = registry.acquire_agent_id(self.user_repo)
 
         # Agent does work and pushes to agent branch
         (ws / "feature.py").write_text("# v1\n")
@@ -1315,14 +1326,14 @@ class TestCAV(unittest.TestCase):
         log = git_out("log", "--oneline", "cave/agent-1/main", cwd=self.user_repo)
         self.assertIn("Feature v1", log)
 
-        config.mark_agent_exited(id1)
+        registry.mark_agent_exited(id1)
 
     def test_reject_per_commit_from_batch(self):
         """Approving 3 commits creates 3 records; reject peels them one at a time."""
         agents = self._init_and_agents("1", "2")
         ws1 = agents["1"]
-        id1 = config.acquire_agent_id(self.user_repo)
-        id2 = config.acquire_agent_id(self.user_repo)
+        id1 = registry.acquire_agent_id(self.user_repo)
+        id2 = registry.acquire_agent_id(self.user_repo)
 
         # Agent 1 makes 3 commits
         for i in range(1, 4):
@@ -1363,8 +1374,8 @@ class TestCAV(unittest.TestCase):
         self.assertIn("Commit 3", log)
         self.assertIn("Commit 1", log)
 
-        config.mark_agent_exited(id1)
-        config.mark_agent_exited(id2)
+        registry.mark_agent_exited(id1)
+        registry.mark_agent_exited(id2)
 
     # -- rollback workflows --
 
@@ -1531,20 +1542,20 @@ class TestCAV(unittest.TestCase):
     def test_concurrent_agents_get_distinct_sessions(self):
         """Two agents registered concurrently have distinct session UUIDs."""
         self._init()
-        id1 = config.acquire_agent_id(self.user_repo)
+        id1 = registry.acquire_agent_id(self.user_repo)
         self._create_agent(id1)
-        id2 = config.acquire_agent_id(self.user_repo)
+        id2 = registry.acquire_agent_id(self.user_repo)
         self._create_agent(id2)
 
-        sid1 = config.read_session_id(id1)
-        sid2 = config.read_session_id(id2)
+        sid1 = registry.read_session_id(id1)
+        sid2 = registry.read_session_id(id2)
 
         self.assertIsNotNone(sid1)
         self.assertIsNotNone(sid2)
         self.assertNotEqual(sid1, sid2)
 
-        config.mark_agent_exited(id1)
-        config.mark_agent_exited(id2)
+        registry.mark_agent_exited(id1)
+        registry.mark_agent_exited(id2)
 
     # -- stale-ref cleanup bug --
 
@@ -1561,7 +1572,7 @@ class TestCAV(unittest.TestCase):
         from cav.init import init
         init(str(self.user_repo))
 
-        aid = config.acquire_agent_id(self.user_repo)
+        aid = registry.acquire_agent_id(self.user_repo)
         ws = self._create_agent(aid)
 
         # Agent does work and pushes from its workspace
@@ -1573,7 +1584,7 @@ class TestCAV(unittest.TestCase):
             f"--push-option=agent={aid}", cwd=ws)
 
         # Agent exits
-        config.mark_agent_exited(aid)
+        registry.mark_agent_exited(aid)
 
         # User's project dir has NOT fetched. Verify it can't see the
         # agent branch locally.
@@ -1602,12 +1613,12 @@ class TestCAV(unittest.TestCase):
                         "agent branch must be visible after fetching")
 
         # Agent should still be in the registry (not erroneously swept)
-        self.assertIn(aid, config.all_agent_ids())
+        self.assertIn(aid, registry.all_agent_ids())
 
         # cav -c should continue the same agent, not create a new one
-        continued = config.continue_agent_id(self.user_repo)
+        continued = registry.continue_agent_id(self.user_repo)
         self.assertEqual(continued, aid)
-        config.mark_agent_exited(continued)
+        registry.mark_agent_exited(continued)
 
     def test_zero_commit_agent_cleaned_up_on_exit(self):
         """Agent with no commits is garbage collected in the finally block.
@@ -1620,14 +1631,14 @@ class TestCAV(unittest.TestCase):
 
         init(str(self.user_repo))
 
-        aid = config.acquire_agent_id(self.user_repo)
+        aid = registry.acquire_agent_id(self.user_repo)
         self._create_agent(aid)
 
         # Agent exits with no commits (simulates the finally block)
-        config.mark_agent_exited(aid)
+        registry.mark_agent_exited(aid)
         _auto_cleanup_if_clean(self.user_repo, aid)
 
-        self.assertNotIn(aid, config.all_agent_ids(),
+        self.assertNotIn(aid, registry.all_agent_ids(),
                          "Zero-commit agent should be cleaned up")
 
 
