@@ -167,6 +167,7 @@ def _auto_cleanup_if_clean(base, agent_id):
     """Remove agent if all work is approved or irrecoverable across all projects."""
     from .status import _remove_agent
 
+    name = registry.display_name(base, agent_id)
     all_agent_branches = []  # (base_path, branch) pairs for removal
     for slug in registry.agent_all_slugs(agent_id):
         # Check for uncommitted work in the worktree.
@@ -175,9 +176,13 @@ def _auto_cleanup_if_clean(base, agent_id):
             try:
                 st = git.git_output("status", "--porcelain", cwd=ws)
                 if st.strip():
-                    return  # uncommitted changes, keep agent
-            except Exception:
-                return  # can't verify worktree state, keep agent
+                    print(f"Warning: keeping {name}: "
+                          f"worktree {ws} has uncommitted changes.")
+                    return
+            except Exception as e:
+                print(f"Warning: keeping {name}: "
+                      f"cannot verify worktree {ws}: {e}")
+                return
 
         path = registry.project_path(slug)
         if not path:
@@ -189,8 +194,10 @@ def _auto_cleanup_if_clean(base, agent_id):
             git.git("fetch", config.CAVE_REMOTE, cwd=proj_base, echo=False,
                     check=False, capture=True)
             branches = git.remote_branches(config.CAVE_REMOTE, cwd=proj_base)
-        except Exception:
-            return  # project exists but git failed, keep agent
+        except Exception as e:
+            print(f"Warning: keeping {name}: "
+                  f"git fetch failed for {slug}: {e}")
+            return
         for b in branches:
             parsed = config.parse_agent_branch(b)
             if not parsed or parsed[1] != agent_id:
@@ -201,10 +208,14 @@ def _auto_cleanup_if_clean(base, agent_id):
             target_ref = f"{config.CAVE_REMOTE}/{target}"
             try:
                 if not git.has_merge_base(remote_agent, target_ref, cwd=proj_base):
+                    print(f"Warning: keeping {name}: "
+                          f"{b} has diverged from {target}.")
                     return
                 if git.cherry_undelivered(target_ref, remote_agent, cwd=proj_base):
-                    return
-            except Exception:
+                    return  # has unapproved work, normal
+            except Exception as e:
+                print(f"Warning: keeping {name}: "
+                      f"cannot check {b} against {target}: {e}")
                 return
 
     # All branches in all projects are approved (or irrecoverable),
