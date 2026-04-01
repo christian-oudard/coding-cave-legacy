@@ -61,16 +61,16 @@ def create(base: Path, agent_id: str) -> Path:
                     cwd=base, echo=False, check=False, capture=True)
 
     # Lightweight clone sharing objects with the bare repo
-    git.git("clone", "--shared", str(shared), str(ws_path), echo=False)
+    git.git("clone", "--shared", str(shared), str(ws_path), echo=False, capture=True)
 
     # Rename origin -> host-cave (points up to the parent's bare repo)
-    git.git("remote", "rename", "origin", config.HOST_REMOTE, cwd=ws_path, echo=False)
+    git.git("remote", "rename", "origin", config.HOST_REMOTE, cwd=ws_path, echo=False, capture=True)
 
     ab = config.agent_branch(target, agent_id)
 
     if empty:
         # No commits yet, create an orphan branch so the agent can make the first commit.
-        git.git("checkout", "--orphan", ab, cwd=ws_path, echo=False)
+        git.git("checkout", "--orphan", ab, cwd=ws_path, echo=False, capture=True)
         return ws_path
 
     remote_ref = f"refs/remotes/{config.HOST_REMOTE}/{ab}"
@@ -80,9 +80,9 @@ def create(base: Path, agent_id: str) -> Path:
     # Otherwise create a fresh branch and push it.
     try:
         git.git_output("rev-parse", "--verify", remote_ref, cwd=ws_path)
-        git.git("checkout", ab, cwd=ws_path, echo=False)
+        git.git("checkout", ab, cwd=ws_path, echo=False, capture=True)
     except subprocess.CalledProcessError:
-        git.git("checkout", "-b", ab, cwd=ws_path, echo=False)
+        git.git("checkout", "-b", ab, cwd=ws_path, echo=False, capture=True)
         git.git("push", config.HOST_REMOTE, ab,
                 f"--push-option=agent={agent_id}", cwd=ws_path,
                 echo=False, capture=True)

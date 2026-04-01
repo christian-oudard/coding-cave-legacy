@@ -139,12 +139,6 @@ def agent(continue_agent, resume_agent, extra_projects, recursive):
     lineage = os.environ.get("CODING_CAVE_LINEAGE", "")
     if lineage:
         name += f" (depth {int(os.environ.get('CODING_CAVE_DEPTH', '0')) + 1}, parent {lineage})"
-    verb = "Continuing" if resuming else "Launching"
-    opts = [f"-p {s}" for _, s in projects[1:]]
-    if recursive:
-        opts.append("--recursive")
-    suffix = ", " + ", ".join(opts) if opts else ""
-    print(f"{verb} {name}{suffix} ...")
     try:
         rc = launch(workspaces, name, project_slug=projects[0][1],
                     recursive=recursive, session_id=session_id,
