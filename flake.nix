@@ -195,9 +195,15 @@
             '')
 
             # GPG: socket + public keyring for commit signing
+            # Bind the host agent socket to BOTH the homedir path and the
+            # runtime dir path. gpg prefers /run/user/<uid>/gnupg/ and will
+            # auto-start a local (keyless) agent there if it finds nothing.
+            # Binding at the bwrap level prevents anything from clobbering it.
             (add-runtime ''
               if [ -n "''${CODING_CAVE_GPG_SOCKET:-}" ] && [ -e "''${CODING_CAVE_GPG_SOCKET}" ]; then
                 RUNTIME_ARGS+=(--bind "$CODING_CAVE_GPG_SOCKET" /home/cave-coder/.gnupg/S.gpg-agent)
+                RUNTIME_ARGS+=(--dir /run/user/1000/gnupg)
+                RUNTIME_ARGS+=(--bind "$CODING_CAVE_GPG_SOCKET" /run/user/1000/gnupg/S.gpg-agent)
               fi
               if [ -n "''${CODING_CAVE_GPG_PUBRING:-}" ] && [ -f "''${CODING_CAVE_GPG_PUBRING}" ]; then
                 RUNTIME_ARGS+=(--ro-bind "$CODING_CAVE_GPG_PUBRING" "/home/cave-coder/.gnupg/$(basename "$CODING_CAVE_GPG_PUBRING")")
@@ -344,7 +350,7 @@
               wrapProgram $out/bin/cav \
                 --prefix PATH : ${pkgs.lib.makeBinPath [
                   pkgs.fuse-overlayfs pkgs.fuse3.bin
-                  pkgs.git pkgs.gnupg pkgs.passt
+                  pkgs.git pkgs.gnupg pkgs.socat pkgs.passt
                   crinj.packages.${pkgs.stdenv.hostPlatform.system}.default
                 ]}
             '';
