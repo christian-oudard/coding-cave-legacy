@@ -108,10 +108,24 @@ def status(base: Path, agent_filter: str | None = None, scoped: bool = True) -> 
         except Exception:
             remote_sha = local_sha = None
         if local_sha and remote_sha and local_sha != remote_sha:
-            ahead = git.commits_ahead(remote_ref, local_branch, cwd=base)
-            if ahead > 0:
-                n = "commit" if ahead == 1 else "commits"
-                print(f"{local_branch} is behind by {ahead} {n}. Please run `cav pull`.")
+            behind = git.commits_ahead(remote_ref, local_branch, cwd=base)
+            local_ahead = git.commits_ahead(local_branch, remote_ref, cwd=base)
+            if behind > 0 and local_ahead > 0:
+                nb = "commit" if behind == 1 else "commits"
+                na = "commit" if local_ahead == 1 else "commits"
+                print(f"{local_branch} and {remote_ref} have diverged,")
+                print(f"and have {local_ahead} and {behind} different {na} and {nb} each, respectively.")
+                print(f"  ** cav push --force                # push local version to cave **")
+                print()
+            elif behind > 0:
+                n = "commit" if behind == 1 else "commits"
+                print(f"{local_branch} is behind {remote_ref} by {behind} {n}, and can be fast-forwarded.")
+                print(f"  ** cav pull                        # fast-forward to match cave **")
+                print()
+            elif local_ahead > 0:
+                n = "commit" if local_ahead == 1 else "commits"
+                print(f"{local_branch} is ahead of {remote_ref} by {local_ahead} {n}.")
+                print(f"  ** cav push                        # push local commits to cave **")
                 print()
 
     # Agents come from the registry, branches provide detail
