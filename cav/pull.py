@@ -109,10 +109,6 @@ def _pull_shared(base: Path, local_branch: str, target_branch: str, force: bool)
         except subprocess.CalledProcessError:
             print(f"\nOn branch {local_branch}")
             print(f"Diverged from {remote_target}.")
-            if config.parse_agent_branch(local_branch):
-                print(f"  ** cav pull --force                # accept remote version **")
-            else:
-                print(f"  ** cav push --force                # push local version to cave **")
             raise SystemExit(1)
 
     n = "commit" if count == 1 else "commits"
