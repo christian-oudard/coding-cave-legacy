@@ -534,28 +534,31 @@ class TestSessionResume(unittest.TestCase):
         self.assertFalse(config.session_file_exists(slug, "nonexistent"))
 
     def test_find_agent_by_session_unknown_returns_none(self):
-        from cav import config
-        self.assertIsNone(config.find_agent_by_session("deadbeef-dead-dead-dead-deadbeefcafe"))
+        from tests import find_agent_by_session
+        self.assertIsNone(find_agent_by_session("deadbeef-dead-dead-dead-deadbeefcafe"))
 
     def test_resume_invalid_agent_gives_error(self):
         """cav --resume with a non-numeric ID gives a clear error."""
         from cav.cli import cli
         from click.testing import CliRunner
         from unittest.mock import patch
-        with patch("cav.cli.require_init"):
+        with patch("cav.cli.find_repo_root"), \
+             patch("cav.cli.require_init"), \
+             patch("cav.cli.git.current_branch", return_value="main"):
             result = CliRunner().invoke(cli, ["agent", "--resume", "not-a-number"])
         self.assertIn("Invalid agent", result.output)
 
     def test_write_then_find_session(self):
         """write_session_id + find_agent_by_session round-trip."""
         from cav import config
+        from tests import find_agent_by_session
         config.DATA_DIR.mkdir(parents=True, exist_ok=True)
         db = config._open_registry()
         db.execute("INSERT INTO agents (agent_id, project, session_id) VALUES ('5', 'proj', NULL)")
         db.commit()
         db.close()
         config.write_session_id("5", "test-session-uuid")
-        self.assertEqual(config.find_agent_by_session("test-session-uuid"), "5")
+        self.assertEqual(find_agent_by_session("test-session-uuid"), "5")
 
 
 class TestSessionLifecycle(unittest.TestCase):
@@ -697,6 +700,7 @@ class TestSessionLifecycle(unittest.TestCase):
     def test_find_agent_by_session_after_capture(self):
         """find_agent_by_session works after post-exit capture overwrites the UUID."""
         from cav import config
+        from tests import find_agent_by_session
         aid = config.acquire_agent_id(self.base)
         pre_generated = config.read_session_id(aid)
 
@@ -705,9 +709,9 @@ class TestSessionLifecycle(unittest.TestCase):
         config.write_session_id(aid, real_uuid)
 
         # Old UUID no longer resolves
-        self.assertIsNone(config.find_agent_by_session(pre_generated))
+        self.assertIsNone(find_agent_by_session(pre_generated))
         # New UUID resolves to the agent
-        self.assertEqual(config.find_agent_by_session(real_uuid), aid)
+        self.assertEqual(find_agent_by_session(real_uuid), aid)
 
 
 class TestFormatAll(unittest.TestCase):

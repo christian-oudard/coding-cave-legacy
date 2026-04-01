@@ -197,19 +197,6 @@ def read_session_id(agent_id: str) -> str | None:
         db.close()
 
 
-def find_agent_by_session(session_id: str) -> str | None:
-    """Return the agent ID that owns the given session UUID, or None."""
-    db = _open_registry()
-    try:
-        row = db.execute(
-            "SELECT agent_id FROM agents WHERE session_id = ?",
-            (session_id,)
-        ).fetchone()
-        return row[0] if row else None
-    finally:
-        db.close()
-
-
 # -- Launch options --
 
 def save_agent_launch_opts(agent_id: str, extra_slugs: list[str],

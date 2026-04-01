@@ -20,6 +20,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from cav import config, workspace
+from tests import find_agent_by_session
 
 
 def run(cmd, cwd=None, check=True, env=None):
@@ -1003,9 +1004,9 @@ class TestCAV(unittest.TestCase):
         sid1 = config.read_session_id(id1)
         sid2 = config.read_session_id(id2)
 
-        self.assertEqual(config.find_agent_by_session(sid1), id1)
-        self.assertEqual(config.find_agent_by_session(sid2), id2)
-        self.assertIsNone(config.find_agent_by_session("unknown-uuid"))
+        self.assertEqual(find_agent_by_session(sid1), id1)
+        self.assertEqual(find_agent_by_session(sid2), id2)
+        self.assertIsNone(find_agent_by_session("unknown-uuid"))
 
         config.mark_agent_exited(id1)
         config.mark_agent_exited(id2)
@@ -1022,14 +1023,14 @@ class TestCAV(unittest.TestCase):
         config.mark_agent_exited(id2)
 
         # Resuming agent 2's session should route to agent 2
-        owner = config.find_agent_by_session(sid2)
+        owner = find_agent_by_session(sid2)
         self.assertEqual(owner, "2")
         cid = config.continue_agent_id(self.user_repo, owner)
         self.assertEqual(cid, "2")
         config.mark_agent_exited(cid)
 
         # Resuming agent 1's session should route to agent 1
-        owner = config.find_agent_by_session(sid1)
+        owner = find_agent_by_session(sid1)
         self.assertEqual(owner, "1")
         cid = config.continue_agent_id(self.user_repo, owner)
         self.assertEqual(cid, "1")
@@ -1042,7 +1043,7 @@ class TestCAV(unittest.TestCase):
         id1 = config.acquire_agent_id(self.user_repo)
         config.mark_agent_exited(id1)
 
-        owner = config.find_agent_by_session("nonexistent-uuid")
+        owner = find_agent_by_session("nonexistent-uuid")
         self.assertIsNone(owner)
 
     def test_write_session_id_overwrites(self):
