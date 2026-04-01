@@ -110,17 +110,13 @@
             (add-runtime ''
               CLAUDE_DIR="$CODING_CAVE_HOME/.claude"
               mkdir -p "$CLAUDE_DIR"
-              # Merge settings: system < user-env < existing persistent
+              # Merge settings: system defaults < user-env overrides
               SETTINGS_ARGS=(${claudeConfig}/settings.json)
               if [ -n "''${CODING_CAVE_USER_ENV:-}" ] && [ -f "''${CODING_CAVE_USER_ENV}/claude/settings.json" ]; then
                 SETTINGS_ARGS+=("''${CODING_CAVE_USER_ENV}/claude/settings.json")
               fi
-              if [ -f "$CLAUDE_DIR/settings.json" ]; then
-                SETTINGS_ARGS+=("$CLAUDE_DIR/settings.json")
-              fi
               ${pkgs.jq}/bin/jq -s 'reduce .[] as $item ({}; . * $item)' \
-                "''${SETTINGS_ARGS[@]}" > "$CLAUDE_DIR/settings.json.tmp"
-              mv "$CLAUDE_DIR/settings.json.tmp" "$CLAUDE_DIR/settings.json"
+                "''${SETTINGS_ARGS[@]}" > "$CLAUDE_DIR/settings.json"
               chmod 644 "$CLAUDE_DIR/settings.json"
               # Always update statusline script to match current version
               chmod u+w "$CLAUDE_DIR/statusline.sh" 2>/dev/null || true
