@@ -54,7 +54,7 @@ def resolve_project(path: str) -> Path:
 
 
 
-@click.group(context_settings={"help_option_names": ["-h", "--help"]})
+@click.group(name="cav", context_settings={"help_option_names": ["-h", "--help"]})
 def cli():
     pass
 
@@ -394,15 +394,6 @@ def checkout(branch, agent_id):
     _checkout(base, branch, agent_id=agent_id)
 
 
-@cli.command("prune-branches")
-def prune_branches():
-    """Delete orphaned local agent branches."""
-    base = find_repo_root()
-    require_init(base)
-    from .prune import prune_branches as _prune_branches
-    _prune_branches(base)
-
-
 @cli.command()
 @click.argument("paths", nargs=-1, required=True)
 @click.option("-R", "-r", "--recursive", is_flag=True,
@@ -448,7 +439,7 @@ def main():
 
     subcmds = {
         "init", "agent", "approve", "reject", "pull", "push", "checkout",
-        "status", "version", "remove-agent", "prune-branches", "cp",
+        "status", "version", "remove-agent", "cp",
     }
     if not argv:
         argv = ["agent"]

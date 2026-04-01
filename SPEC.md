@@ -171,10 +171,6 @@ Direction is determined by which path has the cave prefix. If the destination ha
 
 If multiple agents have worktrees for a slug, the `@N` form is required. Refuses to copy symlinks out of the cave. Prompts before overwriting existing files in either direction unless `-f` is given.
 
-### `cav prune-branches`
-
-Deletes orphaned local agent branch checkouts. An agent branch is orphaned if it has no upstream or its cave upstream no longer exists. Refuses to touch agent-named branches tracking a non-cave remote. Prompts for confirmation before deleting.
-
 ### `cav shell`
 
 Joins a running agent's namespace via nsenter for inspection and debugging.

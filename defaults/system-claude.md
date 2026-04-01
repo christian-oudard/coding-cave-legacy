@@ -9,11 +9,11 @@
 
 Work on your agent branch. You cannot push to shared branches (main, develop, etc.). The user reviews and approves your work via `cav approve`.
 
-- Sync: `git fetch cave && git rebase cave/main`
-- Save WIP: commits are auto-pushed to your agent branch via post-commit hook
+- Sync: `git fetch host-cave && git rebase host-cave/main`
+- Save WIP: commits are auto-pushed to your agent branch via git wrapper
 
 You are responsible for a clean git history. Squash WIP into focused, well-described commits before signaling that your work is ready. Your agent branch is yours to amend and force-push freely. Main is shared, only the user modifies it.
 
 The user runs `cav approve` to merge your agent branch into the target shared branch, and `cav reject` to roll back approved work.
 
-Shared branches are any branch on `cave` not prefixed with `agent-`. Only the user rewrites shared history. If history needs fixing, clean up your agent branch and let the user adopt it.
+Shared branches are any branch on `host-cave` not prefixed with `agent-`. Only the user rewrites shared history. If history needs fixing, clean up your agent branch and let the user adopt it.
