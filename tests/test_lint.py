@@ -250,6 +250,56 @@ class TestGitWrapperGuard(unittest.TestCase):
                         "rebase-merge guard must come before git rebase command")
 
 
+class TestSeccompFilter(unittest.TestCase):
+    """Verify seccomp BPF filter generation is well-formed."""
+
+    def test_filter_size(self):
+        """Filter must have exactly 3 + N + 2 instructions (8 bytes each)."""
+        from cav.seccomp_gen import generate_filter, BLOCKED_X86_64, BLOCKED_AARCH64
+        for arch, blocked in [("x86_64", BLOCKED_X86_64), ("aarch64", BLOCKED_AARCH64)]:
+            bpf = generate_filter(arch)
+            expected = (3 + len(blocked) + 2) * 8
+            self.assertEqual(len(bpf), expected, f"{arch} filter size mismatch")
+
+    def test_filter_blocks_io_uring(self):
+        """io_uring syscalls must be in the blocked list."""
+        from cav.seccomp_gen import BLOCKED_X86_64
+        self.assertIn("io_uring_setup", BLOCKED_X86_64)
+        self.assertIn("io_uring_enter", BLOCKED_X86_64)
+        self.assertIn("io_uring_register", BLOCKED_X86_64)
+
+    def test_filter_blocks_keyctl(self):
+        """Kernel keyring syscalls must be in the blocked list."""
+        from cav.seccomp_gen import BLOCKED_X86_64
+        self.assertIn("keyctl", BLOCKED_X86_64)
+        self.assertIn("add_key", BLOCKED_X86_64)
+
+    def test_filter_allows_needed_syscalls(self):
+        """Syscalls needed by the cave must NOT be blocked."""
+        from cav.seccomp_gen import BLOCKED_X86_64
+        needed = ["clone", "clone3", "unshare", "mount", "umount2",
+                   "pivot_root", "setns", "mknod", "personality",
+                   "ptrace"]  # needed for gdb/strace; Yama handles scope
+        for name in needed:
+            self.assertNotIn(name, BLOCKED_X86_64,
+                             f"{name} is blocked but needed by cave")
+
+    def test_bpf_instructions_valid(self):
+        """Every BPF instruction must have valid jump offsets."""
+        import struct
+        from cav.seccomp_gen import generate_filter, BLOCKED_X86_64
+        bpf = generate_filter("x86_64")
+        n_insns = len(bpf) // 8
+        for i in range(n_insns):
+            code, jt, jf, k = struct.unpack("HBBI", bpf[i*8:(i+1)*8])
+            # Jump targets must not exceed filter bounds
+            if code & 0x07 == 0x05:  # BPF_JMP class
+                self.assertLess(i + 1 + jt, n_insns,
+                                f"insn[{i}] jt overflow")
+                self.assertLess(i + 1 + jf, n_insns,
+                                f"insn[{i}] jf overflow")
+
+
 class TestDeadCode(unittest.TestCase):
     """Detect unused code with vulture.
 

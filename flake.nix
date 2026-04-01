@@ -47,12 +47,20 @@
             memory.fragments = [ ./defaults/system-claude.md ];
           };
 
+          seccompArch = if pkgs.stdenv.hostPlatform.isx86_64 then "x86_64" else "aarch64";
+          seccompFilter = pkgs.runCommand "cave-seccomp-filter" {
+            nativeBuildInputs = [ python ];
+          } ''
+            python3 ${./cav/seccomp_gen.py} --arch=${seccompArch} > $out
+          '';
+
           sandbox = jail "coding-cave" pkgs.bashInteractive (with jail.combinators; [
             no-die-with-parent
             (set-hostname "coding-cave")
             (unsafe-add-raw-args "--uid 1000 --gid 1000")
             (unsafe-add-raw-args "--dir /bin --ro-bind ${pkgs.bashInteractive}/bin/bash /bin/bash --ro-bind ${pkgs.coreutils}/bin/env /usr/bin/env")
             network
+            (add-seccomp seccompFilter)
 
             # Packages available inside the cave
             (add-pkg-deps ([
