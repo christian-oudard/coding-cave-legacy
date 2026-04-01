@@ -105,7 +105,7 @@ def latest_session_file(slug: str) -> str | None:
 def project_slug(base: Path) -> str:
     """Derive a slug from the project path."""
     name = base.name.lower()
-    slug = re.sub(r"[^a-z0-9]+", "-", name).strip("-")
+    slug = re.sub(r"[^a-z0-9_-]+", "-", name).strip("-")
     return slug or "project"
 
 
