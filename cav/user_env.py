@@ -28,7 +28,7 @@ _FLAKE_TEMPLATE = """\
 {input_passes}    }};
     claude = userConfig.claude or {{}};
     claudeConfig = mkClaudeConfig ({{ inherit pkgs; }} // claude);
-    packages = userConfig.packages or [];
+    packages = (userConfig.packages or []) ++ (claudeConfig.packages or []);
     env = userConfig.env or {{}};
     files = userConfig.files or {{}};
   in {{
