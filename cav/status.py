@@ -53,8 +53,8 @@ def format_agents(agents: list[AgentInfo], max_commits: int | None = 3) -> str:
         header = f"{name}  ({state})" + (f"  {age}" if age else "")
         lines.append(header)
         for branch, ahead, commit_lines in unapproved:
-            n = "commit" if ahead == 1 else "commits"
-            lines.append(f"  {ahead} unapproved {n} on {branch}")
+            commit = "commit" if ahead == 1 else "commits"
+            lines.append(f"  {ahead} {commit} on {branch}")
             for line in (commit_lines if max_commits is None else commit_lines[:max_commits]):
                 lines.append(f"    {line}")
             if max_commits and ahead > max_commits:

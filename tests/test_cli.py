@@ -838,7 +838,7 @@ class TestAgentSorting(unittest.TestCase):
                         [("agent-1/main", 2, ["abc feat: add X", "def fix: Y"])]),
         ]
         out = self.format_agents(agents)
-        self.assertIn("2 unapproved commits on agent-1/main", out)
+        self.assertIn("2 commits on agent-1/main", out)
         self.assertIn("abc feat: add X", out)
         self.assertIn("def fix: Y", out)
 
