@@ -96,6 +96,19 @@ def clear_session_id(agent_id: str) -> None:
         db.close()
 
 
+def find_agent_by_session(session_id: str) -> str | None:
+    """Return the agent ID that owns the given session UUID, or None."""
+    db = _open()
+    try:
+        row = db.execute(
+            "SELECT agent_id FROM agents WHERE session_id = ?",
+            (session_id,)
+        ).fetchone()
+        return row[0] if row else None
+    finally:
+        db.close()
+
+
 def read_session_id(agent_id: str) -> str | None:
     """Read the stored Claude session ID for an agent, or None."""
     db = _open()
@@ -367,7 +380,9 @@ def all_agent_ids(project: str | None = None) -> list[str]:
                 elif extras_json and project in json.loads(extras_json):
                     ids.append(aid)
         else:
-            ids = [r[0] for r in db.execute("SELECT agent_id FROM agents").fetchall()]
+            ids = [r[0] for r in db.execute(
+                "SELECT agent_id FROM agents"
+            ).fetchall()]
         return sorted(ids, key=int)
     finally:
         db.close()

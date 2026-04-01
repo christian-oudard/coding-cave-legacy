@@ -89,10 +89,21 @@ def agent(continue_agent, resume_agent, extra_projects, recursive):
 
     if resume_agent:
         aid = resume_agent.lstrip("@").split("@")[-1]
-        if not config.AGENT_ID_RE.match(aid):
-            raise SystemExit(
-                f"Invalid agent '{resume_agent}'. Use @<id> or <slug>@<id>.")
-        agent_id, session_id, resuming = registry.resolve_continue(base, aid)
+        if config.AGENT_ID_RE.match(aid):
+            agent_id, session_id, resuming = registry.resolve_continue(base, aid)
+        else:
+            # Try as a session UUID
+            owner = registry.find_agent_by_session(resume_agent)
+            if owner:
+                agent_id, session_id, resuming = registry.resolve_continue(
+                    base, owner)
+            else:
+                # Session not in registry. Start a fresh agent with this
+                # session so Claude can resume it.
+                agent_id = registry.acquire_agent_id(base)
+                registry.write_session_id(agent_id, resume_agent)
+                session_id = resume_agent
+                resuming = True
     elif continue_agent:
         hint = on_agent_branch[1] if on_agent_branch else None
         agent_id, session_id, resuming = registry.resolve_continue(base, hint)

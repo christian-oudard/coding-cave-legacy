@@ -537,16 +537,31 @@ class TestSessionResume(unittest.TestCase):
         from tests import find_agent_by_session
         self.assertIsNone(find_agent_by_session("deadbeef-dead-dead-dead-deadbeefcafe"))
 
-    def test_resume_invalid_agent_gives_error(self):
-        """cav --resume with a non-numeric ID gives a clear error."""
+    def test_resume_accepts_session_uuid(self):
+        """cav --resume with a non-numeric ID is treated as a session UUID."""
         from cav.cli import cli
         from click.testing import CliRunner
         from unittest.mock import patch
         with patch("cav.cli.find_repo_root"), \
              patch("cav.cli.require_init"), \
-             patch("cav.cli.git.current_branch", return_value="main"):
-            result = CliRunner().invoke(cli, ["agent", "--resume", "not-a-number"])
-        self.assertIn("Invalid agent", result.output)
+             patch("cav.cli.git.current_branch", return_value="main"), \
+             patch("cav.cli.registry.find_agent_by_session",
+                   return_value=None), \
+             patch("cav.cli.registry.acquire_agent_id",
+                   return_value="1"), \
+             patch("cav.cli.registry.write_session_id"), \
+             patch("cav.cli.registry.read_session_id",
+                   return_value="some-session-uuid"), \
+             patch("cav.cli.registry.read_agent_launch_opts",
+                   return_value=([], False)), \
+             patch("cav.cli._sweep_stale_agents"), \
+             patch("cav.sandbox.launch", return_value=0) as mock_launch, \
+             patch("cav.cli.registry.mark_agent_exited"), \
+             patch("cav.cli._auto_cleanup_if_clean"):
+            result = CliRunner().invoke(
+                cli, ["agent", "--resume", "some-session-uuid"])
+        # Should have attempted to launch (exit via sys.exit)
+        self.assertNotIn("Invalid agent", result.output)
 
     def test_write_then_find_session(self):
         """write_session_id + find_agent_by_session round-trip."""
