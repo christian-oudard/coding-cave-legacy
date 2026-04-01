@@ -1,5 +1,4 @@
 """Build user environment from cave.nix."""
-import hashlib
 import json
 import os
 import platform
@@ -14,7 +13,7 @@ _FLAKE_TEMPLATE = """\
   inputs = {{
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     nix-claude = {{
-      url = "github:christian-oudard/nix-claude";
+      url = "@NIX_CLAUDE_URL@";
       inputs.nixpkgs.follows = "nixpkgs";
     }};
 {input_declarations}  }};
@@ -134,17 +133,6 @@ def build():
 
     result_link = user_env / "result"
 
-    # Check if rebuild needed (hash cave.nix + flake.lock)
-    h = hashlib.sha256(content.encode())
-    lock = user_env / "flake.lock"
-    if lock.exists():
-        h.update(lock.read_bytes())
-    content_hash = h.hexdigest()[:16]
-    hash_file = user_env / ".hash"
-    if hash_file.exists() and hash_file.read_text() == content_hash and result_link.exists():
-        return result_link.resolve()
-
-    print("Building user environment from cave.nix...", file=sys.stderr, flush=True)
     r = subprocess.run(
         ["nix", "build", "--no-link", "--print-out-paths"],
         capture_output=True, text=True,
@@ -157,7 +145,9 @@ def build():
         return None
 
     out_path = r.stdout.strip().split("\n")[0]
+    old_path = result_link.resolve() if result_link.exists() else None
     result_link.unlink(missing_ok=True)
     result_link.symlink_to(out_path)
-    hash_file.write_text(content_hash)
+    if str(old_path) != out_path:
+        print(f"User environment updated from {cave_nix}.", file=sys.stderr, flush=True)
     return Path(out_path)

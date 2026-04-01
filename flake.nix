@@ -323,6 +323,8 @@
               substituteInPlace $out/lib/cav/sandbox.py \
                 --replace-fail "@SANDBOX_BIN@" "${sandbox}/bin/coding-cave" \
                 --replace-fail "@CAV_BIN@" "$out/bin"
+              substituteInPlace $out/lib/cav/user_env.py \
+                --replace-fail "@NIX_CLAUDE_URL@" "github:christian-oudard/nix-claude/${nix-claude.rev}"
 
               # Write entry point
               cat > $out/bin/cav <<WRAPPER
