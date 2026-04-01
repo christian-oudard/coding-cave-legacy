@@ -515,9 +515,15 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
     parent_depth = int(os.environ.get("CODING_CAVE_DEPTH", "0"))
     depth = parent_depth + 1
 
-    # Set env vars for the jail binary's add-runtime blocks
-    env = {
-        **os.environ,
+    # Build a minimal environment for the jail wrapper. Only include
+    # vars the add-runtime blocks and try-fwd-env calls actually need.
+    # Using **os.environ here would leak host secrets (API keys, tokens,
+    # SSH_AUTH_SOCK, etc.) via /proc/1/environ inside the sandbox.
+    env = {}
+    for var in ("PATH", "HOME", "TMPDIR", "TERM", "COLORTERM", "TZ"):
+        if var in os.environ:
+            env[var] = os.environ[var]
+    env.update({
         "CODING_CAVE_NIX_MERGED": nix_merged,
         "CODING_CAVE_HOME": str(home),
         "CODING_CAVE_WORKSPACES": ws_paths,
@@ -529,7 +535,7 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
         # Preserve the real host home for nested caves
         "CODING_CAVE_HOST_HOME": os.environ.get(
             "CODING_CAVE_HOST_HOME", str(Path.home())),
-    }
+    })
 
     if nix_db_dir:
         env["CODING_CAVE_NIX_DB_DIR"] = str(nix_db_dir)
