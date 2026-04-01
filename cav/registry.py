@@ -41,6 +41,21 @@ def _is_pid_alive(pid: int) -> bool:
         return True  # exists but can't signal
 
 
+def _sweep_dead_pids(db, now: float) -> None:
+    """Mark agents with dead PIDs as exited. Call inside a transaction."""
+    rows = db.execute(
+        "SELECT agent_id, pid FROM agents "
+        "WHERE exited_at IS NULL AND pid IS NOT NULL"
+    ).fetchall()
+    for aid, p in rows:
+        if not _is_pid_alive(p):
+            db.execute(
+                "UPDATE agents SET exited_at = ?, pid = NULL "
+                "WHERE agent_id = ?",
+                (now, aid)
+            )
+
+
 def display_name(base: Path, agent_id: str) -> str:
     """Display name: <slug>@<id>."""
     slug = agent_project(agent_id) or config.project_slug(base)
@@ -53,6 +68,12 @@ def write_session_id(agent_id: str, session_id: str) -> None:
     """Record the session ID for an agent."""
     db = _open()
     try:
+        # Clear from any other agent first (dead agents may still hold it)
+        db.execute(
+            "UPDATE agents SET session_id = NULL "
+            "WHERE session_id = ? AND agent_id != ?",
+            (session_id, agent_id)
+        )
         db.execute(
             "UPDATE agents SET session_id = ? WHERE agent_id = ?",
             (session_id, agent_id)
@@ -176,19 +197,7 @@ def acquire_agent_id(base: Path) -> str:
     db = _open()
     try:
         db.execute("BEGIN IMMEDIATE")
-
-        # Clean up dead agents (globally)
-        rows = db.execute(
-            "SELECT agent_id, pid FROM agents "
-            "WHERE exited_at IS NULL AND pid IS NOT NULL"
-        ).fetchall()
-        for aid, p in rows:
-            if not _is_pid_alive(p):
-                db.execute(
-                    "UPDATE agents SET exited_at = ?, pid = NULL "
-                    "WHERE agent_id = ?",
-                    (now, aid)
-                )
+        _sweep_dead_pids(db, now)
 
         # All IDs in the registry are occupied (running or paused with work)
         occupied = {r[0] for r in db.execute("SELECT agent_id FROM agents")}
@@ -226,6 +235,7 @@ def continue_agent_id(base: Path, agent_id: str | None = None) -> str | None:
     db = _open()
     try:
         db.execute("BEGIN IMMEDIATE")
+        _sweep_dead_pids(db, now)
 
         if agent_id is not None:
             row = db.execute(
