@@ -452,6 +452,19 @@ def remove_project(slug):
 
 
 @cli.command()
+@click.argument("agent_id")
+def review(agent_id):
+    """Fetch and checkout an agent branch for review."""
+    base = find_repo_root()
+    require_init(base)
+    aid = agent_id.lstrip("@").split("@")[-1]
+    if not config.AGENT_ID_RE.match(aid):
+        raise SystemExit(f"Invalid agent ID '{agent_id}'. Use a number (e.g. 3).")
+    from .review import review as _review
+    _review(base, aid)
+
+
+@cli.command()
 @click.argument("branch")
 @click.argument("agent_id", required=False)
 def checkout(branch, agent_id):
@@ -567,8 +580,8 @@ def main():
 
     subcmds = {
         "init", "agent", "approve", "reject", "pull", "push", "checkout",
-        "status", "version", "remove-agent", "remove-project", "cp", "env",
-        "completion",
+        "review", "status", "version", "remove-agent", "remove-project", "cp",
+        "env", "completion",
     }
     if not argv:
         argv = ["agent"]

@@ -1939,5 +1939,86 @@ class TestGitWrapper(unittest.TestCase):
                          "reset was not synced to remote")
 
 
+class TestReview(TestCAV):
+    """Tests for cav review: fetch and checkout agent branches."""
+
+    def test_review_checks_out_agent_branch(self):
+        """cav review N checks out agent-N/main with the agent's commits."""
+        agents = self._init_and_agents("1")
+        ws = agents["1"]
+
+        (ws / "feature.py").write_text("print('hello')\n")
+        git("add", "feature.py", cwd=ws)
+        git("commit", "-m", "Add feature", cwd=ws)
+        git("push", "host-cave", "agent-1/main", cwd=ws, env=agent_env("1"))
+
+        # Review from main
+        from cav.review import review
+        review(self.user_repo, "1")
+
+        branch = git_out("branch", "--show-current", cwd=self.user_repo)
+        self.assertEqual(branch, "agent-1/main")
+        log = git_out("log", "--oneline", cwd=self.user_repo)
+        self.assertIn("Add feature", log)
+
+    def test_review_resets_when_already_on_branch(self):
+        """cav review N resets to remote when already on that agent branch."""
+        agents = self._init_and_agents("1")
+        ws = agents["1"]
+
+        (ws / "v1.py").write_text("v1\n")
+        git("add", "v1.py", cwd=ws)
+        git("commit", "-m", "v1", cwd=ws)
+        git("push", "host-cave", "agent-1/main", cwd=ws, env=agent_env("1"))
+
+        from cav.review import review
+        review(self.user_repo, "1")
+
+        # Agent adds more work
+        (ws / "v2.py").write_text("v2\n")
+        git("add", "v2.py", cwd=ws)
+        git("commit", "-m", "v2", cwd=ws)
+        git("push", "host-cave", "agent-1/main", cwd=ws, env=agent_env("1"))
+
+        # Review again while already on the branch
+        review(self.user_repo, "1")
+        log = git_out("log", "--oneline", cwd=self.user_repo)
+        self.assertIn("v2", log)
+
+    def test_review_nonexistent_agent(self):
+        """cav review with unknown agent ID gives a clear error."""
+        self._init()
+        from cav.review import review
+        with self.assertRaises(SystemExit) as ctx:
+            review(self.user_repo, "99")
+        self.assertIn("No agent branch", str(ctx.exception))
+
+    def test_review_shows_pending_commits(self):
+        """cav review prints the number of commits ahead of target."""
+        agents = self._init_and_agents("1")
+        ws = agents["1"]
+
+        (ws / "a.py").write_text("a\n")
+        git("add", "a.py", cwd=ws)
+        git("commit", "-m", "first", cwd=ws)
+        (ws / "b.py").write_text("b\n")
+        git("add", "b.py", cwd=ws)
+        git("commit", "-m", "second", cwd=ws)
+        git("push", "host-cave", "agent-1/main", cwd=ws, env=agent_env("1"))
+
+        import io
+        from cav.review import review
+        captured = io.StringIO()
+        old_stdout = sys.stdout
+        sys.stdout = captured
+        try:
+            review(self.user_repo, "1")
+        finally:
+            sys.stdout = old_stdout
+
+        output = captured.getvalue()
+        self.assertIn("2 commits ahead of main", output)
+
+
 if __name__ == "__main__":
     unittest.main()
