@@ -1,0 +1,102 @@
+[axes]
+location = ["agent_cave", "shared_remote", "host", "github"]
+branch = ["dev", "base"]
+
+[[nodes]]
+id = "agent_wt"
+type = "worktree"
+label = "agent worktree"
+sublabel = "dev"
+branch = "dev"
+location = "agent_cave"
+
+[[nodes]]
+id = "dev_remote"
+type = "remote_branch"
+label = "dev remote"
+branch = "dev"
+location = "shared_remote"
+
+[[nodes]]
+id = "host_dev_wt"
+type = "worktree"
+label = "host worktree"
+sublabel = "dev"
+branch = "dev"
+location = "host"
+
+[[nodes]]
+id = "host_main_wt"
+type = "worktree"
+label = "host worktree"
+sublabel = "main"
+branch = "base"
+location = "host"
+
+[[nodes]]
+id = "base_remote"
+type = "remote_branch"
+label = "base remote"
+branch = "base"
+location = "shared_remote"
+
+[[nodes]]
+id = "github"
+type = "remote_branch"
+label = "github"
+branch = "base"
+location = "github"
+
+[[edges]]
+from = "agent_wt"
+to = "dev_remote"
+operation = "push"
+style = "solid"
+
+[[edges]]
+from = "dev_remote"
+to = "agent_wt"
+operation = "pull"
+style = "solid"
+
+[[edges]]
+from = "dev_remote"
+to = "host_dev_wt"
+operation = "pull"
+style = "solid"
+
+[[edges]]
+from = "host_dev_wt"
+to = "dev_remote"
+operation = "push"
+style = "solid"
+
+[[edges]]
+from = "host_dev_wt"
+to = "host_main_wt"
+operation = "approve"
+style = "dashed"
+
+[[edges]]
+from = "host_dev_wt"
+to = "base_remote"
+operation = "approve"
+style = "dashed"
+
+[[edges]]
+from = "host_main_wt"
+to = "base_remote"
+operation = "push"
+style = "solid"
+
+[[edges]]
+from = "host_main_wt"
+to = "github"
+operation = "push"
+style = "solid"
+
+[[edges]]
+from = "base_remote"
+to = "agent_wt"
+operation = "rebase"
+style = "solid"
