@@ -2,187 +2,134 @@
 
 ## Purpose
 
-Coding Cave gives multiple Claude agents full autonomy inside a security boundary. Each agent gets unrestricted access within a bwrap sandbox. Nothing escapes until the user explicitly pulls. The user reviews and controls what crosses the boundary.
-
-## Design Principles
-
-**Full autonomy inside, full control outside.** Agents can install packages, run arbitrary commands, modify any file. But the host filesystem is untouched until the user pulls.
-
-**Git is the sole coordination mechanism.** No external messaging system. Agents discover state changes through normal git operations. Branch protection hooks enforce safety.
-
-**The host is the source of truth.** The host repo is canonical. The cave works on an overlay copy. Only commits cross the boundary via git. Uncommitted changes, working tree state, and staging area never cross. `cav cp` is the escape hatch for moving individual files that should not be committed (data files, credentials, etc.).
-
-**Nix for reproducibility, overlays for mutability.** The environment is defined in a Nix flake. The nix store is mounted as a writable overlay so agents can install additional packages. Project files are also on overlays: host files are the read-only lower layer, cave modifications go to the upper layer.
+The Coding Cave is a secure space for agents to write software. It has a strong boundary enforced with bubblewrap, so that the agents only have access to their own development environments, and not the host machine. Instead of dictating detailed permissions for each possible action, we give the agent room to experiment, and receive only git commits as their output. All commits are reviewed and approved by the user before merging to the user's host repository.
 
 ## Git Topology
 
-A bare Git repo (`.coding-cave/cave-shared.git`) acts as the shared remote, named `cave` on both the user's repo and agent clones. The user also has a separate `origin` remote for publishing to GitHub.
+Locations:
+- **agent cave** - a worktree (shared clone of the bare repo, objects via alternates) inside the bubblewrap sandbox
+- **shared remote** - a bare repository (`.coding-cave/cave-shared.git`) which is the coordination point between agent and host
+- **host** - the user's repository
 
-## Agents
+The agent cave refers to the shared remote as `host-cave`, but the host refers to it as `cave`. The host will generally also have a separate `origin` remote for publishing to GitHub.
 
-Agents are identified by globally unique numeric IDs: 1, 2, 3. IDs are assigned from a single incrementing counter across all projects, so there are never two different agents with the same ID. Display names combine the project slug with the ID: `coding-cave@1`, `my-app@2`. Each agent gets its own workspace clone of the shared repo.
+There are two kinds of branches:
+- **Base branches** (`main`, `develop`, `issue/123`, etc.) are the project's normal branches. Agents cannot access them directly. Only the user modifies base branches, via `cav approve` and normal manual development.
+- **Dev branches** are named `agent-<n>/<base>` (e.g. `agent-1/main`, `agent-2/develop`). These are the working branches for incomplete work to be reviewed and tested.
 
-Each agent session has a primary project (the project directory where the session was started). When an agent operates on multiple projects, it creates agent branches in each project's bare repo using the same globally unique ID.
+Here is how code moves through the system:
+**Development** The agent commits work to its sandboxed worktree on the dev branch (`agent-N/main`). When the user runs `cav pull`, the agent pushes to the shared remote dev branch, and the user pulls that work from the same "remote" dev branch to their own repo dev branch. If the user needs to make manual edits, `cav push` on a dev branch pushes to the shared remote, and pulls from the shared remote to the agent dev branch.
 
-## Branching
+**Approval** When the user is satisfied with the state of the dev branch, they run `cav approve`, which merges the pending commits into the base branch (`main` and `cave/main`). Also, agent worktrees are rebased on the newly updated `cave/main`. This is always a clean fast-forward, never a merge commit.
 
-**Shared branches** (`main`, `develop`, etc.) live on the `cave` remote and are what the user pulls from. Agents cannot push to shared branches. Only the user modifies shared branches, via `cav approve` and `cav reject`.
+**Publication** The host pushes the main branch to the GitHub origin, like normal. The agent never has GitHub credentials, and this local review process does not use the GitHub pull request system.
 
-**Agent branches** are named `agent-<n>/<target>` (e.g. `agent-1/main`, `agent-2/develop`). These are the agent's working branches inside the cave. When an agent's work is ready, it stays on the agent branch until the user approves it.
+**Rebase** Any time `cave/main` receives new commits, an attempt is made to rebase agent dev branches on the new `cave/main`. New commits on `main` can be pushed to the `cave/main` remote branch with `cav push` or `cav push --force` if they rewrite history. `cav push` commands trigger rebase for agent dev branches.
 
-Force-push is allowed on agent branches (agents amend work in progress). Only the matching agent (or the user) can push to an agent branch.
+**History rewrites**
+When agents amend or squash commits, the user running `cav pull --force` pulls history-rewriting updates, which runs agent-side `git push --force` to push agent rewritten history to the shared remote dev branch, and then runs `git reset --hard` to "force-pull" to the host dev branch.
 
-Agents are responsible for a clean git history. WIP commits on agent branches must be squashed into focused, well-described commits before the user approves them. Only the user may rewrite shared branch history.
+**Illegal Actions** 
+Git hooks enforce that git commands run by agents are topologically correct. Agents cannot push to cave/main, or to dev branches that do not belong to them.
 
-## Branch Protection
+## Projects
 
-A pre-receive hook on the shared repo enforces:
+Projects are registered with the coding-cave system with `cav init`. This creates the shared bare repo and adds the project to the project registry database table. Each project is assigned a unique slug based on its folder name.
 
-1. Agents cannot push to shared branches.
-2. Agents cannot push to other agents' branches.
-3. Agents cannot delete shared branches.
-4. The user can push anything.
+## Agent IDs
 
-Agent branches persist until the agent's work is approved or the agent is explicitly removed via `cav remove-agent`. When an agent exits with all work approved, it is auto-removed (registry entry, branches, workspace). When an agent exits with unapproved work, it remains paused and can be continued with `cav -c`. Unapproved work is detected by patch-id comparison, so rebased or rewritten commits count as unapproved. Any agents that were killed before cleanup could run are swept at the next `cav agent` invocation.
+Agent sessions are launched with `cav agent`, or just `cav` for short. Agent sessions are identified by unique IDs: agent-1, agent-2, agent-3, etc.  Display name tags combine the project slug with the ID: `web-frontend@1`, `data_pipeline@2`, and so on. Each agent gets its own workspace clone of the shared repo. Agent session information, including Claude session IDs, are stored in the agent registry database table.
 
-Every commit on an agent branch is automatically force-pushed to the cave remote. This keeps the remote branch in sync without manual pushes. Only the agent's own branch is pushed, never shared branches or other agents' branches.
+`cav status` shows current running agents and work in progress, as unmerged commits. The agent session can be running or stopped. Running sessions are visible in `cav status`. Stopped sessions with unmerged work also show in `cav status`.
 
-Agent identity is communicated via git push options. No push option means the pusher is the user.
+Each agent session is launched in the context of a project directory. This is their primary project, which gives the agents name tag its project slug.
 
-Agents cannot be launched from agent branches. The user must be on a shared branch (e.g. main) when starting a new agent.
+## Multi-project
+`cav agent -p otherproject` allows agents to access multiple projects. They have one dev branch per project, with its associated worktree.
 
 ## Sandbox
 
-Each agent runs in a sandbox with:
-
-- Nix store overlay (host store read-only, writable upper layer).
-- Project workspace mounted at `/projects/<slug>`.
-- Persistent home at `/home/cave-coder` (survives across sessions).
-- GPG agent socket forwarded for commit signing (private key stays on host).
-- Host git identity forwarded via environment variables.
-- Shared host network (no isolation).
-- Standard POSIX environment (SHELL, TERM, locale).
+Each agent runs in bubblewrap sandbox.
+- The development environment is a standard POSIX environment and Bash shell.
+- Agents can install Nix packages to a Nix store overlay (host store read-only, writable upper layer).
+- Project workspaces are mounted at `/projects/<slug>`.
+- A persistent shared home directory is at `/home/cave-coder`.
+- Agents sign commits with host GPG keys, through a forwarded GPG agent socket. The GPG private keys stay on the host.
+- Git commits are signed with the user's Git identity, stored in environment variables.
+- The Standard POSIX environment (SHELL, TERM, locale).
 
 ## Credential Isolation
-
-Caves hold zero real credentials. All HTTPS traffic is routed through a MITM proxy (crinj) running on the host, which injects API keys based on destination host. A placeholder OAuth token satisfies Claude Code's local auth check, but is replaced by crinj at the HTTP level before reaching the API. The proxy CA certificate is available inside the cave. If crinj isn't running, HTTPS requests to credential-protected services fail. No fallback to direct credential forwarding.
+Caves do not have access to any of your SSH keys or API tokens. Instead, all web traffic is routed through a credential injection man-in-the-middle proxy, which wraps network traffic and injects credentials.
 
 ## User/System Configuration
 
-### System layer
+Base packages are infrastructure only: claude-code, nix, git, coreutils, and standard unix tools. No editors, language runtimes, or dev tools. A system CLAUDE.md introducing the coding-cave environment is prepended to the user's CLAUDE.md at session startup. `~/.config/coding-cave/cave.nix` declares per-user Claude Code configuration, Nix packages, and environment variables. All coding cave state is in the folder `~/.local/share/coding-cave/`. A SQLite database tracks registered agents, projects, and approvals. 
 
-Base packages are infrastructure only: claude-code, nix, git, coreutils, and standard unix tools. No editors, language runtimes, or dev tools. A system CLAUDE.md is concatenated with the user's CLAUDE.md at session startup.
-
-### User layer (cave.nix)
-
-`~/.config/coding-cave/cave.nix` declares extra packages, environment variables, files, and Claude Code configuration. Packages and env vars that reference binaries (like EDITOR) are declared together, ensuring consistency.
-
-### CLAUDE.md concatenation
-
-Every session gets `~/.claude/CLAUDE.md` = system layer + cave.nix layer + user CLAUDE.md. The system portion describes the cave environment. The user portion comes from `~/.config/coding-cave/CLAUDE.md`.
-
-## Data
-
-A global database in the data directory (`~/.local/share/coding-cave/`) tracks registered agents, projects, and approvals. Each agent has an ID, project, session ID, and lifecycle state. Each project maps a slug to an absolute path. Each approval maps one commit to its agent, recording the shared branch state before and after that commit. An approval batch (multiple commits from one agent) creates one record per commit.
-
-Slug collisions (two different paths producing the same slug) are rejected at init time. Rename the project directory to resolve.
 
 ## Commands
 
 ### `cav init`
 
-Initializes Coding Cave in a project directory. Sets up the shared bare repo, branch protection hooks, and registers the project in the global database. If the directory is not a git repo, runs `git init` first.
+Adds a project to the coding-cave registry. Sets up the shared bare repo, and branch protection hooks. A valid project is a git repository with at least one commit, because only committed work is shared with the agent.
 
-Requires at least one commit. Agents clone from the shared repo, so there must be something to clone. Errors with a message telling the user to commit their files. Warns if there are uncommitted changes, since those won't be visible to agents.
+### `cav agent [-c,--continue | -r,--resume <agent_id/session_id> [-p,--project <project_slug> ] [--recursive]`
 
-### `cav [-c] [-p path ...] [--recursive]`
+Launches a Claude Code CLI agent in a coding-cave session. Auto-assigns a numeric ID. There are no agent ID duplicates among running agents or stopped agents with unmerged work.
 
-Launches an agent. Auto-assigns the next available numeric ID. Creates the workspace and sandbox, starts Claude with full permissions inside the cave.
+Continue the most recently exited session with `--continue`. Continue arbitrary sessions, by session-id or agent-id, with `--resume`.
 
-With `-c` / `--continue`, continues the most recent Claude session for this project via `claude --resume <session-id>`. If a paused agent exists in the registry, it is reused. Otherwise, a fresh agent ID is allocated. In both cases, the session ID is resolved before launching Claude to avoid TOCTOU races with other agents. When no session ID is in the registry (agent was auto-cleaned), the most recent session is found by scanning `~/.claude/projects/<encoded-cwd>/*.jsonl` by file mtime, matching Claude's own recency metric. Since all agents for a project share the same sandbox cwd (`/projects/<slug>`), sessions from any agent are visible.
+Allow access to multiple projects with the `--project` flag (repeatable).
 
-With `-p`, additional projects are mounted into the same cave. Each project must already have `cav init` done. The agent uses its globally unique ID across all projects, with separate workspaces and agent branches per project. All workspaces are mounted at `/projects/<slug>`. Fails with a helpful message if any project is not initialized.
-
-With `--recursive`, the cave can launch subcaves. Disabled by default.
+With `--recursive`, the cave agent can launch their own sub-caves. This is mainly for automated testing of coding-cave features.
 
 ### `cav approve [agent-id]`
 
-Approves an agent branch's work into a shared branch. With an explicit agent ID (e.g. `cav approve 3`), the target branch is inferred from the current branch. Without an agent ID, must be run from an agent branch, where the agent ID and target are inferred from the branch name.
-
-Displays the commit message(s) and prompts Y/n. Fails if the agent branch is not a fast-forward from the target shared branch (the agent must rebase first).
-
-On success: pushes the agent branch tip to the shared branch on cave and records one approval per commit in the database. Then pulls the updated target branch locally as a courtesy. The approval (push to cave) is never blocked by local worktree state. If the courtesy pull fails, the approval still stands and the user can `cav pull` later. If the agent is running, it continues working from the updated base. If the agent is paused, it is removed (registry entry, branches, workspace) since no unapproved work remains.
+Approves a dev branch's work, and merges it into the base branch. Specify which agent ID number to approve, or the agent ID is inferred from the current dev branch if one is checked out. Approval errors out if the dev branch is not possible to fast-forward merge to the base branch (the agent must rebase first). To process an approval, the command pushes the dev branch tip to the base branch, on both the cave remote and host repo.
 
 ### `cav reject [agent-id]`
 
-Rejects the tip commit of the current shared branch. Must be run from a shared branch. Refuses if the commit has been pushed to `origin` (use `git revert` instead). Prompts Y/n for confirmation. Run repeatedly to reject multiple commits.
+Rejects the tip commit of the current base branch. Must be run from a base branch. This means to undo the approval that got it into the base branch in the first place. this means running `git reset --hard` on the host repo base branch to remove the commit, and ensuring that it exists as the tip of the dev branch, for both host and agent. If the agent has exited and their dev branch is gone, a running agent with no unmerged commits is required to give the rejected commits a place to go.
 
-Resets the shared branch by one commit and force-pushes to cave. Creates an agent branch at the rejected commit so the work can be reworked. Deletes the corresponding approval record.
+### `cav pull [--force]`
 
-If the original agent is still in the registry, the branch is restored to that agent automatically. If the original agent was cleaned up, reject fails and instructs the user to start or continue an agent session first, then re-run with the agent ID: `cav reject <agent-id>`. The target agent must have no unapproved work of its own on that branch.
+Moves work from the agent dev branch to the host dev branch. One push from agent to shared, and one pull from shared to host. This is only valid on dev branches, not on base branches. The pull command is idempotent, multiple calls are the same as one call.
 
-### `cav pull`
+### `cav push [--force]`
 
-Fetches from the cave remote and updates the current branch.
-
-On **shared branches**, fast-forward merges. Equivalent to `git fetch cave && git merge --ff-only cave/<branch>`. Fails if the branches have diverged. Force-pull is not allowed on shared branches, because the host repo is the source of truth. Use `cav push --force` to correct the cave instead.
-
-On **agent branches**, always hard-resets to the remote agent branch. Agent branches are ephemeral on the host. The cave agent is authoritative, so pull unconditionally accepts the remote version. Shows the agent's commits relative to the target branch.
-
-### `cav push`
-
-Pushes the current branch to the cave remote. With `--force`, force-pushes (for rollback).
+Pushes the current branch to the shared remote. With `--force`, force-pushes (for rollback or history rewriting). Valid on both base branches and dev branches. If we push to a dev branch, the agent dev branch is automatically updated. The push command is idempotent, multiple calls are the same as one call.
 
 ### `cav checkout <branch> [agent-id]`
 
-Retargets an agent to deliver to a different shared branch. Creates the target branch on cave if it doesn't exist (forked from the old target). Agent ID is inferred from the current branch if on an agent branch, otherwise required.
+Changes the current base branch to `<branch>`. The host repo runs `git checkout <branch>`. The agent creates a new branch `agent-<n>/<branch>`. Unmerged work from the previous agent dev branch is rebased on the new shared base branch. Agent ID is inferred from the current branch if on a dev branch, otherwise agent ID must specified.
 
-On the host: renames the agent branch in the bare repo and the agent's workspace directly. On an agent branch (inside cave): renames the local branch, attempts a rebase onto the new target (aborts silently on conflict), and pushes. The post-commit hook handles ongoing rebase on subsequent commits.
+### `cav status [-a,--all]`
 
-### Idempotency
+Shows the current list of agents and unmerged commits for the current project, or for all projects with `cav status --all`. It fetches from the shared remote to get latest information, and queries the registry database. The status command is read-only, and does not change registry database state or Git state except for fetching. The status command shows agent status of "running" or "stopped". The sort order is most recent first. Similar to `git status`, it shows whether the host base branch is behind or ahead of the cave remote.
 
-`cav pull` and `cav push` are idempotent. Running them multiple times is equivalent to running once. A pull with nothing new says "Already up to date." A push with nothing new is a no-op.
+### `cav remove-agent [--all] <n>`
 
-### `cav status`
+Removes a paused agent by agent ID. Deletes its session from the database, and deletes its work tree, and and deletes its remote dev branch, and deletes the host dev branch checkout. Warns about unapproved commits being discarded, giving commit hashes. Refuses to remove a running agent. `--all` removes all agents. The command asks for confirmation before removing agents. `--yes` skips the confirmation.
 
-Fetches from the cave remote and shows agent activity. Agents are derived from the registry, not from branch names. Agents with no pending work and no running process are not shown. For each active agent, shows whether it is running or paused (has unapproved commits). Unapproved commits are listed newest-first, matching `git log` order. With `--all`, iterates all registered projects and shows status for each.
+### `cav cp [-R] [-f] [(cave|<slug>)[@<n>]:]<src> [(cave|<slug>)[@<n>]:]<dest>`
 
-If the current local branch is behind its cave counterpart, shows a brief notice and prompts `cav pull`.
+Copies files between the host and a cave agent worktree, or to cave persistent home. Similar to `scp` for ssh remote hosts. Exactly one of the source and destination paths must specify a file in the cave. Paths are relative to the agent worktree, or with `~/` they are paths in the coding-cave shared home directory, or with `/` they are specified from the coding-cave filesystem root. There are several ways to specify which project and agent id to copy files from or to:
+- `<slug>:<path>` - a path in some agent's worktree
+- `<slug>@<n>:<path>` - the working tree for agent N.
+- `cave:<path>` - auto-detect the project slug from current project directory
 
-### `cav remove-agent <n>`
+Direction is determined by which path has the `cave:` prefix. If the destination has a cave prefix, copies host files into the worktree. If the source has a cave prefix, copies from the worktree to the host. Multiple sources can be specified, similar to the `cp` command.
 
-Removes a paused agent by ID. Deletes its session from the database, its remote agent branches, local agent branch checkouts, and its workspace. Warns about any unapproved commits being discarded. Refuses to remove a running agent.
-
-### `cav remove-agent --all [--yes]`
-
-Removes all paused agents and resets the database. Also deletes local agent branch checkouts. Refuses if any agents are currently running. Prompts for confirmation unless `--yes` is given.
-
-### `cav cp [-R] [-f] <src>... <dest>`
-
-Copies files between the host and a cave agent worktree or persistent home. One of the paths must use a cave prefix:
-
-- `slug:path` - project-relative path in the agent's worktree
-- `slug@N:path` - specific agent N's worktree
-- `cave:path` - auto-detect slug from CWD (project must be registered)
-- `slug:~/path` - persistent cave home (no worktree required)
-- `slug:/projects/slug/path` - absolute cave path inside the project
-
-Direction is determined by which path has the cave prefix. If the destination has a cave prefix, copies host files into the worktree. If a source has a cave prefix, copies from the worktree to the host.
-
-If multiple agents have worktrees for a slug, the `@N` form is required. Refuses to copy symlinks out of the cave. Prompts before overwriting existing files in either direction unless `-f` is given.
+If a project has multiple agents, the `@<n>` suffix specifies an agent. If no agent id is given, there is a prompt which asks which agent session to copy into. For security reasons, it refuses to copy symlinks out of the cave. `cav cp` prompts before overwriting existing files, both in the cave and on the host, unless `-f` is given.
 
 ### `cav shell`
 
-Joins a running agent's namespace via nsenter for inspection and debugging.
+Start a shell session in a running agent's worktree, inside the bubblewrap sandbox.
 
 ## Output Style
 
-CLI output follows Git's own conventions:
+CLI output generally follows Git's conventions:
 
-- Echo the git commands being run, prefixed with `+` (like `set -x`).
-- Use Git's ref-line format: `<flag> <summary> <from> -> <to>`.
-  Flags: `*` new, `+` forced, `-` deleted, space for fast-forward.
-  Summary: `old..new` for fast-forward, `old...new` for forced.
-- Show commit subject lines for new work, not just counts.
-- Column-align for readability.
-- Let git's own stderr (fetch progress, etc.) pass through.
+- Echo the git commands being run, prefixed with `+`, when the `-v`/`--verbose` option is set, similar to `set -x` in shell scripts.
+- Use Git's `--oneline` format to list commits.
+- Say how many commits ahead or behind we are when relevant.
+- Show commit subject lines for new work, not just how many commits counts.
