@@ -391,37 +391,25 @@ class TestPullForceGuard(unittest.TestCase):
         os.environ.pop("CAV_DATA_DIR", None)
         shutil.rmtree(self.tmpdir)
 
-    def test_pull_force_blocked_on_main(self):
-        """cav pull --force refuses on base branches like main."""
-        result = cav_cli("pull", "--force", cwd=self.repo, check=False)
+    def test_pull_blocked_on_base_branch(self):
+        """cav pull refuses on base branches."""
+        result = cav_cli("pull", cwd=self.repo, check=False)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("dev branch", result.stderr.lower())
 
-    def test_pull_force_blocked_on_non_dev_branch(self):
-        """cav pull --force refuses on any non-dev branch."""
+    def test_pull_blocked_on_non_dev_branch(self):
+        """cav pull refuses on any non-dev branch."""
         git("checkout", "-b", "develop", cwd=self.repo)
-        result = cav_cli("pull", "--force", cwd=self.repo, check=False)
+        result = cav_cli("pull", cwd=self.repo, check=False)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("dev branch", result.stderr.lower())
 
-    def test_pull_force_allowed_on_dev_branch(self):
-        """cav pull --force is allowed on dev branches."""
+    def test_pull_allowed_on_dev_branch(self):
+        """cav pull is allowed on dev branches."""
         git("checkout", "-b", "agent-1/main", cwd=self.repo)
         # Will fail (no remote tracking branch), but should NOT fail on the guard
-        result = cav_cli("pull", "--force", cwd=self.repo, check=False)
-        self.assertNotIn("dev branch", result.stderr.lower())
-
-    def test_pull_force_with_branch_arg_blocked_on_base(self):
-        """cav pull --force main refuses even when given as argument."""
-        git("checkout", "-b", "agent-1/main", cwd=self.repo)
-        result = cav_cli("pull", "--force", "main", cwd=self.repo, check=False)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("dev branch", result.stderr.lower())
-
-    def test_pull_branch_arg_accepted(self):
-        """cav pull <branch> is a valid argument."""
-        result = cav_cli("pull", "main", cwd=self.repo, check=False)
-        self.assertNotIn("unrecognized arguments", result.stderr)
+        result = cav_cli("pull", cwd=self.repo, check=False)
+        self.assertNotIn("not on a dev branch", result.stderr.lower())
 
 
 class TestPushForceAllowed(unittest.TestCase):

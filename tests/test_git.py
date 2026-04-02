@@ -314,7 +314,8 @@ class TestCAV(unittest.TestCase):
         git("push", "host-cave", "agent-1/main", cwd=ws, env=agent_env("1"))
         git("push", "host-cave", "agent-1/main:main", cwd=ws)
 
-        cav_cli("pull", cwd=self.user_repo)
+        git("fetch", "cave", cwd=self.user_repo)
+        git("merge", "--ff-only", "cave/main", cwd=self.user_repo)
         log = git_out("log", "--oneline", cwd=self.user_repo)
         self.assertIn("Add feature", log)
         self.assertIn("Update feature", log)
@@ -474,7 +475,7 @@ class TestCAV(unittest.TestCase):
     # -- merge + push --
 
     def test_user_pulls_approved_work(self):
-        """User approves agent work to main, then pulls."""
+        """User approves agent work to main, then fetches it."""
         agents = self._init_and_agents("1")
         ws = agents["1"]
 
@@ -484,7 +485,8 @@ class TestCAV(unittest.TestCase):
         git("push", "host-cave", "agent-1/main", cwd=ws, env=agent_env("1"))
         git("push", "host-cave", "agent-1/main:main", cwd=ws)
 
-        cav_cli("pull", cwd=self.user_repo)
+        git("fetch", "cave", cwd=self.user_repo)
+        git("merge", "--ff-only", "cave/main", cwd=self.user_repo)
 
         log = git_out("log", "--oneline", cwd=self.user_repo)
         self.assertIn("Add feature", log)
@@ -593,7 +595,8 @@ class TestCAV(unittest.TestCase):
         # Approve agent 2 as user
         git("push", "host-cave", "agent-2/main:main", cwd=a2)
 
-        cav_cli("pull", cwd=self.user_repo)
+        git("fetch", "cave", cwd=self.user_repo)
+        git("merge", "--ff-only", "cave/main", cwd=self.user_repo)
         log = git_out("log", "--oneline", cwd=self.user_repo)
         self.assertIn("Agent 1 work", log)
         self.assertIn("Agent 2 work", log)
@@ -1392,7 +1395,8 @@ class TestCAV(unittest.TestCase):
 
         # Approve the bad work as user
         git("push", "host-cave", "agent-1/main:main", cwd=ws)
-        cav_cli("pull", cwd=self.user_repo)
+        git("fetch", "cave", cwd=self.user_repo)
+        git("merge", "--ff-only", "cave/main", cwd=self.user_repo)
         self.assertIn("Bad commit", git_out("log", "--oneline", cwd=self.user_repo))
 
         # User makes a replacement commit and force-pushes

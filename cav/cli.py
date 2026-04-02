@@ -258,14 +258,14 @@ def reject(agent_id, yes):
 
 
 @cli.command()
-@click.argument("branch", required=False)
-@click.option("-f", "--force", is_flag=True, help="Hard reset to remote branch")
-def pull(branch, force):
+@click.option("-f", "--force", is_flag=True,
+              help="Accept history rewrites from agent")
+def pull(force):
     """Pull dev branch from shared remote."""
     base = find_repo_root()
     require_init(base)
     from .pull import pull as _pull
-    _pull(base, force=force, branch=branch)
+    _pull(base, force=force)
 
 
 @cli.command()
