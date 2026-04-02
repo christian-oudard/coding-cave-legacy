@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Post-receive hook for cave bare repo.
+"""Post-receive hook for shared remote (bare repo).
 
-Agent branches persist until explicitly removed via cav remove-agent.
+Dev branches persist until explicitly removed via cav remove-agent.
 This hook is reserved for future post-delivery actions.
 """

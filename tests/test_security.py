@@ -111,12 +111,12 @@ class TestPathResolution(unittest.TestCase):
 
     def test_symlink_followed_after_containment_check(self):
         """Symlinks in base_dir are OK (that's how repos are mounted)."""
-        target = os.path.join(self.tmpdir, "actual-repo")
-        os.makedirs(target)
+        base = os.path.join(self.tmpdir, "actual-repo")
+        os.makedirs(base)
         link = os.path.join(self.base, "linked")
-        os.symlink(target, link)
+        os.symlink(base, link)
         result = resolve_repo(self.base, "/linked")
-        self.assertEqual(result, os.path.realpath(target))
+        self.assertEqual(result, os.path.realpath(base))
 
     def test_empty_path_stays_in_base(self):
         result = resolve_repo(self.base, "/")
@@ -179,7 +179,7 @@ class DaemonSecurityBase(unittest.TestCase):
         git("config", "user.email", f"{agent_id}@test.com", cwd=ws)
         git("config", "user.name", f"Agent {agent_id}", cwd=ws)
         url = daemon.remote_url(agent_id, self.slug)
-        git("remote", "set-url", config.HOST_REMOTE, url, cwd=ws)
+        git("remote", "set-url", config.HOST_SHARED_REMOTE, url, cwd=ws)
         return ws
 
     def raw_pkt(self, data: bytes, port: int | None = None) -> int:

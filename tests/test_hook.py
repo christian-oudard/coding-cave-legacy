@@ -61,7 +61,7 @@ class TestCheckRef(unittest.TestCase):
         self.assertIsNone(r)
 
     def test_agent_force_push_own_branch(self):
-        # Force push own branch is allowed (no ff check for agent branches)
+        # Force push own branch is allowed (no ff check for dev branches)
         r = hook.check_ref(SHA_A, SHA_B, "refs/heads/agent-1/main", "1")
         self.assertIsNone(r)
 
@@ -79,15 +79,15 @@ class TestCheckRef(unittest.TestCase):
         self.assertIsNotNone(r)
         self.assertIn("REJECTED", r)
 
-    # -- Agent: shared branch (all pushes rejected) --
+    # -- Agent: base branch (all pushes rejected) --
 
-    def test_agent_push_shared_rejected(self):
-        """Agents cannot push to shared branches at all."""
+    def test_agent_push_base_rejected(self):
+        """Agents cannot push to base branches at all."""
         r = hook.check_ref(SHA_A, SHA_B, "refs/heads/main", "1")
         self.assertIsNotNone(r)
         self.assertIn("REJECTED", r)
         self.assertIn("cannot push", r)
-        self.assertIn("shared branch", r)
+        self.assertIn("base branch", r)
 
     def test_agent_delete_shared_rejected(self):
         r = hook.check_ref(SHA_A, ZERO, "refs/heads/main", "1")
@@ -96,7 +96,7 @@ class TestCheckRef(unittest.TestCase):
         self.assertIn("cannot push", r)
 
     def test_agent_create_shared_rejected(self):
-        """Agents cannot create new shared branches."""
+        """Agents cannot create new base branches."""
         r = hook.check_ref(ZERO, SHA_A, "refs/heads/develop", "1")
         self.assertIsNotNone(r)
         self.assertIn("REJECTED", r)
@@ -143,12 +143,12 @@ class TestCheckRef(unittest.TestCase):
         self.assertIsNotNone(r)
         self.assertIn("REJECTED", r)
 
-    # -- Multiple target branches --
+    # -- Multiple base branches --
 
     def test_agent_own_branch_different_targets(self):
-        for target in ("main", "develop", "feature/foo"):
-            r = hook.check_ref(SHA_A, SHA_B, f"refs/heads/agent-1/{target}", "1")
-            self.assertIsNone(r), f"Failed for target: {target}"
+        for base in ("main", "develop", "feature/foo"):
+            r = hook.check_ref(SHA_A, SHA_B, f"refs/heads/agent-1/{base}", "1")
+            self.assertIsNone(r), f"Failed for base: {base}"
 
 
 class TestGetAgentName(unittest.TestCase):

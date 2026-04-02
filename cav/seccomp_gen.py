@@ -145,7 +145,7 @@ def generate_filter(arch: str) -> bytes:
     # [3..3+n-1] Check each blocked syscall
     for i, nr in enumerate(numbers):
         # If match, jump to DENY at index [3+n+1] = [n+4].
-        # From index [3+i], jt target is [n+4], relative = n+4 - (3+i+1) = n-i.
+        # From index [3+i], jt base is [n+4], relative = n+4 - (3+i+1) = n-i.
         emit(BPF_JMP | BPF_JEQ | BPF_K, n - i, 0, nr)
     # [3+n] ALLOW
     emit(BPF_RET | BPF_K, 0, 0, SECCOMP_RET_ALLOW)

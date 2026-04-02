@@ -1,6 +1,6 @@
 """Agent workspace management.
 
-Each agent gets a lightweight clone (--shared) of the cave bare repo.
+Each agent gets a lightweight clone (--shared) of the shared remote (bare repo).
 Objects are shared via alternates, so disk cost is minimal. The clone has its
 own .git, making it self-contained for bwrap mounting.
 """
@@ -26,10 +26,10 @@ def create(base: Path, agent_id: str) -> Path:
 
     empty = _repo_is_empty(base)
     if empty:
-        target = "main"
+        base_name = "main"
     else:
         user_branch = git.current_branch(cwd=base)
-        target = config.resolve_target(user_branch)
+        base_name = config.resolve_base(user_branch)
 
     slug = config.project_slug(base)
     ws_path = config.worktree_dir(slug, agent_id)
@@ -37,8 +37,8 @@ def create(base: Path, agent_id: str) -> Path:
     if ws_path.exists():
         return ws_path
 
-    # "HEAD" means detached HEAD, which is not a valid target.
-    if target == "HEAD":
+    # "HEAD" means detached HEAD, which is not a valid base.
+    if base_name == "HEAD":
         raise SystemExit(
             f"Cannot launch a new agent from detached HEAD.\n"
             f"Switch to a branch first (e.g. 'git checkout main')."
@@ -48,42 +48,42 @@ def create(base: Path, agent_id: str) -> Path:
     shared = config.shared_repo_path(base)
 
     # Sync user repo to shared repo so the clone has all branches.
-    # Only push shared branches; agent branches are managed by agents
-    # and the host's local copies can be stale (behind the bare repo).
+    # Only push base branches; dev branches are managed by agents
+    # and the host's local copies can be stale (behind the shared remote).
     if not empty:
         branches = git.git_output(
             "for-each-ref", "--format=%(refname:short)", "refs/heads/",
             cwd=base)
         for branch in branches.splitlines():
-            if config.parse_agent_branch(branch):
+            if config.parse_dev_branch(branch):
                 continue
-            git.git("push", "--no-set-upstream", config.CAVE_REMOTE, branch,
+            git.git("push", "--no-set-upstream", config.CAVE_SHARED_REMOTE, branch,
                     cwd=base, echo=False, check=False, capture=True)
 
     # Lightweight clone sharing objects with the bare repo
     git.git("clone", "--shared", str(shared), str(ws_path), echo=False, capture=True)
 
-    # Rename origin -> host-cave (points up to the parent's bare repo)
-    git.git("remote", "rename", "origin", config.HOST_REMOTE, cwd=ws_path, echo=False, capture=True)
+    # Rename origin -> host-cave (points to the shared remote)
+    git.git("remote", "rename", "origin", config.HOST_SHARED_REMOTE, cwd=ws_path, echo=False, capture=True)
 
-    ab = config.agent_branch(target, agent_id)
+    dev = config.dev_branch(base_name, agent_id)
 
     if empty:
         # No commits yet, create an orphan branch so the agent can make the first commit.
-        git.git("checkout", "--orphan", ab, cwd=ws_path, echo=False, capture=True)
+        git.git("checkout", "--orphan", dev, cwd=ws_path, echo=False, capture=True)
         return ws_path
 
-    remote_ref = f"refs/remotes/{config.HOST_REMOTE}/{ab}"
+    remote_ref = f"refs/remotes/{config.HOST_SHARED_REMOTE}/{dev}"
 
-    # If the agent branch already exists on the remote (re-creating a
+    # If the dev branch already exists on the remote (re-creating a
     # workspace for a continuing agent), check it out with tracking.
     # Otherwise create a fresh branch and push it.
     try:
         git.git_output("rev-parse", "--verify", remote_ref, cwd=ws_path)
-        git.git("checkout", ab, cwd=ws_path, echo=False, capture=True)
+        git.git("checkout", dev, cwd=ws_path, echo=False, capture=True)
     except subprocess.CalledProcessError:
-        git.git("checkout", "-b", ab, cwd=ws_path, echo=False, capture=True)
-        git.git("push", config.HOST_REMOTE, ab,
+        git.git("checkout", "-b", dev, cwd=ws_path, echo=False, capture=True)
+        git.git("push", config.HOST_SHARED_REMOTE, dev,
                 f"--push-option=agent={agent_id}", cwd=ws_path,
                 echo=False, capture=True)
 

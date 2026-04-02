@@ -1,4 +1,4 @@
-"""cav push: push current branch to cave."""
+"""cav push: push current branch to shared remote."""
 
 import subprocess
 import sys
@@ -21,7 +21,7 @@ def push(base: Path, force: bool = False):
             )
         raise SystemExit("Detached HEAD. Check out a branch before pushing.")
 
-    args = ["push", "--no-set-upstream", config.CAVE_REMOTE, branch]
+    args = ["push", "--no-set-upstream", config.CAVE_SHARED_REMOTE, branch]
     if force:
         args.insert(1, "--force")
     try:
@@ -30,7 +30,7 @@ def push(base: Path, force: bool = False):
         if e.stderr:
             print(e.stderr.rstrip(), file=sys.stderr)
         if not force:
-            print(f"\n  cav push --force                # overwrite cave with local branch")
+            print(f"\n  cav push --force                # overwrite shared remote with local branch")
         raise SystemExit(1)
 
     if not config.verbose:
@@ -38,4 +38,4 @@ def push(base: Path, force: bool = False):
         if "up-to-date" in stderr:
             print(f"Already up to date.")
         else:
-            print(f"Pushed {branch} to cave.")
+            print(f"Pushed {branch} to shared remote.")

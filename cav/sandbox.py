@@ -18,7 +18,7 @@ from . import config, daemon, git, user_env
 
 GIT_WRAPPER = """\
 #!/bin/sh
-# Git wrapper: syncs agent branches to host-cave after state changes.
+# Git wrapper: syncs dev branches to shared remote after state changes.
 # Installed at $HOME/bin/git inside the cave, shadowing the real git.
 # This replaces per-repo post-commit hooks, leaving .git/hooks/ free
 # for project use.
@@ -51,7 +51,7 @@ elif [ -z "$_branch" ] && [ -f .git/rebase-apply/head-name ]; then
   _branch=$(sed 's|^refs/heads/||' .git/rebase-apply/head-name)
 fi
 
-# Only sync agent branches.
+# Only sync dev branches.
 case "$_branch" in agent-[0-9]*/*) ;; *) exit $_rc ;; esac
 
 # Trap: refuse to push a branch with HEAD in the name.
@@ -66,18 +66,18 @@ export _CAV_GIT_SYNC=1
 
 case "$_cmd" in
   commit|cherry-pick|revert|am)
-    # Full sync: fetch, auto-rebase onto target, push.
+    # Full sync: fetch, auto-rebase onto base, push.
     # During a rebase, just push (don't start a nested rebase).
     if [ -d .git/rebase-merge ] || [ -d .git/rebase-apply ]; then
       "$_CAV_REAL_GIT" push --force host-cave "HEAD:refs/heads/$_branch" >/dev/null 2>&1 || true
       exit $_rc
     fi
     "$_CAV_REAL_GIT" fetch host-cave >/dev/null 2>&1 || true
-    _target=$(echo "$_branch" | sed 's|^agent-[0-9]*/||')
-    if [ -n "$_target" ] && "$_CAV_REAL_GIT" rev-parse "host-cave/$_target" >/dev/null 2>&1; then
-      if ! "$_CAV_REAL_GIT" rebase "host-cave/$_target" >/dev/null 2>&1; then
+    _base=$(echo "$_branch" | sed 's|^agent-[0-9]*/||')
+    if [ -n "$_base" ] && "$_CAV_REAL_GIT" rev-parse "host-cave/$_base" >/dev/null 2>&1; then
+      if ! "$_CAV_REAL_GIT" rebase "host-cave/$_base" >/dev/null 2>&1; then
         "$_CAV_REAL_GIT" rebase --abort >/dev/null 2>&1
-        echo "WARNING: rebase onto host-cave/$_target failed (conflicts). Run: git fetch host-cave && git rebase host-cave/$_target" >&2
+        echo "WARNING: rebase onto host-cave/$_base failed (conflicts). Run: git fetch host-cave && git rebase host-cave/$_base" >&2
       fi
     fi
     "$_CAV_REAL_GIT" push --force host-cave HEAD >/dev/null 2>&1 || true
@@ -457,38 +457,38 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
 
     # Migrate old workspaces: rename "cave" -> "host-cave" if needed.
     for ws, _, _ in workspaces:
-        r = git.git("remote", "get-url", config.HOST_REMOTE, cwd=ws,
+        r = git.git("remote", "get-url", config.HOST_SHARED_REMOTE, cwd=ws,
                     echo=False, check=False, capture=True)
         if r.returncode != 0:
-            git.git("remote", "rename", config.CAVE_REMOTE, config.HOST_REMOTE,
+            git.git("remote", "rename", config.CAVE_SHARED_REMOTE, config.HOST_SHARED_REMOTE,
                     cwd=ws, echo=False, check=False, capture=True)
 
     # Update workspace remotes to use git:// via daemon (localhost for
     # host-side sync, then switch to pasta address for inside the namespace)
     for ws, _, slug in workspaces:
         url = daemon.remote_url(agent_id, slug)
-        git.git("remote", "set-url", config.HOST_REMOTE, url,
+        git.git("remote", "set-url", config.HOST_SHARED_REMOTE, url,
                 cwd=ws, echo=False)
 
-    # Sync: fetch latest and fast-forward local shared branches
+    # Sync: fetch latest and fast-forward local base branches
 
     for ws, _, _ in workspaces:
-        git.git("fetch", config.HOST_REMOTE, cwd=ws, echo=False, check=False,
+        git.git("fetch", config.HOST_SHARED_REMOTE, cwd=ws, echo=False, check=False,
                 capture=True)
         current = git.current_branch(cwd=ws)
-        for branch in git.remote_branches(config.HOST_REMOTE, cwd=ws):
-            if config.parse_agent_branch(branch):
+        for branch in git.remote_branches(config.HOST_SHARED_REMOTE, cwd=ws):
+            if config.parse_dev_branch(branch):
                 continue
             if branch == current:
                 continue  # Can't force-update the checked-out branch
-            remote_ref = f"{config.HOST_REMOTE}/{branch}"
+            remote_ref = f"{config.HOST_SHARED_REMOTE}/{branch}"
             git.git("branch", "-f", branch, remote_ref, cwd=ws,
                     echo=False, check=False, capture=True)
 
     # Now set the remote to the pasta-reachable address for inside the namespace
     for ws, _, slug in workspaces:
         url = daemon.remote_url(agent_id, slug, host=daemon_host)
-        git.git("remote", "set-url", config.HOST_REMOTE, url,
+        git.git("remote", "set-url", config.HOST_SHARED_REMOTE, url,
                 cwd=ws, echo=False)
 
     # Build user environment from cave.nix (cached)

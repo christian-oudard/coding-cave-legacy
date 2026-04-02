@@ -120,10 +120,10 @@ def _kill_by_inode(inode: int) -> None:
         try:
             for fd in (entry / "fd").iterdir():
                 try:
-                    target = os.readlink(fd)
+                    base = os.readlink(fd)
                 except OSError:
                     continue
-                if target == f"socket:[{inode}]":
+                if base == f"socket:[{inode}]":
                     pid = int(entry.name)
                     os.kill(pid, signal.SIGTERM)
                     # Wait briefly for it to exit

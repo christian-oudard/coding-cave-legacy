@@ -23,10 +23,10 @@ def require_init(base: Path):
         if not registry.project_path(config.project_slug(base)):
             raise SystemExit("Project not registered. Run: cav init")
         return
-    # Inside a cave the bare repo is on the host; check for the cave remote instead.
+    # Inside a cave the bare repo is on the host; check for the shared remote instead.
     if int(os.environ.get("CODING_CAVE_DEPTH", "0")) > 0:
         try:
-            git.git_output("remote", "get-url", config.CAVE_REMOTE, cwd=base)
+            git.git_output("remote", "get-url", config.CAVE_SHARED_REMOTE, cwd=base)
             return
         except Exception:
             pass
@@ -85,7 +85,7 @@ def agent(continue_agent, resume_agent, extra_projects, recursive):
 
     # Resolve branch context upfront. Agent branches carry routing info:
     # agent-1/main tells us which agent to continue.
-    on_agent_branch = config.parse_agent_branch(git.current_branch(cwd=base))
+    on_agent_branch = config.parse_dev_branch(git.current_branch(cwd=base))
 
     if resume_agent:
         aid = resume_agent.lstrip("@").split("@")[-1]
@@ -202,31 +202,31 @@ def _auto_cleanup_if_clean(base, agent_id):
         if not config.shared_repo_path(proj_base).is_dir():
             continue  # shared repo gone, nothing to preserve
         try:
-            git.git("fetch", config.CAVE_REMOTE, cwd=proj_base, echo=False,
+            git.git("fetch", config.CAVE_SHARED_REMOTE, cwd=proj_base, echo=False,
                     check=False, capture=True)
-            branches = git.remote_branches(config.CAVE_REMOTE, cwd=proj_base)
+            branches = git.remote_branches(config.CAVE_SHARED_REMOTE, cwd=proj_base)
         except Exception as e:
             print(f"Warning: keeping {name}: "
                   f"git fetch failed for {slug}: {e}")
             return
         for b in branches:
-            parsed = config.parse_agent_branch(b)
+            parsed = config.parse_dev_branch(b)
             if not parsed or parsed[1] != agent_id:
                 continue
             all_agent_branches.append((proj_base, b))
-            target = config.resolve_target(b)
-            remote_agent = f"{config.CAVE_REMOTE}/{b}"
-            target_ref = f"{config.CAVE_REMOTE}/{target}"
+            base_name = config.resolve_base(b)
+            remote_dev = f"{config.CAVE_SHARED_REMOTE}/{b}"
+            base_ref = f"{config.CAVE_SHARED_REMOTE}/{base_name}"
             try:
-                if not git.has_merge_base(remote_agent, target_ref, cwd=proj_base):
+                if not git.has_merge_base(remote_dev, base_ref, cwd=proj_base):
                     print(f"Warning: keeping {name}: "
-                          f"{b} has diverged from {target}.")
+                          f"{b} has diverged from {base_name}.")
                     return
-                if git.cherry_undelivered(target_ref, remote_agent, cwd=proj_base):
+                if git.cherry_undelivered(base_ref, remote_dev, cwd=proj_base):
                     return  # has unapproved work, normal
             except Exception as e:
                 print(f"Warning: keeping {name}: "
-                      f"cannot check {b} against {target}: {e}")
+                      f"cannot check {b} against {base_name}: {e}")
                 return
 
     # All branches in all projects are approved (or irrecoverable),
@@ -239,7 +239,7 @@ def _auto_cleanup_if_clean(base, agent_id):
 @click.argument("agent_id", required=False)
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
 def approve(agent_id, yes):
-    """Approve agent work into shared branch."""
+    """Approve agent work into base branch."""
     base = find_repo_root()
     require_init(base)
     from .approve import approve as _approve
@@ -250,7 +250,7 @@ def approve(agent_id, yes):
 @click.argument("agent_id", required=False)
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
 def reject(agent_id, yes):
-    """Reject tip commit of shared branch."""
+    """Reject tip commit of base branch."""
     base = find_repo_root()
     require_init(base)
     from .reject import reject as _reject
@@ -261,7 +261,7 @@ def reject(agent_id, yes):
 @click.argument("branch", required=False)
 @click.option("-f", "--force", is_flag=True, help="Hard reset to remote branch")
 def pull(branch, force):
-    """Fetch from cave and fast-forward merge."""
+    """Pull dev branch from shared remote."""
     base = find_repo_root()
     require_init(base)
     from .pull import pull as _pull
@@ -271,7 +271,7 @@ def pull(branch, force):
 @cli.command()
 @click.option("-f", "--force", is_flag=True, help="Force push")
 def push(force):
-    """Push current branch to cave."""
+    """Push current branch to shared remote."""
     base = find_repo_root()
     require_init(base)
     from .push import push as _push
@@ -283,7 +283,7 @@ def push(force):
 @click.option("-a", "--all", "all_projects", is_flag=True,
               help="Show status for all registered projects")
 def status(agent, all_projects):
-    """Show agent branch status."""
+    """Show agent and dev branch status."""
     from .status import status as _status
     if all_projects:
         import io, contextlib
@@ -347,26 +347,26 @@ def remove_agent(agent_id, all_agents, yes):
     if registry.is_agent_running(aid):
         raise SystemExit(f"{name} is running. Stop it first.")
 
-    branches = git.remote_branches(config.CAVE_REMOTE, cwd=base)
+    branches = git.remote_branches(config.CAVE_SHARED_REMOTE, cwd=base)
     agent_branches = [
         b for b in branches
-        if (parsed := config.parse_agent_branch(b)) and parsed[1] == aid
+        if (parsed := config.parse_dev_branch(b)) and parsed[1] == aid
     ]
 
     for b in agent_branches:
-        parsed = config.parse_agent_branch(b)
+        parsed = config.parse_dev_branch(b)
         if not parsed:
             continue
-        target = parsed[0]
-        remote_agent = f"{config.CAVE_REMOTE}/{b}"
-        target_ref = f"{config.CAVE_REMOTE}/{target}"
+        base_name = parsed[0]
+        remote_dev = f"{config.CAVE_SHARED_REMOTE}/{b}"
+        base_ref = f"{config.CAVE_SHARED_REMOTE}/{base_name}"
         try:
-            if git.has_merge_base(remote_agent, target_ref, cwd=base):
-                commits = git.cherry_undelivered(target_ref, remote_agent, cwd=base)
+            if git.has_merge_base(remote_dev, base_ref, cwd=base):
+                commits = git.cherry_undelivered(base_ref, remote_dev, cwd=base)
                 if commits:
                     n = "commit" if len(commits) == 1 else "commits"
                     print(f"Warning: discarding {len(commits)} unapproved {n} on {b}:")
-                    for c in git.commit_oneline(f"{target_ref}..{remote_agent}", cwd=base):
+                    for c in git.commit_oneline(f"{base_ref}..{remote_dev}", cwd=base):
                         print(f"  {c}")
         except Exception:
             pass
@@ -386,12 +386,12 @@ def _cmd_remove_all_agents(base, yes=False):
         print("No agents in registry.")
         return
 
-    branches = git.remote_branches(config.CAVE_REMOTE, cwd=base)
-    agent_branches = [b for b in branches if config.parse_agent_branch(b)]
+    branches = git.remote_branches(config.CAVE_SHARED_REMOTE, cwd=base)
+    agent_branches = [b for b in branches if config.parse_dev_branch(b)]
 
     n = len(all_ids)
     s = "session" if n == 1 else "sessions"
-    print(f"This will remove {n} agent {s} and {len(agent_branches)} agent branches.")
+    print(f"This will remove {n} agent {s} and {len(agent_branches)} dev branches.")
 
     if not yes:
         try:
@@ -403,7 +403,7 @@ def _cmd_remove_all_agents(base, yes=False):
 
     for aid in all_ids:
         ab = [b for b in agent_branches
-              if (p := config.parse_agent_branch(b)) and p[1] == aid]
+              if (p := config.parse_dev_branch(b)) and p[1] == aid]
         _remove_agent(base, aid, ab)
 
     registry.clear_registry()
@@ -427,10 +427,10 @@ def remove_project(slug):
 def checkout(branch, agent_id):
     """Retarget an agent to deliver to a different branch."""
     base = find_repo_root()
-    # Self-retarget (on an agent branch) uses host-cave, not cave,
+    # Self-retarget (on a dev branch) uses host-cave, not cave,
     # so it works inside a cave without cav init.
     current = git.current_branch(cwd=base)
-    if not config.parse_agent_branch(current):
+    if not config.parse_dev_branch(current):
         require_init(base)
     from .checkout import checkout as _checkout
     _checkout(base, branch, agent_id=agent_id)

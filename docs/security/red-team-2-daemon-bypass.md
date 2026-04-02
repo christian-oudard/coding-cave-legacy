@@ -48,7 +48,7 @@ agent 2 and pushed to agent 2's namespace.
 No network isolation between agents. Agent 3 connected to agent 1's daemon
 on port 9401 and pushed successfully.
 
-### 5. Create shared branch (SUCCEEDED)
+### 5. Create base branch (SUCCEEDED)
 
     git push git://127.0.0.1:9403/coding-cave HEAD:refs/heads/evil-shared-branch
 

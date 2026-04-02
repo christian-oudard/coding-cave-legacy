@@ -23,7 +23,7 @@ write to other agents' branches, delete branches, escape sandbox).
 |--------|--------|
 | Force-push main (as agent) | Hook rejects non-FF |
 | Delete main (as agent) | Hook rejects deletion |
-| Create shared branch (as agent) | Hook rejects creation |
+| Create base branch (as agent) | Hook rejects creation |
 | Write to host filesystem | Bwrap blocks writes outside sandbox |
 | Direct push to bare repo path | `--ro-bind` mount, unpacker error |
 

@@ -47,14 +47,14 @@ def _warn_dirty(base: Path):
 
 
 def _push_shared_branches(base: Path):
-    """Push only shared branches (not agent branches) to the cave remote."""
+    """Push only base branches (not dev branches) to the shared remote."""
     branches = git.git_output(
         "for-each-ref", "--format=%(refname:short)", "refs/heads/",
         cwd=base)
     for branch in branches.splitlines():
-        if config.parse_agent_branch(branch):
+        if config.parse_dev_branch(branch):
             continue
-        git.git("push", "--no-set-upstream", config.CAVE_REMOTE, branch,
+        git.git("push", "--no-set-upstream", config.CAVE_SHARED_REMOTE, branch,
                 cwd=base, echo=False, check=False, capture=True)
 
 
@@ -80,11 +80,11 @@ def init(path: str):
     # Check for conflicting remote before creating anything
     try:
         existing_url = git.git_output(
-            "remote", "get-url", config.CAVE_REMOTE, cwd=base)
+            "remote", "get-url", config.CAVE_SHARED_REMOTE, cwd=base)
         raise SystemExit(
-            f"Remote '{config.CAVE_REMOTE}' already exists, pointing to:\n"
+            f"Remote '{config.CAVE_SHARED_REMOTE}' already exists, pointing to:\n"
             f"  {existing_url}\n"
-            f"Remove it first: git remote remove {config.CAVE_REMOTE}")
+            f"Remove it first: git remote remove {config.CAVE_SHARED_REMOTE}")
     except subprocess.CalledProcessError:
         pass  # No conflicting remote, good
 
@@ -100,8 +100,8 @@ def init(path: str):
     # Install hooks
     install_hooks(shared)
 
-    # Add cave remote
-    git.git("remote", "add", config.CAVE_REMOTE, str(shared), cwd=base, echo=False)
+    # Add shared remote
+    git.git("remote", "add", config.CAVE_SHARED_REMOTE, str(shared), cwd=base, echo=False)
 
     _warn_dirty(base)
     _push_shared_branches(base)

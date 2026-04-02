@@ -61,8 +61,8 @@ def _cwd_info() -> tuple[str, str | None]:
     """Return (slug, agent_id | None) for the current working directory.
 
     Tries registered project paths first (agent_id=None, any worktree).
-    Falls back to the current agent branch so that running cav cp from a
-    repo checked out on an agent branch also works without explicit slug,
+    Falls back to the current dev branch so that running cav cp from a
+    repo checked out on a dev branch also works without explicit slug,
     and implicitly selects that agent's worktree.
     """
     cwd = Path.cwd().resolve()
@@ -73,7 +73,7 @@ def _cwd_info() -> tuple[str, str | None]:
 
     try:
         branch = git.current_branch()
-        parsed = config.parse_agent_branch(branch)
+        parsed = config.parse_dev_branch(branch)
         if parsed:
             _, agent_id = parsed
             slug = registry.agent_project(agent_id)
@@ -156,7 +156,7 @@ def cp(srcs: list[str], dest: str, recursive: bool = False, force: bool = False)
         # host -> cave
         dest_path.parent.mkdir(parents=True, exist_ok=True)
         if len(srcs) > 1 and not dest_path.is_dir():
-            raise SystemExit(f"cp: target '{dest}': not a directory")
+            raise SystemExit(f"cp: base '{dest}': not a directory")
         for src in srcs:
             src_obj = Path(src).resolve()
             if not src_obj.exists():
@@ -164,22 +164,22 @@ def cp(srcs: list[str], dest: str, recursive: bool = False, force: bool = False)
             if src_obj.is_dir():
                 if not recursive:
                     raise SystemExit(f"cp: -R not specified; omitting directory '{src}'")
-                target = dest_path / src_obj.name if dest_path.is_dir() else dest_path
+                base = dest_path / src_obj.name if dest_path.is_dir() else dest_path
             else:
-                target = dest_path / src_obj.name if dest_path.is_dir() else dest_path
-            if not force and target.exists():
+                base = dest_path / src_obj.name if dest_path.is_dir() else dest_path
+            if not force and base.exists():
                 try:
-                    answer = input(f"Overwrite {target}? [y/N] ").strip().lower()
+                    answer = input(f"Overwrite {base}? [y/N] ").strip().lower()
                 except EOFError:
                     answer = ""
                 if answer != "y":
                     raise SystemExit("Aborted.")
             if src_obj.is_dir():
-                shutil.copytree(src_obj, target, dirs_exist_ok=True)
+                shutil.copytree(src_obj, base, dirs_exist_ok=True)
             else:
-                if target.is_symlink():
-                    target.unlink()
-                shutil.copy2(src_obj, target, follow_symlinks=False)
+                if base.is_symlink():
+                    base.unlink()
+                shutil.copy2(src_obj, base, follow_symlinks=False)
             print(f"  {src} -> {dest}", file=sys.stderr)
 
     elif src_path is not None:
@@ -190,12 +190,12 @@ def cp(srcs: list[str], dest: str, recursive: bool = False, force: bool = False)
             raise SystemExit(f"Source not found in cave: {srcs[0]}")
         host_dest = Path(dest).resolve()
         host_dest.parent.mkdir(parents=True, exist_ok=True)
-        target = host_dest / src_path.name if host_dest.is_dir() else host_dest
+        base = host_dest / src_path.name if host_dest.is_dir() else host_dest
         if src_path.is_dir() and not recursive:
             raise SystemExit(f"cp: -R not specified; omitting directory '{srcs[0]}'")
-        if not force and target.exists():
+        if not force and base.exists():
             try:
-                answer = input(f"Overwrite {target}? [y/N] ").strip().lower()
+                answer = input(f"Overwrite {base}? [y/N] ").strip().lower()
             except EOFError:
                 answer = ""
             if answer != "y":
@@ -208,9 +208,9 @@ def cp(srcs: list[str], dest: str, recursive: bool = False, force: bool = False)
                 if dst_obj.exists() and not os.access(dst, os.W_OK):
                     dst_obj.unlink()
                 shutil.copy2(src, dst, **kwargs)
-            shutil.copytree(src_path, target, dirs_exist_ok=True, copy_function=_copy_no_symlinks)
+            shutil.copytree(src_path, base, dirs_exist_ok=True, copy_function=_copy_no_symlinks)
         else:
-            shutil.copy2(src_path, target)
+            shutil.copy2(src_path, base)
         print(f"  {srcs[0]} -> {dest}", file=sys.stderr)
 
     else:

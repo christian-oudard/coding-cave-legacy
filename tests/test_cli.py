@@ -74,7 +74,7 @@ class TestRequireInitInsideCave(unittest.TestCase):
     """Commands require cav init inside a cave.
 
     Inside a cave, host-cave points to the parent's bare repo but cave
-    (CAVE_REMOTE) does not exist until cav init is run.  require_init
+    (CAVE_SHARED_REMOTE) does not exist until cav init is run.  require_init
     must reject commands that need the local bare repo.
     """
 
@@ -263,7 +263,7 @@ class TestInitNewProject(unittest.TestCase):
         self.assertIn("No commits yet", str(ctx.exception))
 
     def test_init_repo_with_commits(self):
-        """cav init on a repo with commits pushes branches to cave."""
+        """cav init on a repo with commits pushes branches to shared remote."""
         project = Path(self.tmpdir) / "withcommits"
         project.mkdir()
         git("init", "-b", "main", cwd=project)
@@ -339,10 +339,10 @@ class TestInitNewProject(unittest.TestCase):
         (ws / "README.md").write_text("# Hello\n")
         git("add", "README.md", cwd=ws)
         git("commit", "-m", "add readme", cwd=ws)
-        # Push agent branch to cave (simulating post-commit hook)
+        # Push dev branch to shared remote (simulating post-commit hook)
         shared = config.shared_repo_path(project)
         git("push", str(shared), "agent-1/main", cwd=ws)
-        # Fetch so user repo sees the agent branch
+        # Fetch so user repo sees the dev branch
         git("fetch", "cave", cwd=project)
         # Approve
         approve(project, agent_id="1", yes=True)
@@ -371,7 +371,7 @@ class TestTopLevelHelp(unittest.TestCase):
 
 
 class TestPullForceGuard(unittest.TestCase):
-    """cav pull --force is only allowed on agent branches."""
+    """cav pull --force is only allowed on dev branches."""
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
@@ -392,31 +392,31 @@ class TestPullForceGuard(unittest.TestCase):
         shutil.rmtree(self.tmpdir)
 
     def test_pull_force_blocked_on_main(self):
-        """cav pull --force refuses on shared branches like main."""
+        """cav pull --force refuses on base branches like main."""
         result = cav_cli("pull", "--force", cwd=self.repo, check=False)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("agent branch", result.stderr.lower())
+        self.assertIn("dev branch", result.stderr.lower())
 
-    def test_pull_force_blocked_on_non_agent_branch(self):
-        """cav pull --force refuses on any non-agent branch."""
+    def test_pull_force_blocked_on_non_dev_branch(self):
+        """cav pull --force refuses on any non-dev branch."""
         git("checkout", "-b", "develop", cwd=self.repo)
         result = cav_cli("pull", "--force", cwd=self.repo, check=False)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("agent branch", result.stderr.lower())
+        self.assertIn("dev branch", result.stderr.lower())
 
-    def test_pull_force_allowed_on_agent_branch(self):
-        """cav pull --force is allowed on agent branches."""
+    def test_pull_force_allowed_on_dev_branch(self):
+        """cav pull --force is allowed on dev branches."""
         git("checkout", "-b", "agent-1/main", cwd=self.repo)
         # Will fail (no remote tracking branch), but should NOT fail on the guard
         result = cav_cli("pull", "--force", cwd=self.repo, check=False)
-        self.assertNotIn("agent branch", result.stderr.lower())
+        self.assertNotIn("dev branch", result.stderr.lower())
 
-    def test_pull_force_with_branch_arg_blocked_on_shared(self):
+    def test_pull_force_with_branch_arg_blocked_on_base(self):
         """cav pull --force main refuses even when given as argument."""
         git("checkout", "-b", "agent-1/main", cwd=self.repo)
         result = cav_cli("pull", "--force", "main", cwd=self.repo, check=False)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("agent branch", result.stderr.lower())
+        self.assertIn("dev branch", result.stderr.lower())
 
     def test_pull_branch_arg_accepted(self):
         """cav pull <branch> is a valid argument."""
@@ -446,10 +446,10 @@ class TestPushForceAllowed(unittest.TestCase):
         shutil.rmtree(self.tmpdir)
 
     def test_push_force_not_blocked_on_main(self):
-        """cav push --force on main is allowed (user corrects the cave)."""
+        """cav push --force on main is allowed (user corrects the shared remote)."""
         result = cav_cli("push", "--force", cwd=self.repo, check=False)
         # May fail for other reasons (no remote tracking), but NOT the guard
-        self.assertNotIn("agent branch", result.stderr.lower())
+        self.assertNotIn("dev branch", result.stderr.lower())
 
 
 class TestUnknownCommand(unittest.TestCase):

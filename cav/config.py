@@ -4,10 +4,10 @@ import os
 import re
 from pathlib import Path
 
-CAVE_REMOTE = "cave"
-HOST_REMOTE = "host-cave"
+CAVE_SHARED_REMOTE = "cave"
+HOST_SHARED_REMOTE = "host-cave"
 AGENT_ID_RE = re.compile(r"^\d+$")
-# agent-<id>/<target>, e.g. agent-1/develop
+# agent-<id>/<base>, e.g. agent-1/develop
 AGENT_BRANCH_RE = re.compile(r"^agent-(\d+)/(.+)$")
 DAEMON_BASE_PORT = 9400
 
@@ -25,23 +25,23 @@ def v() -> dict:
     return {"echo": verbose, "capture": not verbose}
 
 
-def agent_branch(target: str, agent_id: str) -> str:
-    return f"agent-{agent_id}/{target}"
+def dev_branch(base: str, agent_id: str) -> str:
+    return f"agent-{agent_id}/{base}"
 
 
-def parse_agent_branch(branch: str) -> tuple[str, str] | None:
-    """Returns (target, agent_id) or None."""
+def parse_dev_branch(branch: str) -> tuple[str, str] | None:
+    """Returns (base, agent_id) or None."""
     m = AGENT_BRANCH_RE.match(branch)
     if m:
         return m.group(2), m.group(1)
     return None
 
 
-def resolve_target(branch: str) -> str:
-    """Resolve the ultimate shared-branch target of an agent branch.
-    Handles nested agent branches like agent-7/agent-5/main -> main."""
+def resolve_base(branch: str) -> str:
+    """Resolve the ultimate base branch of a dev branch.
+    Handles nested dev branches like agent-7/agent-5/main -> main."""
     while True:
-        parsed = parse_agent_branch(branch)
+        parsed = parse_dev_branch(branch)
         if not parsed:
             return branch
         branch = parsed[0]

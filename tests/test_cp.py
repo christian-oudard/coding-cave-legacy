@@ -142,9 +142,9 @@ class TestCpHostToProject(CpTestCase):
         assert (self.ws / "existing.txt").read_text() == "old\n"
 
     def test_copy_replaces_symlink(self):
-        target = Path(self.tmpdir) / "real.txt"
-        target.write_text("real\n")
-        (self.ws / "link.txt").symlink_to(target)
+        base = Path(self.tmpdir) / "real.txt"
+        base.write_text("real\n")
+        (self.ws / "link.txt").symlink_to(base)
         src = Path(self.tmpdir) / "link.txt"
         src.write_text("content\n")
 
@@ -435,7 +435,7 @@ class TestCpPathResolution(CpTestCase):
         assert (self.ws / "f.txt").read_text() == "cave cwd\n"
 
     def test_cave_prefix_from_agent_branch(self):
-        """cave:path resolves slug from agent branch when not in a registered project."""
+        """cave:path resolves slug from dev branch when not in a registered project."""
         ws = _make_worktree(self.data_dir, "branchproj", "5")
         src = Path(self.tmpdir) / "g.txt"
         src.write_text("from branch\n")
@@ -454,7 +454,7 @@ class TestCpPathResolution(CpTestCase):
         assert (ws / "g.txt").read_text() == "from branch\n"
 
     def test_cave_prefix_selects_branch_agent_when_multiple(self):
-        """cave:path on agent branch selects that agent's worktree even when multiple exist."""
+        """cave:path on dev branch selects that agent's worktree even when multiple exist."""
         ws1 = _make_worktree(self.data_dir, "multi", "1")
         ws2 = _make_worktree(self.data_dir, "multi", "2")
         src = Path(self.tmpdir) / "h.txt"

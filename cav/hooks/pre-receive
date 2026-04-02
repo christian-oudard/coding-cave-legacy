@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Pre-receive hook for cave bare repo.
+"""Pre-receive hook for shared remote (bare repo).
 
 Enforces Coding Cave branch protection:
-- Shared branches: agents cannot push.
+- Base branches: agents cannot push.
 - Agent branches: only the matching agent (or user) can push.
 
 Agent identity: CAV_AGENT_ID env var (server-controlled, set by daemon
@@ -74,10 +74,10 @@ def check_ref(old_sha: str, new_sha: str, ref: str, agent: str | None) -> str | 
             )
         return None
     else:
-        # Shared branch: agents cannot push
+        # Base branch: agents cannot push
         return (
-            f"REJECTED: Agent {agent} cannot push to shared branch '{branch}'.\n"
-            f"Work stays on your agent branch until the user approves it."
+            f"REJECTED: Agent {agent} cannot push to base branch '{branch}'.\n"
+            f"Work stays on your dev branch until the user approves it."
         )
 
 

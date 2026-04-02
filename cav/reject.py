@@ -1,4 +1,4 @@
-"""cav reject: reject the tip commit of a shared branch."""
+"""cav reject: reject the tip commit of a base branch."""
 
 from pathlib import Path
 
@@ -7,24 +7,24 @@ from . import config, git, registry
 
 def reject(base: Path, agent_id: str | None = None, yes: bool = False):
     branch = git.current_branch(cwd=base)
-    if config.parse_agent_branch(branch):
+    if config.parse_dev_branch(branch):
         raise SystemExit(
-            f"Cannot reject from agent branch '{branch}'.\n"
-            f"Switch to a shared branch first (e.g. 'git checkout main')."
+            f"Cannot reject from dev branch '{branch}'.\n"
+            f"Switch to a base branch first (e.g. 'git checkout main')."
         )
 
-    git.git("fetch", "--prune", config.CAVE_REMOTE, cwd=base, **config.v())
+    git.git("fetch", "--prune", config.CAVE_SHARED_REMOTE, cwd=base, **config.v())
 
-    remote_target = f"{config.CAVE_REMOTE}/{branch}"
+    remote_base = f"{config.CAVE_SHARED_REMOTE}/{branch}"
     try:
-        tip_sha = git.git_output("rev-parse", remote_target, cwd=base)
+        tip_sha = git.git_output("rev-parse", remote_base, cwd=base)
     except Exception:
-        raise SystemExit(f"No remote branch '{remote_target}'.")
+        raise SystemExit(f"No remote branch '{remote_base}'.")
 
     local_sha = git.git_output("rev-parse", "HEAD", cwd=base)
     if local_sha != tip_sha:
         raise SystemExit(
-            f"Local '{branch}' is not in sync with '{remote_ref}'.\n"
+            f"Local '{branch}' is not in sync with '{remote_base}'.\n"
             f"Run 'cav pull' first."
         )
 
@@ -53,13 +53,13 @@ def reject(base: Path, agent_id: str | None = None, yes: bool = False):
     before_sha = approval["before_sha"]
     original_agent_id = approval["agent_id"]
 
-    target_agent = _resolve_target_agent(
+    base_agent = _resolve_target_agent(
         base, branch, agent_id, original_agent_id, tip_sha)
 
     commits = git.commit_oneline(f"{before_sha}..{tip_sha}", cwd=base)
     n = len(commits)
     word = "commit" if n == 1 else "commits"
-    target_name = registry.display_name(base, target_agent)
+    target_name = registry.display_name(base, base_agent)
     print(f"\nRejecting {n} {word} from tip of {branch}:\n")
     for line in commits:
         print(f"  {line}")
@@ -73,15 +73,15 @@ def reject(base: Path, agent_id: str | None = None, yes: bool = False):
         if answer.strip().lower() in ("n", "no"):
             raise SystemExit("Aborted.")
 
-    # Create agent branch on cave (before resetting, so commits stay reachable).
-    # Skip if the agent branch already contains this commit (stacked rejection).
-    ab = config.agent_branch(branch, target_agent)
+    # Create dev branch on shared remote (before resetting, so commits stay reachable).
+    # Skip if the dev branch already contains this commit (stacked rejection).
+    ab = config.dev_branch(branch, base_agent)
     if not _agent_covers_tip(base, ab, tip_sha):
-        git.git("push", "--force", config.CAVE_REMOTE,
+        git.git("push", "--force", config.CAVE_SHARED_REMOTE,
                 f"{tip_sha}:refs/heads/{ab}", cwd=base, **config.v())
 
-    # Reset shared branch on cave
-    git.git("push", "--force", config.CAVE_REMOTE,
+    # Reset base branch on shared remote
+    git.git("push", "--force", config.CAVE_SHARED_REMOTE,
             f"{before_sha}:refs/heads/{branch}", cwd=base, **config.v())
 
     # Update local branch
@@ -93,8 +93,8 @@ def reject(base: Path, agent_id: str | None = None, yes: bool = False):
 
 
 def _agent_covers_tip(base, agent_branch_name, tip_sha):
-    """True if the agent branch already contains tip_sha (from a prior rejection)."""
-    remote_agent = f"{config.CAVE_REMOTE}/{agent_branch_name}"
+    """True if the dev branch already contains tip_sha (from a prior rejection)."""
+    remote_agent = f"{config.CAVE_SHARED_REMOTE}/{agent_branch_name}"
     try:
         git.git_output("rev-parse", remote_agent, cwd=base)
     except Exception:
@@ -123,27 +123,27 @@ def _resolve_target_agent(base, branch, agent_id, original_agent_id, tip_sha):
     return original_agent_id
 
 
-def _check_no_unapproved(base, target_branch, agent_id, tip_sha):
-    """Fail if the agent has unapproved work on the target branch.
+def _check_no_unapproved(base, base_branch, agent_id, tip_sha):
+    """Fail if the agent has unapproved work on the base branch.
 
-    Allows stacking: if tip_sha is already an ancestor of the agent branch
+    Allows stacking: if tip_sha is already an ancestor of the dev branch
     (from a prior rejection in the same chain), the rejection proceeds.
     """
-    ab = config.agent_branch(target_branch, agent_id)
-    remote_agent = f"{config.CAVE_REMOTE}/{ab}"
-    remote_target = f"{config.CAVE_REMOTE}/{target_branch}"
+    ab = config.dev_branch(base_branch, agent_id)
+    remote_agent = f"{config.CAVE_SHARED_REMOTE}/{ab}"
+    remote_base = f"{config.CAVE_SHARED_REMOTE}/{base_branch}"
     try:
         git.git_output("rev-parse", remote_agent, cwd=base)
     except Exception:
         return  # branch doesn't exist, no conflict
-    if not git.has_merge_base(remote_agent, remote_target, cwd=base):
+    if not git.has_merge_base(remote_agent, remote_base, cwd=base):
         raise SystemExit(
-            f"Agent {agent_id}'s branch '{ab}' has diverged from '{target_branch}'.\n"
-            f"Choose an agent with no existing work on '{target_branch}'."
+            f"Agent {agent_id}'s branch '{ab}' has diverged from '{base_branch}'.\n"
+            f"Choose an agent with no existing work on '{base_branch}'."
         )
-    if git.cherry_undelivered(remote_target, remote_agent, cwd=base):
+    if git.cherry_undelivered(remote_base, remote_agent, cwd=base):
         if _agent_covers_tip(base, ab, tip_sha):
-            return  # tip already on agent branch from prior rejection
+            return  # tip already on dev branch from prior rejection
         raise SystemExit(
             f"Agent {agent_id} has unapproved work on '{ab}'.\n"
             f"Approve or remove it first, or choose a different agent."

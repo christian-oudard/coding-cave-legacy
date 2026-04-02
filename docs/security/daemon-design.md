@@ -90,6 +90,6 @@ cav agent 1
 
 All agents share the host network. Agent 1 can push to `git://127.0.0.1:9402/` (agent 2's daemon port) and the hook will see `CAV_AGENT_ID=2`. This breaks cross-agent branch isolation.
 
-Impact: agents can write to each other's branches. They still cannot force-push, delete, or create shared branches (hook enforces ff-only for all agents regardless of identity).
+Impact: agents can write to each other's branches. They still cannot force-push, delete, or create base branches (hook enforces ff-only for all agents regardless of identity).
 
 Fix: Unix sockets instead of TCP. Each agent's sandbox mounts only its own socket. Other agents' sockets are inaccessible.

@@ -74,7 +74,7 @@ class TestDaemon(unittest.TestCase):
         git("config", "user.email", f"{agent_id}@test.com", cwd=ws)
         git("config", "user.name", f"Agent {agent_id}", cwd=ws)
         url = daemon.remote_url(agent_id, self.slug)
-        git("remote", "set-url", config.HOST_REMOTE, url, cwd=ws)
+        git("remote", "set-url", config.HOST_SHARED_REMOTE, url, cwd=ws)
         return ws
 
     def test_fetch_via_daemon(self):
@@ -93,7 +93,7 @@ class TestDaemon(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
 
     def test_ff_push_shared_rejected_via_daemon(self):
-        """Agent cannot ff-push to shared branch through daemon."""
+        """Agent cannot ff-push to base branch through daemon."""
         ws = self._ws_with_daemon_remote("1")
         git("checkout", "main", cwd=ws)
         (ws / "fix.txt").write_text("fix\n")
@@ -128,7 +128,7 @@ class TestDaemon(unittest.TestCase):
         self.assertIn("REJECTED", result.stderr)
 
     def test_delete_shared_rejected_via_daemon(self):
-        """Agent cannot delete shared branch through daemon."""
+        """Agent cannot delete base branch through daemon."""
         ws = self._ws_with_daemon_remote("1")
         result = git("push", "host-cave", "--delete", "main",
                       cwd=ws, check=False)

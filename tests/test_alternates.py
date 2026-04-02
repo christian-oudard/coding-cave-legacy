@@ -57,7 +57,7 @@ class TestAlternates(unittest.TestCase):
         bare_objects = str(config.shared_repo_path(self.user_repo) / "objects")
 
         self.assertEqual(alt_path, bare_objects)
-        self.assertTrue(Path(alt_path).exists(), f"alternates target missing: {alt_path}")
+        self.assertTrue(Path(alt_path).exists(), f"alternates base missing: {alt_path}")
 
     def test_alternates_path_is_absolute(self):
         """Alternates must be absolute for bwrap bind-mount to work."""
