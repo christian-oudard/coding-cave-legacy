@@ -234,23 +234,23 @@
 
             # Forward identity and config into the cave
             (try-fwd-env "CODING_CAVE_DNS_SERVER")
-            (try-fwd-env "CAV_GIT_NAME")
-            (try-fwd-env "CAV_GIT_EMAIL")
-            (try-fwd-env "CAV_GIT_SIGNINGKEY")
-            (try-fwd-env "CAV_GIT_GPGSIGN")
-            (try-fwd-env "CAV_AGENT_NAME")
-            (try-fwd-env "CODING_CAVE_DEPTH")
+            (try-fwd-env "CODING_CAVE_VERSION")
+            (try-fwd-env "CODING_CAVE_GIT_NAME")
+            (try-fwd-env "CODING_CAVE_GIT_EMAIL")
+            (try-fwd-env "CODING_CAVE_GIT_SIGNINGKEY")
+            (try-fwd-env "CODING_CAVE_GIT_GPGSIGN")
+            (try-fwd-env "CODING_CAVE_AGENT_NAME")
             (try-fwd-env "CODING_CAVE_LINEAGE")
             (try-fwd-env "CLAUDE_CODE_OAUTH_TOKEN")
             (try-fwd-env "CODING_CAVE_PROXY_ADDR")
             (try-fwd-env "CODING_CAVE_PROJECT_SLUG")
             (try-fwd-env "CODING_CAVE_USER_ENV")
-            (try-fwd-env "CODING_CAVE_CAV_BIN")
+            (try-fwd-env "CODING_CAVE_BIN")
 
             # Entry: configure git identity, user env, proxy, cd to project, run command
             (wrap-entry (entry: ''
               # cav itself (for `cav version` etc. inside the cave)
-              [ -n "''${CODING_CAVE_CAV_BIN:-}" ] && export PATH="$CODING_CAVE_CAV_BIN:$PATH"
+              [ -n "''${CODING_CAVE_BIN:-}" ] && export PATH="$CODING_CAVE_BIN:$PATH"
               # User environment from cave.nix (packages, env vars, files)
               if [ -n "''${CODING_CAVE_USER_ENV:-}" ] && [ -d "''${CODING_CAVE_USER_ENV}" ]; then
                 for pkg in "''${CODING_CAVE_USER_ENV}"/packages/*; do
@@ -274,10 +274,10 @@
               [ -d "$HOME/bin" ] && export PATH="$HOME/bin:$PATH"
               # Git identity (fallback when no .gitconfig was copied)
               if [ ! -f "$HOME/.gitconfig" ]; then
-                [ -n "''${CAV_GIT_NAME:-}" ] && git config --global user.name "$CAV_GIT_NAME"
-                [ -n "''${CAV_GIT_EMAIL:-}" ] && git config --global user.email "$CAV_GIT_EMAIL"
-                [ -n "''${CAV_GIT_SIGNINGKEY:-}" ] && git config --global user.signingkey "$CAV_GIT_SIGNINGKEY"
-                [ "''${CAV_GIT_GPGSIGN:-}" = "true" ] && git config --global commit.gpgsign true
+                [ -n "''${CODING_CAVE_GIT_NAME:-}" ] && git config --global user.name "$CODING_CAVE_GIT_NAME"
+                [ -n "''${CODING_CAVE_GIT_EMAIL:-}" ] && git config --global user.email "$CODING_CAVE_GIT_EMAIL"
+                [ -n "''${CODING_CAVE_GIT_SIGNINGKEY:-}" ] && git config --global user.signingkey "$CODING_CAVE_GIT_SIGNINGKEY"
+                [ "''${CODING_CAVE_GIT_GPGSIGN:-}" = "true" ] && git config --global commit.gpgsign true
               fi
               # GPG: set ultimate trust on signing key to avoid verification warnings
               _sigkey=$(git config user.signingkey 2>/dev/null || true)
@@ -329,8 +329,9 @@
                 --replace-fail "#!/usr/bin/env python3" "#!${python}/bin/python3"
 
               # Embed version and sandbox binary path
+              substituteInPlace $out/lib/cav/config.py \
+                --replace-fail "@VERSION@" "${self.shortRev or "dev"}"
               substituteInPlace $out/lib/cav/cli.py \
-                --replace-fail "@VERSION@" "${self.shortRev or "dev"}" \
                 --replace-fail "@VERSION_DATE@" "${toString (self.lastModified or 0)}"
               substituteInPlace $out/lib/cav/sandbox.py \
                 --replace-fail "@SANDBOX_BIN@" "${sandbox}/bin/coding-cave" \

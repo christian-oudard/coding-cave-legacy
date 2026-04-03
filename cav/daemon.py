@@ -3,7 +3,7 @@
 Runs socat per agent, with a custom handler that parses the git://
 protocol pkt-line and execs git-receive-pack or git-upload-pack directly.
 This replaces git daemon, which strips environment variables and prevents
-CAV_AGENT_ID from reaching the pre-receive hook.
+CODING_CAVE_AGENT_ID from reaching the pre-receive hook.
 """
 
 import os
@@ -50,8 +50,8 @@ def start(agent_id: str, shared_repos: list[tuple[Path, str]]) -> tuple[subproce
         stderr=subprocess.PIPE,
         env={
             **os.environ,
-            "CAV_HANDLER_AGENT_ID": agent_id,
-            "CAV_HANDLER_BASE_PATH": str(base_dir),
+            "CODING_CAVE_HANDLER_AGENT_ID": agent_id,
+            "CODING_CAVE_HANDLER_BASE_PATH": str(base_dir),
         },
     )
 
@@ -77,9 +77,8 @@ def stop(proc: subprocess.Popen, base_dir: Path):
 
 
 def _agent_port(agent_id: str) -> int:
-    """Port for an agent's git daemon, scoped by depth to avoid collisions."""
-    depth = config.cave_depth()
-    return config.DAEMON_BASE_PORT + depth * 100 + int(agent_id)
+    """Port for an agent's git daemon."""
+    return config.DAEMON_BASE_PORT + int(agent_id)
 
 
 def remote_url(agent_id: str, slug: str, host: str = "127.0.0.1") -> str:

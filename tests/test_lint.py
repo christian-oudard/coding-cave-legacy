@@ -136,11 +136,9 @@ class TestSandboxEnvCompleteness(unittest.TestCase):
         text = sandbox.read_text()
         import re
         sets = set()
-        # Match env["CODING_CAVE_*"] = and "CODING_CAVE_*": patterns
-        for m in re.finditer(r'["\'](\w+)["\'](?:\s*[:\]])', text):
-            name = m.group(1)
-            if name.startswith("CODING_CAVE_") or name.startswith("CAV_"):
-                sets.add(name)
+        # Match any quoted CODING_CAVE_* string in sandbox.py
+        for m in re.finditer(r'["\'](CODING_CAVE_\w+)["\']', text):
+            sets.add(m.group(1))
         return sets
 
     def test_launch_sets_all_required_env_vars(self):

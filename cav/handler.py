@@ -7,7 +7,7 @@ connection.
 Security invariants:
 - Only git-upload-pack and git-receive-pack are allowed.
 - Paths are resolved under base_path and must not escape it.
-- CAV_AGENT_ID is set server-side, not client-controllable.
+- CODING_CAVE_AGENT_ID is set server-side, not client-controllable.
 - Payload size is bounded to prevent resource exhaustion.
 - Malformed requests are rejected without information leakage.
 """
@@ -63,13 +63,13 @@ def resolve_repo(base_path: str, request_path: str) -> str | None:
 
 
 def main():
-    agent_id = os.environ.get("CAV_HANDLER_AGENT_ID", "")
-    base_path = os.environ.get("CAV_HANDLER_BASE_PATH", "")
+    agent_id = os.environ.get("CODING_CAVE_HANDLER_AGENT_ID", "")
+    base_path = os.environ.get("CODING_CAVE_HANDLER_BASE_PATH", "")
 
     if not agent_id or not base_path:
         sys.exit(1)
 
-    os.environ["CAV_AGENT_ID"] = agent_id
+    os.environ["CODING_CAVE_AGENT_ID"] = agent_id
 
     # Read pkt-line header (4 hex digits)
     raw_len = sys.stdin.buffer.read(4)

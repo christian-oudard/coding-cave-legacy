@@ -5,7 +5,7 @@ Enforces Coding Cave branch protection:
 - Base branches: agents cannot push.
 - Agent branches: only the matching agent (or user) can push.
 
-Agent identity: CAV_AGENT_ID env var (server-controlled, set by daemon
+Agent identity: CODING_CAVE_AGENT_ID env var (server-controlled, set by daemon
 wrapper). Falls back to push options for non-daemon environments (tests).
 No identity = user (unrestricted).
 """
@@ -18,9 +18,9 @@ AGENT_BRANCH_RE = re.compile(r"^agent-(\d+)/(.+)$")
 
 
 def get_agent_name() -> str | None:
-    """Extract agent identity. Prefers server-controlled CAV_AGENT_ID,
+    """Extract agent identity. Prefers server-controlled CODING_CAVE_AGENT_ID,
     falls back to push options for non-daemon environments."""
-    agent = os.environ.get("CAV_AGENT_ID")
+    agent = os.environ.get("CODING_CAVE_AGENT_ID")
     if agent:
         return agent
     count = int(os.environ.get("GIT_PUSH_OPTION_COUNT", "0"))
@@ -55,7 +55,7 @@ def check_ref(old_sha: str, new_sha: str, ref: str, agent: str | None) -> str | 
             "old": old_sha, "new": new_sha,
             "agent": agent,
             "env": {k: v for k, v in os.environ.items()
-                    if k.startswith(("CAV_", "GIT_", "CODING_CAVE_"))},
+                    if k.startswith(("CODING_CAVE_", "GIT_"))},
             "stack": traceback.format_stack(),
         }
         print(json.dumps(diag, indent=2), file=sys.stderr)

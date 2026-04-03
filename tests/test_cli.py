@@ -95,10 +95,10 @@ class TestRequireInitInsideCave(unittest.TestCase):
         git("init", "--bare", cwd=bare)
         git("remote", "add", "host-cave", str(bare), cwd=self.repo)
         # Simulate being inside a cave.
-        os.environ["CODING_CAVE_DEPTH"] = "1"
+        os.environ["CODING_CAVE_VERSION"] = "test"
 
     def tearDown(self):
-        os.environ.pop("CODING_CAVE_DEPTH", None)
+        os.environ.pop("CODING_CAVE_VERSION", None)
         shutil.rmtree(self.tmpdir)
 
     def test_agent_blocked_inside_cave(self):
@@ -153,10 +153,10 @@ class TestRequireInitWithRegistry(unittest.TestCase):
         git("commit", "-m", "init", cwd=self.repo)
         os.symlink(PROJECT_ROOT / "cav", self.repo / "cav")
         self.data_dir = Path(self.tmpdir) / "data"
-        os.environ["CAV_DATA_DIR"] = str(self.data_dir)
+        os.environ["CODING_CAVE_DATA_DIR"] = str(self.data_dir)
 
     def tearDown(self):
-        os.environ.pop("CAV_DATA_DIR", None)
+        os.environ.pop("CODING_CAVE_DATA_DIR", None)
         shutil.rmtree(self.tmpdir)
 
     def test_agent_without_registry_entry(self):
@@ -217,10 +217,10 @@ class TestInitDefaults(unittest.TestCase):
         git("add", "file.txt", cwd=self.repo)
         git("commit", "-m", "init", cwd=self.repo)
         os.symlink(PROJECT_ROOT / "cav", self.repo / "cav")
-        os.environ["CAV_DATA_DIR"] = str(Path(self.tmpdir) / "data")
+        os.environ["CODING_CAVE_DATA_DIR"] = str(Path(self.tmpdir) / "data")
 
     def tearDown(self):
-        os.environ.pop("CAV_DATA_DIR", None)
+        os.environ.pop("CODING_CAVE_DATA_DIR", None)
         shutil.rmtree(self.tmpdir)
 
     def test_init_no_args(self):
@@ -236,10 +236,10 @@ class TestInitNewProject(unittest.TestCase):
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
-        os.environ["CAV_DATA_DIR"] = str(Path(self.tmpdir) / "data")
+        os.environ["CODING_CAVE_DATA_DIR"] = str(Path(self.tmpdir) / "data")
 
     def tearDown(self):
-        os.environ.pop("CAV_DATA_DIR", None)
+        os.environ.pop("CODING_CAVE_DATA_DIR", None)
         shutil.rmtree(self.tmpdir)
 
     def test_init_creates_git_repo(self):
@@ -384,11 +384,11 @@ class TestPullForceGuard(unittest.TestCase):
         git("add", "file.txt", cwd=self.repo)
         git("commit", "-m", "init", cwd=self.repo)
         os.symlink(PROJECT_ROOT / "cav", self.repo / "cav")
-        os.environ["CAV_DATA_DIR"] = str(Path(self.tmpdir) / "data")
+        os.environ["CODING_CAVE_DATA_DIR"] = str(Path(self.tmpdir) / "data")
         cav_cli("init", cwd=self.repo)
 
     def tearDown(self):
-        os.environ.pop("CAV_DATA_DIR", None)
+        os.environ.pop("CODING_CAVE_DATA_DIR", None)
         shutil.rmtree(self.tmpdir)
 
     def test_pull_blocked_on_base_branch(self):
@@ -426,11 +426,11 @@ class TestPushForceAllowed(unittest.TestCase):
         git("add", "file.txt", cwd=self.repo)
         git("commit", "-m", "init", cwd=self.repo)
         os.symlink(PROJECT_ROOT / "cav", self.repo / "cav")
-        os.environ["CAV_DATA_DIR"] = str(Path(self.tmpdir) / "data")
+        os.environ["CODING_CAVE_DATA_DIR"] = str(Path(self.tmpdir) / "data")
         cav_cli("init", cwd=self.repo)
 
     def tearDown(self):
-        os.environ.pop("CAV_DATA_DIR", None)
+        os.environ.pop("CODING_CAVE_DATA_DIR", None)
         shutil.rmtree(self.tmpdir)
 
     def test_push_force_not_blocked_on_main(self):
@@ -495,12 +495,12 @@ class TestSessionResume(unittest.TestCase):
         import cav.config as cfg
         self._orig_data_dir = cfg.DATA_DIR
         cfg.DATA_DIR = Path(self.tmpdir) / "data"
-        os.environ["CAV_DATA_DIR"] = str(cfg.DATA_DIR)
+        os.environ["CODING_CAVE_DATA_DIR"] = str(cfg.DATA_DIR)
 
     def tearDown(self):
         import cav.config as cfg
         cfg.DATA_DIR = self._orig_data_dir
-        os.environ.pop("CAV_DATA_DIR", None)
+        os.environ.pop("CODING_CAVE_DATA_DIR", None)
         shutil.rmtree(self.tmpdir)
 
     def _make_session_file(self, slug: str, session_id: str):
@@ -577,14 +577,14 @@ class TestSessionLifecycle(unittest.TestCase):
         import cav.config as cfg
         self._orig_data_dir = cfg.DATA_DIR
         cfg.DATA_DIR = Path(self.tmpdir) / "data"
-        os.environ["CAV_DATA_DIR"] = str(cfg.DATA_DIR)
+        os.environ["CODING_CAVE_DATA_DIR"] = str(cfg.DATA_DIR)
         self.base = Path(self.tmpdir) / "project"
         self.base.mkdir()
 
     def tearDown(self):
         import cav.config as cfg
         cfg.DATA_DIR = self._orig_data_dir
-        os.environ.pop("CAV_DATA_DIR", None)
+        os.environ.pop("CODING_CAVE_DATA_DIR", None)
         shutil.rmtree(self.tmpdir)
 
     def _make_session_file(self, slug, session_id):
@@ -865,14 +865,14 @@ class TestLaunchOpts(unittest.TestCase):
         import cav.config as cfg
         self._orig_data_dir = cfg.DATA_DIR
         cfg.DATA_DIR = Path(self.tmpdir) / "data"
-        os.environ["CAV_DATA_DIR"] = str(cfg.DATA_DIR)
+        os.environ["CODING_CAVE_DATA_DIR"] = str(cfg.DATA_DIR)
         self.base = Path(self.tmpdir) / "project"
         self.base.mkdir()
 
     def tearDown(self):
         import cav.config as cfg
         cfg.DATA_DIR = self._orig_data_dir
-        os.environ.pop("CAV_DATA_DIR", None)
+        os.environ.pop("CODING_CAVE_DATA_DIR", None)
         shutil.rmtree(self.tmpdir)
 
     def test_save_and_read_round_trip(self):

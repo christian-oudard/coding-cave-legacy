@@ -168,21 +168,21 @@ class TestGetAgentName(unittest.TestCase):
     def _clean_env(self):
         """Env dict with no agent identity vars."""
         return {k: v for k, v in os.environ.items()
-                if not k.startswith("GIT_PUSH_OPTION") and k != "CAV_AGENT_ID"}
+                if not k.startswith("GIT_PUSH_OPTION") and k != "CODING_CAVE_AGENT_ID"}
 
     def test_no_identity(self):
         with patch.dict(os.environ, self._clean_env(), clear=True):
             self.assertIsNone(hook.get_agent_name())
 
     def test_cav_agent_id(self):
-        with patch.dict(os.environ, {**self._clean_env(), "CAV_AGENT_ID": "3"}, clear=True):
+        with patch.dict(os.environ, {**self._clean_env(), "CODING_CAVE_AGENT_ID": "3"}, clear=True):
             self.assertEqual(hook.get_agent_name(), "3")
 
     def test_cav_agent_id_takes_precedence(self):
-        """CAV_AGENT_ID wins over push options."""
+        """CODING_CAVE_AGENT_ID wins over push options."""
         with patch.dict(os.environ, {
             **self._clean_env(),
-            "CAV_AGENT_ID": "1",
+            "CODING_CAVE_AGENT_ID": "1",
             "GIT_PUSH_OPTION_COUNT": "1",
             "GIT_PUSH_OPTION_0": "agent=2",
         }, clear=True):

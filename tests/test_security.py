@@ -148,7 +148,7 @@ class DaemonSecurityBase(unittest.TestCase):
         self.user_repo = Path(self.tmpdir) / "project"
         self.data_dir = Path(self.tmpdir) / "data"
 
-        os.environ["CAV_DATA_DIR"] = str(self.data_dir)
+        os.environ["CODING_CAVE_DATA_DIR"] = str(self.data_dir)
         config.DATA_DIR = self.data_dir
 
         self.user_repo.mkdir()
@@ -281,14 +281,14 @@ class TestAgentIsolation(DaemonSecurityBase):
     """Tests for agent identity and cross-agent access controls."""
 
     def test_client_env_cannot_override_agent_id(self):
-        """Client-side CAV_AGENT_ID doesn't affect server-side identity."""
+        """Client-side CODING_CAVE_AGENT_ID doesn't affect server-side identity."""
         ws = self._ws("1")
         (ws / "x.txt").write_text("x\n")
         git("add", "x.txt", cwd=ws)
         git("commit", "-m", "work", cwd=ws)
         result = git(
             "push", "host-cave", "HEAD:refs/heads/agent-2/main",
-            cwd=ws, check=False, env={"CAV_AGENT_ID": "2"},
+            cwd=ws, check=False, env={"CODING_CAVE_AGENT_ID": "2"},
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("REJECTED", result.stderr)
@@ -333,7 +333,7 @@ class TestAgentIsolation(DaemonSecurityBase):
                 cwd=ws1, check=False,
             )
             # At the daemon level this succeeds (agent 2's daemon sets
-            # CAV_AGENT_ID=2). Mitigated by pasta network isolation.
+            # CODING_CAVE_AGENT_ID=2). Mitigated by pasta network isolation.
             self.assertEqual(result.returncode, 0,
                 "Expected port-hop push to succeed (mitigated by pasta)")
         finally:

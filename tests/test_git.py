@@ -39,7 +39,7 @@ def git(*args, cwd=None, check=True, env=None):
 
 def agent_env(agent_id):
     """Env dict that identifies pushes as coming from an agent."""
-    return {"CAV_AGENT_ID": agent_id}
+    return {"CODING_CAVE_AGENT_ID": agent_id}
 
 
 def git_out(*args, cwd=None):
@@ -87,7 +87,7 @@ class TestCAV(unittest.TestCase):
             symlinks=True,
         )
 
-        os.environ["CAV_DATA_DIR"] = str(self.data_dir)
+        os.environ["CODING_CAVE_DATA_DIR"] = str(self.data_dir)
         config.DATA_DIR = self.data_dir
 
     def tearDown(self):
@@ -1231,24 +1231,23 @@ class TestCAV(unittest.TestCase):
         with self.assertRaises(SystemExit):
             registry.register_project(other)
 
-    def test_depth_and_lineage_propagation(self):
-        """Verify depth increments and lineage chains across 3 levels of nesting."""
+    def test_version_and_lineage_propagation(self):
+        """Verify version is set and lineage chains across 3 levels of nesting."""
         # Simulate the env computation from sandbox.py launch() at each level
 
         def compute_env(parent_env, agent_name, recursive=True):
-            """Replicate the depth/lineage logic from sandbox.py."""
-            parent_depth = int(parent_env.get("CODING_CAVE_DEPTH", "0"))
+            """Replicate the version/lineage logic from sandbox.py."""
             env = {
                 **parent_env,
-                "CODING_CAVE_DEPTH": str(parent_depth + 1),
-                "CAV_AGENT_NAME": agent_name,
+                "CODING_CAVE_VERSION": "test",
+                "CODING_CAVE_AGENT_NAME": agent_name,
                 "CODING_CAVE_HOST_HOME": parent_env.get(
                     "CODING_CAVE_HOST_HOME", "/home/testuser"),
             }
             if recursive:
                 env["CODING_CAVE_RECURSIVE"] = "1"
             parent_lineage = parent_env.get("CODING_CAVE_LINEAGE", "")
-            parent_agent = parent_env.get("CAV_AGENT_NAME", "")
+            parent_agent = parent_env.get("CODING_CAVE_AGENT_NAME", "")
             if parent_agent:
                 lineage = f"{parent_lineage}.{parent_agent}" if parent_lineage else parent_agent
                 env["CODING_CAVE_LINEAGE"] = lineage
@@ -1259,25 +1258,25 @@ class TestCAV(unittest.TestCase):
 
         # Level 1: first cave
         l1 = compute_env(host_env, "project@1")
-        self.assertEqual(l1["CODING_CAVE_DEPTH"], "1")
+        self.assertEqual(l1["CODING_CAVE_VERSION"], "test")
         self.assertNotIn("CODING_CAVE_LINEAGE", l1)  # no parent agent at host
         self.assertEqual(l1["CODING_CAVE_HOST_HOME"], "/home/testuser")
 
         # Level 2: subcave
         l2 = compute_env(l1, "project@2")
-        self.assertEqual(l2["CODING_CAVE_DEPTH"], "2")
+        self.assertEqual(l2["CODING_CAVE_VERSION"], "test")
         self.assertEqual(l2["CODING_CAVE_LINEAGE"], "project@1")
         self.assertEqual(l2["CODING_CAVE_HOST_HOME"], "/home/testuser")
 
         # Level 3: sub-subcave
         l3 = compute_env(l2, "project@1")
-        self.assertEqual(l3["CODING_CAVE_DEPTH"], "3")
+        self.assertEqual(l3["CODING_CAVE_VERSION"], "test")
         self.assertEqual(l3["CODING_CAVE_LINEAGE"], "project@1.project@2")
         self.assertEqual(l3["CODING_CAVE_HOST_HOME"], "/home/testuser")
 
         # Level 4: verify it keeps working
         l4 = compute_env(l3, "project@3")
-        self.assertEqual(l4["CODING_CAVE_DEPTH"], "4")
+        self.assertEqual(l4["CODING_CAVE_VERSION"], "test")
         self.assertEqual(l4["CODING_CAVE_LINEAGE"], "project@1.project@2.project@1")
 
     def test_recursive_not_set_blocks_subcave(self):
@@ -1524,22 +1523,12 @@ class TestCAV(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("dev branch", result.stderr)
 
-    # -- cross-depth isolation --
+    # -- version env var --
 
-    def test_daemon_port_isolated_by_depth(self):
-        """Agent 1 at depth 1 and agent 1 at depth 2 must use different ports."""
-        from cav import daemon
-
-        # Same agent ID at two different depths should produce different ports
-        # Currently both would use DAEMON_BASE_PORT + 1 = 9401
-        with unittest.mock.patch.dict(os.environ, {"CODING_CAVE_DEPTH": "1"}):
-            url_d1 = daemon.remote_url("1", "project")
-
-        with unittest.mock.patch.dict(os.environ, {"CODING_CAVE_DEPTH": "2"}):
-            url_d2 = daemon.remote_url("1", "project")
-
-        # BUG: both return git://127.0.0.1:9401/project
-        self.assertNotEqual(url_d1, url_d2)
+    def test_version_env_var_set_in_cave(self):
+        """CODING_CAVE_VERSION is set when running inside a cave."""
+        with unittest.mock.patch.dict(os.environ, {"CODING_CAVE_VERSION": "test"}):
+            self.assertTrue(config.inside_cave())
 
     # -- session uniqueness under concurrent registration --
 
@@ -1660,7 +1649,7 @@ class TestGitWrapper(unittest.TestCase):
         (self.user_repo / "README.md").write_text("# Project\n")
         git("add", "README.md", cwd=self.user_repo)
         git("commit", "-m", "Initial commit", cwd=self.user_repo)
-        os.environ["CAV_DATA_DIR"] = str(self.data_dir)
+        os.environ["CODING_CAVE_DATA_DIR"] = str(self.data_dir)
         config.DATA_DIR = self.data_dir
         from cav import init as cav_init
         cav_init.init(str(self.user_repo))

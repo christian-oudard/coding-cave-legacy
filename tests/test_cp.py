@@ -34,14 +34,14 @@ class CpTestCase(unittest.TestCase):
         self.tmpdir = tempfile.mkdtemp()
         self.data_dir = Path(self.tmpdir) / "data"
         self.data_dir.mkdir()
-        os.environ["CAV_DATA_DIR"] = str(self.data_dir)
+        os.environ["CODING_CAVE_DATA_DIR"] = str(self.data_dir)
         # Reload config so DATA_DIR picks up the env var
-        config.DATA_DIR = Path(os.environ["CAV_DATA_DIR"])
+        config.DATA_DIR = Path(os.environ["CODING_CAVE_DATA_DIR"])
 
     def tearDown(self):
-        os.environ.pop("CAV_DATA_DIR", None)
+        os.environ.pop("CODING_CAVE_DATA_DIR", None)
         config.DATA_DIR = Path(
-            os.environ.get("CAV_DATA_DIR",
+            os.environ.get("CODING_CAVE_DATA_DIR",
                            Path.home() / ".local" / "share" / "coding-cave")
         )
         shutil.rmtree(self.tmpdir)

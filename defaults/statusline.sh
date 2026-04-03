@@ -44,7 +44,7 @@ if [ -n "$persist_file" ]; then
     fi
 fi
 
-line="Coding Cave - ${CAV_AGENT_NAME:-?}"
+line="Coding Cave - ${CODING_CAVE_AGENT_NAME:-?}"
 if [ -n "$persist" ]; then
     line="$line [$persist]"
 fi

@@ -7,6 +7,8 @@ from pathlib import Path
 
 log = logging.getLogger("cav")
 
+VERSION = "@VERSION@"
+
 CAVE_SHARED_REMOTE = "cave"
 HOST_SHARED_REMOTE = "host-cave"
 AGENT_ID_RE = re.compile(r"^\d+$")
@@ -15,7 +17,7 @@ AGENT_BRANCH_RE = re.compile(r"^agent-(\d+)/(.+)$")
 DAEMON_BASE_PORT = 9400
 
 DATA_DIR = Path(os.environ.get(
-    "CAV_DATA_DIR",
+    "CODING_CAVE_DATA_DIR",
     Path.home() / ".local" / "share" / "coding-cave",
 ))
 
@@ -112,5 +114,5 @@ def project_slug(base: Path) -> str:
     return slug or "project"
 
 
-def cave_depth() -> int:
-    return int(os.environ.get("CODING_CAVE_DEPTH", "0"))
+def inside_cave() -> bool:
+    return "CODING_CAVE_VERSION" in os.environ

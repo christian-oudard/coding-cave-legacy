@@ -25,7 +25,7 @@ def require_init(base: Path):
             raise SystemExit("Project not registered. Run: cav init")
         return
     # Inside a cave the bare repo is on the host; check for the shared remote instead.
-    if int(os.environ.get("CODING_CAVE_DEPTH", "0")) > 0:
+    if config.inside_cave():
         try:
             git.git_output("remote", "get-url", config.CAVE_SHARED_REMOTE, cwd=base)
             return
@@ -150,7 +150,7 @@ def agent(continue_agent, resume_agent, extra_projects, recursive):
     name = registry.display_name(base, agent_id)
     lineage = os.environ.get("CODING_CAVE_LINEAGE", "")
     if lineage:
-        name += f" (depth {int(os.environ.get('CODING_CAVE_DEPTH', '0')) + 1}, parent {lineage})"
+        name += f" (parent {lineage})"
     try:
         rc = launch(workspaces, name, project_slug=projects[0][1],
                     recursive=recursive, session_id=session_id,
@@ -458,9 +458,9 @@ def version():
     if ts.isdigit():
         from datetime import datetime
         dt = datetime.fromtimestamp(int(ts))
-        print(f"cav @VERSION@ ({dt:%Y-%m-%d %H:%M})")
+        print(f"cav {config.VERSION} ({dt:%Y-%m-%d %H:%M})")
     else:
-        print(f"cav @VERSION@ ({ts})")
+        print(f"cav {config.VERSION} ({ts})")
 
 
 def main():

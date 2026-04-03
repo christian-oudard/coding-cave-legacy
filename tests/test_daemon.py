@@ -1,7 +1,7 @@
 """Integration tests for the git daemon remote isolation.
 
 Tests that agents can fetch/push through the daemon, and that the
-pre-receive hook correctly identifies agents via CAV_AGENT_ID.
+pre-receive hook correctly identifies agents via CODING_CAVE_AGENT_ID.
 """
 
 import os
@@ -40,7 +40,7 @@ class TestDaemon(unittest.TestCase):
         self.user_repo = Path(self.tmpdir) / "project"
         self.data_dir = Path(self.tmpdir) / "data"
 
-        os.environ["CAV_DATA_DIR"] = str(self.data_dir)
+        os.environ["CODING_CAVE_DATA_DIR"] = str(self.data_dir)
         config.DATA_DIR = self.data_dir
         self._orig_base_port = config.DAEMON_BASE_PORT
         config.DAEMON_BASE_PORT = TEST_DAEMON_BASE_PORT
@@ -136,17 +136,17 @@ class TestDaemon(unittest.TestCase):
         self.assertIn("REJECTED", result.stderr)
 
     def test_daemon_identity_unforgeable(self):
-        """Agent cannot override CAV_AGENT_ID via client-side env."""
+        """Agent cannot override CODING_CAVE_AGENT_ID via client-side env."""
         ws = self._ws_with_daemon_remote("1")
         (ws / "x.txt").write_text("x\n")
         git("add", "x.txt", cwd=ws)
         git("commit", "-m", "work", cwd=ws)
-        # Try pushing to agent-2's branch while setting CAV_AGENT_ID=2
-        # on the client side. The daemon sets CAV_AGENT_ID=1 server-side,
+        # Try pushing to agent-2's branch while setting CODING_CAVE_AGENT_ID=2
+        # on the client side. The daemon sets CODING_CAVE_AGENT_ID=1 server-side,
         # so this should still be rejected.
         result = git(
             "push", "host-cave", "HEAD:refs/heads/agent-2/main",
-            cwd=ws, check=False, env={"CAV_AGENT_ID": "2"},
+            cwd=ws, check=False, env={"CODING_CAVE_AGENT_ID": "2"},
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("REJECTED", result.stderr)

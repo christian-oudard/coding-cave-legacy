@@ -28,7 +28,7 @@ class TestAlternates(unittest.TestCase):
         self.user_repo = Path(self.tmpdir) / "project"
         self.data_dir = Path(self.tmpdir) / "data"
 
-        os.environ["CAV_DATA_DIR"] = str(self.data_dir)
+        os.environ["CODING_CAVE_DATA_DIR"] = str(self.data_dir)
         config.DATA_DIR = self.data_dir
 
         self.user_repo.mkdir()

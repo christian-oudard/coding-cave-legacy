@@ -119,10 +119,10 @@ def _host_git_identity() -> dict[str, str]:
     """Read git identity from host config."""
     env = {}
     for key, envvar in [
-        ("user.name", "CAV_GIT_NAME"),
-        ("user.email", "CAV_GIT_EMAIL"),
-        ("user.signingkey", "CAV_GIT_SIGNINGKEY"),
-        ("commit.gpgsign", "CAV_GIT_GPGSIGN"),
+        ("user.name", "CODING_CAVE_GIT_NAME"),
+        ("user.email", "CODING_CAVE_GIT_EMAIL"),
+        ("user.signingkey", "CODING_CAVE_GIT_SIGNINGKEY"),
+        ("commit.gpgsign", "CODING_CAVE_GIT_GPGSIGN"),
     ]:
         try:
             val = git.git_output("config", "--global", key)
@@ -364,67 +364,17 @@ def _seed_nix_db() -> Path | None:
     return db_dir
 
 
-def _setup_nix_overlay(agent_id: str) -> str:
-    """Mount a per-agent writable nix store overlay. Returns merged path.
-
-    At depth 0, fusermount3 is setuid on the host, so fuse-overlayfs works
-    directly. At depth > 0, fusermount3 is not setuid. We defer the mount
-    to _nix_overlay_preexec() which runs in the child process after
-    unshare(NEWUSER|NEWNS).
-    """
+def _nix_overlay_dirs(agent_id: str) -> tuple[Path, Path, Path]:
     agent_dir = config.nix_overlay_dir() / agent_id
     upper = agent_dir / "upper"
     work = agent_dir / "work"
     merged = agent_dir / "merged"
-
     for d in (upper, work, merged):
         d.mkdir(parents=True, exist_ok=True)
-
-    # Check if already mounted
-    if any(merged.iterdir()):
-        return str(merged)
-
-    parent_depth = int(os.environ.get("CODING_CAVE_DEPTH", "0"))
-    if parent_depth > 0:
-        # Deferred: mounted in child via _nix_overlay_preexec()
-        return str(merged)
-
-    result = subprocess.run(
-        [
-            "fuse-overlayfs",
-            "-o", f"lowerdir=/nix/store,upperdir={upper},workdir={work}",
-            str(merged),
-        ],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        raise SystemExit(f"Failed to mount nix store overlay: {result.stderr}")
-
-    return str(merged)
+    return upper, work, merged
 
 
-def _nix_overlay_preexec(agent_id: str):
-    """Mount nix overlay inside a child user+mount namespace.
-
-    Called as preexec_fn in Popen at depth > 0, where fusermount3 isn't
-    setuid. Creates a user namespace (gaining CAP_SYS_ADMIN for mount),
-    then mounts fuse-overlayfs before exec.
-    """
-    agent_dir = config.nix_overlay_dir() / agent_id
-    upper = agent_dir / "upper"
-    work = agent_dir / "work"
-    merged = agent_dir / "merged"
-
-    if any(merged.iterdir()):
-        return  # Already mounted
-
-    uid = os.getuid()
-    gid = os.getgid()
-    os.unshare(os.CLONE_NEWUSER | os.CLONE_NEWNS)
-    Path("/proc/self/setgroups").write_text("deny")
-    Path("/proc/self/uid_map").write_text(f"0 {uid} 1\n")
-    Path("/proc/self/gid_map").write_text(f"0 {gid} 1\n")
-
+def _mount_fuse_overlay(upper: Path, work: Path, merged: Path):
     subprocess.run(
         [
             "fuse-overlayfs",
@@ -433,6 +383,47 @@ def _nix_overlay_preexec(agent_id: str):
         ],
         check=True, capture_output=True, text=True,
     )
+
+
+def _setup_nix_overlay(agent_id: str) -> str:
+    """Mount a per-agent writable nix store overlay. Returns merged path.
+
+    Tries a direct mount (works when fusermount3 is setuid). If that fails,
+    defers the mount to _nix_overlay_preexec() which runs in the child
+    process after unshare(NEWUSER|NEWNS).
+    """
+    upper, work, merged = _nix_overlay_dirs(agent_id)
+
+    if any(merged.iterdir()):
+        return str(merged)
+
+    try:
+        _mount_fuse_overlay(upper, work, merged)
+    except subprocess.CalledProcessError:
+        pass  # Deferred: mounted in child via _nix_overlay_preexec()
+
+    return str(merged)
+
+
+def _nix_overlay_preexec(agent_id: str):
+    """Mount nix overlay inside a child user+mount namespace.
+
+    Called as preexec_fn when the direct mount in _setup_nix_overlay failed
+    (fusermount3 not setuid). Creates a user namespace with mount capability,
+    then mounts fuse-overlayfs before exec.
+    """
+    upper, work, merged = _nix_overlay_dirs(agent_id)
+    if any(merged.iterdir()):
+        return  # Already mounted (direct mount succeeded)
+
+    uid = os.getuid()
+    gid = os.getgid()
+    os.unshare(os.CLONE_NEWUSER | os.CLONE_NEWNS)
+    Path("/proc/self/setgroups").write_text("deny")
+    Path("/proc/self/uid_map").write_text(f"0 {uid} 1\n")
+    Path("/proc/self/gid_map").write_text(f"0 {gid} 1\n")
+
+    _mount_fuse_overlay(upper, work, merged)
 
 
 def _teardown_nix_overlay(agent_id: str):
@@ -520,7 +511,6 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
     # namespace. Each level's services bind to 127.0.0.1 and the parent
     # is reachable at 10.0.2.2 via --map-host-loopback, so port numbers
     # are reused without conflict at any depth.
-    parent_depth = int(os.environ.get("CODING_CAVE_DEPTH", "0"))
     daemon_host = PASTA_HOST_LOOPBACK
 
     # Migrate old workspaces: rename "cave" -> "host-cave" if needed.
@@ -574,10 +564,6 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
     shared_repos = ":".join(str(sr) for _, sr, _ in workspaces)
     slugs = ":".join(s for _, _, s in workspaces)
 
-    # Subcave depth tracking: increment if already inside a cave
-    parent_depth = int(os.environ.get("CODING_CAVE_DEPTH", "0"))
-    depth = parent_depth + 1
-
     # Build a minimal environment for the jail wrapper. Only include
     # vars the add-runtime blocks and try-fwd-env calls actually need.
     # Using **os.environ here would leak host secrets (API keys, tokens,
@@ -587,14 +573,14 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
         if var in os.environ:
             env[var] = os.environ[var]
     env.update({
+        "CODING_CAVE_VERSION": config.VERSION,
         "CODING_CAVE_NIX_MERGED": nix_merged,
         "CODING_CAVE_HOME": str(home),
         "CODING_CAVE_WORKSPACES": ws_paths,
         "CODING_CAVE_SHARED_REPOS": shared_repos,
-        "CAV_AGENT_NAME": agent_name,
+        "CODING_CAVE_AGENT_NAME": agent_name,
         "CODING_CAVE_PROJECT_SLUGS": slugs,
         "CODING_CAVE_PROJECT_SLUG": project_slug,
-        "CODING_CAVE_DEPTH": str(depth),
         # Preserve the real host home for nested caves
         "CODING_CAVE_HOST_HOME": os.environ.get(
             "CODING_CAVE_HOST_HOME", str(Path.home())),
@@ -610,7 +596,7 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
 
     # Lineage: build dot-separated chain of parent agent names
     parent_lineage = os.environ.get("CODING_CAVE_LINEAGE", "")
-    parent_agent = os.environ.get("CAV_AGENT_NAME", "")
+    parent_agent = os.environ.get("CODING_CAVE_AGENT_NAME", "")
     if parent_agent:
         lineage = f"{parent_lineage}.{parent_agent}" if parent_lineage else parent_agent
         env["CODING_CAVE_LINEAGE"] = lineage
@@ -636,7 +622,7 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
                     break
 
     # cav bin dir (so agents can run `cav version` etc. inside the cave)
-    env["CODING_CAVE_CAV_BIN"] = CAV_BIN
+    env["CODING_CAVE_BIN"] = CAV_BIN
 
 
     # User environment from cave.nix
