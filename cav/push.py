@@ -4,7 +4,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import config, git
+from . import config, git, registry
 
 
 def push(base: Path, force: bool = False):
@@ -21,11 +21,12 @@ def push(base: Path, force: bool = False):
             )
         raise SystemExit("Detached HEAD. Check out a branch before pushing.")
 
-    args = ["push", "--no-set-upstream", config.CAVE_SHARED_REMOTE, branch]
-    if force:
-        args.insert(1, "--force")
+    parsed = config.parse_dev_branch(branch)
     try:
-        r = git.git(*args, cwd=base, **config.v())
+        if parsed:
+            r = _push_dev(base, branch, parsed[1], force)
+        else:
+            r = push_base(base, branch, force=force)
     except subprocess.CalledProcessError as e:
         if e.stderr:
             print(e.stderr.rstrip(), file=sys.stderr)
@@ -40,74 +41,79 @@ def push(base: Path, force: bool = False):
         else:
             print(f"Pushed {branch} to shared remote.")
 
-    parsed = config.parse_dev_branch(branch)
-    if parsed:
-        _sync_shared_to_agent(base, branch, parsed[1])
-    else:
-        _rebase_agent_branches(base, branch)
+
+def push_base(base: Path, base_branch: str, refspec: str | None = None,
+              force: bool = False):
+    """Push to a base branch on the shared remote and rebase dependent agents."""
+    if refspec is None:
+        refspec = base_branch
+    args = ["push", "--no-set-upstream", config.CAVE_SHARED_REMOTE, refspec]
+    if force:
+        args.insert(1, "--force")
+    r = git.git(*args, cwd=base, **config.v())
+    _rebase_agents(base, base_branch)
+    return r
 
 
-def _sync_shared_to_agent(base: Path, dev_branch: str, agent_id: str):
-    """After pushing a dev branch, update the agent worktree to match."""
+def _push_dev(base: Path, branch: str, agent_id: str, force: bool):
+    """Push a dev branch and sync the agent worktree."""
+    args = ["push", "--no-set-upstream", config.CAVE_SHARED_REMOTE, branch]
+    if force:
+        args.insert(1, "--force")
+    r = git.git(*args, cwd=base, **config.v())
+
     slug = config.project_slug(base)
     ws = config.worktree_dir(slug, agent_id)
     if not ws.exists():
-        return
+        return r
 
     shared = config.shared_repo_path(base)
-
-    # Fetch the pushed ref into the worktree's remote tracking ref.
     git.git("fetch", str(shared),
-            f"+refs/heads/{dev_branch}:refs/remotes/{config.HOST_SHARED_REMOTE}/{dev_branch}",
+            f"+refs/heads/{branch}:refs/remotes/{config.HOST_SHARED_REMOTE}/{branch}",
             cwd=ws, echo=False, check=False, capture=True)
 
-    # Reset worktree if it's on this branch.
     try:
         current = git.current_branch(cwd=ws)
     except Exception:
-        return
-    if current == dev_branch:
+        return r
+    if current == branch:
         git.git("reset", "--hard",
-                f"{config.HOST_SHARED_REMOTE}/{dev_branch}",
+                f"{config.HOST_SHARED_REMOTE}/{branch}",
                 cwd=ws, echo=False, check=False, capture=True)
+    return r
 
 
-def _rebase_agent_branches(base: Path, base_branch: str):
-    """After pushing a base branch, rebase agent dev branches onto it."""
+def _rebase_agents(base: Path, base_branch: str):
+    """Rebase agent dev branches with pending work onto the updated base."""
     slug = config.project_slug(base)
     shared = config.shared_repo_path(base)
     if not shared.exists():
         return
 
-    # Fetch to update tracking refs so we can list remote branches.
-    git.git("fetch", config.CAVE_SHARED_REMOTE, cwd=base,
-            echo=False, check=False, capture=True)
-
-    for branch in git.remote_branches(config.CAVE_SHARED_REMOTE, cwd=base):
-        parsed = config.parse_dev_branch(branch)
-        if not parsed:
-            continue
-        if config.resolve_base(branch) != base_branch:
-            continue
-
-        _, agent_id = parsed
+    for agent_id in registry.all_agent_ids(project=slug):
         ws = config.worktree_dir(slug, agent_id)
         if not ws.exists():
             continue
 
         try:
-            current = git.current_branch(cwd=ws)
+            branch = git.current_branch(cwd=ws)
         except Exception:
             continue
-        if current != branch:
-            continue  # Can only rebase the checked-out branch
+        if config.resolve_base(branch) != base_branch:
+            continue
 
-        # Fetch updated base into the agent worktree.
+        try:
+            ahead = git.commits_ahead(
+                f"refs/heads/{branch}", f"refs/heads/{base_branch}", cwd=shared)
+        except Exception:
+            continue
+        if ahead == 0:
+            continue
+
         git.git("fetch", str(shared),
                 f"+refs/heads/{base_branch}:refs/remotes/{config.HOST_SHARED_REMOTE}/{base_branch}",
                 cwd=ws, echo=False, check=False, capture=True)
 
-        # Rebase dev branch onto updated base.
         r = git.git("rebase", f"{config.HOST_SHARED_REMOTE}/{base_branch}",
                     cwd=ws, check=False, capture=True, echo=False)
         if r.returncode != 0:
@@ -116,7 +122,6 @@ def _rebase_agent_branches(base: Path, base_branch: str):
             print(f"Warning: rebase of {branch} onto {base_branch} failed (conflicts).")
             continue
 
-        # Push rebased branch back to shared remote.
         git.git("fetch", str(ws),
                 f"+refs/heads/{branch}:refs/heads/{branch}",
                 cwd=shared, echo=False, check=False, capture=True)

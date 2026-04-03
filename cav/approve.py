@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from . import config, git, registry
+from . import config, git, push, registry
 
 
 def approve(base: Path, agent_id: str | None = None, yes: bool = False):
@@ -74,9 +74,8 @@ def approve(base: Path, agent_id: str | None = None, yes: bool = False):
         if answer.strip().lower() in ("n", "no"):
             raise SystemExit("Aborted.")
 
-    # Push to shared remote (the approval)
-    git.git("push", config.CAVE_SHARED_REMOTE,
-            f"{after_sha}:refs/heads/{base_name}", cwd=base, **config.v())
+    # Push to shared remote (the approval) and rebase other agents.
+    push.push_base(base, base_name, refspec=f"{after_sha}:refs/heads/{base_name}")
 
     # Record one approval per commit (enables per-commit rejection)
     slug = config.project_slug(base)
