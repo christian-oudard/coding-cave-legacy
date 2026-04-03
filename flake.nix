@@ -238,15 +238,21 @@
             # Clear env vars that were consumed by add-runtime blocks
             # above. Without this, they leak via /proc/1/environ inside
             # the cave (bwrap is PID 1, same uid, readable).
+            # Use bwrap --unsetenv instead of shell unset: jail.nix
+            # needs $HOME for ~ expansion in the bwrap command line.
+            # HOME itself is already overridden by set-env above.
             (add-runtime ''
-              unset HOME PWD SHLVL \
+              for _v in \
+                PWD SHLVL \
                 CODING_CAVE_NIX_MERGED CODING_CAVE_HOME \
                 CODING_CAVE_WORKSPACES CODING_CAVE_SHARED_REPOS \
                 CODING_CAVE_HOST_HOME CODING_CAVE_NIX_DB_DIR \
                 CODING_CAVE_GPG_SOCKET CODING_CAVE_GPG_PUBRING \
                 CODING_CAVE_GITCONFIG CODING_CAVE_USER_CLAUDE_MD \
                 CODING_CAVE_PROXY_CA CODING_CAVE_PROJECT_SLUGS \
-                2>/dev/null || true
+              ; do
+                RUNTIME_ARGS+=(--unsetenv "$_v")
+              done
             '')
 
             # Forward identity and config into the cave
