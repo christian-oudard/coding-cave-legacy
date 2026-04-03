@@ -568,8 +568,10 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
     # vars the add-runtime blocks and try-fwd-env calls actually need.
     # Using **os.environ here would leak host secrets (API keys, tokens,
     # SSH_AUTH_SOCK, etc.) via /proc/1/environ inside the sandbox.
+    # HOME is needed by the wrapper for ~/.local/share/jail.nix/passwd.
+    # TERM/COLORTERM/TZ are forwarded into the cave via try-fwd-env.
     env = {}
-    for var in ("PATH", "HOME", "TMPDIR", "TERM", "COLORTERM", "TZ"):
+    for var in ("HOME", "TERM", "COLORTERM", "TZ"):
         if var in os.environ:
             env[var] = os.environ[var]
     env.update({

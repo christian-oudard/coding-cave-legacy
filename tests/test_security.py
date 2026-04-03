@@ -339,8 +339,8 @@ class TestAgentIsolation(DaemonSecurityBase):
         finally:
             daemon.stop(daemon2_proc, daemon2_dir)
 
-    def test_non_branch_ref_push(self):
-        """Agent pushing a tag or note ref. Documents current behavior."""
+    def test_non_branch_ref_push_rejected(self):
+        """Agent cannot push tags or other non-branch refs."""
         ws = self._ws("1")
         (ws / "x.txt").write_text("x\n")
         git("add", "x.txt", cwd=ws)
@@ -349,13 +349,8 @@ class TestAgentIsolation(DaemonSecurityBase):
             "push", "host-cave", "HEAD:refs/tags/v1.0",
             cwd=ws, check=False,
         )
-        # KNOWN GAP: non-branch refs are currently unprotected.
-        # This test documents the behavior so we can track it.
-        # When we add protection, change assertNotEqual to assertEqual.
-        if result.returncode == 0:
-            self._tag_push_allowed = True
-        else:
-            self._tag_push_allowed = False
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("REJECTED", result.stderr)
 
 
 class TestDaemonStress(DaemonSecurityBase):

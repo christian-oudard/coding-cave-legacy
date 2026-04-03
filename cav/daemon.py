@@ -40,16 +40,21 @@ def start(agent_id: str, shared_repos: list[tuple[Path, str]]) -> tuple[subproce
     for repo_path, slug in shared_repos:
         (base_dir / slug).symlink_to(repo_path)
 
+    socat_bin = _find_bin("socat")
     python_bin = _find_bin("python3")
+    git_bin = _find_bin("git")
+    git_exec_path = subprocess.run(
+        [git_bin, "--exec-path"], capture_output=True, text=True, check=True,
+    ).stdout.strip()
     handler_module = Path(__file__).parent / "handler.py"
 
     proc = subprocess.Popen(
-        ["socat", f"TCP-LISTEN:{port},fork,reuseaddr,bind=127.0.0.1",
+        [socat_bin, f"TCP-LISTEN:{port},fork,reuseaddr,bind=127.0.0.1",
          f"EXEC:{python_bin} {handler_module}"],
         start_new_session=True,
         stderr=subprocess.PIPE,
         env={
-            **os.environ,
+            "PATH": git_exec_path,
             "CODING_CAVE_HANDLER_AGENT_ID": agent_id,
             "CODING_CAVE_HANDLER_BASE_PATH": str(base_dir),
         },

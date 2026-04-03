@@ -167,8 +167,7 @@ class TestGetAgentName(unittest.TestCase):
 
     def _clean_env(self):
         """Env dict with no agent identity vars."""
-        return {k: v for k, v in os.environ.items()
-                if not k.startswith("GIT_PUSH_OPTION") and k != "CODING_CAVE_AGENT_ID"}
+        return {k: v for k, v in os.environ.items() if k != "CODING_CAVE_AGENT_ID"}
 
     def test_no_identity(self):
         with patch.dict(os.environ, self._clean_env(), clear=True):
@@ -178,33 +177,18 @@ class TestGetAgentName(unittest.TestCase):
         with patch.dict(os.environ, {**self._clean_env(), "CODING_CAVE_AGENT_ID": "3"}, clear=True):
             self.assertEqual(hook.get_agent_name(), "3")
 
-    def test_cav_agent_id_takes_precedence(self):
-        """CODING_CAVE_AGENT_ID wins over push options."""
-        with patch.dict(os.environ, {
-            **self._clean_env(),
-            "CODING_CAVE_AGENT_ID": "1",
-            "GIT_PUSH_OPTION_COUNT": "1",
-            "GIT_PUSH_OPTION_0": "agent=2",
-        }, clear=True):
-            self.assertEqual(hook.get_agent_name(), "1")
-
-    def test_push_option_fallback(self):
+    def test_push_options_ignored(self):
+        """Push options must not be used for identity."""
         with patch.dict(os.environ, {
             **self._clean_env(),
             "GIT_PUSH_OPTION_COUNT": "1",
             "GIT_PUSH_OPTION_0": "agent=1",
         }, clear=True):
-            self.assertEqual(hook.get_agent_name(), "1")
+            self.assertIsNone(hook.get_agent_name())
 
-    def test_push_option_among_others(self):
-        with patch.dict(os.environ, {
-            **self._clean_env(),
-            "GIT_PUSH_OPTION_COUNT": "3",
-            "GIT_PUSH_OPTION_0": "foo=bar",
-            "GIT_PUSH_OPTION_1": "agent=2",
-            "GIT_PUSH_OPTION_2": "baz=qux",
-        }, clear=True):
-            self.assertEqual(hook.get_agent_name(), "2")
+    def test_empty_string_is_no_identity(self):
+        with patch.dict(os.environ, {**self._clean_env(), "CODING_CAVE_AGENT_ID": ""}, clear=True):
+            self.assertIsNone(hook.get_agent_name())
 
 
 if __name__ == "__main__":

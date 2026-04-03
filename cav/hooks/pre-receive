@@ -4,10 +4,10 @@
 Enforces Coding Cave branch protection:
 - Base branches: agents cannot push.
 - Agent branches: only the matching agent (or user) can push.
+- Non-branch refs: agents cannot push.
 
-Agent identity: CODING_CAVE_AGENT_ID env var (server-controlled, set by daemon
-wrapper). Falls back to push options for non-daemon environments (tests).
-No identity = user (unrestricted).
+Agent identity comes from CODING_CAVE_AGENT_ID (server-controlled, set by the
+daemon handler). No identity = user (unrestricted).
 """
 
 import os
@@ -18,17 +18,8 @@ AGENT_BRANCH_RE = re.compile(r"^agent-(\d+)/(.+)$")
 
 
 def get_agent_name() -> str | None:
-    """Extract agent identity. Prefers server-controlled CODING_CAVE_AGENT_ID,
-    falls back to push options for non-daemon environments."""
-    agent = os.environ.get("CODING_CAVE_AGENT_ID")
-    if agent:
-        return agent
-    count = int(os.environ.get("GIT_PUSH_OPTION_COUNT", "0"))
-    for i in range(count):
-        opt = os.environ.get(f"GIT_PUSH_OPTION_{i}", "")
-        if opt.startswith("agent="):
-            return opt[len("agent="):]
-    return None
+    """Extract agent identity from CODING_CAVE_AGENT_ID. Returns None for user."""
+    return os.environ.get("CODING_CAVE_AGENT_ID") or None
 
 
 def check_ref(old_sha: str, new_sha: str, ref: str, agent: str | None) -> str | None:
