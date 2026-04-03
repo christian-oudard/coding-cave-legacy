@@ -232,6 +232,13 @@ def _auto_cleanup_if_clean(base, agent_id):
 
     # All branches in all projects are approved (or irrecoverable),
     # and no worktrees have uncommitted changes.
+    if config.verbose:
+        import sys
+        ws = config.worktree_dir(config.project_slug(base), agent_id)
+        print(f"+ auto-cleanup: removing {name} "
+              f"(worktree {'exists' if ws.is_dir() else 'gone'}, "
+              f"{len(all_agent_branches)} branches, all approved)",
+              file=sys.stderr)
     primary_branches = [b for p, b in all_agent_branches if p == base]
     _remove_agent(base, agent_id, primary_branches)
 

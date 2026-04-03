@@ -653,13 +653,10 @@ class TestSessionLifecycle(unittest.TestCase):
         # Step 2-3: simulate sweep removing the agent entirely.
         registry.remove_agent(aid)
 
-        # Step 4-5: cav -c resolve logic.
-        new_aid, session_id, resuming = resolve_continue(self.base)
-
-        self.assertFalse(resuming,
-                         "must not --resume after sweep created a fresh agent")
-        self.assertNotEqual(session_id, old_sid,
-                            "session_id should be a fresh UUID, not the swept one")
+        # Step 4-5: cav -c resolve logic. With nothing to continue
+        # (no agent, no session file), it should fail loudly.
+        with self.assertRaises(SystemExit):
+            resolve_continue(self.base)
 
     def test_continue_with_valid_session_resumes(self):
         """cav -c resumes when the session file exists on disk."""

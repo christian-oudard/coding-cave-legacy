@@ -3,11 +3,18 @@
 import json
 import os
 import sqlite3
+import sys
 import time
 import uuid
 from pathlib import Path
 
 from . import config
+
+
+def _vprint(*args, **kwargs):
+    """Print to stderr if verbose mode is on."""
+    if config.verbose:
+        print(*args, file=sys.stderr, **kwargs)
 
 
 def _registry_path() -> Path:
@@ -276,6 +283,18 @@ def continue_agent_id(base: Path, agent_id: str | None = None) -> str | None:
             (slug,)
         ).fetchone()
         if not row:
+            all_rows = db.execute(
+                "SELECT agent_id, project, exited_at, pid FROM agents"
+            ).fetchall()
+            if all_rows:
+                _vprint(f"continue: no exited agent for project "
+                        f"'{slug}', registry has:")
+                for r in all_rows:
+                    state = ("running" if r[2] is None else "exited")
+                    _vprint(f"  agent {r[0]}: project={r[1]}, "
+                            f"{state}, pid={r[3]}")
+            else:
+                _vprint("continue: registry is empty")
             return None
 
         aid = row[0]
@@ -294,26 +313,40 @@ def resolve_continue(base: Path, agent_id_hint: str | None = None):
     """Resolve agent_id, session_id, resuming for cav -c.
 
     Returns (agent_id, session_id, resuming).
+    Raises SystemExit if nothing to continue.
     """
+    slug = config.project_slug(base)
     agent_id = continue_agent_id(base, agent_id_hint)
+
     if agent_id is None:
         # Nothing in the registry. Check for a session file on disk
         # (e.g. a zero-commit agent that was cleaned up on exit).
-        agent_id = acquire_agent_id(base)
-        slug = config.project_slug(base)
         found = config.latest_session_file(slug)
         if found:
+            agent_id = acquire_agent_id(base)
+            _vprint(f"continue: no agent in registry, resuming "
+                    f"latest session file: {found}")
             write_session_id(agent_id, found)
             return agent_id, found, True
-        return agent_id, read_session_id(agent_id), False
+        d = config._claude_project_dir(slug)
+        raise SystemExit(
+            f"Nothing to continue. No agents in registry and no "
+            f"session files in {d}\n"
+            f"Start a new session with: cav agent"
+        )
 
     session_id = read_session_id(agent_id)
-    slug = config.project_slug(base)
     if session_id and config.session_file_exists(slug, session_id):
+        _vprint(f"continue: resuming agent {agent_id}, "
+                f"session {session_id}")
         return agent_id, session_id, True
 
-    # Session file gone or never created; start fresh.
+    # Session file gone or never created; start fresh in same agent slot.
+    d = config._claude_project_dir(slug)
     if session_id:
+        f = d / f"{session_id}.jsonl"
+        print(f"Warning: session file missing ({f}), "
+              f"starting fresh.", file=sys.stderr)
         clear_session_id(agent_id)
     session_id = str(uuid.uuid4())
     write_session_id(agent_id, session_id)

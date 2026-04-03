@@ -923,23 +923,11 @@ class TestCAV(unittest.TestCase):
         registry.mark_agent_exited(id1)
         registry.mark_agent_exited(cid)
 
-    def test_continue_no_agents_no_sessions(self):
-        """resolve_continue with no agents acquires fresh agent."""
+    def test_continue_no_agents_no_sessions_fails(self):
+        """resolve_continue with nothing to continue raises SystemExit."""
         self._init()
-        aid, sid, resuming = registry.resolve_continue(self.user_repo)
-        self.assertEqual(aid, "1")
-        self.assertFalse(resuming)
-        self.assertIsNotNone(sid)
-        registry.mark_agent_exited(aid)
-
-    def test_continue_no_agents_acquires_fresh(self):
-        """resolve_continue with no agents acquires a fresh one with a UUID session."""
-        self._init()
-        aid, sid, resuming = registry.resolve_continue(self.user_repo)
-        self.assertIsNotNone(sid)
-        self.assertEqual(len(sid), 36)
-        self.assertFalse(resuming)
-        registry.mark_agent_exited(aid)
+        with self.assertRaises(SystemExit):
+            registry.resolve_continue(self.user_repo)
 
     def test_claude_project_dir_encoding(self):
         """_claude_project_dir encodes path like Claude Code does."""
