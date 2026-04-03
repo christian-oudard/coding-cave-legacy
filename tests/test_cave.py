@@ -58,6 +58,21 @@ class TestGPGSigning(unittest.TestCase):
         self.assertIn(key[-16:], signer)
 
 
+class TestGPGRestriction(unittest.TestCase):
+    """Verify the GPG agent socket blocks dangerous operations."""
+
+    def test_secret_key_export_blocked(self):
+        """The restricted extra socket must deny secret key export."""
+        result = subprocess.run(
+            ["gpg", "--export-secret-keys", "--armor"],
+            capture_output=True, text=True, timeout=10,
+        )
+        # Restricted socket returns no key material (empty output or error)
+        self.assertEqual(result.stdout, "",
+                         "Secret key export should produce no output through "
+                         "the restricted extra socket")
+
+
 class TestNixStore(unittest.TestCase):
     """Verify nix operations work inside the cave.
 

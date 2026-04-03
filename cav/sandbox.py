@@ -157,16 +157,21 @@ def _gpg_homedir() -> Path | None:
 
 
 def _gpg_socket() -> str | None:
-    """Find and ensure the GPG agent socket exists."""
+    """Find the restricted GPG agent extra socket.
+
+    The extra socket (S.gpg-agent.extra) runs in restricted mode, which
+    blocks secret key export, key generation, key deletion, and other
+    dangerous operations while still allowing signing (for git commits).
+    """
     try:
         sock = subprocess.run(
-            ["gpgconf", "--list-dirs", "agent-socket"],
+            ["gpgconf", "--list-dirs", "agent-extra-socket"],
             capture_output=True, text=True, check=True,
         ).stdout.strip()
     except (FileNotFoundError, subprocess.CalledProcessError):
         return None
     if not sock or not Path(sock).exists():
-        # Auto-launch gpg-agent
+        # Auto-launch gpg-agent (creates extra socket by default)
         subprocess.run(["gpgconf", "--launch", "gpg-agent"],
                        capture_output=True, check=False)
     return sock if sock and Path(sock).exists() else None

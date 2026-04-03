@@ -54,7 +54,7 @@ Each agent runs in bubblewrap sandbox.
 - Agents can install Nix packages to a Nix store overlay (host store read-only, writable upper layer).
 - Project workspaces are mounted at `/projects/<slug>`.
 - A persistent shared home directory is at `/home/cave-coder`.
-- Agents sign commits with host GPG keys, through a forwarded GPG agent socket. The GPG private keys stay on the host.
+- Agents sign commits with host GPG keys, through a forwarded GPG agent extra socket. The extra socket runs in restricted mode, allowing signing but blocking secret key export and other dangerous operations.
 - Git commits are signed with the user's Git identity, stored in environment variables.
 - The Standard POSIX environment (SHELL, TERM, locale).
 
