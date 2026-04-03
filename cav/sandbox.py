@@ -16,6 +16,8 @@ from pathlib import Path
 
 from . import config, daemon, git, user_env
 
+log = config.log
+
 GIT_WRAPPER = """\
 #!/bin/sh
 # Git wrapper: syncs dev branches to shared remote after state changes.
@@ -206,18 +208,27 @@ def _start_crinj() -> str:
     if not shutil.which("crinj"):
         raise SystemExit("crinj not found on PATH")
 
-    if not _crinj_listening():
+    if _crinj_listening():
+        log.debug("crinj already listening")
+    else:
+        log.debug("starting crinj...")
         config.DATA_DIR.mkdir(parents=True, exist_ok=True)
-        subprocess.Popen(
+        proc = subprocess.Popen(
             ["crinj", "--port", str(CRINJ_PORT)],
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             start_new_session=True,
         )
-        for _ in range(20):
+        for i in range(20):
             if _crinj_listening():
+                log.debug(f"crinj ready after {(i + 1) * 0.25:.1f}s")
                 break
+            if proc.poll() is not None:
+                stderr = proc.stderr.read().decode(errors="replace").strip()
+                raise SystemExit(f"crinj exited {proc.returncode}: {stderr}")
             time.sleep(0.25)
+        else:
+            raise SystemExit("crinj failed to start within 5s")
 
     return f"127.0.0.1:{CRINJ_PORT}"
 
@@ -382,8 +393,7 @@ def _teardown_nix_overlay(agent_id: str):
                                    capture_output=True, text=True)
                 if r.returncode == 0:
                     return
-        print(f"fusermount3 -uz {merged}: {r.stderr.strip()}",
-              file=sys.stderr)
+        log.error(f"fusermount3 -uz {merged}: {r.stderr.strip()}")
 
 
 def _host_claude_json() -> Path | None:
@@ -435,9 +445,10 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
     agent_id = agent_name.split("@")[-1]
 
     # Start git daemon for remote isolation (bare repos served over git://)
-
+    log.info("starting git daemon...")
     shared_repos_for_daemon = [(sr, slug) for _, sr, slug in workspaces]
     daemon_proc, daemon_dir = daemon.start(agent_id, shared_repos_for_daemon)
+    log.info("git daemon ready")
 
 
     # Install git wrapper in shared home (shadows real git on PATH).
@@ -471,7 +482,7 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
                 cwd=ws, echo=False)
 
     # Sync: fetch latest and fast-forward local base branches
-
+    log.info("syncing workspace branches...")
     for ws, _, _ in workspaces:
         git.git("fetch", config.HOST_SHARED_REMOTE, cwd=ws, echo=False, check=False,
                 capture=True)
@@ -492,16 +503,19 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
                 cwd=ws, echo=False)
 
     # Build user environment from cave.nix (cached)
-
+    log.info("building user environment...")
     user_env_path = user_env.build()
+    log.info("user environment ready")
 
     # Nested caves inherit the parent's writable nix store overlay.
     # At depth 0, mount a fresh fuse-overlayfs. At depth > 0, the parent's
     # /nix/store is already writable; skip the mount (fusermount3 isn't
     # setuid inside the cave) and let the jail inherit it.
     if parent_depth == 0:
+        log.info("setting up nix overlay...")
         nix_db_dir = _seed_nix_db()
         nix_merged = _setup_nix_overlay(agent_id)
+        log.info("nix overlay ready")
     else:
         nix_db_dir = None
         nix_merged = ""
@@ -589,6 +603,7 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
     # Crinj proxy (required for API auth).
     # Claude Code requires a token env var to consider itself "logged in",
     # but the actual credential is injected by crinj at the HTTP level.
+    log.info("starting crinj proxy...")
     _start_crinj()
     env["CODING_CAVE_PROXY_ADDR"] = f"{daemon_host}:{CRINJ_PORT}"
     env["CODING_CAVE_PROXY_CA"] = str(_crinj_ca_path())
@@ -624,6 +639,7 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
         else:
             pasta_cmd = []
 
+        log.info("launching sandbox...")
         proc = subprocess.Popen(pasta_cmd + claude_cmd, env=env)
 
         def fwd(s, _f):

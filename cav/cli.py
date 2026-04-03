@@ -1,5 +1,6 @@
 """Coding Cave CLI entry point."""
 
+import logging
 import os
 import re
 import subprocess
@@ -465,19 +466,24 @@ def version():
 def main():
     argv = sys.argv[1:]
 
-    # Strip -v/--verbose anywhere in argv (including combined like -va).
+    # Strip -v/--verbose anywhere in argv (including combined like -vva).
+    # No -v = ERROR, -v = INFO, -vv = DEBUG.
+    v_count = 0
     clean = []
     for a in argv:
         if a == "--verbose":
-            config.verbose = True
+            v_count += 1
         elif re.match(r'^-[a-zA-Z]+$', a) and 'v' in a:
-            config.verbose = True
-            rest = a.replace('v', '', 1)
+            v_count += a.count('v')
+            rest = a.replace('v', '')
             if rest != '-':
                 clean.append(rest)
         else:
             clean.append(a)
     argv = clean
+    config.verbose = v_count >= 1
+    level = {0: logging.ERROR, 1: logging.INFO}.get(v_count, logging.DEBUG)
+    logging.basicConfig(format="[cav] %(message)s", level=level, stream=sys.stderr)
 
     subcmds = {
         "init", "agent", "approve", "reject", "pull", "push", "checkout",

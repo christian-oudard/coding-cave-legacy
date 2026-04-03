@@ -135,11 +135,11 @@ def build():
 
     r = subprocess.run(
         ["nix", "build", "--no-link", "--print-out-paths"],
-        capture_output=True, text=True,
+        stdout=subprocess.PIPE, text=True,
         cwd=str(user_env),
     )
     if r.returncode != 0:
-        print(f"Warning: cave.nix build failed: {r.stderr.strip()}", file=sys.stderr)
+        print(f"Warning: cave.nix build failed.", file=sys.stderr)
         if result_link.exists():
             return result_link.resolve()
         return None

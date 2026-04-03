@@ -1,8 +1,11 @@
 """Constants and naming helpers for Coding Cave."""
 
+import logging
 import os
 import re
 from pathlib import Path
+
+log = logging.getLogger("cav")
 
 CAVE_SHARED_REMOTE = "cave"
 HOST_SHARED_REMOTE = "host-cave"
