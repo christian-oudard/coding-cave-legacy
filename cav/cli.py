@@ -109,6 +109,7 @@ def agent(continue_agent, resume_agent, extra_projects, recursive):
         hint = on_agent_branch[1] if on_agent_branch else None
         agent_id, session_id, resuming = registry.resolve_continue(base, hint)
     else:
+        _try_reclaim_one(base)
         agent_id = registry.acquire_agent_id(base)
         session_id = registry.read_session_id(agent_id)
         resuming = False
@@ -123,8 +124,6 @@ def agent(continue_agent, resume_agent, extra_projects, recursive):
             )
         if not recursive and saved_recursive:
             recursive = True
-
-    _sweep_stale_agents(base)
 
     projects = [(base, config.project_slug(base))]
 
@@ -159,20 +158,32 @@ def agent(continue_agent, resume_agent, extra_projects, recursive):
         if session_id and not config.session_file_exists(projects[0][1], session_id):
             registry.clear_session_id(agent_id)
         registry.mark_agent_exited(agent_id)
-        _auto_cleanup_if_clean(base, agent_id)
     sys.exit(rc)
 
 
-def _sweep_stale_agents(base: Path):
-    """Clean up exited agents with no pending work before launching."""
-    before = {aid: registry.display_name(base, aid)
-              for aid in registry.all_agent_ids()}
-    for agent_id in before:
-        if not registry.is_agent_running(agent_id):
-            _auto_cleanup_if_clean(base, agent_id)
-    removed = set(before) - set(registry.all_agent_ids())
-    for aid in sorted(removed, key=int):
-        print(f"Warning: cleaned up stale agent {before[aid]}.")
+CLEANUP_COOLDOWN = 3600  # seconds before an exited agent can be reclaimed
+
+
+def _try_reclaim_one(base: Path):
+    """Try to reclaim a single expired agent slot for ID reuse.
+
+    Finds the lowest-numbered agent that has been exited for longer than
+    CLEANUP_COOLDOWN and has no pending work, and removes it. Called
+    before acquire_agent_id so the freed ID can be reused.
+    """
+    import time
+    now = time.time()
+    for agent_id in registry.all_agent_ids():
+        if registry.is_agent_running(agent_id):
+            continue
+        exit_time = registry.agent_exit_time(agent_id)
+        if exit_time and (now - exit_time) < CLEANUP_COOLDOWN:
+            continue
+        name = registry.display_name(base, agent_id)
+        _auto_cleanup_if_clean(base, agent_id)
+        if agent_id not in registry.all_agent_ids():
+            print(f"Reclaimed stale agent {name}.")
+            return  # only reclaim one
 
 
 def _auto_cleanup_if_clean(base, agent_id):

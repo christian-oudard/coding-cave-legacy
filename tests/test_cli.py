@@ -542,10 +542,8 @@ class TestSessionResume(unittest.TestCase):
                    return_value="some-session-uuid"), \
              patch("cav.cli.registry.read_agent_launch_opts",
                    return_value=([], False)), \
-             patch("cav.cli._sweep_stale_agents"), \
              patch("cav.sandbox.launch", return_value=0) as mock_launch, \
-             patch("cav.cli.registry.mark_agent_exited"), \
-             patch("cav.cli._auto_cleanup_if_clean"):
+             patch("cav.cli.registry.mark_agent_exited"):
             result = CliRunner().invoke(
                 cli, ["agent", "--resume", "some-session-uuid"])
         # Should have attempted to launch (exit via sys.exit)
@@ -635,7 +633,7 @@ class TestSessionLifecycle(unittest.TestCase):
         Sequence that triggered the original bug:
         1. Agent 1 runs, exits. Registry has agent 1 + session UUID.
         2. User approves work. Agent branches deleted from remote.
-        3. _sweep_stale_agents removes agent 1 from registry.
+        3. Agent reclaimed (removed from registry).
         4. cav -c calls continue_agent_id, finds nothing, old code fell
            through to acquire_agent_id which created a NEW agent 1 with
            a new pre-generated UUID.
@@ -808,16 +806,17 @@ class TestAgentSorting(unittest.TestCase):
         ids = [a[1] for a in result]
         self.assertEqual(ids, ["3", "2", "1"])
 
-    def test_sort_orphaned_last(self):
+    def test_sort_stopped_after_running(self):
         agents = [
             self._agent(2000.0, "1", "proj@1", True),
-            self._agent(3000.0, "2", "proj@2", False, "orphaned"),
-            self._agent(1000.0, "3", "proj@3", False, "exited",
-                        [("agent-3/main", 1, ["abc feat"])]),
+            self._agent(3000.0, "2", "proj@2", False, "stopped",
+                        [("agent-2/main", 1, ["abc feat"])]),
+            self._agent(1000.0, "3", "proj@3", False, "stopped",
+                        [("agent-3/main", 1, ["def fix"])]),
         ]
         result = self.sort_agents(agents)
         ids = [a[1] for a in result]
-        self.assertEqual(ids, ["1", "3", "2"])
+        self.assertEqual(ids, ["1", "2", "3"])
 
     def test_format_agents_order_preserved(self):
         agents = [
@@ -834,7 +833,7 @@ class TestAgentSorting(unittest.TestCase):
 
     def test_format_agents_unapproved_commits(self):
         agents = [
-            self._agent(1000.0, "1", "proj@1", False, "exited",
+            self._agent(1000.0, "1", "proj@1", False, "stopped",
                         [("agent-1/main", 2, ["abc feat: add X", "def fix: Y"])]),
         ]
         out = self.format_agents(agents)
@@ -845,7 +844,7 @@ class TestAgentSorting(unittest.TestCase):
     def test_format_agents_truncates_long_commit_lists(self):
         lines = [f"{chr(97+i)*7} commit {i}" for i in range(5)]
         agents = [
-            self._agent(1000.0, "1", "proj@1", False, "exited",
+            self._agent(1000.0, "1", "proj@1", False, "stopped",
                         [("agent-1/main", 5, lines)]),
         ]
         out = self.format_agents(agents, max_commits=3)

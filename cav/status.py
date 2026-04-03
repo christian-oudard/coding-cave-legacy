@@ -40,8 +40,8 @@ AgentInfo = tuple[float, str, str, bool, str, list[tuple[str, int, list[str]]]]
 
 
 def sort_agents(agents: list[AgentInfo]) -> list[AgentInfo]:
-    """Sort agents: running first, then exited, then orphaned. Within each group, most recent first."""
-    order = {"running": 0, "exited": 1, "orphaned": 2}
+    """Sort agents: running first, then stopped. Within each group, most recent first."""
+    order = {"running": 0, "stopped": 1}
     return sorted(agents, key=lambda a: (order.get(a[4], 9), -a[0]))
 
 
@@ -184,12 +184,13 @@ def status(base: Path, agent_filter: str | None = None, scoped: bool = True) -> 
 
         total_ahead = sum(a for _, a, _ in unapproved)
 
-        if running:
-            state = "running"
-        elif total_ahead > 0:
-            state = "exited"
-        else:
-            state = "orphaned"
+        state = "running" if running else "stopped"
+
+        # Only show agents that are running or have unapproved work.
+        # Exited agents with no pending commits are kept in the registry
+        # for cav -c but aren't interesting for status.
+        if not running and total_ahead == 0:
+            continue
 
         agents.append((last_activity, agent_id, name, running, state, unapproved))
 

@@ -1601,11 +1601,11 @@ class TestCAV(unittest.TestCase):
         self.assertEqual(continued, aid)
         registry.mark_agent_exited(continued)
 
-    def test_zero_commit_agent_cleaned_up_on_exit(self):
-        """Agent with no commits is garbage collected in the finally block.
+    def test_zero_commit_agent_cleaned_up_by_reclaim(self):
+        """Agent with no commits is removed by _auto_cleanup_if_clean.
 
-        Zero-commit agents have no branches to preserve, so cleanup
-        removes them immediately. cav -c will launch a fresh agent.
+        Zero-commit agents have no branches to preserve, so reclaim
+        removes them when a new agent needs an ID.
         """
         from cav.cli import _auto_cleanup_if_clean
         from cav.init import init

@@ -111,12 +111,4 @@ def approve(base: Path, agent_id: str | None = None, yes: bool = False):
     git.git("branch", "-D", branch,
             cwd=base, echo=False, capture=True, check=False)
 
-    if not registry.is_agent_running(agent_id):
-        from .cli import _auto_cleanup_if_clean
-        _auto_cleanup_if_clean(base, agent_id)
-        if agent_id not in [a for a in registry.all_agent_ids()]:
-            print(f"Approved and removed {name}.")
-        else:
-            print(f"Approved (agent has work in other projects).")
-    else:
-        print(f"Approved.")
+    print(f"Approved.")
