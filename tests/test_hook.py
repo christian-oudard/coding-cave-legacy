@@ -121,14 +121,25 @@ class TestCheckRef(unittest.TestCase):
         self.assertIsNotNone(r)
         self.assertIn("REJECTED", r)
 
-    # -- Non-branch refs (tags, etc.) --
+    # -- Non-branch refs (tags, notes, replace, etc.) --
 
-    def test_tag_push_by_agent_allowed(self):
+    def test_tag_push_by_agent_rejected(self):
         r = hook.check_ref(ZERO, SHA_A, "refs/tags/v1.0", "1")
-        self.assertIsNone(r)
+        self.assertIsNotNone(r)
+        self.assertIn("REJECTED", r)
 
-    def test_notes_ref_by_agent_allowed(self):
+    def test_notes_ref_by_agent_rejected(self):
         r = hook.check_ref(SHA_A, SHA_B, "refs/notes/commits", "1")
+        self.assertIsNotNone(r)
+        self.assertIn("REJECTED", r)
+
+    def test_replace_ref_by_agent_rejected(self):
+        r = hook.check_ref(ZERO, SHA_A, "refs/replace/" + SHA_A, "1")
+        self.assertIsNotNone(r)
+        self.assertIn("REJECTED", r)
+
+    def test_tag_push_by_user_allowed(self):
+        r = hook.check_ref(ZERO, SHA_A, "refs/tags/v1.0", None)
         self.assertIsNone(r)
 
     # -- Agent ID edge cases --

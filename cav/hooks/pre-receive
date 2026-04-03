@@ -33,11 +33,17 @@ def get_agent_name() -> str | None:
 
 def check_ref(old_sha: str, new_sha: str, ref: str, agent: str | None) -> str | None:
     """Returns an error message if the push should be rejected, else None."""
-    # Strip refs/heads/ prefix
-    if ref.startswith("refs/heads/"):
-        branch = ref[len("refs/heads/"):]
-    else:
-        return None  # Not a branch ref, allow
+    # Agents can only push to refs/heads/ (branches). All other ref
+    # namespaces (tags, notes, replace, etc.) are denied for agents.
+    if not ref.startswith("refs/heads/"):
+        if agent is not None:
+            return (
+                f"REJECTED: Agent {agent} cannot push to '{ref}'.\n"
+                f"Agents may only push to branch refs."
+            )
+        return None  # User can push any ref
+
+    branch = ref[len("refs/heads/"):]
 
     # Reject any branch with HEAD in the name. This should never happen,
     # but something has been creating agent-N/HEAD branches and we need
