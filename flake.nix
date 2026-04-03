@@ -181,11 +181,14 @@
               done
             '')
 
-            # Shared repos (read-only for alternates object access)
+            # Shared repos (read-only for alternates object access).
+            # Mount under /projects/<slug>/.coding-cave/ instead of at
+            # the host-absolute path, to avoid leaking the host home dir.
             (add-runtime ''
               IFS=: read -ra _repos <<< "''${CODING_CAVE_SHARED_REPOS:-}"
-              for repo in "''${_repos[@]}"; do
-                RUNTIME_ARGS+=(--ro-bind "$repo" "$repo")
+              IFS=: read -ra _slugs <<< "''${CODING_CAVE_PROJECT_SLUGS:-}"
+              for i in "''${!_repos[@]}"; do
+                RUNTIME_ARGS+=(--ro-bind "''${_repos[$i]}" "/projects/''${_slugs[$i]}/.coding-cave/cave-shared.git")
               done
             '')
 
@@ -230,6 +233,20 @@
                 echo "nameserver ''${CODING_CAVE_DNS_SERVER}" > "$_RESOLV"
                 RUNTIME_ARGS+=(--ro-bind "$_RESOLV" /etc/resolv.conf)
               fi
+            '')
+
+            # Clear env vars that were consumed by add-runtime blocks
+            # above. Without this, they leak via /proc/1/environ inside
+            # the cave (bwrap is PID 1, same uid, readable).
+            (add-runtime ''
+              unset HOME PWD SHLVL \
+                CODING_CAVE_NIX_MERGED CODING_CAVE_HOME \
+                CODING_CAVE_WORKSPACES CODING_CAVE_SHARED_REPOS \
+                CODING_CAVE_HOST_HOME CODING_CAVE_NIX_DB_DIR \
+                CODING_CAVE_GPG_SOCKET CODING_CAVE_GPG_PUBRING \
+                CODING_CAVE_GITCONFIG CODING_CAVE_USER_CLAUDE_MD \
+                CODING_CAVE_PROXY_CA CODING_CAVE_PROJECT_SLUGS \
+                2>/dev/null || true
             '')
 
             # Forward identity and config into the cave
