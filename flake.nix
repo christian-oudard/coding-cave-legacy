@@ -100,11 +100,13 @@
               fi
             '')
 
-            # /dev/fuse for subcave support (opt-in via --recursive)
+            # Subcave support (opt-in via --recursive):
+            # /dev/fuse for nix store overlay, /dev/net/tun for pasta networking
             (try-fwd-env "CODING_CAVE_RECURSIVE")
             (add-runtime ''
-              if [ "''${CODING_CAVE_RECURSIVE:-}" = "1" ] && [ -e /dev/fuse ]; then
-                RUNTIME_ARGS+=(--dev-bind /dev/fuse /dev/fuse)
+              if [ "''${CODING_CAVE_RECURSIVE:-}" = "1" ]; then
+                [ -e /dev/fuse ] && RUNTIME_ARGS+=(--dev-bind /dev/fuse /dev/fuse)
+                [ -e /dev/net/tun ] && RUNTIME_ARGS+=(--dev-bind /dev/net/tun /dev/net/tun)
               fi
             '')
 

@@ -11,6 +11,7 @@ import signal
 import socket
 import sqlite3
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -190,12 +191,20 @@ def _host_home() -> Path:
 
 
 def _crinj_ca_path() -> Path:
-    """Find crinj CA certificate on the host."""
-    home = _host_home()
-    xdg = os.environ.get("XDG_DATA_HOME", home / ".local" / "share")
+    """Find crinj CA certificate.
+
+    At depth 0, crinj generates the cert in the host home. At depth > 0,
+    crinj runs inside the cave (cert in cave home), or the parent's cert
+    is bind-mounted at /etc/crinj-ca.pem by jail.nix.
+    """
+    host_home = _host_home()
+    cave_home = Path.home()
+    xdg = os.environ.get("XDG_DATA_HOME", host_home / ".local" / "share")
     for path in [
-        home / ".crinj" / "gateway" / "ca.pem",
+        cave_home / ".crinj" / "gateway" / "ca.pem",
+        host_home / ".crinj" / "gateway" / "ca.pem",
         Path(xdg) / "crinj" / "gateway" / "ca.pem",
+        Path("/etc/crinj-ca.pem"),
     ]:
         if path.exists():
             return path
@@ -356,7 +365,13 @@ def _seed_nix_db() -> Path | None:
 
 
 def _setup_nix_overlay(agent_id: str) -> str:
-    """Mount a per-agent writable nix store overlay. Returns merged path."""
+    """Mount a per-agent writable nix store overlay. Returns merged path.
+
+    At depth 0, fusermount3 is setuid on the host, so fuse-overlayfs works
+    directly. At depth > 0, fusermount3 is not setuid. We defer the mount
+    to _nix_overlay_preexec() which runs in the child process after
+    unshare(NEWUSER|NEWNS).
+    """
     agent_dir = config.nix_overlay_dir() / agent_id
     upper = agent_dir / "upper"
     work = agent_dir / "work"
@@ -367,6 +382,11 @@ def _setup_nix_overlay(agent_id: str) -> str:
 
     # Check if already mounted
     if any(merged.iterdir()):
+        return str(merged)
+
+    parent_depth = int(os.environ.get("CODING_CAVE_DEPTH", "0"))
+    if parent_depth > 0:
+        # Deferred: mounted in child via _nix_overlay_preexec()
         return str(merged)
 
     result = subprocess.run(
@@ -381,6 +401,38 @@ def _setup_nix_overlay(agent_id: str) -> str:
         raise SystemExit(f"Failed to mount nix store overlay: {result.stderr}")
 
     return str(merged)
+
+
+def _nix_overlay_preexec(agent_id: str):
+    """Mount nix overlay inside a child user+mount namespace.
+
+    Called as preexec_fn in Popen at depth > 0, where fusermount3 isn't
+    setuid. Creates a user namespace (gaining CAP_SYS_ADMIN for mount),
+    then mounts fuse-overlayfs before exec.
+    """
+    agent_dir = config.nix_overlay_dir() / agent_id
+    upper = agent_dir / "upper"
+    work = agent_dir / "work"
+    merged = agent_dir / "merged"
+
+    if any(merged.iterdir()):
+        return  # Already mounted
+
+    uid = os.getuid()
+    gid = os.getgid()
+    os.unshare(os.CLONE_NEWUSER | os.CLONE_NEWNS)
+    Path("/proc/self/setgroups").write_text("deny")
+    Path("/proc/self/uid_map").write_text(f"0 {uid} 1\n")
+    Path("/proc/self/gid_map").write_text(f"0 {gid} 1\n")
+
+    subprocess.run(
+        [
+            "fuse-overlayfs",
+            "-o", f"lowerdir=/nix/store,upperdir={upper},workdir={work}",
+            str(merged),
+        ],
+        check=True, capture_output=True, text=True,
+    )
 
 
 def _teardown_nix_overlay(agent_id: str):
@@ -464,12 +516,12 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
         wrapper.write_text(GIT_WRAPPER)
         wrapper.chmod(0o755)
 
-    # Network isolation: top-level caves get a pasta network namespace so
-    # agents can only reach their own daemon port, not other agents'.
-    # Nested caves inherit the parent's namespace (already isolated).
+    # Network isolation: every nesting level gets its own pasta network
+    # namespace. Each level's services bind to 127.0.0.1 and the parent
+    # is reachable at 10.0.2.2 via --map-host-loopback, so port numbers
+    # are reused without conflict at any depth.
     parent_depth = int(os.environ.get("CODING_CAVE_DEPTH", "0"))
-    use_pasta = parent_depth == 0
-    daemon_host = PASTA_HOST_LOOPBACK if use_pasta else "127.0.0.1"
+    daemon_host = PASTA_HOST_LOOPBACK
 
     # Migrate old workspaces: rename "cave" -> "host-cave" if needed.
     for ws, _, _ in workspaces:
@@ -512,18 +564,10 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
     user_env_path = user_env.build()
     log.info("user environment ready")
 
-    # Nested caves inherit the parent's writable nix store overlay.
-    # At depth 0, mount a fresh fuse-overlayfs. At depth > 0, the parent's
-    # /nix/store is already writable; skip the mount (fusermount3 isn't
-    # setuid inside the cave) and let the jail inherit it.
-    if parent_depth == 0:
-        log.info("setting up nix overlay...")
-        nix_db_dir = _seed_nix_db()
-        nix_merged = _setup_nix_overlay(agent_id)
-        log.info("nix overlay ready")
-    else:
-        nix_db_dir = None
-        nix_merged = ""
+    log.info("setting up nix overlay...")
+    nix_db_dir = _seed_nix_db()
+    nix_merged = _setup_nix_overlay(agent_id)
+    log.info("nix overlay ready")
 
     # Encode multiple workspaces as colon-separated lists
     ws_paths = ":".join(str(ws) for ws, _, _ in workspaces)
@@ -562,8 +606,7 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
     if recursive:
         env["CODING_CAVE_RECURSIVE"] = "1"
 
-    if use_pasta:
-        env["CODING_CAVE_DNS_SERVER"] = PASTA_HOST_LOOPBACK
+    env["CODING_CAVE_DNS_SERVER"] = PASTA_HOST_LOOPBACK
 
     # Lineage: build dot-separated chain of parent agent names
     parent_lineage = os.environ.get("CODING_CAVE_LINEAGE", "")
@@ -605,9 +648,10 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
     if user_claude_md.exists():
         env["CODING_CAVE_USER_CLAUDE_MD"] = str(user_claude_md)
 
-    # Crinj proxy (required for API auth).
-    # Claude Code requires a token env var to consider itself "logged in",
-    # but the actual credential is injected by crinj at the HTTP level.
+    # Crinj proxy (required for API auth). Each nesting level runs its own
+    # crinj instance. Nested instances inject placeholder keys; the outermost
+    # crinj (on the host) replaces them with real credentials. Traffic chains
+    # through http_proxy at each level automatically.
     log.info("starting crinj proxy...")
     _start_crinj()
     env["CODING_CAVE_PROXY_ADDR"] = f"{daemon_host}:{CRINJ_PORT}"
@@ -627,25 +671,23 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
                 claude_cmd += ["--resume", session_id]
             else:
                 claude_cmd += ["--session-id", session_id]
-        if use_pasta:
-            pasta_bin = shutil.which("pasta")
-            if not pasta_bin:
-                raise SystemExit("pasta not found on PATH (install passt package)")
-            daemon_port = daemon._agent_port(agent_id)
-            pasta_cmd = [
-                pasta_bin, "--quiet", "--config-net",
-                "--map-host-loopback", PASTA_HOST_LOOPBACK,
-                "--dns-forward", PASTA_HOST_LOOPBACK,
-                "-T", f"{daemon_port},{CRINJ_PORT}",
-                "-t", "none",
-                "-u", "none", "-U", "none",
-                "--",
-            ]
-        else:
-            pasta_cmd = []
+        pasta_bin = shutil.which("pasta")
+        if not pasta_bin:
+            raise SystemExit("pasta not found on PATH (install passt package)")
+        pasta_cmd = [
+            pasta_bin, "--quiet", "--config-net",
+            "--map-host-loopback", PASTA_HOST_LOOPBACK,
+            "--dns-forward", PASTA_HOST_LOOPBACK,
+            "-t", "none",
+            "-u", "none", "-U", "none",
+            "--",
+        ]
+
+        preexec = lambda: _nix_overlay_preexec(agent_id)
 
         log.info("launching sandbox...")
-        proc = subprocess.Popen(pasta_cmd + claude_cmd, env=env)
+        proc = subprocess.Popen(pasta_cmd + claude_cmd, env=env,
+                                preexec_fn=preexec)
 
         def fwd(s, _f):
             _signal_descendants(proc.pid, s)
@@ -663,5 +705,4 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
 
     finally:
         daemon.stop(daemon_proc, daemon_dir)
-        if parent_depth == 0:
-            _teardown_nix_overlay(agent_id)
+        _teardown_nix_overlay(agent_id)

@@ -55,7 +55,8 @@ class TestPathHomeLint(unittest.TestCase):
         # DATA_DIR default uses Path.home()
         "config.py": {"DATA_DIR"},
         # _host_home fallback + CODING_CAVE_HOST_HOME fallback in launch()
-        "sandbox.py": {"_host_home", "launch"},
+        # _crinj_ca_path intentionally checks cave home (where cave-local crinj puts its cert)
+        "sandbox.py": {"_host_home", "launch", "_crinj_ca_path"},
         # _cave_nix_path uses CODING_CAVE_HOST_HOME with Path.home() fallback
         "user_env.py": {"_cave_nix_path"},
     }
