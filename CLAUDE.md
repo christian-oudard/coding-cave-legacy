@@ -12,7 +12,7 @@ To add a new Python dependency, add it to the `python3.withPackages` calls in `f
 
 Three test tiers, separated by what they require:
 
-- **Fast (pure Python):** `nix flake check` runs `test_hook`, `test_cli`, `test_alternates`, `test_nixdb`, `test_lint`. No git subprocesses.
+- **Fast (pure Python):** `nix flake check` runs `test_hook`, `test_cli`, `test_alternates`, `test_nixdb`, `test_lint`, `test_cp_security`. No git subprocesses.
 - **Git integration:** `nix develop --command python3 -m unittest -v tests.test_git tests.test_daemon tests.test_security`. Spawns real git repos, exercises CLI and daemon isolation.
 - **Cave integration:** `nix develop --command python3 -m unittest -v tests.test_cave`. Requires running inside a cave (GPG socket, git identity). Tests environment features.
 

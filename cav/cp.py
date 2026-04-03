@@ -2,10 +2,38 @@
 
 import os
 import shutil
+import stat
 import sys
 from pathlib import Path
 
 from . import config, git, registry
+
+
+def _copy_nofollow(src: str, dst: str, **_kwargs) -> None:
+    """Copy a regular file, refusing to follow symlinks (TOCTOU-safe).
+
+    Opens the source with O_NOFOLLOW so that even if the agent replaces
+    a regular file with a symlink between our is_symlink() check and
+    this open, the open fails instead of following the symlink.
+    """
+    try:
+        fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        # O_NOFOLLOW raises ELOOP on symlinks. Also skip other errors.
+        return
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return
+        dst_obj = Path(dst)
+        if dst_obj.exists() and not os.access(dst, os.W_OK):
+            dst_obj.unlink()
+        with open(fd, "rb", closefd=False) as src_f:
+            with open(dst, "wb") as dst_f:
+                shutil.copyfileobj(src_f, dst_f)
+        shutil.copystat(src, dst, follow_symlinks=False)
+    finally:
+        os.close(fd)
 
 
 def _norm(base: Path, rel: str) -> Path:
@@ -14,11 +42,43 @@ def _norm(base: Path, rel: str) -> Path:
 
 
 def _check_in_dir(path: Path, directory: Path) -> None:
-    """Raise SystemExit if path is not inside directory (no symlink following)."""
-    norm_dir = str(Path(os.path.normpath(directory)))
-    norm_path = str(path)
-    if norm_path != norm_dir and not norm_path.startswith(norm_dir + os.sep):
+    """Raise SystemExit if path is not inside directory.
+
+    Resolves symlinks in existing ancestor components to catch symlink
+    escapes (e.g. agent creates evil -> /etc in worktree, user copies
+    to cave:evil/target which would write to /etc/target on host).
+    """
+    real_dir = str(directory.resolve())
+    # Resolve what exists, keep the tail that doesn't exist yet.
+    # This catches symlinks in intermediate directories.
+    real_path = str(_resolve_existing(path))
+    if real_path != real_dir and not real_path.startswith(real_dir + os.sep):
         raise SystemExit(f"Path escapes worktree: {path}")
+
+
+def _resolve_existing(path: Path) -> Path:
+    """Resolve symlinks in the existing prefix of a path.
+
+    For /a/b/c where /a/b exists but c doesn't, resolves /a/b
+    and appends c. This catches symlink escapes in intermediate
+    directories without requiring the leaf to exist.
+    """
+    path = Path(os.path.normpath(path))
+    if path.exists() or path.is_symlink():
+        return path.resolve()
+    # Walk up to find the existing ancestor, resolve it, append the rest
+    parts = []
+    current = path
+    while not current.exists() and not current.is_symlink():
+        parts.append(current.name)
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    resolved = current.resolve()
+    for part in reversed(parts):
+        resolved = resolved / part
+    return resolved
 
 
 def _worktree_for_slug(slug: str, agent_id: str | None) -> Path:
@@ -184,6 +244,9 @@ def cp(srcs: list[str], dest: str, recursive: bool = False, force: bool = False)
 
     elif src_path is not None:
         # cave -> host
+        # Use O_NOFOLLOW to atomically reject symlinks, preventing TOCTOU
+        # where the agent replaces a regular file with a symlink between
+        # our check and the copy.
         if src_path.is_symlink():
             raise SystemExit(f"Refusing to copy symlink from cave: {srcs[0]}")
         if not src_path.exists():
@@ -201,16 +264,10 @@ def cp(srcs: list[str], dest: str, recursive: bool = False, force: bool = False)
             if answer != "y":
                 raise SystemExit("Aborted.")
         if src_path.is_dir():
-            def _copy_no_symlinks(src, dst, **kwargs):
-                if Path(src).is_symlink():
-                    return
-                dst_obj = Path(dst)
-                if dst_obj.exists() and not os.access(dst, os.W_OK):
-                    dst_obj.unlink()
-                shutil.copy2(src, dst, **kwargs)
-            shutil.copytree(src_path, base, dirs_exist_ok=True, copy_function=_copy_no_symlinks)
+            shutil.copytree(src_path, base, dirs_exist_ok=True,
+                            copy_function=_copy_nofollow)
         else:
-            shutil.copy2(src_path, base)
+            _copy_nofollow(str(src_path), str(base))
         print(f"  {srcs[0]} -> {dest}", file=sys.stderr)
 
     else:
