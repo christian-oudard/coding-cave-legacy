@@ -12,9 +12,26 @@ daemon handler). No identity = user (unrestricted).
 
 import os
 import re
+import subprocess
 import sys
 
 AGENT_BRANCH_RE = re.compile(r"^agent-(\d+)/(.+)$")
+ZERO_SHA = "0" * 40
+
+
+def _is_ancestor(old: str, new: str) -> bool:
+    return subprocess.run(
+        ["git", "merge-base", "--is-ancestor", old, new],
+        capture_output=True,
+    ).returncode == 0
+
+
+def _agent_tip(branch: str) -> str | None:
+    r = subprocess.run(
+        ["git", "rev-parse", "--verify", f"refs/cav/agent-tip/{branch}"],
+        capture_output=True, text=True,
+    )
+    return r.stdout.strip() if r.returncode == 0 else None
 
 
 def get_agent_name() -> str | None:
@@ -69,6 +86,20 @@ def check_ref(old_sha: str, new_sha: str, ref: str, agent: str | None) -> str | 
                 f"REJECTED: Agent {agent} cannot push to '{branch}'.\n"
                 f"You may only push to branches matching '*/agent-{agent}'."
             )
+
+        # On non-FF push, protect user commits. Compare old_sha against
+        # the recorded agent tip (last SHA pushed by this agent). If they
+        # differ, someone else (the user) advanced the branch.
+        if (old_sha != ZERO_SHA and new_sha != ZERO_SHA
+                and not _is_ancestor(old_sha, new_sha)):
+            tip = _agent_tip(branch)
+            if tip is not None and tip != old_sha:
+                return (
+                    f"REJECTED: Agent {agent} force-push would overwrite "
+                    f"commits on '{branch}' not pushed by this agent.\n"
+                    f"Pull the user's changes first."
+                )
+
         return None
     else:
         # Base branch: agents cannot push

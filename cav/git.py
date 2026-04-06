@@ -101,6 +101,13 @@ def commit_timestamp(ref: str, cwd=None) -> float | None:
         return None
 
 
+def update_agent_tip(shared, branch: str):
+    """Record agent-tip so the pre-receive hook can protect user commits."""
+    sha = git_output("rev-parse", f"refs/heads/{branch}", cwd=shared)
+    git("update-ref", f"refs/cav/agent-tip/{branch}", sha,
+        cwd=shared, echo=False, check=False, capture=True)
+
+
 def commit_oneline(range_spec: str, exclude: list[str] | None = None, cwd=None) -> list[str]:
     """Return commit lines in --oneline format for a range (newest first)."""
     args = ["log", "--oneline", range_spec]

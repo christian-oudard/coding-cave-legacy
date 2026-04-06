@@ -20,13 +20,13 @@ def pull(base: Path, force: bool = False):
 
     # Step 1: Sync agent worktree tip to shared remote.
     # Objects are shared via alternates; this is mostly a ref update.
-    _sync_agent_to_shared(base, slug, local_branch, agent_id, force)
-
-    # Step 2: Fetch from shared remote to host.
-    git.git("fetch", "--prune", config.CAVE_SHARED_REMOTE, cwd=base, **config.v())
+    _sync_agent_to_shared(base, slug, local_branch, agent_id)
 
     remote_dev = f"{config.CAVE_SHARED_REMOTE}/{local_branch}"
     remote_base = f"{config.CAVE_SHARED_REMOTE}/{base_name}"
+
+    # Step 2: Fetch from shared remote to host.
+    git.git("fetch", "--prune", config.CAVE_SHARED_REMOTE, cwd=base, **config.v())
 
     try:
         git.git_output("rev-parse", remote_dev, cwd=base)
@@ -54,6 +54,30 @@ def pull(base: Path, force: bool = False):
         print("Already up to date.")
         return
 
+    # Refuse to overwrite user commits. Commits that exist in the shared
+    # bare repo came from the agent (prior pushes); commits that only exist
+    # locally were made by the user on the host.
+    local_only = git.git_output(
+        "log", "--oneline", f"{remote_dev}..{local_branch}", cwd=base)
+    if local_only and not force:
+        shared = config.shared_repo_path(base)
+        user_lines = []
+        for line in local_only.splitlines():
+            sha = line.split()[0]
+            r = git.git("cat-file", "-t", sha,
+                        cwd=shared, check=False, capture=True, echo=False)
+            if r.returncode != 0:
+                user_lines.append(line)
+        local_only = "\n".join(user_lines) if user_lines else ""
+    if local_only and not force:
+        count = len(local_only.splitlines())
+        n = "commit" if count == 1 else "commits"
+        raise SystemExit(
+            f"Local {n} on '{local_branch}' would be overwritten:\n"
+            f"{local_only}\n"
+            f"Use 'cav pull --force' to discard them."
+        )
+
     git.git("reset", "--hard", remote_dev, cwd=base, **config.v())
     print(f"Reset '{local_branch}' to '{remote_dev}'.")
 
@@ -61,11 +85,11 @@ def pull(base: Path, force: bool = False):
 
 
 def _sync_agent_to_shared(base: Path, slug: str, dev_branch: str,
-                           agent_id: str, force: bool):
+                           agent_id: str):
     """Fetch agent worktree's dev branch into the shared remote (bare repo).
 
-    Uses git fetch in the bare repo from the worktree path. No hooks fire
-    for fetches, and alternates mean minimal object transfer.
+    Always force-fetches so agent history rewrites are accepted. User commits
+    are protected separately in the main pull path.
     """
     ws = config.worktree_dir(slug, agent_id)
     if not ws.exists():
@@ -81,16 +105,12 @@ def _sync_agent_to_shared(base: Path, slug: str, dev_branch: str,
     except Exception:
         return
 
-    prefix = "+" if force else ""
-    refspec = f"{prefix}refs/heads/{dev_branch}:refs/heads/{dev_branch}"
-
+    refspec = f"+refs/heads/{dev_branch}:refs/heads/{dev_branch}"
     r = git.git("fetch", str(ws), refspec,
                 cwd=shared, check=False, capture=True, echo=False)
-    if r.returncode != 0 and not force:
-        raise SystemExit(
-            f"Agent has rewritten history on '{dev_branch}'.\n"
-            f"Use 'cav pull --force' to accept the rewrite."
-        )
+    if r.returncode == 0:
+        git.update_agent_tip(shared, dev_branch)
+
 
 
 def _show_ahead(base, remote_base, remote_dev, base_name):

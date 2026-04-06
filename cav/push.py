@@ -77,10 +77,45 @@ def _push_dev(base: Path, branch: str, agent_id: str, force: bool):
     except Exception:
         return r
     if current == branch:
-        git.git("reset", "--hard",
-                f"{config.HOST_SHARED_REMOTE}/{branch}",
-                cwd=ws, echo=False, check=False, capture=True)
+        _sync_agent_worktree(ws, branch, force)
+
+    # Agent worktree now has the pushed state, so update agent-tip
+    # to let the agent amend freely from this point.
+    git.update_agent_tip(shared, branch)
     return r
+
+
+def _sync_agent_worktree(ws: Path, branch: str, force: bool):
+    """Update the agent worktree to match the pushed dev branch.
+
+    Preserves uncommitted work via stash. If the stash pop conflicts,
+    the conflict markers are left for the agent to resolve.
+    """
+    remote_ref = f"{config.HOST_SHARED_REMOTE}/{branch}"
+    q = dict(echo=False, check=False, capture=True)
+
+    # Stash uncommitted changes
+    has_changes = bool(git.git_output("status", "--porcelain", cwd=ws))
+    if has_changes:
+        git.git("stash", cwd=ws, **q)
+
+    if force:
+        git.git("reset", "--hard", remote_ref, cwd=ws, **q)
+    else:
+        # Non-force push was FF to shared remote, so this should be FF too.
+        r = git.git("merge", "--ff-only", remote_ref, cwd=ws, **q)
+        if r.returncode != 0:
+            # Agent has unpushed commits (e.g. daemon was down). Try rebase.
+            r = git.git("rebase", remote_ref, cwd=ws, **q)
+            if r.returncode != 0:
+                git.git("rebase", "--abort", cwd=ws, **q)
+                git.git("reset", "--hard", remote_ref, cwd=ws, **q)
+                print(f"Warning: could not rebase agent worktree, reset to pushed state.")
+
+    if has_changes:
+        r = git.git("stash", "pop", cwd=ws, **q)
+        if r.returncode != 0:
+            print(f"Warning: agent worktree has merge conflicts from pushed changes.")
 
 
 def _rebase_agents(base: Path, base_branch: str):
@@ -125,5 +160,6 @@ def _rebase_agents(base: Path, base_branch: str):
         git.git("fetch", str(ws),
                 f"+refs/heads/{branch}:refs/heads/{branch}",
                 cwd=shared, echo=False, check=False, capture=True)
+        git.update_agent_tip(shared, branch)
 
         print(f"Rebased {branch} onto {base_branch}.")

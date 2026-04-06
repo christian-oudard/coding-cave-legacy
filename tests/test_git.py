@@ -340,8 +340,8 @@ class TestCAV(unittest.TestCase):
         branches = git_out("branch", "-r", cwd=self.user_repo)
         self.assertIn("cave/agent-1/main", branches)
 
-    def test_pull_agent_branch_resets_to_remote(self):
-        """cav pull on a dev branch hard-resets to the remote dev branch."""
+    def test_pull_refuses_overwriting_local_commits(self):
+        """cav pull refuses to overwrite local commits without --force."""
         agents = self._init_and_agents("1")
         ws = agents["1"]
 
@@ -355,7 +355,7 @@ class TestCAV(unittest.TestCase):
         git("fetch", "cave", cwd=self.user_repo)
         git("checkout", "-b", "agent-1/main", "cave/agent-1/main", cwd=self.user_repo)
 
-        # User makes a local commit (simulating divergence)
+        # User makes a local commit
         (self.user_repo / "local.py").write_text("# local\n")
         git("add", "local.py", cwd=self.user_repo)
         git("commit", "-m", "Local change", cwd=self.user_repo)
@@ -366,8 +366,18 @@ class TestCAV(unittest.TestCase):
         git("commit", "--amend", "-m", "WIP v2", cwd=ws)
         git("push", "--force", "host-cave", "agent-1/main", cwd=ws, env=agent_env("1"))
 
-        # cav pull should reset to remote, discarding local divergence
-        cav_cli("pull", cwd=self.user_repo)
+        # cav pull without --force should refuse
+        r = cav_cli("pull", cwd=self.user_repo, check=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("Local change", r.stderr)
+        self.assertIn("--force", r.stderr)
+
+        # Local commit should still be there
+        log = git_out("log", "--oneline", cwd=self.user_repo)
+        self.assertIn("Local change", log)
+
+        # cav pull --force should overwrite
+        cav_cli("pull", "--force", cwd=self.user_repo)
 
         log = git_out("log", "--oneline", cwd=self.user_repo)
         self.assertIn("WIP v2", log)
@@ -377,6 +387,128 @@ class TestCAV(unittest.TestCase):
         content = (self.user_repo / "wip.py").read_text()
         self.assertEqual(content, "# v2\n")
         self.assertFalse((self.user_repo / "local.py").exists())
+
+    def test_pull_accepts_agent_rewrite_without_force(self):
+        """cav pull accepts agent history rewrites when no user commits exist."""
+        agents = self._init_and_agents("1")
+        ws = agents["1"]
+
+        # Agent makes a commit and pushes
+        (ws / "wip.py").write_text("# v1\n")
+        git("add", "wip.py", cwd=ws)
+        git("commit", "-m", "WIP v1", cwd=ws)
+        git("push", "host-cave", "agent-1/main", cwd=ws, env=agent_env("1"))
+
+        # User pulls
+        git("fetch", "cave", cwd=self.user_repo)
+        git("checkout", "-b", "agent-1/main", "cave/agent-1/main",
+            cwd=self.user_repo)
+
+        # Agent amends and force-pushes
+        (ws / "wip.py").write_text("# v2\n")
+        git("add", "wip.py", cwd=ws)
+        git("commit", "--amend", "-m", "WIP v2", cwd=ws)
+        git("push", "--force", "host-cave", "agent-1/main",
+            cwd=ws, env=agent_env("1"))
+
+        # cav pull should succeed without --force
+        cav_cli("pull", cwd=self.user_repo)
+
+        log = git_out("log", "--oneline", cwd=self.user_repo)
+        self.assertIn("WIP v2", log)
+        self.assertNotIn("WIP v1", log)
+
+        content = (self.user_repo / "wip.py").read_text()
+        self.assertEqual(content, "# v2\n")
+
+    def test_agent_force_push_rejects_over_user_commits(self):
+        """Agent force-push must not clobber user commits on agent branch."""
+        agents = self._init_and_agents("1")
+        ws = agents["1"]
+
+        # Agent pushes initial commit
+        (ws / "wip.py").write_text("# v1\n")
+        git("add", "wip.py", cwd=ws)
+        git("commit", "-m", "WIP v1", cwd=ws)
+        git("push", "host-cave", "agent-1/main", cwd=ws, env=agent_env("1"))
+
+        # User adds a commit on the agent branch and pushes to shared remote
+        git("fetch", "cave", cwd=self.user_repo)
+        git("checkout", "-b", "agent-1/main", "cave/agent-1/main",
+            cwd=self.user_repo)
+        (self.user_repo / "user.py").write_text("# user fix\n")
+        git("add", "user.py", cwd=self.user_repo)
+        git("commit", "-m", "User fix", cwd=self.user_repo)
+        git("push", "cave", "agent-1/main", cwd=self.user_repo)
+
+        # Agent amends and tries to force-push (should be rejected)
+        (ws / "wip.py").write_text("# v2\n")
+        git("add", "wip.py", cwd=ws)
+        git("commit", "--amend", "-m", "WIP v2", cwd=ws)
+        r = git("push", "--force", "host-cave", "agent-1/main",
+                cwd=ws, env=agent_env("1"), check=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("REJECTED", r.stderr)
+
+    def test_agent_can_amend_after_cav_push(self):
+        """Agent can amend after cav push resets its worktree."""
+        agents = self._init_and_agents("1")
+        ws = agents["1"]
+
+        # Agent pushes initial commit
+        (ws / "wip.py").write_text("# v1\n")
+        git("add", "wip.py", cwd=ws)
+        git("commit", "-m", "WIP v1", cwd=ws)
+        git("push", "host-cave", "agent-1/main", cwd=ws, env=agent_env("1"))
+
+        # User pushes to the dev branch (resets agent worktree)
+        git("fetch", "cave", cwd=self.user_repo)
+        git("checkout", "-b", "agent-1/main", "cave/agent-1/main",
+            cwd=self.user_repo)
+        (self.user_repo / "fix.py").write_text("# user fix\n")
+        git("add", "fix.py", cwd=self.user_repo)
+        git("commit", "-m", "User fix", cwd=self.user_repo)
+        cav_cli("push", cwd=self.user_repo)
+
+        # Agent should be able to amend (force-push) from the new state
+        (ws / "fix.py").write_text("# improved fix\n")
+        git("add", "fix.py", cwd=ws)
+        git("commit", "--amend", "-m", "Improved fix", cwd=ws)
+        r = git("push", "--force", "host-cave", "agent-1/main",
+                cwd=ws, env=agent_env("1"), check=False)
+        self.assertEqual(r.returncode, 0)
+
+    def test_push_dev_preserves_agent_uncommitted_work(self):
+        """cav push to dev branch preserves agent's uncommitted changes."""
+        agents = self._init_and_agents("1")
+        ws = agents["1"]
+
+        # Agent pushes initial commit
+        (ws / "feature.py").write_text("# v1\n")
+        git("add", "feature.py", cwd=ws)
+        git("commit", "-m", "Initial feature", cwd=ws)
+        git("push", "host-cave", "agent-1/main", cwd=ws, env=agent_env("1"))
+
+        # Agent starts working on something (uncommitted)
+        (ws / "wip.py").write_text("# work in progress\n")
+        git("add", "wip.py", cwd=ws)
+
+        # User pushes a non-conflicting commit
+        git("fetch", "cave", cwd=self.user_repo)
+        git("checkout", "-b", "agent-1/main", "cave/agent-1/main",
+            cwd=self.user_repo)
+        (self.user_repo / "fix.py").write_text("# user fix\n")
+        git("add", "fix.py", cwd=self.user_repo)
+        git("commit", "-m", "User fix", cwd=self.user_repo)
+        cav_cli("push", cwd=self.user_repo)
+
+        # Agent's uncommitted work should still be there
+        self.assertTrue((ws / "wip.py").exists())
+        self.assertEqual((ws / "wip.py").read_text(), "# work in progress\n")
+
+        # User's commit should be in the agent's history
+        log = git_out("log", "--oneline", cwd=ws)
+        self.assertIn("User fix", log)
 
     def test_pull_agent_branch_preserves_main_upstream(self):
         """cav pull on dev branch must not hijack main's upstream to shared remote."""

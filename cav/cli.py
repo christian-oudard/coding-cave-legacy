@@ -278,7 +278,7 @@ def reject(agent_id, yes):
 
 @cli.command()
 @click.option("-f", "--force", is_flag=True,
-              help="Accept history rewrites from agent")
+              help="Overwrite local commits and accept agent history rewrites")
 def pull(force):
     """Pull dev branch from shared remote."""
     base = find_repo_root()
