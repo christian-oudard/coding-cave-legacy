@@ -14,7 +14,7 @@ HOST_SHARED_REMOTE = "host-cave"
 AGENT_ID_RE = re.compile(r"^\d+$")
 # agent-<id>/<base>, e.g. agent-1/develop
 AGENT_BRANCH_RE = re.compile(r"^agent-(\d+)/(.+)$")
-DAEMON_BASE_PORT = 9400
+DAEMON_BASE_PORT = 61000
 
 DATA_DIR = Path(os.environ.get(
     "CODING_CAVE_DATA_DIR",

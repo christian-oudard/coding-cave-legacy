@@ -313,8 +313,8 @@ class TestAgentIsolation(DaemonSecurityBase):
         At the daemon level, identity is bound to which daemon serves the
         connection, not which client connects. This test confirms the daemon
         behavior. The actual mitigation is in sandbox.py: each top-level
-        agent runs inside a pasta network namespace that only forwards its
-        own daemon port, making other agents' ports unreachable.
+        agent runs inside a slirp4netns network namespace that only forwards
+        its own daemon port, making other agents' ports unreachable.
         """
         # Start a second daemon for agent 2
         daemon2_proc, daemon2_dir = daemon.start(
@@ -333,9 +333,9 @@ class TestAgentIsolation(DaemonSecurityBase):
                 cwd=ws1, check=False,
             )
             # At the daemon level this succeeds (agent 2's daemon sets
-            # CODING_CAVE_AGENT_ID=2). Mitigated by pasta network isolation.
+            # CODING_CAVE_AGENT_ID=2). Mitigated by slirp4netns isolation.
             self.assertEqual(result.returncode, 0,
-                "Expected port-hop push to succeed (mitigated by pasta)")
+                "Expected port-hop push to succeed (mitigated by slirp4netns)")
         finally:
             daemon.stop(daemon2_proc, daemon2_dir)
 
@@ -351,6 +351,138 @@ class TestAgentIsolation(DaemonSecurityBase):
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("REJECTED", result.stderr)
+
+
+class TestNamespaceFirewall(unittest.TestCase):
+    """Verify iptables rules applied via nsenter from the parent survive
+    attacks from the inner user namespace (simulating bwrap's sandbox)."""
+
+    def _have(self, *bins):
+        for b in bins:
+            if not shutil.which(b):
+                self.skipTest(f"{b} not available")
+
+    def test_inner_namespace_cannot_modify_outer_iptables(self):
+        """Agent in bwrap's inner user namespace cannot flush, delete,
+        insert, or change policy on iptables rules set via nsenter
+        from the parent."""
+        self._have("iptables-restore", "nsenter")
+        result = subprocess.run(
+            [sys.executable, "-c", _IPTABLES_TEST_CODE],
+            capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0,
+            f"Namespace firewall test failed:\n{result.stderr}")
+
+    def test_iptables_restore_works_in_empty_netns(self):
+        """Firewall rules can be applied before slirp4netns starts."""
+        self._have("iptables-restore", "nsenter")
+        result = subprocess.run(
+            [sys.executable, "-c", _IPTABLES_EMPTY_NETNS_CODE],
+            capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0,
+            f"Empty netns iptables test failed:\n{result.stderr}")
+
+
+# Test: parent applies iptables via nsenter, inner namespace can't modify.
+# Mirrors the real startup: parent creates rules, bwrap inner ns attacks.
+_IPTABLES_TEST_CODE = r'''
+import os, subprocess, sys
+from pathlib import Path
+
+sync_r, sync_w = os.pipe()
+
+child = os.fork()
+if child == 0:
+    os.close(sync_r)
+    uid, gid = os.getuid(), os.getgid()
+    os.unshare(os.CLONE_NEWUSER | os.CLONE_NEWNS | os.CLONE_NEWNET)
+    Path("/proc/self/setgroups").write_text("deny")
+    Path("/proc/self/uid_map").write_text(f"0 {uid} 1\n")
+    Path("/proc/self/gid_map").write_text(f"0 {gid} 1\n")
+    os.write(sync_w, b"1")
+    os.close(sync_w)
+
+    # Wait for parent to apply firewall, then test from inner namespace.
+    import time; time.sleep(1)
+
+    inner = os.fork()
+    if inner == 0:
+        os.unshare(os.CLONE_NEWUSER)
+        Path("/proc/self/setgroups").write_text("deny")
+        Path("/proc/self/uid_map").write_text("0 0 1\n")
+        Path("/proc/self/gid_map").write_text("0 0 1\n")
+        attacks = [
+            ["iptables", "-F"],
+            ["iptables", "-D", "OUTPUT", "-d", "10.0.2.2", "-j", "DROP"],
+            ["iptables", "-I", "OUTPUT", "-d", "10.0.2.2", "-j", "ACCEPT"],
+            ["iptables", "-P", "OUTPUT", "ACCEPT"],
+        ]
+        for cmd in attacks:
+            r = subprocess.run(cmd, capture_output=True, text=True)
+            if r.returncode == 0:
+                sys.stderr.write(f"ATTACK SUCCEEDED: {cmd}\n")
+                os._exit(1)
+        os._exit(0)
+    _, status = os.waitpid(inner, 0)
+    os._exit(os.WEXITSTATUS(status))
+
+os.close(sync_w)
+os.read(sync_r, 1)
+os.close(sync_r)
+
+# Parent applies firewall via nsenter (mirrors _apply_firewall).
+rules = "*filter\n-A OUTPUT -d 10.0.2.2 -j DROP\nCOMMIT\n"
+r = subprocess.run(
+    ["nsenter", "--preserve-credentials",
+     f"--user=/proc/{child}/ns/user", f"--net=/proc/{child}/ns/net",
+     "iptables-restore"],
+    input=rules, text=True, capture_output=True)
+assert r.returncode == 0, f"iptables-restore failed: {r.stderr}"
+
+_, status = os.waitpid(child, 0)
+sys.exit(os.WEXITSTATUS(status))
+'''
+
+# Test: iptables-restore works in an empty namespace (no TAP, no routes).
+# Confirms the firewall-before-network invariant.
+_IPTABLES_EMPTY_NETNS_CODE = r'''
+import os, subprocess, sys
+from pathlib import Path
+
+sync_r, sync_w = os.pipe()
+
+child = os.fork()
+if child == 0:
+    os.close(sync_r)
+    uid, gid = os.getuid(), os.getgid()
+    os.unshare(os.CLONE_NEWUSER | os.CLONE_NEWNS | os.CLONE_NEWNET)
+    Path("/proc/self/setgroups").write_text("deny")
+    Path("/proc/self/uid_map").write_text(f"0 {uid} 1\n")
+    Path("/proc/self/gid_map").write_text(f"0 {gid} 1\n")
+    os.write(sync_w, b"1")
+    os.close(sync_w)
+    import time; time.sleep(1)
+    # Verify rules are present in the empty namespace.
+    r = subprocess.run(["iptables", "-L", "OUTPUT", "-n"],
+                       capture_output=True, text=True)
+    os._exit(0 if "DROP" in r.stdout else 1)
+
+os.close(sync_w)
+os.read(sync_r, 1)
+os.close(sync_r)
+
+# Apply firewall to empty namespace (no interfaces configured yet).
+rules = "*filter\n-A OUTPUT -d 10.0.2.2 -j DROP\nCOMMIT\n"
+r = subprocess.run(
+    ["nsenter", "--preserve-credentials",
+     f"--user=/proc/{child}/ns/user", f"--net=/proc/{child}/ns/net",
+     "iptables-restore"],
+    input=rules, text=True, capture_output=True)
+assert r.returncode == 0, f"iptables-restore failed: {r.stderr}"
+
+_, status = os.waitpid(child, 0)
+sys.exit(os.WEXITSTATUS(status))
+'''
 
 
 class TestDaemonStress(DaemonSecurityBase):

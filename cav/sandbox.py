@@ -179,10 +179,8 @@ def _gpg_socket() -> str | None:
 
 
 CRINJ_PORT = 10255
-# Inside pasta's network namespace, 127.0.0.1 is the namespace's own
-# loopback. Host loopback is mapped to this address via pasta's
-# --map-host-loopback so the cave can reach host-side services.
-PASTA_HOST_LOOPBACK = "10.0.2.2"
+# slirp4netns built-in DNS forwarder address.
+SLIRP_DNS = "10.0.2.3"
 
 
 def _host_home() -> Path:
@@ -440,8 +438,8 @@ def _setup_shared_nix_overlay() -> str:
     launches and is not torn down when an agent exits.
 
     Tries a direct mount (works when fusermount3 is setuid). If that fails,
-    defers the mount to _nix_overlay_preexec() which runs in the child
-    process after unshare(NEWUSER|NEWNS).
+    defers the mount to cave-ns.sh which runs inside the user namespace
+    created by unshare(1).
     """
     upper, work, merged = _nix_overlay_dirs()
 
@@ -451,30 +449,80 @@ def _setup_shared_nix_overlay() -> str:
     try:
         _mount_fuse_overlay(upper, work, merged)
     except subprocess.CalledProcessError:
-        pass  # Deferred: mounted in child via _nix_overlay_preexec()
+        pass  # Deferred: mounted in child via cave-ns.sh
 
     return str(merged)
 
 
-def _nix_overlay_preexec():
-    """Mount nix overlay inside a child user+mount namespace.
+SLIRP_GATEWAY = "10.0.2.2"
 
-    Called as preexec_fn when the direct mount in _setup_shared_nix_overlay
-    failed (fusermount3 not setuid). Creates a user namespace with mount
-    capability, then mounts fuse-overlayfs before exec.
+# Substituted at nix build time with the cave-ns.sh helper path.
+CAVE_NS_SH = "@CAVE_NS_SH@"
+
+
+def _apply_firewall(pid: int, allowed_ports: list[int]):
+    """Apply iptables firewall rules inside the child's network namespace.
+
+    Uses nsenter to enter the child's user+net namespace and applies rules
+    atomically via iptables-restore. Only the listed TCP ports can reach
+    the gateway (host loopback). All other gateway traffic is dropped.
+
+    The rules live in the outer user namespace, so bwrap's inner user
+    namespace (where the agent runs) cannot modify them.
     """
-    upper, work, merged = _nix_overlay_dirs()
-    if any(merged.iterdir()):
-        return  # Already mounted (direct mount succeeded)
+    rules = "*filter\n"
+    for port in allowed_ports:
+        rules += (f"-A OUTPUT -d {SLIRP_GATEWAY} -p tcp"
+                  f" --dport {port} -j ACCEPT\n")
+    rules += f"-A OUTPUT -d {SLIRP_GATEWAY} -j DROP\nCOMMIT\n"
 
-    uid = os.getuid()
-    gid = os.getgid()
-    os.unshare(os.CLONE_NEWUSER | os.CLONE_NEWNS)
-    Path("/proc/self/setgroups").write_text("deny")
-    Path("/proc/self/uid_map").write_text(f"0 {uid} 1\n")
-    Path("/proc/self/gid_map").write_text(f"0 {gid} 1\n")
+    nsenter = shutil.which("nsenter")
+    if not nsenter:
+        raise SystemExit("nsenter not found on PATH (install util-linux)")
+    iptables_restore = shutil.which("iptables-restore")
+    if not iptables_restore:
+        raise SystemExit(
+            "iptables-restore not found on PATH (install iptables)")
 
-    _mount_fuse_overlay(upper, work, merged)
+    r = subprocess.run(
+        [nsenter, "--preserve-credentials",
+         f"--user=/proc/{pid}/ns/user", f"--net=/proc/{pid}/ns/net",
+         iptables_restore],
+        input=rules, text=True, capture_output=True)
+    if r.returncode != 0:
+        raise SystemExit(f"iptables-restore failed: {r.stderr.strip()}")
+
+
+def _start_slirp4netns(pid: int) -> subprocess.Popen:
+    """Start slirp4netns for a child process.
+
+    Configures tap0 with default 10.0.2.0/24 network. Uses --ready-fd
+    to know when networking is fully configured before returning.
+    """
+    slirp_bin = shutil.which("slirp4netns")
+    if not slirp_bin:
+        raise SystemExit("slirp4netns not found on PATH")
+
+    ready_r, ready_w = os.pipe()
+    slirp_proc = subprocess.Popen(
+        [slirp_bin, "--configure", f"--ready-fd={ready_w}",
+         str(pid), "tap0"],
+        start_new_session=True,
+        pass_fds=(ready_w,),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    os.close(ready_w)
+
+    # Block until slirp4netns signals the network is ready.
+    os.read(ready_r, 1)
+    os.close(ready_r)
+
+    if slirp_proc.poll() is not None:
+        raise SystemExit(
+            f"slirp4netns exited with code {slirp_proc.returncode}")
+
+    return slirp_proc
 
 
 
@@ -541,11 +589,11 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
         wrapper.write_text(GIT_WRAPPER)
         wrapper.chmod(0o755)
 
-    # Network isolation: every nesting level gets its own pasta network
-    # namespace. Each level's services bind to 127.0.0.1 and the parent
-    # is reachable at 10.0.2.2 via --map-host-loopback, so port numbers
-    # are reused without conflict at any depth.
-    daemon_host = PASTA_HOST_LOOPBACK
+    # Network isolation: every nesting level gets its own network
+    # namespace via slirp4netns. Only the agent's daemon port and crinj
+    # proxy port are forwarded via add_hostfwd. Other host loopback
+    # services (including other agents' daemons) are unreachable.
+    daemon_host = SLIRP_GATEWAY
 
     # Migrate old workspaces: rename "cave" -> "host-cave" if needed.
     for ws, _, _ in workspaces:
@@ -556,7 +604,7 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
                     cwd=ws, echo=False, check=False, capture=True)
 
     # Update workspace remotes to use git:// via daemon (localhost for
-    # host-side sync, then switch to pasta address for inside the namespace)
+    # host-side sync, then switch to slirp address for inside the namespace)
     for ws, _, slug in workspaces:
         url = daemon.remote_url(agent_id, slug)
         git.git("remote", "set-url", config.HOST_SHARED_REMOTE, url,
@@ -577,7 +625,7 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
             git.git("branch", "-f", branch, remote_ref, cwd=ws,
                     echo=False, check=False, capture=True)
 
-    # Now set the remote to the pasta-reachable address for inside the namespace
+    # Now set the remote to the slirp-reachable address for inside the namespace
     for ws, _, slug in workspaces:
         url = daemon.remote_url(agent_id, slug, host=daemon_host)
         git.git("remote", "set-url", config.HOST_SHARED_REMOTE, url,
@@ -636,7 +684,7 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
     if recursive:
         env["CODING_CAVE_RECURSIVE"] = "1"
 
-    env["CODING_CAVE_DNS_SERVER"] = PASTA_HOST_LOOPBACK
+    env["CODING_CAVE_DNS_SERVER"] = SLIRP_DNS
 
     # Lineage: build dot-separated chain of parent agent names
     parent_lineage = os.environ.get("CODING_CAVE_LINEAGE", "")
@@ -701,23 +749,62 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
                 claude_cmd += ["--resume", session_id]
             else:
                 claude_cmd += ["--session-id", session_id]
-        pasta_bin = shutil.which("pasta")
-        if not pasta_bin:
-            raise SystemExit("pasta not found on PATH (install passt package)")
-        pasta_cmd = [
-            pasta_bin, "--quiet", "--config-net",
-            "--map-host-loopback", PASTA_HOST_LOOPBACK,
-            "--dns-forward", PASTA_HOST_LOOPBACK,
-            "-t", "none",
-            "-u", "none", "-U", "none",
-            "--",
-        ]
+        daemon_port = daemon._agent_port(agent_id)
 
-        preexec = _nix_overlay_preexec
+        # One-directional sync pipe: cave-ns.sh writes a byte after
+        # unshare(1) has created the namespace, then continues exec'ing
+        # into bwrap without waiting. The parent reads the byte, applies
+        # iptables (firewall before network), then starts slirp4netns.
+        # No handshake needed: the child has no network until slirp4netns
+        # starts, and nothing in the bwrap exec chain makes network calls.
+        sync_r, sync_w = os.pipe()
+        os.set_inheritable(sync_w, True)
+
+        # Nix overlay env vars for cave-ns.sh.
+        upper, work, merged = _nix_overlay_dirs()
+        env["CAVE_NS_SYNC_FD"] = str(sync_w)
+        env["CAVE_NS_OVERLAY_MERGED"] = str(merged)
+        env["CAVE_NS_OVERLAY_UPPER"] = str(upper)
+        env["CAVE_NS_OVERLAY_WORK"] = str(work)
+
+        # cave-ns.sh runs inside unshare(1) without nix-wrapped PATH.
+        # Resolve absolute paths for the binaries it needs.
+        mountpoint_bin = shutil.which("mountpoint")
+        if mountpoint_bin:
+            env["CAVE_NS_MOUNTPOINT"] = mountpoint_bin
+        fuse_overlayfs_bin = shutil.which("fuse-overlayfs")
+        if fuse_overlayfs_bin:
+            env["CAVE_NS_FUSE_OVERLAYFS"] = fuse_overlayfs_bin
+
+        unshare_bin = shutil.which("unshare")
+        if not unshare_bin:
+            raise SystemExit("unshare not found on PATH (install util-linux)")
+
+        # Map to uid/gid 0 inside the namespace so iptables-restore
+        # (nf_tables backend) works. It checks getuid()==0 rather than
+        # capabilities. bwrap creates its own inner user namespace so
+        # the outer uid doesn't matter for the agent process.
+        ns_cmd = [
+            unshare_bin, "--user", "--net", "--mount",
+            "--map-user=0", "--map-group=0",
+            "--", CAVE_NS_SH,
+        ] + claude_cmd
 
         log.info("launching sandbox...")
-        proc = subprocess.Popen(pasta_cmd + claude_cmd, env=env,
-                                preexec_fn=preexec)
+        proc = subprocess.Popen(ns_cmd, env=env, close_fds=False)
+        os.close(sync_w)
+
+        # Wait for cave-ns.sh to signal that the namespace exists.
+        data = os.read(sync_r, 1)
+        os.close(sync_r)
+        if not data:
+            raise SystemExit("sandbox child died during namespace setup")
+
+        # Apply firewall before starting network. Zero gap.
+        _apply_firewall(proc.pid, [daemon_port, CRINJ_PORT])
+
+        # Start slirp4netns (network comes up after firewall).
+        slirp_proc = _start_slirp4netns(proc.pid)
 
         def fwd(s, _f):
             _signal_descendants(proc.pid, s)
@@ -730,6 +817,8 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
         try:
             return proc.wait()
         finally:
+            slirp_proc.terminate()
+            slirp_proc.wait(timeout=5)
             for s, handler in orig.items():
                 signal.signal(s, handler)
 

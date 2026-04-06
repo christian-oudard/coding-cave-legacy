@@ -101,7 +101,7 @@
             '')
 
             # Subcave support (opt-in via --recursive):
-            # /dev/fuse for nix store overlay, /dev/net/tun for pasta networking
+            # /dev/fuse for nix store overlay, /dev/net/tun for slirp4netns
             (try-fwd-env "CODING_CAVE_RECURSIVE")
             (add-runtime ''
               if [ "''${CODING_CAVE_RECURSIVE:-}" = "1" ]; then
@@ -222,11 +222,11 @@
               fi
             '')
 
-            # DNS: override resolv.conf when inside a pasta network namespace.
+            # DNS: override resolv.conf inside the network namespace.
             # The host's resolv.conf may point to a loopback resolver (e.g.
             # systemd-resolved at 127.0.0.53) which is unreachable in the
-            # namespace's isolated loopback. Point to the mapped host address
-            # instead; pasta's --dns-forward handles the actual forwarding.
+            # namespace. Point to slirp4netns's built-in DNS forwarder
+            # (10.0.2.3) which forwards queries to the host's resolver.
             (add-runtime ''
               if [ -n "''${CODING_CAVE_DNS_SERVER:-}" ]; then
                 _RESOLV=$(mktemp)
@@ -329,7 +329,9 @@
             ''))
           ]);
 
-          cav = pkgs.stdenv.mkDerivation {
+          # unshare --map-user/--map-group requires util-linux >= 2.39.
+          cav = assert pkgs.lib.versionAtLeast pkgs.util-linux.version "2.39";
+            pkgs.stdenv.mkDerivation {
             pname = "cav";
             version = "0.1.0";
 
@@ -338,7 +340,8 @@
             nativeBuildInputs = [ pkgs.makeWrapper ];
             buildInputs = [ python ];
             propagatedBuildInputs = with pkgs; [
-              fuse-overlayfs git socat passt
+              fuse-overlayfs git socat slirp4netns iptables
+              util-linux  # unshare + nsenter (>= 2.39 for --map-user)
             ];
 
             installPhase = ''
@@ -358,7 +361,8 @@
                 --replace-fail "@VERSION_DATE@" "${toString (self.lastModified or 0)}"
               substituteInPlace $out/lib/cav/sandbox.py \
                 --replace-fail "@SANDBOX_BIN@" "${sandbox}/bin/coding-cave" \
-                --replace-fail "@CAV_BIN@" "$out/bin"
+                --replace-fail "@CAV_BIN@" "$out/bin" \
+                --replace-fail "@CAVE_NS_SH@" "$out/lib/cav/cave-ns.sh"
               substituteInPlace $out/lib/cav/user_env.py \
                 --replace-fail "@NIX_CLAUDE_URL@" "github:christian-oudard/nix-claude/${nix-claude.rev}"
 
@@ -370,13 +374,14 @@
               from cav.cli import main
               main()
               WRAPPER
-              chmod +x $out/bin/cav $out/lib/cav/hooks/pre-receive
+              chmod +x $out/bin/cav $out/lib/cav/hooks/pre-receive $out/lib/cav/cave-ns.sh
 
               # Wrap with runtime dependencies on PATH
               wrapProgram $out/bin/cav \
                 --prefix PATH : ${pkgs.lib.makeBinPath [
                   pkgs.fuse-overlayfs pkgs.fuse3.bin
-                  pkgs.git pkgs.gnupg pkgs.socat pkgs.passt
+                  pkgs.git pkgs.gnupg pkgs.socat pkgs.slirp4netns pkgs.iptables
+                  pkgs.util-linux
                   crinj.packages.${pkgs.stdenv.hostPlatform.system}.default
                 ]}
             '';
@@ -396,6 +401,9 @@
             (pkgs.python3.withPackages (ps: [ ps.click ps.vulture ]))
             pkgs.git
             pkgs.socat
+            pkgs.iptables
+            pkgs.util-linux
+            pkgs.slirp4netns
           ];
         };
       });
