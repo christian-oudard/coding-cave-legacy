@@ -631,14 +631,6 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
         git.git("remote", "set-url", config.HOST_SHARED_REMOTE, url,
                 cwd=ws, echo=False)
 
-    # Rewrite alternates to use the cave mount path instead of the
-    # host-absolute path (avoids leaking host home dir into the cave).
-    for ws, _, slug in workspaces:
-        alt = ws / ".git" / "objects" / "info" / "alternates"
-        if alt.exists():
-            cave_objects = f"/projects/{slug}/.coding-cave/cave-shared.git/objects"
-            alt.write_text(cave_objects + "\n")
-
     # Build user environment from cave.nix (cached)
     log.info("building user environment...")
     user_env_path = user_env.build()

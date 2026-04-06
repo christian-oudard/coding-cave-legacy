@@ -46,27 +46,28 @@ class TestAlternates(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmpdir)
 
-    def test_alternates_points_to_bare_repo(self):
-        """Shared clone's alternates file points to the bare repo's objects dir."""
-        ws = workspace.create(self.user_repo, "1")
-
-        alternates = ws / ".git" / "objects" / "info" / "alternates"
-        self.assertTrue(alternates.exists(), "alternates file missing")
-
-        alt_path = alternates.read_text().strip()
-        bare_objects = str(config.shared_repo_path(self.user_repo) / "objects")
-
-        self.assertEqual(alt_path, bare_objects)
-        self.assertTrue(Path(alt_path).exists(), f"alternates base missing: {alt_path}")
-
-    def test_alternates_path_is_absolute(self):
-        """Alternates must be absolute for bwrap bind-mount to work."""
+    def test_alternates_is_relative(self):
+        """Alternates uses a relative path so it works on both host and cave."""
         ws = workspace.create(self.user_repo, "1")
 
         alternates = ws / ".git" / "objects" / "info" / "alternates"
         alt_path = alternates.read_text().strip()
 
-        self.assertTrue(alt_path.startswith("/"), f"alternates not absolute: {alt_path}")
+        self.assertFalse(alt_path.startswith("/"),
+                         f"alternates should be relative: {alt_path}")
+        self.assertIn(".coding-cave/cave-shared.git/objects", alt_path)
+
+    def test_alternates_resolves_on_host(self):
+        """Relative alternates resolve to the shared repo objects on the host."""
+        ws = workspace.create(self.user_repo, "1")
+        shared = config.shared_repo_path(self.user_repo)
+
+        # The mount-point directory should have a symlink to real objects.
+        mount_point = ws / ".coding-cave" / "cave-shared.git"
+        self.assertTrue(mount_point.is_dir())
+        objects_link = mount_point / "objects"
+        self.assertTrue(objects_link.is_symlink())
+        self.assertEqual(objects_link.resolve(), (shared / "objects").resolve())
 
     def test_objects_accessible_via_alternates(self):
         """Git operations in the shared clone can access objects from the bare repo."""
@@ -79,18 +80,24 @@ class TestAlternates(unittest.TestCase):
         ).stdout.strip()
         self.assertIn("init", log)
 
-    def test_bwrap_mount_path_matches_alternates(self):
-        """The bare repo path in alternates is what sandbox.py would bind-mount."""
+    def test_coding_cave_dir_excluded(self):
+        """The .coding-cave mount-point directory is excluded from git tracking."""
         ws = workspace.create(self.user_repo, "1")
 
-        alternates = ws / ".git" / "objects" / "info" / "alternates"
-        alt_path = Path(alternates.read_text().strip())
+        result = subprocess.run(
+            ["git", "status", "--porcelain"], cwd=ws,
+            capture_output=True, text=True, check=True,
+        )
+        self.assertNotIn(".coding-cave", result.stdout)
 
-        # The parent of objects/ is the bare repo root
-        bare_from_alternates = alt_path.parent
-        bare_expected = config.shared_repo_path(self.user_repo)
+    def test_bwrap_mount_point_exists(self):
+        """The .coding-cave/cave-shared.git dir exists as a bwrap mount target."""
+        ws = workspace.create(self.user_repo, "1")
 
-        self.assertEqual(bare_from_alternates, bare_expected)
+        mount_point = ws / ".coding-cave" / "cave-shared.git"
+        self.assertTrue(mount_point.is_dir())
+        # Must be a real directory (not a symlink) for bwrap --ro-bind.
+        self.assertFalse(mount_point.is_symlink())
 
 
 if __name__ == "__main__":

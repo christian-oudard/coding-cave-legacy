@@ -63,6 +63,21 @@ def create(base: Path, agent_id: str) -> Path:
     # Lightweight clone sharing objects with the bare repo
     git.git("clone", "--shared", str(shared), str(ws_path), echo=False, capture=True)
 
+    # Make alternates work on both host and inside the cave namespace.
+    # git clone --shared writes a host-absolute path in alternates, which
+    # won't resolve inside the cave (different mount namespace).  We create
+    # a mount-point directory with a symlink for host access, then use a
+    # relative alternates path.  Inside the cave, bwrap overlays the real
+    # shared repo on the mount-point directory, hiding the symlink.
+    mount_point = ws_path / ".coding-cave" / "cave-shared.git"
+    mount_point.mkdir(parents=True)
+    (mount_point / "objects").symlink_to(shared / "objects")
+    alt = ws_path / ".git" / "objects" / "info" / "alternates"
+    alt.write_text("../../.coding-cave/cave-shared.git/objects\n")
+    exclude = ws_path / ".git" / "info" / "exclude"
+    with exclude.open("a") as f:
+        f.write("/.coding-cave\n")
+
     # Rename origin -> host-cave (points to the shared remote)
     git.git("remote", "rename", "origin", config.HOST_SHARED_REMOTE, cwd=ws_path, echo=False, capture=True)
 

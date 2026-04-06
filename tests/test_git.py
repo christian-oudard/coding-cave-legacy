@@ -1622,6 +1622,44 @@ class TestCAV(unittest.TestCase):
         self.assertNotIn(aid, registry.all_agent_ids(),
                          "Zero-commit agent should be cleaned up")
 
+    def test_workspace_alternates_use_relative_path(self):
+        """Workspace alternates use a relative path via a mount-point directory.
+
+        The relative path resolves on the host (via symlink to shared repo
+        objects) and inside the cave (via bwrap overlay on the mount point).
+        """
+        from cav.init import init
+
+        init(str(self.user_repo))
+        shared = config.shared_repo_path(self.user_repo)
+
+        aid = registry.acquire_agent_id(self.user_repo)
+        ws = self._create_agent(aid)
+
+        # Alternates should be a relative path, not an absolute one.
+        alt = ws / ".git" / "objects" / "info" / "alternates"
+        content = alt.read_text().strip()
+        self.assertFalse(content.startswith("/"),
+                         f"alternates should be relative, got: {content}")
+        self.assertIn(".coding-cave/cave-shared.git/objects", content)
+
+        # The mount-point directory should exist with symlink to real objects.
+        mount_point = ws / ".coding-cave" / "cave-shared.git"
+        self.assertTrue(mount_point.is_dir())
+        objects_link = mount_point / "objects"
+        self.assertTrue(objects_link.is_symlink())
+        self.assertEqual(objects_link.resolve(), (shared / "objects").resolve())
+
+        # git status should work on the host (relative path resolves via symlink).
+        result = subprocess.run(
+            ["git", "status", "--porcelain"], cwd=ws,
+            capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0,
+                         f"git status failed: {result.stderr}")
+
+        # .coding-cave should be excluded from git tracking.
+        self.assertNotIn(".coding-cave", result.stdout)
+
 
 class TestGitWrapper(unittest.TestCase):
     """Tests for the git wrapper's auto-rebase and sync behavior."""
