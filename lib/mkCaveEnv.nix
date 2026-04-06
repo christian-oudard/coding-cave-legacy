@@ -29,7 +29,7 @@ let
 
       userConfig = config { inherit pkgs; };
 
-      requiredPackages = with pkgs; [ coreutils bash nix git ];
+      requiredPackages = with pkgs; [ coreutils bash nix git gnugrep gnused ];
 
       defaultPackages = with pkgs; [
         coreutils bash nix git gnupg jq
