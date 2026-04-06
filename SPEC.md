@@ -18,7 +18,8 @@ There are two kinds of branches:
 - **Dev branches** are named `agent-<n>/<base>` (e.g. `agent-1/main`, `agent-2/develop`). These are the working branches for incomplete work to be reviewed and tested.
 
 Here is how code moves through the system:
-**Development** The agent commits work to its sandboxed worktree on the dev branch (`agent-N/main`). When the user runs `cav pull`, the agent pushes to the shared remote dev branch, and the user pulls that work from the same "remote" dev branch to their own repo dev branch. If the user needs to make manual edits, `cav push` on a dev branch pushes to the shared remote, and pulls from the shared remote to the agent dev branch.
+
+**Development** The agent commits work to its sandboxed worktree on the dev branch (`agent-N/main`). These commits are automatically synced to the shared remote. The user runs `cav pull` to pull new or rewritten commits to their own repository's dev branch. If the user has made manual edits, they run `cav push` to push their commits the shared remote, which is automatically synced to the agent worktree.
 
 **Approval** When the user is satisfied with the state of the dev branch, they run `cav approve`, which merges the pending commits into the base branch (`main` and `cave/main`). Also, agent worktrees are rebased on the newly updated `cave/main`. This is always a clean fast-forward, never a merge commit.
 
@@ -27,7 +28,7 @@ Here is how code moves through the system:
 **Rebase** Any time `cave/main` receives new commits, an attempt is made to rebase agent dev branches on the new `cave/main`. New commits on `main` can be pushed to the `cave/main` remote branch with `cav push` or `cav push --force` if they rewrite history. `cav push` commands trigger rebase for agent dev branches.
 
 **History rewrites**
-When agents amend or squash commits, the user running `cav pull --force` pulls history-rewriting updates, which runs agent-side `git push --force` to push agent rewritten history to the shared remote dev branch, and then runs `git reset --hard` to "force-pull" to the host dev branch.
+When agents amend or squash commits, the user can run `cav pull`  to pull history-rewriting updates. If these updates would clobber user commits, `cav pull --force` is required to authorize this.
 
 **Illegal Actions** 
 Git hooks enforce that git commands run by agents are topologically correct. Agents cannot push to cave/main, or to dev branches that do not belong to them.
