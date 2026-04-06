@@ -10,6 +10,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from cav.sandbox import _seed_nix_db, _prune_nix_caches
+from cav import config
 
 
 def _create_nix_db(path):
@@ -186,6 +187,103 @@ class TestSeedNixDb(unittest.TestCase):
         paths = _get_paths(cave_db)
         self.assertEqual(paths, {"/nix/store/aaa"})
 
+    def test_stale_entries_cleaned_after_host_gc(self):
+        """DB entries for paths missing from the overlay are removed.
+
+        Simulates: host GC'd paths after the DB snapshot was taken.
+        The overlay reflects the live host store, so the files are gone,
+        but the DB copy still has the entries.
+        """
+        import tempfile
+        tmp_path = Path(tempfile.mkdtemp())
+
+        # Simulate a merged overlay dir with only some paths present
+        store_root = tmp_path / "merged"
+        store_root.mkdir()
+        (store_root / "aaa").mkdir()       # exists on overlay
+        (store_root / "ccc-pkg").mkdir()   # exists on overlay
+        # bbb-missing.drv does NOT exist (host GC'd it after snapshot)
+
+        # Cave DB has all three paths (from the host DB snapshot)
+        cave_db = tmp_path / "cave_db.sqlite"
+        db = _create_nix_db(cave_db)
+        id_aaa = _insert_path(db, "/nix/store/aaa")
+        id_bbb = _insert_path(db, "/nix/store/bbb-missing.drv")
+        id_ccc = _insert_path(db, "/nix/store/ccc-pkg")
+        # Add a ref: aaa references bbb
+        db.execute("INSERT INTO Refs VALUES (?, ?)", (id_aaa, id_bbb))
+        db.commit()
+
+        # Run the stale cleanup logic (from _seed_nix_db)
+        stale_ids = []
+        for vid, path in db.execute("SELECT id, path FROM ValidPaths"):
+            basename = Path(path).name
+            if not (store_root / basename).exists():
+                stale_ids.append(vid)
+        self.assertEqual(len(stale_ids), 1)
+
+        db.executemany(
+            "DELETE FROM Refs WHERE referrer = ? OR reference = ?",
+            [(vid, vid) for vid in stale_ids],
+        )
+        db.executemany(
+            "DELETE FROM ValidPaths WHERE id = ?",
+            [(vid,) for vid in stale_ids],
+        )
+        db.commit()
+        db.close()
+
+        paths = _get_paths(cave_db)
+        self.assertEqual(paths, {"/nix/store/aaa", "/nix/store/ccc-pkg"})
+
+        # Verify refs to the stale path were also cleaned
+        db = sqlite3.connect(str(cave_db))
+        refs = db.execute("SELECT * FROM Refs").fetchall()
+        db.close()
+        self.assertEqual(len(refs), 0)
+
+    def test_cave_only_paths_checked_against_overlay(self):
+        """Cave-only paths are validated against the merged overlay, not /nix/store."""
+        import tempfile
+        tmp_path = Path(tempfile.mkdtemp())
+
+        # Merged overlay has the cave-only package (in the upper layer)
+        store_root = tmp_path / "merged"
+        store_root.mkdir()
+        (store_root / "host-pkg").mkdir()
+        (store_root / "cave-pkg").mkdir()  # exists in upper layer
+        # stale-cave-pkg does NOT exist (upper layer was cleaned)
+
+        host_db = self._setup_host_db(tmp_path, ["/nix/store/host-pkg"])
+
+        # Previous cave DB had host + two cave-only paths
+        cave_db = tmp_path / "cave_db.sqlite"
+        db = _create_nix_db(cave_db)
+        _insert_path(db, "/nix/store/host-pkg")
+        _insert_path(db, "/nix/store/cave-pkg")
+        _insert_path(db, "/nix/store/stale-cave-pkg")
+        db.close()
+
+        # Merge-back: check cave-only paths against overlay
+        old = sqlite3.connect(f"file:{cave_db}?mode=ro", uri=True)
+        host = sqlite3.connect(f"file:{host_db}?mode=ro", uri=True)
+        host_paths = {r[0] for r in host.execute("SELECT path FROM ValidPaths")}
+        cave_only_rows = []
+        for row in old.execute(
+            "SELECT path, hash, registrationTime, deriver, narSize, "
+            "ultimate, sigs, ca FROM ValidPaths"
+        ):
+            if row[0] not in host_paths:
+                basename = Path(row[0]).name
+                if (store_root / basename).exists():
+                    cave_only_rows.append(row)
+        host.close()
+        old.close()
+
+        # Only cave-pkg should be preserved (stale-cave-pkg is gone)
+        self.assertEqual(len(cave_only_rows), 1)
+        self.assertEqual(cave_only_rows[0][0], "/nix/store/cave-pkg")
+
     def test_noop_when_no_cave_only(self, tmp_path=None):
         """When cave has no extra paths, result equals host DB."""
         tmp_path = tmp_path or Path(__import__("tempfile").mkdtemp())
@@ -210,6 +308,23 @@ class TestSeedNixDb(unittest.TestCase):
         old.close()
 
         self.assertEqual(len(cave_only), 0)
+
+
+    def test_db_on_native_fs_not_overlay(self):
+        """Shared DB directory is NOT under the merged overlay mount."""
+        db_dir = config.nix_db_dir()
+        overlay_dir = config.nix_overlay_dir()
+        merged = overlay_dir / "shared" / "merged"
+        # The DB must not be a child of the merged mount point
+        self.assertFalse(
+            str(db_dir).startswith(str(merged) + "/"),
+            f"DB dir {db_dir} must not be under merged mount {merged}",
+        )
+        # But it should be under the overlay parent (sibling of merged)
+        self.assertTrue(
+            str(db_dir).startswith(str(overlay_dir) + "/"),
+            f"DB dir {db_dir} should be under {overlay_dir}",
+        )
 
 
 class TestPruneNixCaches(unittest.TestCase):

@@ -301,14 +301,24 @@ def _prune_nix_caches() -> None:
             db_path.unlink(missing_ok=True)
 
 
-def _seed_nix_db() -> Path | None:
+DB_RESEED_THRESHOLD = 24 * 3600  # 24 hours
+
+
+def _seed_nix_db(merged_path: str = "", force: bool = False) -> Path | None:
     """Backup host nix DB, preserving cave-installed package registrations.
 
+    Skips re-seeding if the DB already exists and is younger than
+    DB_RESEED_THRESHOLD (default 24h), unless force is True.
+
     Always starts from a fresh host backup (fast, self-cleaning), then
-    merges back cave-only paths whose files still exist on disk. This
-    avoids unbounded DB growth from stale entries while preserving
-    cave-installed packages (which would fail with EPERM on re-substitute
-    because nix tries to chmod the existing overlay path).
+    merges back cave-only paths whose files still exist on disk. Finally,
+    removes stale entries for paths the host GC'd after the snapshot.
+
+    Args:
+        merged_path: The mounted fuse-overlayfs merged directory. When
+            provided, stale DB entries are validated against this path
+            (which reflects the live host store plus the cave upper layer).
+        force: Re-seed even if the DB is fresh.
 
     Returns the DB directory path, or None if the host DB doesn't exist.
     """
@@ -316,9 +326,19 @@ def _seed_nix_db() -> Path | None:
     if not host_db.exists():
         return None
 
-    db_dir = config.nix_state_dir() / "db"
+    db_dir = config.nix_db_dir()
     db_dir.mkdir(parents=True, exist_ok=True)
     cave_db = db_dir / "db.sqlite"
+
+    # Skip re-seed if the DB is fresh enough
+    if not force and cave_db.exists():
+        age = time.time() - cave_db.stat().st_mtime
+        if age < DB_RESEED_THRESHOLD:
+            return db_dir
+
+    # Use the merged overlay for existence checks when available,
+    # otherwise fall back to the host's /nix/store.
+    store_root = Path(merged_path) if merged_path else Path("/nix/store")
 
     try:
         # Collect cave-only paths before overwriting
@@ -331,8 +351,10 @@ def _seed_nix_db() -> Path | None:
                 "SELECT path, hash, registrationTime, deriver, narSize, "
                 "ultimate, sigs, ca FROM ValidPaths"
             ):
-                if row[0] not in host_paths and Path(row[0]).exists():
-                    cave_only_rows.append(row)
+                if row[0] not in host_paths:
+                    basename = Path(row[0]).name
+                    if (store_root / basename).exists():
+                        cave_only_rows.append(row)
             host.close()
             old.close()
 
@@ -354,6 +376,25 @@ def _seed_nix_db() -> Path | None:
                 )
             dst.commit()
 
+        # Remove stale entries: paths the host GC'd after the DB snapshot.
+        # The overlay reflects the live host store, so missing paths are
+        # genuinely gone.
+        stale_ids = []
+        for vid, path in dst.execute("SELECT id, path FROM ValidPaths"):
+            basename = Path(path).name
+            if not (store_root / basename).exists():
+                stale_ids.append(vid)
+        if stale_ids:
+            dst.executemany(
+                "DELETE FROM Refs WHERE referrer = ? OR reference = ?",
+                [(vid, vid) for vid in stale_ids],
+            )
+            dst.executemany(
+                "DELETE FROM ValidPaths WHERE id = ?",
+                [(vid,) for vid in stale_ids],
+            )
+            dst.commit()
+
         dst.close()
         src.close()
     except sqlite3.Error:
@@ -364,35 +405,45 @@ def _seed_nix_db() -> Path | None:
     return db_dir
 
 
-def _nix_overlay_dirs(agent_id: str) -> tuple[Path, Path, Path]:
-    agent_dir = config.nix_overlay_dir() / agent_id
-    upper = agent_dir / "upper"
-    work = agent_dir / "work"
-    merged = agent_dir / "merged"
+def _nix_overlay_dirs() -> tuple[Path, Path, Path]:
+    shared = config.nix_overlay_dir() / "shared"
+    upper = shared / "upper"
+    work = shared / "work"
+    merged = shared / "merged"
     for d in (upper, work, merged):
         d.mkdir(parents=True, exist_ok=True)
     return upper, work, merged
 
 
 def _mount_fuse_overlay(upper: Path, work: Path, merged: Path):
+    # squash_to_uid/gid: Host store paths are owned by the nix daemon
+    # (uid 65534). Without squashing, fuse-overlayfs can't copy-up these
+    # files on chmod/chown, causing EPERM when nix tries to register
+    # or validate existing store paths.
+    uid = os.getuid()
+    gid = os.getgid()
     subprocess.run(
         [
             "fuse-overlayfs",
-            "-o", f"lowerdir=/nix/store,upperdir={upper},workdir={work}",
+            "-o", (f"lowerdir=/nix/store,upperdir={upper},workdir={work}"
+                   f",squash_to_uid={uid},squash_to_gid={gid}"),
             str(merged),
         ],
         check=True, capture_output=True, text=True,
     )
 
 
-def _setup_nix_overlay(agent_id: str) -> str:
-    """Mount a per-agent writable nix store overlay. Returns merged path.
+def _setup_shared_nix_overlay() -> str:
+    """Mount the shared writable nix store overlay. Returns merged path.
+
+    All agents share a single overlay. The overlay persists across agent
+    launches and is not torn down when an agent exits.
 
     Tries a direct mount (works when fusermount3 is setuid). If that fails,
     defers the mount to _nix_overlay_preexec() which runs in the child
     process after unshare(NEWUSER|NEWNS).
     """
-    upper, work, merged = _nix_overlay_dirs(agent_id)
+    upper, work, merged = _nix_overlay_dirs()
 
     if any(merged.iterdir()):
         return str(merged)
@@ -405,14 +456,14 @@ def _setup_nix_overlay(agent_id: str) -> str:
     return str(merged)
 
 
-def _nix_overlay_preexec(agent_id: str):
+def _nix_overlay_preexec():
     """Mount nix overlay inside a child user+mount namespace.
 
-    Called as preexec_fn when the direct mount in _setup_nix_overlay failed
-    (fusermount3 not setuid). Creates a user namespace with mount capability,
-    then mounts fuse-overlayfs before exec.
+    Called as preexec_fn when the direct mount in _setup_shared_nix_overlay
+    failed (fusermount3 not setuid). Creates a user namespace with mount
+    capability, then mounts fuse-overlayfs before exec.
     """
-    upper, work, merged = _nix_overlay_dirs(agent_id)
+    upper, work, merged = _nix_overlay_dirs()
     if any(merged.iterdir()):
         return  # Already mounted (direct mount succeeded)
 
@@ -425,23 +476,6 @@ def _nix_overlay_preexec(agent_id: str):
 
     _mount_fuse_overlay(upper, work, merged)
 
-
-def _teardown_nix_overlay(agent_id: str):
-    """Unmount the per-agent nix store overlay."""
-    merged = config.nix_overlay_dir() / agent_id / "merged"
-    if not merged.exists():
-        return
-    r = subprocess.run(["fusermount3", "-uz", str(merged)],
-                       capture_output=True, text=True)
-    if r.returncode != 0:
-        # Nix store fusermount3 isn't setuid; try system paths (NixOS).
-        for p in ["/run/wrappers/bin/fusermount3", "/usr/bin/fusermount3"]:
-            if Path(p).is_file():
-                r = subprocess.run([p, "-uz", str(merged)],
-                                   capture_output=True, text=True)
-                if r.returncode == 0:
-                    return
-        log.error(f"fusermount3 -uz {merged}: {r.stderr.strip()}")
 
 
 def _host_claude_json() -> Path | None:
@@ -563,8 +597,8 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
     log.info("user environment ready")
 
     log.info("setting up nix overlay...")
-    nix_db_dir = _seed_nix_db()
-    nix_merged = _setup_nix_overlay(agent_id)
+    nix_merged = _setup_shared_nix_overlay()
+    nix_db_dir = _seed_nix_db(nix_merged)
     log.info("nix overlay ready")
 
     # Encode multiple workspaces as colon-separated lists
@@ -679,7 +713,7 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
             "--",
         ]
 
-        preexec = lambda: _nix_overlay_preexec(agent_id)
+        preexec = _nix_overlay_preexec
 
         log.info("launching sandbox...")
         proc = subprocess.Popen(pasta_cmd + claude_cmd, env=env,
@@ -701,4 +735,3 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
 
     finally:
         daemon.stop(daemon_proc, daemon_dir)
-        _teardown_nix_overlay(agent_id)
