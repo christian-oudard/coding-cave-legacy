@@ -89,17 +89,24 @@ def create(base: Path, agent_id: str) -> Path:
         return ws_path
 
     remote_ref = f"refs/remotes/{config.HOST_SHARED_REMOTE}/{dev}"
+    base_ref = f"refs/remotes/{config.HOST_SHARED_REMOTE}/{base_name}"
 
     # If the dev branch already exists on the remote (re-creating a
     # workspace for a continuing agent), check it out with tracking.
-    # Otherwise create a fresh branch and push it.
+    # Otherwise create a fresh branch from the base and push it.
     try:
         git.git_output("rev-parse", "--verify", remote_ref, cwd=ws_path)
         git.git("checkout", dev, cwd=ws_path, echo=False, capture=True)
     except subprocess.CalledProcessError:
-        git.git("checkout", "-b", dev, cwd=ws_path, echo=False, capture=True)
-        git.git("push", config.HOST_SHARED_REMOTE, dev,
-                f"--push-option=agent={agent_id}", cwd=ws_path,
+        git.git("checkout", "-b", dev, base_ref, cwd=ws_path,
                 echo=False, capture=True)
+        r = git.git("push", config.HOST_SHARED_REMOTE, dev,
+                    cwd=ws_path, echo=False, capture=True, check=False)
+        if r.returncode:
+            msg = (r.stderr or r.stdout or "").strip()
+            raise SystemExit(
+                f"Failed to push initial branch '{dev}' to shared repo.\n"
+                f"{msg}"
+            )
 
     return ws_path

@@ -87,6 +87,8 @@ def init(path: str):
 
     if shared.exists():
         install_hooks(shared)
+        git.git("config", "receive.advertisePushOptions", "true",
+                cwd=shared, echo=False)
         registry.register_project(base)
         # Re-sync: push any commits added since last init.
         _require_commits(base)
