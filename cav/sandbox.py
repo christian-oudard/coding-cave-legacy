@@ -631,10 +631,8 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
         git.git("remote", "set-url", config.HOST_SHARED_REMOTE, url,
                 cwd=ws, echo=False)
 
-    # Build user environment from cave.nix (cached)
-    log.info("building user environment...")
+    # Build cave environment (skipped if unchanged)
     user_env_path = user_env.build()
-    log.info("user environment ready")
 
     log.info("setting up nix overlay...")
     nix_merged = _setup_shared_nix_overlay()

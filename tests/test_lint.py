@@ -59,6 +59,8 @@ class TestPathHomeLint(unittest.TestCase):
         "sandbox.py": {"_host_home", "launch", "_crinj_ca_path"},
         # _cave_nix_path uses CODING_CAVE_HOST_HOME with Path.home() fallback
         "user_env.py": {"_cave_nix_path"},
+        # _offer_cave_nix runs on host only (cav init), Path.home() is correct
+        "init.py": {"_offer_cave_nix"},
     }
 
     def test_no_bare_path_home(self):
@@ -309,8 +311,9 @@ class TestDeadCode(unittest.TestCase):
     vulture sees the name used. This lets us run at min_confidence=0.
     """
 
-    # Click commands registered via @cli.command() that vulture can't trace.
-    CLICK_COMMANDS = {"version"}
+    # Click commands registered via @cli.command() or @group.command()
+    # that vulture can't trace through decorator dispatch.
+    CLICK_COMMANDS = {"version", "env_build", "env_update", "env_metadata"}
 
     def test_no_dead_code(self):
         import vulture

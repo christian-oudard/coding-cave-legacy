@@ -424,6 +424,34 @@ def cp(paths, recursive, force):
     _cp(list(paths[:-1]), paths[-1], recursive=recursive, force=force)
 
 
+@cli.group()
+def env():
+    """Manage the cave environment."""
+    pass
+
+
+@env.command("build")
+def env_build():
+    """Rebuild the cave environment from cave.nix."""
+    from . import user_env
+    user_env.build()
+
+
+@env.command("update")
+@click.argument("input_name", required=False)
+def env_update(input_name):
+    """Update flake inputs and rebuild the cave environment."""
+    from . import user_env
+    user_env.update(input_name)
+
+
+@env.command("metadata")
+def env_metadata():
+    """Show cave environment flake input versions."""
+    from . import user_env
+    user_env.metadata()
+
+
 @cli.command()
 def version():
     """Show version."""
@@ -460,7 +488,7 @@ def main():
 
     subcmds = {
         "init", "agent", "approve", "reject", "pull", "push", "checkout",
-        "status", "version", "remove-agent", "remove-project", "cp",
+        "status", "version", "remove-agent", "remove-project", "cp", "env",
     }
     if not argv:
         argv = ["agent"]

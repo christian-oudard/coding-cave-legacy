@@ -1,5 +1,6 @@
 """cav init: create the shared infrastructure."""
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -58,6 +59,23 @@ def _push_shared_branches(base: Path):
                 cwd=base, echo=False, check=False, capture=True)
 
 
+def _offer_cave_nix():
+    """Offer to create a default cave.nix if none exists."""
+    cave_nix = Path(os.environ.get("CODING_CAVE_HOST_HOME", Path.home())) / ".config" / "coding-cave" / "cave.nix"
+    if cave_nix.exists():
+        return
+    try:
+        answer = input("Create default cave.nix? [Y/n] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return
+    if answer and answer != "y":
+        return
+    from . import user_env
+    cave_nix.parent.mkdir(parents=True, exist_ok=True)
+    cave_nix.write_text(user_env.default_cave_nix())
+    print(f"Created {cave_nix}")
+
+
 def init(path: str):
     base = Path(path).resolve()
     if not (base / ".git").exists():
@@ -108,3 +126,5 @@ def init(path: str):
 
     registry.register_project(base)
     print(f"Coding Cave initialized at {cav}")
+
+    _offer_cave_nix()

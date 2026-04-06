@@ -24,11 +24,16 @@
         config.allowUnfreePredicate = pkg: (nixpkgs.lib.getName pkg) == "claude-code";
       }));
     in {
+      lib.mkCaveEnv = import ./lib/mkCaveEnv.nix {
+        inherit nixpkgs nix-claude;
+        systemClaudeMd = ./defaults/system-claude.md;
+        defaultStatusline = ./defaults/statusline.sh;
+      };
+
       packages = eachSystem (pkgs:
         let
           jail = jail-nix.lib.init pkgs;
           python = pkgs.python3.withPackages (ps: [ ps.click ]);
-          claude-code = claude-code-nix.packages.${pkgs.stdenv.hostPlatform.system}.default;
           mkClaudeConfig = nix-claude.lib.mkClaudeConfig;
           defaultStatusline = ./defaults/statusline.sh;
           claudeConfig = mkClaudeConfig {
@@ -61,15 +66,6 @@
             (unsafe-add-raw-args "--dir /bin --ro-bind ${pkgs.bashInteractive}/bin/bash /bin/bash --ro-bind ${pkgs.coreutils}/bin/env /usr/bin/env")
             network
             (add-seccomp seccompFilter)
-
-            # Packages available inside the cave
-            (add-pkg-deps ([
-              claude-code
-            ] ++ (with pkgs; [
-              nix git gnupg jq
-              coreutils bash gnugrep gnused gawk findutils
-              curl wget
-            ])))
 
             # Standard POSIX environment
             (set-env "SHELL" "${pkgs.bashInteractive}/bin/bash")
@@ -283,12 +279,12 @@
                 [ -f "''${CODING_CAVE_USER_ENV}/env.sh" ] && . "''${CODING_CAVE_USER_ENV}/env.sh"
                 if [ -d "''${CODING_CAVE_USER_ENV}/files" ]; then
                   cd "''${CODING_CAVE_USER_ENV}/files"
-                  find . -type f | while read -r f; do
+                  ${pkgs.findutils}/bin/find . -type f | while read -r f; do
                     dest="$HOME/$f"
-                    mkdir -p "$(dirname "$dest")"
-                    chmod u+w "$(dirname "$dest")" 2>/dev/null || true
-                    [ -f "$dest" ] && chmod u+w "$dest" 2>/dev/null || true
-                    cp --no-preserve=mode "$f" "$dest"
+                    ${pkgs.coreutils}/bin/mkdir -p "$(${pkgs.coreutils}/bin/dirname "$dest")"
+                    ${pkgs.coreutils}/bin/chmod u+w "$(${pkgs.coreutils}/bin/dirname "$dest")" 2>/dev/null || true
+                    [ -f "$dest" ] && ${pkgs.coreutils}/bin/chmod u+w "$dest" 2>/dev/null || true
+                    ${pkgs.coreutils}/bin/cp --no-preserve=mode "$f" "$dest"
                   done
                   cd /
                 fi
@@ -297,17 +293,17 @@
               [ -d "$HOME/bin" ] && export PATH="$HOME/bin:$PATH"
               # Git identity (fallback when no .gitconfig was copied)
               if [ ! -f "$HOME/.gitconfig" ]; then
-                [ -n "''${CODING_CAVE_GIT_NAME:-}" ] && git config --global user.name "$CODING_CAVE_GIT_NAME"
-                [ -n "''${CODING_CAVE_GIT_EMAIL:-}" ] && git config --global user.email "$CODING_CAVE_GIT_EMAIL"
-                [ -n "''${CODING_CAVE_GIT_SIGNINGKEY:-}" ] && git config --global user.signingkey "$CODING_CAVE_GIT_SIGNINGKEY"
-                [ "''${CODING_CAVE_GIT_GPGSIGN:-}" = "true" ] && git config --global commit.gpgsign true
+                [ -n "''${CODING_CAVE_GIT_NAME:-}" ] && ${pkgs.git}/bin/git config --global user.name "$CODING_CAVE_GIT_NAME"
+                [ -n "''${CODING_CAVE_GIT_EMAIL:-}" ] && ${pkgs.git}/bin/git config --global user.email "$CODING_CAVE_GIT_EMAIL"
+                [ -n "''${CODING_CAVE_GIT_SIGNINGKEY:-}" ] && ${pkgs.git}/bin/git config --global user.signingkey "$CODING_CAVE_GIT_SIGNINGKEY"
+                [ "''${CODING_CAVE_GIT_GPGSIGN:-}" = "true" ] && ${pkgs.git}/bin/git config --global commit.gpgsign true
               fi
               # GPG: set ultimate trust on signing key to avoid verification warnings
-              _sigkey=$(git config user.signingkey 2>/dev/null || true)
+              _sigkey=$(${pkgs.git}/bin/git config user.signingkey 2>/dev/null || true)
               if [ -n "$_sigkey" ]; then
-                mkdir -p "$HOME/.gnupg"
-                chmod 700 "$HOME/.gnupg" 2>/dev/null || true
-                echo "$_sigkey:6:" | gpg --import-ownertrust 2>/dev/null || true
+                ${pkgs.coreutils}/bin/mkdir -p "$HOME/.gnupg"
+                ${pkgs.coreutils}/bin/chmod 700 "$HOME/.gnupg" 2>/dev/null || true
+                echo "$_sigkey:6:" | ${pkgs.gnupg}/bin/gpg --import-ownertrust 2>/dev/null || true
               fi
               # HTTP proxy (crinj credential injection)
               if [ -n "''${CODING_CAVE_PROXY_ADDR:-}" ]; then
@@ -318,7 +314,7 @@
                 export NO_PROXY="localhost,127.0.0.1,::1"
                 export no_proxy="$NO_PROXY"
                 if [ -f /etc/crinj-ca.pem ]; then
-                  cat /etc/ssl/certs/ca-bundle.crt /etc/crinj-ca.pem > /tmp/combined-ca.pem
+                  ${pkgs.coreutils}/bin/cat /etc/ssl/certs/ca-bundle.crt /etc/crinj-ca.pem > /tmp/combined-ca.pem
                   export SSL_CERT_FILE=/tmp/combined-ca.pem
                   export REQUESTS_CA_BUNDLE=/tmp/combined-ca.pem
                   export NODE_EXTRA_CA_CERTS=/etc/crinj-ca.pem
@@ -364,7 +360,12 @@
                 --replace-fail "@CAV_BIN@" "$out/bin" \
                 --replace-fail "@CAVE_NS_SH@" "$out/lib/cav/cave-ns.sh"
               substituteInPlace $out/lib/cav/user_env.py \
-                --replace-fail "@NIX_CLAUDE_URL@" "github:christian-oudard/nix-claude/${nix-claude.rev}"
+                --replace-fail "@NIXPKGS_URL@" "path:${nixpkgs}" \
+                --replace-fail "@CLAUDE_CODE_NIX_URL@" "github:sadjow/claude-code-nix" \
+                --replace-fail "@NIX_CLAUDE_URL@" "path:${nix-claude}" \
+                --replace-fail "@MKCAVEENV_PATH@" "${./lib/mkCaveEnv.nix}" \
+                --replace-fail "@SYSTEM_CLAUDE_MD_PATH@" "${./defaults/system-claude.md}" \
+                --replace-fail "@DEFAULT_STATUSLINE_PATH@" "${./defaults/statusline.sh}"
 
               # Write entry point
               cat > $out/bin/cav <<WRAPPER

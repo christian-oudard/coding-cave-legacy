@@ -20,10 +20,12 @@ Run fast + git tests before committing changes to core modules. Run cave tests w
 
 ## Build
 
-Nix-only. `nix build` produces the `cav` binary. Build-time placeholders (`@VERSION@`, `@VERSION_DATE@`, `@SANDBOX_BIN@`, `@CAV_BIN@`) in cli.py and sandbox.py are substituted by the Nix derivation. Running from source via `nix develop` works for tests and most CLI commands, but `cav version` and `cav agent` require a full `nix build` since they depend on substituted values.
+Nix-only. `nix build` produces the `cav` binary. Build-time placeholders (`@VERSION@`, `@VERSION_DATE@`, `@SANDBOX_BIN@`, `@CAV_BIN@`, `@NIXPKGS_URL@`, `@CLAUDE_CODE_NIX_URL@`, `@NIX_CLAUDE_URL@`, `@MKCAVEENV_PATH@`, `@SYSTEM_CLAUDE_MD_PATH@`, `@DEFAULT_STATUSLINE_PATH@`) in cli.py, sandbox.py, and user_env.py are substituted by the Nix derivation. Running from source via `nix develop` works for tests and most CLI commands, but `cav version` and `cav agent` require a full `nix build` since they depend on substituted values.
+
 ## Layout
 
-- `cav/` - Python package (cli, config, daemon, handler, init, sandbox, workspace, pull, push, status, git, hooks/)
+- `cav/` - Python package (cli, config, daemon, handler, init, sandbox, workspace, pull, push, status, git, user_env, hooks/)
+- `lib/` - Nix library (mkCaveEnv.nix, exported as `lib.mkCaveEnv` in the flake)
 - `tests/` - test_hook (hook security), test_cli (CLI usability), test_alternates (shared clone setup), test_nixdb (nix DB seeding, cache pruning), test_lint (import smoke, Path.home() audit, env completeness), test_git (full integration), test_daemon (daemon isolation), test_security (protocol fuzzing, agent isolation, stress)
 - `.coding-cave/` - per-project data dir created by `cav init` (bare repo with pre-receive hook)
 

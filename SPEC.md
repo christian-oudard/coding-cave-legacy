@@ -64,7 +64,7 @@ Caves do not have access to any of your SSH keys or API tokens. Instead, all web
 
 ## User/System Configuration
 
-Base packages are infrastructure only: claude-code, nix, git, coreutils, and standard unix tools. No editors, language runtimes, or dev tools. A system CLAUDE.md introducing the coding-cave environment is prepended to the user's CLAUDE.md at session startup. `~/.config/coding-cave/cave.nix` declares per-user Claude Code configuration, Nix packages, and environment variables. All coding cave state is in the folder `~/.local/share/coding-cave/`. A SQLite database tracks registered agents, projects, and approvals. 
+The cave environment is configured by `~/.config/coding-cave/cave.nix`. This is a simple Nix config (not a flake) with an optional `inputs` attrset for user dependencies and a `config` function that receives `pkgs` and those inputs. The system wraps it in a proper flake, injecting system dependencies (nixpkgs, claude-code, nix-claude, mkCaveEnv) via build-time substituted store paths. The user never specifies system dependency URLs. Core packages (coreutils, bash, nix, git) are always included automatically. Without a cave.nix, a default environment is generated with claude-code and standard tools. The build result is cached in `~/.local/share/coding-cave/user-env/` and skipped on agent startup if nothing changed. `cav env update` updates flake inputs (e.g. `cav env update claude-code` for latest Claude Code). `cav init` offers to create a default cave.nix for new users. A system CLAUDE.md is prepended to the user's CLAUDE.md at session startup. All coding cave state is in `~/.local/share/coding-cave/`. A SQLite database tracks registered agents, projects, and approvals.
 
 
 ## Commands
@@ -110,6 +110,18 @@ Shows the current list of agents and unmerged commits for the current project, o
 ### `cav remove-agent <n>`
 
 Removes a paused agent by agent ID. Deletes its session from the database, and deletes its work tree, and deletes its remote dev branch, and deletes the host dev branch checkout. Warns about unapproved commits being discarded, giving commit hashes. Refuses to remove a running agent.
+
+### `cav env build`
+
+Force-rebuilds the cave environment from `~/.config/coding-cave/cave.nix` (or the default). Useful for iterating on cave.nix without starting an agent.
+
+### `cav env update [INPUT]`
+
+Updates flake inputs and rebuilds the cave environment. With an argument, updates only that input (e.g. `cav env update claude-code-nix`). Without, updates all inputs.
+
+### `cav env metadata`
+
+Shows the locked versions of all flake inputs in the cave environment.
 
 ### `cav cp [-R] [-f] [(cave|<slug>)[@<n>]:]<src> [(cave|<slug>)[@<n>]:]<dest>`
 
