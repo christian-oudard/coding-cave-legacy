@@ -182,8 +182,7 @@ def _try_reclaim_one(base: Path):
         name = registry.display_name(base, agent_id)
         _auto_cleanup_if_clean(base, agent_id)
         if agent_id not in registry.all_agent_ids():
-            print(f"Reclaimed stale agent {name}.")
-            return  # only reclaim one
+            return  # only reclaim one per invocation
 
 
 def _auto_cleanup_if_clean(base, agent_id):
