@@ -421,37 +421,6 @@ def all_agent_ids(project: str | None = None) -> list[str]:
         db.close()
 
 
-def any_agent_running() -> bool:
-    """Return True if any agent in the registry is currently running."""
-    db = _open()
-    try:
-        rows = db.execute(
-            "SELECT agent_id, pid FROM agents "
-            "WHERE exited_at IS NULL AND pid IS NOT NULL"
-        ).fetchall()
-        for aid, pid in rows:
-            if _is_pid_alive(pid):
-                return True
-            db.execute(
-                "UPDATE agents SET exited_at = ?, pid = NULL WHERE agent_id = ?",
-                (time.time(), aid)
-            )
-        db.commit()
-        return False
-    finally:
-        db.close()
-
-
-def clear_registry() -> None:
-    """Remove all agents from the registry."""
-    db = _open()
-    try:
-        db.execute("DELETE FROM agents")
-        db.commit()
-    finally:
-        db.close()
-
-
 # -- Project registry --
 
 def register_project(base: Path) -> str:

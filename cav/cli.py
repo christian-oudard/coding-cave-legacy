@@ -338,22 +338,12 @@ def status(agent, all_projects):
 
 
 @cli.command("remove-agent")
-@click.argument("agent_id", required=False)
-@click.option("-a", "--all", "all_agents", is_flag=True,
-              help="Remove all agents and reset the database")
-@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
-def remove_agent(agent_id, all_agents, yes):
+@click.argument("agent_id")
+def remove_agent(agent_id):
     """Remove a paused agent and its branches."""
     from .status import _remove_agent
     base = find_repo_root()
     require_init(base)
-
-    if all_agents:
-        _cmd_remove_all_agents(base, yes=yes)
-        return
-
-    if not agent_id:
-        raise SystemExit("Specify an agent ID (e.g. 3) or use --all.")
 
     aid = agent_id.lstrip("@").split("@")[-1]
     if not config.AGENT_ID_RE.match(aid):
@@ -392,41 +382,6 @@ def remove_agent(agent_id, all_agents, yes):
 
     _remove_agent(base, aid, agent_branches)
     print(f"Removed {registry.display_name(base, aid)}.")
-
-
-def _cmd_remove_all_agents(base, yes=False):
-    from .status import _remove_agent
-
-    if registry.any_agent_running():
-        raise SystemExit("Cannot remove all: some agents are still running.")
-
-    all_ids = registry.all_agent_ids()
-    if not all_ids:
-        print("No agents in registry.")
-        return
-
-    branches = git.remote_branches(config.CAVE_SHARED_REMOTE, cwd=base)
-    agent_branches = [b for b in branches if config.parse_dev_branch(b)]
-
-    n = len(all_ids)
-    s = "session" if n == 1 else "sessions"
-    print(f"This will remove {n} agent {s} and {len(agent_branches)} dev branches.")
-
-    if not yes:
-        try:
-            answer = input("Continue? [y/N] ")
-        except (EOFError, KeyboardInterrupt):
-            raise SystemExit("\nAborted.")
-        if answer.strip().lower() not in ("y", "yes"):
-            raise SystemExit("Aborted.")
-
-    for aid in all_ids:
-        ab = [b for b in agent_branches
-              if (p := config.parse_dev_branch(b)) and p[1] == aid]
-        _remove_agent(base, aid, ab)
-
-    registry.clear_registry()
-    print(f"Removed {n} agent {s}.")
 
 
 @cli.command("remove-project")

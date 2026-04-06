@@ -1105,59 +1105,6 @@ class TestCAV(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("not found", result.stderr.lower())
 
-    def test_remove_all_agents(self):
-        """remove-agent --all clears registry and dev branches."""
-        agents = self._init_and_agents("1", "2")
-
-        # Both agents do work and push
-        for name, ws in agents.items():
-            (ws / f"work-{name}.py").write_text(f"# {name}\n")
-            git("add", f"work-{name}.py", cwd=ws)
-            git("commit", "-m", f"Agent {name} work", cwd=ws)
-            git("push", "host-cave", f"agent-{name}/main", cwd=ws, env=agent_env(name))
-
-        # Register them in the registry and mark exited
-        id1 = registry.acquire_agent_id(self.user_repo)
-        id2 = registry.acquire_agent_id(self.user_repo)
-        registry.mark_agent_exited(id1)
-        registry.mark_agent_exited(id2)
-
-        # Verify dev branches exist
-        git("fetch", "--prune", "cave", cwd=self.user_repo)
-        branches = git_out("branch", "-r", cwd=self.user_repo)
-        self.assertIn("cave/agent-1/main", branches)
-        self.assertIn("cave/agent-2/main", branches)
-
-        # Run remove-agent --all --yes
-        result = cav_cli("remove-agent", "--all", "--yes", cwd=self.user_repo)
-        self.assertEqual(result.returncode, 0)
-
-        # Registry should be empty
-        self.assertEqual(registry.all_agent_ids(), [])
-
-        # Agent branches should be gone
-        git("fetch", "--prune", "cave", cwd=self.user_repo)
-        branches = git_out("branch", "-r", cwd=self.user_repo)
-        self.assertNotIn("agent-1", branches)
-        self.assertNotIn("agent-2", branches)
-
-    def test_remove_all_refuses_running(self):
-        """remove-agent --all refuses if any agent is running."""
-        self._init()
-        id1 = registry.acquire_agent_id(self.user_repo)
-
-        result = cav_cli("remove-agent", "--all", "--yes", cwd=self.user_repo, check=False)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("still running", result.stderr)
-
-        registry.mark_agent_exited(id1)
-
-    def test_remove_all_empty_registry(self):
-        """remove-agent --all on empty registry is a no-op."""
-        self._init()
-        result = cav_cli("remove-agent", "--all", "--yes", cwd=self.user_repo)
-        self.assertIn("No agents", result.stdout)
-
     def test_global_agent_id_uniqueness(self):
         """Agent IDs are globally unique across projects, not per-project."""
         self._init()

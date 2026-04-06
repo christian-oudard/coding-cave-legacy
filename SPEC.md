@@ -106,9 +106,9 @@ Changes the current base branch to `<branch>`. The host repo runs `git checkout 
 
 Shows the current list of agents and unmerged commits for the current project, or for all projects with `cav status --all`. It fetches from the shared remote to get latest information, and queries the registry database. The status command is read-only, and does not change registry database state or Git state except for fetching. The status command shows agent status of "running" or "stopped". The sort order is most recent first. Similar to `git status`, it shows whether the host base branch is behind or ahead of the cave remote.
 
-### `cav remove-agent [--all] <n>`
+### `cav remove-agent <n>`
 
-Removes a paused agent by agent ID. Deletes its session from the database, and deletes its work tree, and and deletes its remote dev branch, and deletes the host dev branch checkout. Warns about unapproved commits being discarded, giving commit hashes. Refuses to remove a running agent. `--all` removes all agents. The command asks for confirmation before removing agents. `--yes` skips the confirmation.
+Removes a paused agent by agent ID. Deletes its session from the database, and deletes its work tree, and deletes its remote dev branch, and deletes the host dev branch checkout. Warns about unapproved commits being discarded, giving commit hashes. Refuses to remove a running agent.
 
 ### `cav cp [-R] [-f] [(cave|<slug>)[@<n>]:]<src> [(cave|<slug>)[@<n>]:]<dest>`
 
