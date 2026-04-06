@@ -116,3 +116,8 @@ def project_slug(base: Path) -> str:
 
 def inside_cave() -> bool:
     return "CODING_CAVE_VERSION" in os.environ
+
+
+def shared_remote() -> str:
+    """Return the shared remote name for the current context."""
+    return HOST_SHARED_REMOTE if inside_cave() else CAVE_SHARED_REMOTE

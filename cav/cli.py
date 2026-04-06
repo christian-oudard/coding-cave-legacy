@@ -213,9 +213,9 @@ def _auto_cleanup_if_clean(base, agent_id):
         if not config.shared_repo_path(proj_base).is_dir():
             continue  # shared repo gone, nothing to preserve
         try:
-            git.git("fetch", config.CAVE_SHARED_REMOTE, cwd=proj_base, echo=False,
+            git.git("fetch", config.shared_remote(), cwd=proj_base, echo=False,
                     check=False, capture=True)
-            branches = git.remote_branches(config.CAVE_SHARED_REMOTE, cwd=proj_base)
+            branches = git.remote_branches(config.shared_remote(), cwd=proj_base)
         except Exception as e:
             print(f"Warning: keeping {name}: "
                   f"git fetch failed for {slug}: {e}")
@@ -226,8 +226,8 @@ def _auto_cleanup_if_clean(base, agent_id):
                 continue
             all_agent_branches.append((proj_base, b))
             base_name = config.resolve_base(b)
-            remote_dev = f"{config.CAVE_SHARED_REMOTE}/{b}"
-            base_ref = f"{config.CAVE_SHARED_REMOTE}/{base_name}"
+            remote_dev = f"{config.shared_remote()}/{b}"
+            base_ref = f"{config.shared_remote()}/{base_name}"
             try:
                 if not git.has_merge_base(remote_dev, base_ref, cwd=proj_base):
                     print(f"Warning: keeping {name}: "
@@ -341,21 +341,28 @@ def status(agent, all_projects):
 def remove_agent(agent_id):
     """Remove a paused agent and its branches."""
     from .status import _remove_agent
-    base = find_repo_root()
-    require_init(base)
 
     aid = agent_id.lstrip("@").split("@")[-1]
     if not config.AGENT_ID_RE.match(aid):
         raise SystemExit(f"Invalid agent ID '{agent_id}'. Use a number (e.g. 3).")
 
-    name = registry.display_name(base, aid)
     if aid not in registry.all_agent_ids():
-        raise SystemExit(f"{name} not found.")
+        raise SystemExit(f"Agent {aid} not found.")
+
+    slug = registry.agent_project(aid)
+    path = registry.project_path(slug) if slug else None
+    if not path or not Path(path).is_dir():
+        # Project dir gone; just clean up the registry.
+        registry.remove_agent(aid)
+        print(f"Removed agent {aid} (project directory missing).")
+        return
+    base = Path(path)
 
     if registry.is_agent_running(aid):
+        name = registry.display_name(base, aid)
         raise SystemExit(f"{name} is running. Stop it first.")
 
-    branches = git.remote_branches(config.CAVE_SHARED_REMOTE, cwd=base)
+    branches = git.remote_branches(config.shared_remote(), cwd=base)
     agent_branches = [
         b for b in branches
         if (parsed := config.parse_dev_branch(b)) and parsed[1] == aid
@@ -366,8 +373,8 @@ def remove_agent(agent_id):
         if not parsed:
             continue
         base_name = parsed[0]
-        remote_dev = f"{config.CAVE_SHARED_REMOTE}/{b}"
-        base_ref = f"{config.CAVE_SHARED_REMOTE}/{base_name}"
+        remote_dev = f"{config.shared_remote()}/{b}"
+        base_ref = f"{config.shared_remote()}/{base_name}"
         try:
             if git.has_merge_base(remote_dev, base_ref, cwd=base):
                 commits = git.cherry_undelivered(base_ref, remote_dev, cwd=base)

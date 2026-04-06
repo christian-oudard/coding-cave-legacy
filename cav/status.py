@@ -66,7 +66,7 @@ def _remove_agent(base: Path, agent_id: str, branches: list[str]):
     """Remove an agent's remote branches, local branches, and local state."""
     # Clean branches in the primary project.
     for branch in branches:
-        git.git("push", config.CAVE_SHARED_REMOTE, f":refs/heads/{branch}",
+        git.git("push", config.shared_remote(), f":refs/heads/{branch}",
                 cwd=base, echo=False, capture=True)
         git.git("branch", "-D", branch,
                 cwd=base, echo=False, capture=True, check=False)
@@ -83,10 +83,10 @@ def _remove_agent(base: Path, agent_id: str, branches: list[str]):
             continue
         try:
             sec_base = Path(path)
-            for b in git.remote_branches(config.CAVE_SHARED_REMOTE, cwd=sec_base):
+            for b in git.remote_branches(config.shared_remote(), cwd=sec_base):
                 parsed = config.parse_dev_branch(b)
                 if parsed and parsed[1] == agent_id:
-                    git.git("push", config.CAVE_SHARED_REMOTE, f":refs/heads/{b}",
+                    git.git("push", config.shared_remote(), f":refs/heads/{b}",
                             cwd=sec_base, echo=False, capture=True, check=False)
                     git.git("branch", "-D", b,
                             cwd=sec_base, echo=False, capture=True, check=False)
@@ -97,11 +97,11 @@ def _remove_agent(base: Path, agent_id: str, branches: list[str]):
 
 def status(base: Path, agent_filter: str | None = None, scoped: bool = True) -> float:
     """Show agent status. Returns the most recent activity timestamp (0.0 if none)."""
-    git.git("fetch", "--prune", config.CAVE_SHARED_REMOTE, cwd=base, **config.v())
+    git.git("fetch", "--prune", config.shared_remote(), cwd=base, **config.v())
 
     if not agent_filter:
         local_branch = git.current_branch(cwd=base)
-        remote_ref = f"{config.CAVE_SHARED_REMOTE}/{local_branch}"
+        remote_ref = f"{config.shared_remote()}/{local_branch}"
         try:
             local_sha = git.git_output("rev-parse", local_branch, cwd=base)
             remote_sha = git.git_output("rev-parse", remote_ref, cwd=base)
@@ -131,7 +131,7 @@ def status(base: Path, agent_filter: str | None = None, scoped: bool = True) -> 
     if agent_filter:
         registered = [a for a in registered if a == agent_filter]
 
-    branches = git.remote_branches(config.CAVE_SHARED_REMOTE, cwd=base)
+    branches = git.remote_branches(config.shared_remote(), cwd=base)
     by_agent = {aid: [] for aid in registered}
     for branch in branches:
         parsed = config.parse_dev_branch(branch)
@@ -163,8 +163,8 @@ def status(base: Path, agent_filter: str | None = None, scoped: bool = True) -> 
         unapproved = []
         last_activity = 0.0
         for branch, base_name in branches:
-            remote_dev = f"{config.CAVE_SHARED_REMOTE}/{branch}"
-            remote_base = f"{config.CAVE_SHARED_REMOTE}/{base_name}"
+            remote_dev = f"{config.shared_remote()}/{branch}"
+            remote_base = f"{config.shared_remote()}/{base_name}"
             ts = git.commit_timestamp(remote_dev, cwd=base)
             if ts and ts > last_activity:
                 last_activity = ts
