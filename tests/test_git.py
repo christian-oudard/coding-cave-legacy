@@ -23,9 +23,19 @@ from cav import config, registry, workspace
 from tests import find_agent_by_session
 
 
+def _clean_env():
+    """Base environment for test subprocesses.
+
+    Strip CODING_CAVE_* vars (except DATA_DIR) so test repos behave as
+    host-side repos even when tests run inside a cave.
+    """
+    return {k: v for k, v in os.environ.items()
+            if not k.startswith("CODING_CAVE_") or k == "CODING_CAVE_DATA_DIR"}
+
+
 def run(cmd, cwd=None, check=True, env=None):
     """Run a command, return CompletedProcess."""
-    merged_env = {**os.environ, **(env or {})}
+    merged_env = {**_clean_env(), **(env or {})}
     return subprocess.run(
         cmd, cwd=cwd, check=check,
         capture_output=True, text=True,
