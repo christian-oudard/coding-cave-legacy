@@ -326,13 +326,22 @@ def status(agent, all_projects):
                 f" Restore directory or remove with: cav remove-project {slug}",
                 err=True)
         return
-    base = find_repo_root()
-    require_init(base)
     agent_id = None
     if agent:
         agent_id = agent.lstrip("@").split("@")[-1]
         if not config.AGENT_ID_RE.match(agent_id):
             raise SystemExit(f"Invalid agent ID '{agent}'. Use a number (e.g. 3).")
+        # Look up agent globally so cross-project queries work
+        slug = registry.agent_project(agent_id)
+        if not slug:
+            raise SystemExit(f"No agent {agent_id} in registry.")
+        path = registry.project_path(slug)
+        if not path or not Path(path).is_dir():
+            raise SystemExit(f"Agent {agent_id} project \"{slug}\" path missing: {path}")
+        base = Path(path)
+    else:
+        base = find_repo_root()
+    require_init(base)
     _status(base, agent_filter=agent_id)
 
 
