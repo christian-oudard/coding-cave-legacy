@@ -12,7 +12,10 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from cav import config, registry
-from cav.cp import cp, _resolve_cave_path, _worktree_for_slug, _complete_cp_path
+from cav.cp import (
+    cp, _resolve_cave_path, _worktree_for_slug, _complete_cp_path,
+    _expand_cave_glob,
+)
 
 
 def _make_worktree(data_dir: Path, slug: str, agent_id: str) -> Path:
@@ -609,3 +612,177 @@ class TestCpCompleter(CpTestCase):
 
     def test_nonexistent_directory_returns_empty(self):
         assert _complete_cp_path(None, None, "demo:nope/") == []
+
+
+class TestCpCaveGlob(CpTestCase):
+    """Glob expansion for cave-side source paths."""
+
+    def setUp(self):
+        super().setUp()
+        self.ws = _make_worktree(self.data_dir, "proj", "1")
+        (self.ws / "tmp").mkdir()
+        (self.ws / "tmp" / "a.png").write_bytes(b"A")
+        (self.ws / "tmp" / "b.png").write_bytes(b"B")
+        (self.ws / "tmp" / "c.txt").write_bytes(b"C")
+
+    def test_expand_relative_glob(self):
+        expanded = _expand_cave_glob("proj@1:tmp/*.png")
+        assert expanded == ["proj@1:tmp/a.png", "proj@1:tmp/b.png"]
+
+    def test_expand_absolute_glob(self):
+        expanded = _expand_cave_glob("proj@1:/projects/proj/tmp/*.png")
+        assert expanded == [
+            "proj@1:/projects/proj/tmp/a.png",
+            "proj@1:/projects/proj/tmp/b.png",
+        ]
+
+    def test_expand_top_level_glob(self):
+        (self.ws / "x.md").write_text("x")
+        (self.ws / "y.md").write_text("y")
+        expanded = _expand_cave_glob("proj@1:*.md")
+        assert expanded == ["proj@1:x.md", "proj@1:y.md"]
+
+    def test_expand_no_glob_returns_unchanged(self):
+        assert _expand_cave_glob("proj@1:tmp/a.png") == ["proj@1:tmp/a.png"]
+
+    def test_expand_no_cave_prefix_returns_unchanged(self):
+        assert _expand_cave_glob("/host/path/*.png") == ["/host/path/*.png"]
+
+    def test_expand_no_matches_errors(self):
+        with self.assertRaises(SystemExit) as ctx:
+            _expand_cave_glob("proj@1:tmp/*.gif")
+        assert "No matches" in str(ctx.exception)
+
+    def test_expand_question_mark(self):
+        expanded = _expand_cave_glob("proj@1:tmp/?.png")
+        assert expanded == ["proj@1:tmp/a.png", "proj@1:tmp/b.png"]
+
+    def test_expand_charclass(self):
+        expanded = _expand_cave_glob("proj@1:tmp/[ab].png")
+        assert expanded == ["proj@1:tmp/a.png", "proj@1:tmp/b.png"]
+
+    def test_glob_rejects_symlink_escape(self):
+        outside = Path(self.tmpdir) / "outside"
+        outside.mkdir()
+        (outside / "leaked.png").write_bytes(b"LEAK")
+        (self.ws / "tmp" / "leak.png").symlink_to(outside / "leaked.png")
+        with self.assertRaises(SystemExit) as ctx:
+            _expand_cave_glob("proj@1:tmp/*.png")
+        assert "escapes" in str(ctx.exception).lower()
+
+    def test_cp_glob_to_directory(self):
+        out = Path(self.tmpdir) / "out"
+        out.mkdir()
+        cp(["proj@1:tmp/*.png"], str(out))
+        names = sorted(p.name for p in out.iterdir())
+        assert names == ["a.png", "b.png"]
+        assert (out / "a.png").read_bytes() == b"A"
+        assert (out / "b.png").read_bytes() == b"B"
+
+    def test_cp_glob_single_match_to_file(self):
+        """A glob that matches one file can be copied to a non-directory dest."""
+        out = Path(self.tmpdir) / "single.png"
+        cp(["proj@1:tmp/a*.png"], str(out))
+        assert out.read_bytes() == b"A"
+
+    def test_cp_glob_multi_match_requires_directory(self):
+        out = Path(self.tmpdir) / "notadir"
+        with self.assertRaises(SystemExit) as ctx:
+            cp(["proj@1:tmp/*.png"], str(out))
+        assert "not a directory" in str(ctx.exception).lower()
+
+    def test_cp_home_glob(self):
+        home = _make_home(self.data_dir)
+        (home / "a.log").write_text("LA")
+        (home / "b.log").write_text("LB")
+        out = Path(self.tmpdir) / "out"
+        out.mkdir()
+        cp(["proj@1:~/*.log"], str(out))
+        names = sorted(p.name for p in out.iterdir())
+        assert names == ["a.log", "b.log"]
+
+    def test_escaped_star_is_literal(self):
+        """\\* should be treated as a literal star, not a glob."""
+        (self.ws / "tmp" / "lit*.png").write_bytes(b"LIT")
+        expanded = _expand_cave_glob("proj@1:tmp/lit\\*.png")
+        # No unescaped magic -> single literal spec with escapes stripped.
+        assert expanded == ["proj@1:tmp/lit*.png"]
+
+        out = Path(self.tmpdir) / "out.png"
+        cp(["proj@1:tmp/lit\\*.png"], str(out))
+        assert out.read_bytes() == b"LIT"
+
+    def test_escaped_question_is_literal(self):
+        (self.ws / "tmp" / "q?.txt").write_bytes(b"Q")
+        out = Path(self.tmpdir) / "out.txt"
+        cp(["proj@1:tmp/q\\?.txt"], str(out))
+        assert out.read_bytes() == b"Q"
+
+    def test_escaped_brackets_are_literal(self):
+        (self.ws / "tmp" / "[abc].txt").write_bytes(b"BR")
+        out = Path(self.tmpdir) / "out.txt"
+        cp(["proj@1:tmp/\\[abc\\].txt"], str(out))
+        assert out.read_bytes() == b"BR"
+
+    def test_escaped_literal_does_not_glob_other_files(self):
+        """A fully-escaped pattern must not match files matching the unescaped form."""
+        # tmp/ already has a.png and b.png from setUp.
+        # tmp/*.png as a literal name doesn't exist; should error, not match a.png/b.png.
+        with self.assertRaises(SystemExit) as ctx:
+            cp(["proj@1:tmp/\\*.png"], str(Path(self.tmpdir) / "out"))
+        # Source not found, not "no matches" -- went through literal path.
+        assert "not found" in str(ctx.exception).lower()
+
+    def test_mixed_escape_and_glob(self):
+        """An escaped star next to an unescaped one matches files starting with '*'."""
+        (self.ws / "tmp" / "*foo.png").write_bytes(b"S1")
+        (self.ws / "tmp" / "*bar.png").write_bytes(b"S2")
+        out = Path(self.tmpdir) / "out"
+        out.mkdir()
+        cp(["proj@1:tmp/\\**.png"], str(out))
+        names = sorted(p.name for p in out.iterdir())
+        assert names == ["*bar.png", "*foo.png"]
+
+    def test_backslash_before_nonmagic_is_stripped(self):
+        """\\X for non-magic X collapses to X (POSIX shell convention)."""
+        (self.ws / "tmp" / "abc.txt").write_text("A")
+        out = Path(self.tmpdir) / "out.txt"
+        cp(["proj@1:tmp/a\\bc.txt"], str(out))
+        assert out.read_text() == "A"
+
+    def test_double_backslash_is_literal_backslash(self):
+        r"""\\\\ collapses to a single literal backslash."""
+        (self.ws / "tmp" / "back\\slash.txt").write_text("B")
+        out = Path(self.tmpdir) / "out.txt"
+        cp(["proj@1:tmp/back\\\\slash.txt"], str(out))
+        assert out.read_text() == "B"
+
+    def test_glob_multi_agent_picker_only_prompts_once(self):
+        """When the slug has multiple agents, the picker should fire once per cp,
+        not once per glob match.
+        """
+        ws2 = _make_worktree(self.data_dir, "proj", "2")
+        (ws2 / "tmp").mkdir()
+        (ws2 / "tmp" / "x.png").write_bytes(b"X")
+        (ws2 / "tmp" / "y.png").write_bytes(b"Y")
+
+        db = registry._open()
+        for aid in ("1", "2"):
+            db.execute(
+                "INSERT OR REPLACE INTO agents (agent_id, project, started_at) "
+                "VALUES (?, ?, ?)",
+                (aid, "proj", 0.0),
+            )
+        db.commit()
+        db.close()
+
+        out = Path(self.tmpdir) / "out"
+        out.mkdir()
+
+        # Without the agent_id encoding fix, the picker would prompt once per
+        # match. Provide exactly one input so any extra prompt raises.
+        with patch("builtins.input", side_effect=["2"]):
+            cp(["proj:tmp/*.png"], str(out))
+
+        names = sorted(p.name for p in out.iterdir())
+        assert names == ["x.png", "y.png"]

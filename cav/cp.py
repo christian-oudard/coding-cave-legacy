@@ -1,5 +1,6 @@
 """Copy files between the host and a cave agent worktree."""
 
+import glob as _glob
 import os
 import shutil
 import stat
@@ -348,10 +349,114 @@ def _completer_worktree(slug: str, agent_id: str | None) -> Path | None:
     return candidates[0]
 
 
+def _parse_path_component(p: str) -> tuple[str, str, bool]:
+    """Process backslash escapes in a single path component.
+
+    Returns (literal, pattern, has_unescaped_magic):
+      - literal: the component with \\X collapsed to X (used for literal lookup)
+      - pattern: the component with \\X collapsed to glob.escape(X) — i.e.
+        magic chars become a single-char class like [*] so Path.glob treats
+        them literally — and unescaped magic kept as-is
+      - has_unescaped_magic: True iff *, ?, or [ appears unescaped
+    """
+    literal: list[str] = []
+    pattern: list[str] = []
+    has_magic = False
+    i = 0
+    while i < len(p):
+        c = p[i]
+        if c == "\\" and i + 1 < len(p):
+            nxt = p[i + 1]
+            literal.append(nxt)
+            pattern.append(_glob.escape(nxt))
+            i += 2
+        elif c in "*?[":
+            literal.append(c)
+            pattern.append(c)
+            has_magic = True
+            i += 1
+        else:
+            literal.append(c)
+            pattern.append(c)
+            i += 1
+    return "".join(literal), "".join(pattern), has_magic
+
+
+def _expand_cave_glob(spec: str) -> list[str]:
+    """Expand glob characters in a cave path spec.
+
+    Returns a list of cave specs (one per match). If the spec has no
+    unescaped glob characters or no cave prefix, returns [spec] unchanged
+    (with backslash escapes stripped, if any). Raises SystemExit if a
+    glob matches nothing.
+
+    Backslash escapes the next character: cave:foo\\*.txt looks up a file
+    literally named "foo*.txt". Use single quotes on the shell to keep
+    the backslash from being eaten by the shell.
+    """
+    if ":" not in spec:
+        return [spec]
+    prefix, _, path = spec.partition(":")
+
+    parsed = [_parse_path_component(p) for p in path.split("/")]
+    if not any(has for _, _, has in parsed):
+        # No unescaped magic. Strip escapes and return as a single literal.
+        literal_path = "/".join(lit for lit, _, _ in parsed)
+        if literal_path == path:
+            return [spec]
+        return [f"{prefix}:{literal_path}"]
+
+    # Split at the first component containing unescaped magic. Static
+    # prefix uses literal forms (so escaped magic resolves correctly),
+    # the glob remainder uses the escape-aware pattern form.
+    split_at = next(i for i, (_, _, has) in enumerate(parsed) if has)
+    static_path = "/".join(lit for lit, _, _ in parsed[:split_at])
+    if not static_path:
+        static_path = "~" if path.startswith("~") else "."
+    pattern = "/".join(pat for _, pat, _ in parsed[split_at:])
+
+    base_host, _slug = _resolve_cave_path(f"{prefix}:{static_path}")
+    if not base_host.is_dir():
+        raise SystemExit(f"Not a directory: {prefix}:{static_path}")
+
+    matches = sorted(base_host.glob(pattern))
+    if not matches:
+        raise SystemExit(f"No matches for: {spec}")
+
+    # Reject any match that escapes the static base via symlink.
+    for m in matches:
+        _check_in_dir(m, base_host)
+
+    # If the picker resolved to a specific agent worktree, encode it into
+    # the expanded specs so subsequent _resolve_cave_path calls don't
+    # re-prompt. Home paths don't need this (no per-agent worktree).
+    out_prefix = prefix
+    if "@" not in prefix:
+        try:
+            rel = base_host.relative_to(config.DATA_DIR / "worktrees")
+            out_prefix = f"{prefix}@{rel.parts[1]}"  # parts = (slug, agent_id, ...)
+        except (ValueError, IndexError):
+            pass
+
+    results = []
+    for m in matches:
+        rel = m.relative_to(base_host).as_posix()
+        joined = rel if static_path == "." else f"{static_path}/{rel}"
+        results.append(f"{out_prefix}:{joined}")
+    return results
+
+
 def cp(srcs: list[str], dest: str, recursive: bool = False, force: bool = False):
     """Copy files between host and a cave agent worktree."""
+    expanded: list[str] = []
+    for src in srcs:
+        expanded.extend(_expand_cave_glob(src))
+    srcs = expanded
+
     dest_path, _dest_slug = _resolve_cave_path(dest)
-    src_path, _src_slug = _resolve_cave_path(srcs[0]) if len(srcs) == 1 else (None, None)
+    # Direction is determined by the first src: if it has a cave prefix,
+    # we're copying cave -> host regardless of how many globbed matches.
+    first_src_path, _src_slug = _resolve_cave_path(srcs[0])
 
     if dest_path is not None:
         # host -> cave
@@ -383,33 +488,37 @@ def cp(srcs: list[str], dest: str, recursive: bool = False, force: bool = False)
                 shutil.copy2(src_obj, base, follow_symlinks=False)
             print(f"  {src} -> {dest}", file=sys.stderr)
 
-    elif src_path is not None:
+    elif first_src_path is not None:
         # cave -> host
-        # Use O_NOFOLLOW to atomically reject symlinks, preventing TOCTOU
-        # where the agent replaces a regular file with a symlink between
-        # our check and the copy.
-        if src_path.is_symlink():
-            raise SystemExit(f"Refusing to copy symlink from cave: {srcs[0]}")
-        if not src_path.exists():
-            raise SystemExit(f"Source not found in cave: {srcs[0]}")
         host_dest = Path(dest).resolve()
         host_dest.parent.mkdir(parents=True, exist_ok=True)
-        base = host_dest / src_path.name if host_dest.is_dir() else host_dest
-        if src_path.is_dir() and not recursive:
-            raise SystemExit(f"cp: -R not specified; omitting directory '{srcs[0]}'")
-        if not force and base.exists():
-            try:
-                answer = input(f"Overwrite {base}? [y/N] ").strip().lower()
-            except EOFError:
-                answer = ""
-            if answer != "y":
-                raise SystemExit("Aborted.")
-        if src_path.is_dir():
-            shutil.copytree(src_path, base, dirs_exist_ok=True,
-                            copy_function=_copy_nofollow)
-        else:
-            _copy_nofollow(str(src_path), str(base))
-        print(f"  {srcs[0]} -> {dest}", file=sys.stderr)
+        if len(srcs) > 1 and not host_dest.is_dir():
+            raise SystemExit(f"cp: base '{dest}': not a directory")
+        for src in srcs:
+            src_path, _ = _resolve_cave_path(src)
+            # Use O_NOFOLLOW to atomically reject symlinks, preventing TOCTOU
+            # where the agent replaces a regular file with a symlink between
+            # our check and the copy.
+            if src_path.is_symlink():
+                raise SystemExit(f"Refusing to copy symlink from cave: {src}")
+            if not src_path.exists():
+                raise SystemExit(f"Source not found in cave: {src}")
+            base = host_dest / src_path.name if host_dest.is_dir() else host_dest
+            if src_path.is_dir() and not recursive:
+                raise SystemExit(f"cp: -R not specified; omitting directory '{src}'")
+            if not force and base.exists():
+                try:
+                    answer = input(f"Overwrite {base}? [y/N] ").strip().lower()
+                except EOFError:
+                    answer = ""
+                if answer != "y":
+                    raise SystemExit("Aborted.")
+            if src_path.is_dir():
+                shutil.copytree(src_path, base, dirs_exist_ok=True,
+                                copy_function=_copy_nofollow)
+            else:
+                _copy_nofollow(str(src_path), str(base))
+            print(f"  {src} -> {dest}", file=sys.stderr)
 
     else:
         raise SystemExit(
