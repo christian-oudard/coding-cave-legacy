@@ -313,7 +313,10 @@ class TestDeadCode(unittest.TestCase):
 
     # Click commands registered via @cli.command() or @group.command()
     # that vulture can't trace through decorator dispatch.
-    CLICK_COMMANDS = {"version", "env_build", "env_update", "env_metadata"}
+    CLICK_COMMANDS = {"version", "env_build", "env_update", "env_metadata",
+                      "completion"}
+    # Click overrides accessed by name from the framework, not by direct call.
+    CLICK_OVERRIDES = {"shell_complete", "source_template"}
 
     def test_no_dead_code(self):
         import vulture
@@ -322,6 +325,7 @@ class TestDeadCode(unittest.TestCase):
         unused = [
             item for item in v.get_unused_code(min_confidence=0)
             if item.name not in self.CLICK_COMMANDS
+            and item.name not in self.CLICK_OVERRIDES
         ]
         if unused:
             self.fail(

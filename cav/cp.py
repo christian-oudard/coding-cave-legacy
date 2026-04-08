@@ -207,6 +207,147 @@ def _resolve_cave_path(spec: str) -> tuple[Path, str] | tuple[None, None]:
     return result, slug
 
 
+def _complete_cp_path(ctx, param, incomplete: str):
+    """Click completer for `cav cp` paths.
+
+    No `:` in the partial -> emit a file marker so the shell does its
+    own filename completion. With `:`, parse the cave prefix and list
+    matching entries from the worktree (or persistent home for `~/`).
+    Errors during completion are swallowed: a missing project, dead
+    worktree, etc. just produce no suggestions instead of a traceback.
+    """
+    from click.shell_completion import CompletionItem
+
+    if ":" not in incomplete:
+        return [CompletionItem(incomplete, type="file")]
+
+    prefix, _, path_part = incomplete.partition(":")
+    p = prefix
+    agent_id = None
+    if "@" in p:
+        p, id_str = p.rsplit("@", 1)
+        if not id_str.isdigit():
+            return []
+        agent_id = id_str
+
+    try:
+        slug = _completer_slug(p, agent_id)
+        if slug is None:
+            return []
+        if p == "cave" and agent_id is None:
+            # cave: may resolve an agent_id from the dev branch
+            agent_id = _completer_branch_agent_id(slug)
+
+        if path_part.startswith("~"):
+            base_dir = config.persistent_home()
+            if path_part == "~":
+                rel = ""
+                marker = "~"
+            elif path_part.startswith("~/"):
+                rel = path_part[2:]
+                marker = "~/"
+            else:
+                return []
+        else:
+            ws = _completer_worktree(slug, agent_id)
+            if ws is None:
+                return []
+            base_dir = ws
+            # Treat /projects/<slug>/... as worktree-relative for listing.
+            project_prefix = f"/projects/{slug}"
+            if path_part == project_prefix or path_part.startswith(project_prefix + "/"):
+                rel = path_part[len(project_prefix):].lstrip("/")
+                marker = f"{project_prefix}/"
+            else:
+                rel = path_part.lstrip("/")
+                marker = "/" if path_part.startswith("/") else ""
+    except Exception:
+        return []
+
+    if "/" in rel:
+        head, _, tail = rel.rpartition("/")
+        list_dir = base_dir / head
+        head_with_slash = head + "/"
+    else:
+        head_with_slash = ""
+        tail = rel
+        list_dir = base_dir
+
+    try:
+        if not list_dir.is_dir():
+            return []
+        entries = sorted(list_dir.iterdir())
+    except OSError:
+        return []
+
+    items = []
+    for entry in entries:
+        if not entry.name.startswith(tail):
+            continue
+        if entry.name.startswith(".") and not tail.startswith("."):
+            continue
+        sep = "/" if entry.is_dir() else ""
+        value = f"{prefix}:{marker}{head_with_slash}{entry.name}{sep}"
+        items.append(CompletionItem(value))
+    return items
+
+
+def _completer_slug(prefix_word: str, agent_id: str | None) -> str | None:
+    """Resolve a project slug for completion. Never prompts."""
+    if prefix_word == "cave":
+        if agent_id is not None:
+            return registry.agent_project(agent_id)
+        cwd = Path.cwd().resolve()
+        for s, path in registry.all_projects():
+            proj = Path(path).resolve()
+            if cwd == proj or cwd.is_relative_to(proj):
+                return s
+        try:
+            branch = git.current_branch()
+        except Exception:
+            return None
+        parsed = config.parse_dev_branch(branch)
+        if parsed:
+            return registry.agent_project(parsed[1])
+        return None
+    if registry.project_path(prefix_word):
+        return prefix_word
+    return None
+
+
+def _completer_branch_agent_id(slug: str) -> str | None:
+    """Return the agent_id implied by the current dev branch, if any."""
+    try:
+        branch = git.current_branch()
+    except Exception:
+        return None
+    parsed = config.parse_dev_branch(branch)
+    if parsed and registry.agent_project(parsed[1]) == slug:
+        return parsed[1]
+    return None
+
+
+def _completer_worktree(slug: str, agent_id: str | None) -> Path | None:
+    """Return a worktree to list for completion. Never prompts.
+
+    With multiple agents and no agent_id given, pick the lowest-numbered
+    one rather than asking. The user can disambiguate by typing `slug@N:`.
+    """
+    if agent_id is not None:
+        ws = config.worktree_dir(slug, agent_id)
+        return ws if ws.exists() else None
+    slug_dir = config.DATA_DIR / "worktrees" / slug
+    if not slug_dir.exists():
+        return None
+    registered = set(registry.all_agent_ids(slug))
+    candidates = [p for p in slug_dir.iterdir()
+                  if p.is_dir() and p.name in registered]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda p: int(p.name) if p.name.isdigit() else p.name)
+    return candidates[0]
+
+
 def cp(srcs: list[str], dest: str, recursive: bool = False, force: bool = False):
     """Copy files between host and a cave agent worktree."""
     dest_path, _dest_slug = _resolve_cave_path(dest)

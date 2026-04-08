@@ -9,7 +9,9 @@ from pathlib import Path
 
 import click
 
-from . import config, git, registry
+from . import completion as _completion, config, git, registry
+
+_completion.register()
 
 
 def find_repo_root() -> Path:
@@ -425,8 +427,13 @@ def checkout(branch, agent_id):
     _checkout(base, branch, agent_id=agent_id)
 
 
+def _cp_path_completer(ctx, param, incomplete):
+    from .cp import _complete_cp_path
+    return _complete_cp_path(ctx, param, incomplete)
+
+
 @cli.command()
-@click.argument("paths", nargs=-1, required=True)
+@click.argument("paths", nargs=-1, required=True, shell_complete=_cp_path_completer)
 @click.option("-R", "-r", "--recursive", is_flag=True,
               help="Copy directories recursively")
 @click.option("-f", "--force", is_flag=True,
@@ -468,6 +475,24 @@ def env_metadata():
 
 
 @cli.command()
+@click.argument("shell", type=click.Choice(["bash", "zsh", "fish"]))
+def completion(shell):
+    """Print shell completion script. Source it from your shell rc.
+
+    Examples:
+      eval "$(cav completion bash)"   # in ~/.bashrc
+      eval "$(cav completion zsh)"    # in ~/.zshrc (after compinit)
+      cav completion fish | source    # in fish
+    """
+    from click.shell_completion import shell_complete, get_completion_class
+    cls = get_completion_class(shell)
+    if cls is None:
+        raise SystemExit(f"Unsupported shell: {shell}")
+    comp = cls(cli, {}, "cav", "_CAV_COMPLETE")
+    click.echo(comp.source())
+
+
+@cli.command()
 def version():
     """Show version."""
     ts = "@VERSION_DATE@"
@@ -504,6 +529,7 @@ def main():
     subcmds = {
         "init", "agent", "approve", "reject", "pull", "push", "checkout",
         "status", "version", "remove-agent", "remove-project", "cp", "env",
+        "completion",
     }
     if not argv:
         argv = ["agent"]
@@ -516,7 +542,7 @@ def main():
         else:
             raise SystemExit(f"Unknown command '{argv[0]}'.")
 
-    cli(args=argv)
+    cli(args=argv, prog_name="cav")
 
 
 if __name__ == "__main__":

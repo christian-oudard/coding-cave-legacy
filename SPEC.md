@@ -134,6 +134,18 @@ Direction is determined by which path has the `cave:` prefix. If the destination
 
 If a project has multiple agents, the `@<n>` suffix specifies an agent. If no agent id is given, there is a prompt which asks which agent session to copy into. For security reasons, it refuses to copy symlinks out of the cave. `cav cp` prompts before overwriting existing files, both in the cave and on the host, unless `-f` is given.
 
+Tab completion is supported for cave-side paths once the shell completion script is installed (see `cav completion`). Typing `cav cp cave:src/<TAB>` lists files inside the cave worktree, similar to how `scp host:<TAB>` lists files on a remote host.
+
+### `cav completion bash|zsh|fish`
+
+Prints a shell completion script to stdout. Source it from your shell rc to enable tab completion for `cav` commands and arguments, including cave-side path completion for `cav cp`.
+
+```
+eval "$(cav completion bash)"   # in ~/.bashrc
+eval "$(cav completion zsh)"    # in ~/.zshrc, after compinit
+cav completion fish | source    # in fish
+```
+
 ### `cav shell`
 
 Start a shell session in a running agent's worktree, inside the bubblewrap sandbox.

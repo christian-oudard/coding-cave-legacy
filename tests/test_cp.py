@@ -12,7 +12,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from cav import config, registry
-from cav.cp import cp, _resolve_cave_path, _worktree_for_slug
+from cav.cp import cp, _resolve_cave_path, _worktree_for_slug, _complete_cp_path
 
 
 def _make_worktree(data_dir: Path, slug: str, agent_id: str) -> Path:
@@ -506,3 +506,106 @@ class TestCpPathResolution(CpTestCase):
         with self.assertRaises(SystemExit) as ctx:
             cp([str(a), str(b)], "destproj:newfile")
         assert "not a directory" in str(ctx.exception).lower()
+
+
+def _values(items):
+    return [i.value for i in items]
+
+
+class TestCpCompleter(CpTestCase):
+    """Shell completion for `cav cp` paths."""
+
+    def setUp(self):
+        super().setUp()
+        self.ws = _make_worktree(self.data_dir, "demo", "1")
+        (self.ws / "README.md").write_text("")
+        (self.ws / "src").mkdir()
+        (self.ws / "src" / "cli.py").write_text("")
+        (self.ws / "src" / "cp.py").write_text("")
+        (self.ws / ".hidden").write_text("")
+        db = registry._open()
+        db.execute("INSERT INTO projects (slug, path) VALUES (?, ?)",
+                   ("demo", self.tmpdir))
+        db.execute(
+            "INSERT INTO agents (agent_id, project, started_at) VALUES (?, ?, ?)",
+            ("1", "demo", 0.0))
+        db.commit()
+        db.close()
+
+    def test_no_colon_returns_file_marker(self):
+        items = _complete_cp_path(None, None, "loc")
+        assert len(items) == 1
+        assert items[0].type == "file"
+        assert items[0].value == "loc"
+
+    def test_empty_returns_file_marker(self):
+        items = _complete_cp_path(None, None, "")
+        assert items[0].type == "file"
+
+    def test_lists_worktree_root(self):
+        vals = _values(_complete_cp_path(None, None, "demo:"))
+        assert "demo:README.md" in vals
+        assert "demo:src/" in vals
+        assert "demo:.hidden" not in vals  # hidden hidden unless typed
+
+    def test_lists_worktree_subdir(self):
+        vals = _values(_complete_cp_path(None, None, "demo:src/"))
+        assert vals == ["demo:src/cli.py", "demo:src/cp.py"]
+
+    def test_filters_by_partial(self):
+        vals = _values(_complete_cp_path(None, None, "demo:src/cl"))
+        assert vals == ["demo:src/cli.py"]
+
+    def test_directory_gets_trailing_slash(self):
+        vals = _values(_complete_cp_path(None, None, "demo:s"))
+        assert vals == ["demo:src/"]
+
+    def test_hidden_shown_when_explicit(self):
+        vals = _values(_complete_cp_path(None, None, "demo:."))
+        assert "demo:.hidden" in vals
+
+    def test_unknown_slug_returns_empty(self):
+        assert _complete_cp_path(None, None, "ghost:") == []
+
+    def test_invalid_agent_id_returns_empty(self):
+        assert _complete_cp_path(None, None, "demo@bad:") == []
+
+    def test_specific_agent_id(self):
+        ws2 = _make_worktree(self.data_dir, "demo", "2")
+        (ws2 / "only2.txt").write_text("")
+        db = registry._open()
+        db.execute(
+            "INSERT INTO agents (agent_id, project, started_at) VALUES (?, ?, ?)",
+            ("2", "demo", 0.0))
+        db.commit()
+        db.close()
+        vals = _values(_complete_cp_path(None, None, "demo@2:"))
+        assert "demo@2:only2.txt" in vals
+
+    def test_never_prompts_with_multiple_agents(self):
+        _make_worktree(self.data_dir, "demo", "2")
+        db = registry._open()
+        db.execute(
+            "INSERT INTO agents (agent_id, project, started_at) VALUES (?, ?, ?)",
+            ("2", "demo", 0.0))
+        db.commit()
+        db.close()
+        # Picker would call input(); patch to detect any call.
+        with patch("builtins.input", side_effect=AssertionError("must not prompt")):
+            vals = _values(_complete_cp_path(None, None, "demo:"))
+        assert "demo:README.md" in vals
+
+    def test_home_path_completion(self):
+        home = _make_home(self.data_dir)
+        (home / "rcfile").write_text("")
+        (home / "notes.txt").write_text("")
+        vals = _values(_complete_cp_path(None, None, "demo:~/"))
+        assert "demo:~/rcfile" in vals
+        assert "demo:~/notes.txt" in vals
+
+    def test_absolute_project_path(self):
+        vals = _values(_complete_cp_path(None, None, "demo:/projects/demo/src/"))
+        assert "demo:/projects/demo/src/cli.py" in vals
+
+    def test_nonexistent_directory_returns_empty(self):
+        assert _complete_cp_path(None, None, "demo:nope/") == []
