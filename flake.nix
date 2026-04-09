@@ -101,14 +101,10 @@
               fi
             '')
 
-            # Subcave support (opt-in via --recursive):
-            # /dev/fuse for nix store overlay, /dev/net/tun for slirp4netns
-            (try-fwd-env "CODING_CAVE_RECURSIVE")
+            # Subcave support: /dev/fuse for nix store overlay, /dev/net/tun for slirp4netns
             (add-runtime ''
-              if [ "''${CODING_CAVE_RECURSIVE:-}" = "1" ]; then
-                [ -e /dev/fuse ] && RUNTIME_ARGS+=(--dev-bind /dev/fuse /dev/fuse)
-                [ -e /dev/net/tun ] && RUNTIME_ARGS+=(--dev-bind /dev/net/tun /dev/net/tun)
-              fi
+              [ -e /dev/fuse ] && RUNTIME_ARGS+=(--dev-bind /dev/fuse /dev/fuse)
+              [ -e /dev/net/tun ] && RUNTIME_ARGS+=(--dev-bind /dev/net/tun /dev/net/tun)
             '')
 
             # Persistent home

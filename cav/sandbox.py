@@ -672,7 +672,7 @@ def _seed_claude_config(home: Path, project_slug: str):
 
 
 def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
-           project_slug: str = "project", recursive: bool = False,
+           project_slug: str = "project",
            session_id: str | None = None, resuming: bool = False,
            prompt: str | None = None):
     """Launch claude in a bwrap sandbox via the jail.nix binary.
@@ -790,9 +790,7 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
     if nix_db_dir:
         env["CODING_CAVE_NIX_DB_DIR"] = str(nix_db_dir)
 
-    if recursive:
-        env["CODING_CAVE_RECURSIVE"] = "1"
-
+    env["CODING_CAVE_RECURSIVE"] = "1"
     env["CODING_CAVE_DNS_SERVER"] = SLIRP_DNS
 
     # Lineage: build dot-separated chain of parent agent names

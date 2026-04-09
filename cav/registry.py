@@ -131,34 +131,30 @@ def read_session_id(agent_id: str) -> str | None:
 
 # -- Launch options --
 
-def save_agent_launch_opts(agent_id: str, extra_slugs: list[str],
-                           recursive: bool) -> None:
+def save_agent_launch_opts(agent_id: str, extra_slugs: list[str]) -> None:
     """Persist launch options so cav -c can restore them."""
     db = _open()
     try:
         db.execute(
-            "UPDATE agents SET extra_projects = ?, recursive = ? "
-            "WHERE agent_id = ?",
-            (json.dumps(extra_slugs) if extra_slugs else None,
-             int(recursive), agent_id)
+            "UPDATE agents SET extra_projects = ? WHERE agent_id = ?",
+            (json.dumps(extra_slugs) if extra_slugs else None, agent_id)
         )
         db.commit()
     finally:
         db.close()
 
 
-def read_agent_launch_opts(agent_id: str) -> tuple[list[str], bool]:
-    """Read saved launch options. Returns (extra_project_slugs, recursive)."""
+def read_agent_launch_opts(agent_id: str) -> list[str]:
+    """Read saved launch options. Returns extra_project_slugs."""
     db = _open()
     try:
         row = db.execute(
-            "SELECT extra_projects, recursive FROM agents WHERE agent_id = ?",
+            "SELECT extra_projects FROM agents WHERE agent_id = ?",
             (agent_id,)
         ).fetchone()
         if not row:
-            return [], False
-        extras = json.loads(row[0]) if row[0] else []
-        return extras, bool(row[1])
+            return []
+        return json.loads(row[0]) if row[0] else []
     finally:
         db.close()
 

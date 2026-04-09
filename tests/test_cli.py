@@ -869,7 +869,7 @@ class TestAgentSorting(unittest.TestCase):
 
 
 class TestLaunchOpts(unittest.TestCase):
-    """Launch options (extra projects, recursive) persist for cav -c."""
+    """Launch options (extra projects) persist for cav -c."""
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
@@ -890,38 +890,34 @@ class TestLaunchOpts(unittest.TestCase):
         """save_agent_launch_opts round-trips through read."""
         from cav import registry
         aid = registry.acquire_agent_id(self.base)
-        registry.save_agent_launch_opts(aid, ["coding-cave", "other"], True)
-        slugs, recursive = registry.read_agent_launch_opts(aid)
+        registry.save_agent_launch_opts(aid, ["coding-cave", "other"])
+        slugs = registry.read_agent_launch_opts(aid)
         self.assertEqual(slugs, ["coding-cave", "other"])
-        self.assertTrue(recursive)
 
     def test_read_defaults_without_save(self):
         """read_agent_launch_opts returns defaults when nothing saved."""
         from cav import registry
         aid = registry.acquire_agent_id(self.base)
-        slugs, recursive = registry.read_agent_launch_opts(aid)
+        slugs = registry.read_agent_launch_opts(aid)
         self.assertEqual(slugs, [])
-        self.assertFalse(recursive)
 
     def test_opts_survive_exit_and_continue(self):
         """Launch opts persist through exit and are available on continue."""
         from cav import registry
         aid = registry.acquire_agent_id(self.base)
-        registry.save_agent_launch_opts(aid, ["extra-proj"], True)
+        registry.save_agent_launch_opts(aid, ["extra-proj"])
         registry.mark_agent_exited(aid)
 
         continued = registry.continue_agent_id(self.base)
         self.assertEqual(continued, aid)
-        slugs, recursive = registry.read_agent_launch_opts(continued)
+        slugs = registry.read_agent_launch_opts(continued)
         self.assertEqual(slugs, ["extra-proj"])
-        self.assertTrue(recursive)
 
     def test_nonexistent_agent_returns_defaults(self):
         """read_agent_launch_opts returns defaults for unknown agent."""
         from cav import registry
-        slugs, recursive = registry.read_agent_launch_opts("999")
+        slugs = registry.read_agent_launch_opts("999")
         self.assertEqual(slugs, [])
-        self.assertFalse(recursive)
 
 
 if __name__ == "__main__":

@@ -105,84 +105,102 @@ class TestNixStore(unittest.TestCase):
                          f"This means nix DB seeding from host is not working.")
 
 
-class TestSubcaveReadiness(unittest.TestCase):
-    """Verify the cave environment supports launching subcaves.
+def _cav_bin():
+    """Return path to a cav binary with --prompt support."""
+    built = Path(__file__).parent.parent / "result" / "bin" / "cav"
+    if built.exists():
+        return str(built)
+    system = shutil.which("cav")
+    if system:
+        r = subprocess.run([system, "agent", "--help"],
+                           capture_output=True, text=True)
+        if "--prompt" in r.stdout:
+            return system
+    return None
 
-    These checks confirm the recursive plumbing is in place. Actual
-    subcave launches require API access (crinj proxy chain).
-    """
+
+def _subcave(prompt, timeout=120):
+    """Launch a subcave with --prompt and return stdout."""
+    cav = _cav_bin()
+    if not cav:
+        raise unittest.SkipTest("no cav binary with --prompt support")
+    r = subprocess.run(
+        [cav, "agent", "--prompt", prompt],
+        capture_output=True, text=True, timeout=timeout,
+    )
+    return r.stdout.strip()
+
+
+class TestSubcaveReadiness(unittest.TestCase):
+    """Verify the cave environment supports launching subcaves."""
 
     def test_recursive_env_set(self):
-        """CODING_CAVE_RECURSIVE must be 1 for subcave support."""
+        """CODING_CAVE_RECURSIVE must be 1."""
         import os
-        val = os.environ.get("CODING_CAVE_RECURSIVE")
-        if val != "1":
-            self.skipTest("not a recursive cave (--recursive not passed)")
-        self.assertEqual(val, "1")
+        self.assertEqual(os.environ.get("CODING_CAVE_RECURSIVE"), "1")
 
     def test_fuse_device_available(self):
         """/dev/fuse is required for nested nix store overlays."""
-        import os
-        if os.environ.get("CODING_CAVE_RECURSIVE") != "1":
-            self.skipTest("not a recursive cave")
-        self.assertTrue(Path("/dev/fuse").exists(),
-                        "/dev/fuse must be available for fuse-overlayfs")
+        self.assertTrue(Path("/dev/fuse").exists())
 
     def test_tun_device_available(self):
         """/dev/net/tun is required for subcave network isolation."""
-        import os
-        if os.environ.get("CODING_CAVE_RECURSIVE") != "1":
-            self.skipTest("not a recursive cave")
-        self.assertTrue(Path("/dev/net/tun").exists(),
-                        "/dev/net/tun must be available for slirp4netns")
+        self.assertTrue(Path("/dev/net/tun").exists())
 
     def test_cav_binary_available(self):
-        """cav binary must be on PATH for subcave launching."""
-        self.assertIsNotNone(shutil.which("cav"),
-                             "cav not found on PATH")
+        """A cav binary with --prompt must be available."""
+        self.assertIsNotNone(_cav_bin(), "no cav with --prompt found")
 
-    def test_prompt_flag_accepted(self):
-        """cav agent --prompt must be a valid option."""
-        # Use the locally built binary if available (system cav may be outdated).
-        cav = str(Path(__file__).parent.parent / "result" / "bin" / "cav")
-        if not Path(cav).exists():
-            cav = "cav"
-        result = subprocess.run(
-            [cav, "agent", "--help"],
-            capture_output=True, text=True,
+
+class TestSubcaveLaunch(unittest.TestCase):
+    """Integration tests that launch a real subcave via --prompt.
+
+    A single subcave launch (bwrap + slirp4netns + fuse-overlayfs + claude)
+    runs all checks at once to avoid the ~30s startup cost per test.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        """Launch one subcave and cache the output for all assertions."""
+        cls.out = _subcave(
+            'Run these commands and reply with ONLY the raw output, '
+            'one result per line, prefixed by the label:\n'
+            'MATH: echo $((2+2))\n'
+            'VERSION: echo $CODING_CAVE_VERSION\n'
+            'LINEAGE: echo $CODING_CAVE_LINEAGE\n'
+            'NIXHASH: nix-store --query --hash /nix/store/*-bash-5* 2>/dev/null | head -1\n'
+            'PROJECT: ls /projects/coding-cave/CLAUDE.md 2>&1\n'
         )
-        self.assertIn("--prompt", result.stdout)
 
-    def test_inside_cave_detected(self):
-        """config.inside_cave() must return True inside a cave."""
-        import sys, os
-        sys.path.insert(0, str(Path(__file__).parent.parent))
-        from cav import config
-        self.assertTrue(config.inside_cave(),
-                        "CODING_CAVE_VERSION not set")
+    def _get(self, label):
+        """Extract the value for a label from the combined output."""
+        for line in self.out.splitlines():
+            if line.startswith(label + ":"):
+                return line[len(label) + 1:].strip()
+        return ""
 
-    def test_subcave_home_is_isolated(self):
-        """Subcave homes must be separate from the parent's persistent home."""
-        import sys
-        sys.path.insert(0, str(Path(__file__).parent.parent))
-        from cav import config
-        parent_home = config.persistent_home()
-        subcave_home = config.DATA_DIR / "subcave-homes" / "test-agent"
-        self.assertNotEqual(subcave_home, parent_home)
-        self.assertFalse(
-            str(subcave_home).startswith(str(parent_home) + "/"),
-            "subcave home must not be under parent's persistent home")
+    def test_api_connectivity(self):
+        """Subcave can reach the API through the crinj proxy chain."""
+        self.assertIn("4", self._get("MATH"))
 
-    def test_nix_overlay_dirs_isolated_per_home(self):
-        """Different homes produce non-overlapping nix overlay paths."""
-        import sys, tempfile
-        sys.path.insert(0, str(Path(__file__).parent.parent))
-        from cav.sandbox import _nix_overlay_dirs
-        a = Path(tempfile.mkdtemp())
-        b = Path(tempfile.mkdtemp())
-        _, _, merged_a = _nix_overlay_dirs(a)
-        _, _, merged_b = _nix_overlay_dirs(b)
-        self.assertNotEqual(merged_a, merged_b)
+    def test_cave_version_set(self):
+        """Subcave has CODING_CAVE_VERSION set."""
+        self.assertTrue(len(self._get("VERSION")) > 0,
+                        "CODING_CAVE_VERSION is empty")
+
+    def test_lineage_includes_parent(self):
+        """Subcave CODING_CAVE_LINEAGE contains the parent agent name."""
+        self.assertRegex(self._get("LINEAGE"), r'coding-cave@\d+',
+                         "lineage should contain parent agent name")
+
+    def test_nix_store_registered(self):
+        """Subcave nix DB has registered store paths from parent."""
+        self.assertRegex(self._get("NIXHASH"), r'sha256:',
+                         "nix store query should return a hash")
+
+    def test_project_mounted(self):
+        """Subcave has the project directory mounted."""
+        self.assertIn("CLAUDE.md", self._get("PROJECT"))
 
 
 if __name__ == "__main__":

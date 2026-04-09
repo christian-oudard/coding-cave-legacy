@@ -152,7 +152,6 @@ class TestSandboxEnvCompleteness(unittest.TestCase):
 
         # These are conditionally set (only when the feature is available)
         conditional = {
-            "CODING_CAVE_RECURSIVE",     # only with --recursive
             "CODING_CAVE_GITCONFIG",     # only if host has .gitconfig
             "CODING_CAVE_GPG_SOCKET",    # only if gpg available
             "CODING_CAVE_GPG_PUBRING",   # only if gpg keyring exists

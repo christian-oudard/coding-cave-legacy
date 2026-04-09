@@ -1312,7 +1312,7 @@ class TestCAV(unittest.TestCase):
         """Verify version is set and lineage chains across 3 levels of nesting."""
         # Simulate the env computation from sandbox.py launch() at each level
 
-        def compute_env(parent_env, agent_name, recursive=True):
+        def compute_env(parent_env, agent_name):
             """Replicate the version/lineage logic from sandbox.py."""
             env = {
                 **parent_env,
@@ -1320,9 +1320,8 @@ class TestCAV(unittest.TestCase):
                 "CODING_CAVE_AGENT_NAME": agent_name,
                 "CODING_CAVE_HOST_HOME": parent_env.get(
                     "CODING_CAVE_HOST_HOME", "/home/testuser"),
+                "CODING_CAVE_RECURSIVE": "1",
             }
-            if recursive:
-                env["CODING_CAVE_RECURSIVE"] = "1"
             parent_lineage = parent_env.get("CODING_CAVE_LINEAGE", "")
             parent_agent = parent_env.get("CODING_CAVE_AGENT_NAME", "")
             if parent_agent:
@@ -1355,16 +1354,6 @@ class TestCAV(unittest.TestCase):
         l4 = compute_env(l3, "project@3")
         self.assertEqual(l4["CODING_CAVE_VERSION"], "test")
         self.assertEqual(l4["CODING_CAVE_LINEAGE"], "project@1.project@2.project@1")
-
-    def test_recursive_not_set_blocks_subcave(self):
-        """Without --recursive, CODING_CAVE_RECURSIVE is not propagated."""
-        # Simulate launch without --recursive
-        env = {}
-        recursive = False
-        if recursive:
-            env["CODING_CAVE_RECURSIVE"] = "1"
-
-        self.assertNotIn("CODING_CAVE_RECURSIVE", env)
 
     def test_approve_and_reject_workflow(self):
         """User approves agent work via cav approve, then rejects via cav reject."""

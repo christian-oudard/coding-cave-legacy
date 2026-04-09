@@ -132,11 +132,9 @@ def init(path):
               help="Resume a specific agent (e.g. @3, coding-cave@3)")
 @click.option("-p", "--project", "extra_projects", multiple=True, metavar="PATH",
               help="Additional project to mount (repeatable)")
-@click.option("--recursive", is_flag=True,
-              help="Allow agent to launch subcaves (exposes /dev/fuse)")
 @click.option("--prompt", type=str, default=None,
               help="Non-interactive mode: execute prompt, print response, exit")
-def agent(continue_agent, resume_agent, extra_projects, recursive, prompt):
+def agent(continue_agent, resume_agent, extra_projects, prompt):
     """Launch an agent in a sandbox."""
     base = find_repo_root()
     require_init(base)
@@ -175,14 +173,12 @@ def agent(continue_agent, resume_agent, extra_projects, recursive, prompt):
 
     # Restore saved launch options when continuing
     if continue_agent or resume_agent:
-        saved_slugs, saved_recursive = registry.read_agent_launch_opts(agent_id)
+        saved_slugs = registry.read_agent_launch_opts(agent_id)
         if not extra_projects and saved_slugs:
             extra_projects = tuple(
                 registry.project_path(s) for s in saved_slugs
                 if registry.project_path(s)
             )
-        if not recursive and saved_recursive:
-            recursive = True
 
     projects = [(base, config.project_slug(base))]
 
@@ -197,7 +193,7 @@ def agent(continue_agent, resume_agent, extra_projects, recursive, prompt):
         projects.append((extra, slug))
 
     registry.save_agent_launch_opts(
-        agent_id, [slug for _, slug in projects[1:]], recursive)
+        agent_id, [slug for _, slug in projects[1:]])
 
     workspaces = []
     for project_base, slug in projects:
@@ -211,8 +207,8 @@ def agent(continue_agent, resume_agent, extra_projects, recursive, prompt):
         name += f" (parent {lineage})"
     try:
         rc = launch(workspaces, name, project_slug=projects[0][1],
-                    recursive=recursive, session_id=session_id,
-                    resuming=resuming, prompt=prompt)
+                    session_id=session_id, resuming=resuming,
+                    prompt=prompt)
     finally:
         if session_id and not config.session_file_exists(projects[0][1], session_id):
             registry.clear_session_id(agent_id)
@@ -590,7 +586,7 @@ def main():
     elif argv[0] == "help":
         argv = argv[1:] + ["--help"] if len(argv) > 1 else ["--help"]
     elif argv[0] not in subcmds | {"-h", "--help"}:
-        agent_flags = {"-c", "--continue", "-r", "--resume", "-p", "--project", "--recursive"}
+        agent_flags = {"-c", "--continue", "-r", "--resume", "-p", "--project"}
         if argv[0] in agent_flags:
             argv = ["agent"] + argv
         else:
