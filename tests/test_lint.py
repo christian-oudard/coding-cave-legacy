@@ -56,7 +56,9 @@ class TestPathHomeLint(unittest.TestCase):
         "config.py": {"DATA_DIR"},
         # _host_home fallback + CODING_CAVE_HOST_HOME fallback in launch()
         # _crinj_ca_path intentionally checks cave home (where cave-local crinj puts its cert)
-        "sandbox.py": {"_host_home", "launch", "_crinj_ca_path"},
+        # _start_crinj runs in the current namespace and reads rules from that
+        # namespace's home, so Path.home() is the correct fallback
+        "sandbox.py": {"_host_home", "launch", "_crinj_ca_path", "_start_crinj"},
         # _cave_nix_path uses CODING_CAVE_HOST_HOME with Path.home() fallback
         "user_env.py": {"_cave_nix_path"},
         # _offer_cave_nix runs on host only (cav init), Path.home() is correct
