@@ -10,13 +10,18 @@ def git(*args, cwd=None, check=True, capture=False, echo=True):
     cmd = ["git"] + list(args)
     if echo:
         print(f"+ {shlex.join(cmd)}", file=sys.stderr)
-    return subprocess.run(
+    r = subprocess.run(
         cmd,
         cwd=cwd,
-        check=check,
         capture_output=capture,
         text=True,
     )
+    if check and r.returncode != 0:
+        if capture and r.stderr:
+            print(r.stderr, end="", file=sys.stderr)
+        raise subprocess.CalledProcessError(
+            r.returncode, cmd, output=r.stdout, stderr=r.stderr)
+    return r
 
 
 def git_output(*args, cwd=None) -> str:

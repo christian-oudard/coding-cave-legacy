@@ -1,5 +1,6 @@
 """cav review: fetch and checkout an agent branch for review."""
 
+import subprocess
 from pathlib import Path
 
 from . import config, git
@@ -24,11 +25,14 @@ def review(base: Path, agent_id: str):
     remote_target = f"{config.CAVE_SHARED_REMOTE}/{target}"
 
     current = git.current_branch(cwd=base)
-    if current == agent_branch:
-        git.git("reset", "--hard", remote_ref, cwd=base, **config.v())
-    else:
-        git.git("checkout", "-B", agent_branch, remote_ref,
-                cwd=base, **config.v())
+    try:
+        if current == agent_branch:
+            git.git("reset", "--hard", remote_ref, cwd=base, **config.v())
+        else:
+            git.git("checkout", "-B", agent_branch, remote_ref,
+                    cwd=base, **config.v())
+    except subprocess.CalledProcessError:
+        raise SystemExit(1)
 
     print(f"Checked out {agent_branch}")
 
