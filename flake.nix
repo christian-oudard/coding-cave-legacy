@@ -53,13 +53,24 @@
             python3 ${./cav/seccomp_gen.py} --arch=${seccompArch} > $out
           '';
 
+          # FHS dynamic linker compatibility, so pre-built binaries
+          # (e.g. Playwright's Chromium, pip wheels) can execute.
+          fhsLdLinux = if pkgs.stdenv.hostPlatform.isx86_64
+            then { loader = "${pkgs.glibc}/lib/ld-linux-x86-64.so.2"; path = "/lib64/ld-linux-x86-64.so.2"; }
+            else { loader = "${pkgs.glibc}/lib/ld-linux-aarch64.so.1"; path = "/lib/ld-linux-aarch64.so.1"; };
+          gccLib = "${pkgs.stdenv.cc.cc.lib}/lib";
+
           sandbox = jail "coding-cave" pkgs.bashInteractive (with jail.combinators; [
             no-die-with-parent
             (set-hostname "coding-cave")
             (unsafe-add-raw-args "--uid 1000 --gid 1000")
             (unsafe-add-raw-args "--dir /bin --ro-bind ${pkgs.bashInteractive}/bin/bash /bin/bash --ro-bind ${pkgs.coreutils}/bin/env /usr/bin/env")
+            (unsafe-add-raw-args "--ro-bind ${fhsLdLinux.loader} ${fhsLdLinux.path}")
             network
             (add-seccomp seccompFilter)
+
+            # FHS library path for pre-built native extensions (libstdc++ etc.)
+            (set-env "LD_LIBRARY_PATH" gccLib)
 
             # Standard POSIX environment
             (set-env "SHELL" "${pkgs.bashInteractive}/bin/bash")
