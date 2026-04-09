@@ -712,28 +712,28 @@ class TestSessionLifecycle(unittest.TestCase):
         self.assertEqual(find_agent_by_session(real_uuid), aid)
 
 
-class TestFormatProjects(unittest.TestCase):
+class TestFormatAll(unittest.TestCase):
     """Unit tests for multi-project status formatting."""
 
     def setUp(self):
-        from cav.status import format_projects
-        self.format_projects = format_projects
+        from cav.status import format_all
+        self.format_all = format_all
 
     def test_no_agents_anywhere(self):
         entries = [
-            (0.0, "alpha", "No running agents in alpha."),
-            (0.0, "beta", "No running agents in beta."),
+            (0.0, "alpha", ""),
+            (0.0, "beta", ""),
         ]
-        self.assertEqual(self.format_projects(entries),
+        self.assertEqual(self.format_all(entries),
                          "No running agents in any project.")
 
     def test_active_shown_inactive_summarized(self):
         entries = [
-            (1000.0, "onecli", "=== onecli ===\nonecli@3  (running)  1h ago"),
-            (0.0, "coding-cave", "No running agents in coding-cave."),
-            (0.0, "dotfiles", "No running agents in dotfiles."),
+            (1000.0, "onecli", "onecli@3  (running)  1h ago\n"),
+            (0.0, "coding-cave", ""),
+            (0.0, "dotfiles", ""),
         ]
-        out = self.format_projects(entries)
+        out = self.format_all(entries)
         self.assertIn("=== onecli ===", out)
         self.assertIn("onecli@3", out)
         self.assertIn("No running agents in: coding-cave, dotfiles", out)
@@ -743,41 +743,41 @@ class TestFormatProjects(unittest.TestCase):
 
     def test_inactive_sorted_alphabetically(self):
         entries = [
-            (1000.0, "zoo", "=== zoo ===\nzoo@1  (running)"),
-            (0.0, "delta", "No running agents in delta."),
-            (0.0, "alpha", "No running agents in alpha."),
-            (0.0, "charlie", "No running agents in charlie."),
+            (1000.0, "zoo", "zoo@1  (running)\n"),
+            (0.0, "delta", ""),
+            (0.0, "alpha", ""),
+            (0.0, "charlie", ""),
         ]
-        out = self.format_projects(entries)
+        out = self.format_all(entries)
         self.assertIn("No running agents in: alpha, charlie, delta", out)
 
     def test_all_active(self):
         entries = [
-            (2000.0, "proj-a", "=== proj-a ===\na@1  (running)"),
-            (1000.0, "proj-b", "=== proj-b ===\nb@2  (exited)"),
+            (2000.0, "proj-a", "a@1  (running)\n"),
+            (1000.0, "proj-b", "b@2  (exited)\n"),
         ]
-        out = self.format_projects(entries)
+        out = self.format_all(entries)
         self.assertIn("=== proj-a ===", out)
         self.assertIn("=== proj-b ===", out)
         self.assertNotIn("No running agents", out)
 
     def test_single_inactive(self):
         entries = [
-            (1000.0, "active", "=== active ===\nactive@1  (running)"),
-            (0.0, "lonely", "No running agents in lonely."),
+            (1000.0, "active", "active@1  (running)\n"),
+            (0.0, "lonely", ""),
         ]
-        out = self.format_projects(entries)
+        out = self.format_all(entries)
         self.assertIn("No running agents in: lonely", out)
 
     def test_projects_sorted_by_most_recent_activity(self):
         """Projects with more recent activity appear first."""
         entries = [
-            (1000.0, "oldest", "=== oldest ===\noldest@1  (running)"),
-            (3000.0, "newest", "=== newest ===\nnewest@2  (running)"),
-            (2000.0, "middle", "=== middle ===\nmiddle@3  (running)"),
-            (0.0, "inactive", "No running agents in inactive."),
+            (1000.0, "oldest", "oldest@1  (running)\n"),
+            (3000.0, "newest", "newest@2  (running)\n"),
+            (2000.0, "middle", "middle@3  (running)\n"),
+            (0.0, "inactive", ""),
         ]
-        out = self.format_projects(entries)
+        out = self.format_all(entries)
         newest_pos = out.index("=== newest ===")
         middle_pos = out.index("=== middle ===")
         oldest_pos = out.index("=== oldest ===")

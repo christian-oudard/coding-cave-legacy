@@ -358,8 +358,10 @@ def push(force):
               help="Show status for all registered projects")
 def status(args, all_projects):
     """Show agent and dev branch status."""
-    from .status import render_status, format_projects
+    from .status import status as _status
     if all_projects:
+        import io, contextlib
+        from .status import format_all
         projects = registry.all_projects()
         if not projects:
             raise SystemExit("No registered projects. Run: cav init")
@@ -369,12 +371,11 @@ def status(args, all_projects):
             if not Path(path).is_dir():
                 missing.append((slug, path))
                 continue
-            base = Path(path)
-            git.git("fetch", "--prune", config.CAVE_SHARED_REMOTE,
-                    cwd=base, **config.v())
-            last_activity, text = render_status(base)
-            entries.append((last_activity, slug, text))
-        print(format_projects(entries))
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                last_activity = _status(Path(path), scoped=False)
+            entries.append((last_activity, slug, buf.getvalue()))
+        print(format_all(entries))
         for slug, path in missing:
             click.echo(
                 f"\"{slug}\" is registered but {path} is missing."
@@ -382,9 +383,7 @@ def status(args, all_projects):
                 err=True)
         return
     base, agent_id = resolve_target(args, infer_agent=True)
-    git.git("fetch", "--prune", config.CAVE_SHARED_REMOTE, cwd=base, **config.v())
-    _, text = render_status(base, agent_filter=agent_id)
-    print(text)
+    _status(base, agent_filter=agent_id)
 
 
 @cli.command("remove-agent")

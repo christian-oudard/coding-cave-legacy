@@ -1,26 +1,28 @@
 """Build user environment from cave.nix.
 
 The user's cave.nix (~/.config/coding-cave/cave.nix) is a simple config file,
-not a flake. It declares user inputs and a config function:
+not a flake. It declares user inputs and a config function that returns a
+home-manager module:
 
     {
       inputs = {
-        persist = "github:christian-oudard/persist";
+        persist = { url = "github:christian-oudard/persist"; flake = false; };
       };
       config = { pkgs, persist, ... }: {
-        packages = with pkgs; [ coreutils bash nix git nano ];
-        claude.plugins = [ persist ];
+        home.packages = with pkgs; [ coreutils nano ];
+        coding-cave.claude-code.bundles = [ { src = persist; } ];
       };
     }
 
 This module wraps it in a proper flake (user-env/flake.nix) that wires in
-system dependencies (nixpkgs, nix-claude, mkCaveEnv) via build-time
-substituted store paths. The user never sees those system URLs.
+system dependencies (nixpkgs, claude-code, home-manager, coding-cave) via
+build-time substituted store paths. The user never sees those system URLs.
 """
 
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -30,10 +32,8 @@ from . import config
 # Build-time substituted store paths and URLs.
 _NIXPKGS_URL = "@NIXPKGS_URL@"
 _CLAUDE_CODE_NIX_URL = "@CLAUDE_CODE_NIX_URL@"
-_NIX_CLAUDE_URL = "@NIX_CLAUDE_URL@"
-_MKCAVEENV_PATH = "@MKCAVEENV_PATH@"
-_SYSTEM_CLAUDE_MD_PATH = "@SYSTEM_CLAUDE_MD_PATH@"
-_DEFAULT_STATUSLINE_PATH = "@DEFAULT_STATUSLINE_PATH@"
+_HOME_MANAGER_URL = "@HOME_MANAGER_URL@"
+_CODING_CAVE_URL = "@CODING_CAVE_URL@"
 
 
 def _cave_nix_path():
@@ -49,24 +49,30 @@ def _hash_file():
     return config.DATA_DIR / "user-env.hash"
 
 
-def _compute_hash(cave_nix_content=None):
+def _compute_hash(cave_nix_content=None, sibling_files=None):
     """Hash combining system deps and user config."""
     parts = [
-        _NIXPKGS_URL, _CLAUDE_CODE_NIX_URL, _NIX_CLAUDE_URL,
-        _MKCAVEENV_PATH, _SYSTEM_CLAUDE_MD_PATH, _DEFAULT_STATUSLINE_PATH,
+        _NIXPKGS_URL, _CLAUDE_CODE_NIX_URL, _HOME_MANAGER_URL,
+        _CODING_CAVE_URL,
         cave_nix_content or "",
     ]
+    if sibling_files:
+        for name, content in sorted(sibling_files.items()):
+            parts.append(name)
+            parts.append(content)
     return hashlib.sha256("\0".join(parts).encode()).hexdigest()
 
 
-def _needs_build(cave_nix_content=None):
+def _needs_build(cave_nix_content=None, sibling_files=None):
     result_link = _user_env_dir() / "result"
     if not result_link.exists():
         return True
     hash_file = _hash_file()
     if not hash_file.exists():
         return True
-    return hash_file.read_text().strip() != _compute_hash(cave_nix_content)
+    return hash_file.read_text().strip() != _compute_hash(
+        cave_nix_content, sibling_files
+    )
 
 
 def _to_nix(value):
@@ -97,6 +103,9 @@ def _extract_user_inputs(cave_nix_path):
     return json.loads(r.stdout)
 
 
+_SYSTEM_INPUT_NAMES = {"self", "nixpkgs", "claude-code", "home-manager", "coding-cave"}
+
+
 def _generate_flake(has_cave_nix, user_inputs=None):
     """Generate flake.nix that wraps the user's cave.nix config."""
     if user_inputs is None:
@@ -105,47 +114,85 @@ def _generate_flake(has_cave_nix, user_inputs=None):
     lines = []
     lines.append("{\n")
     lines.append(f'  inputs.nixpkgs.url = "{_NIXPKGS_URL}";\n')
-    lines.append(f"  inputs.claude-code = {{\n")
+    lines.append("  inputs.claude-code = {\n")
     lines.append(f'    url = "{_CLAUDE_CODE_NIX_URL}";\n')
-    lines.append(f"    inputs.nixpkgs.follows = \"nixpkgs\";\n")
-    lines.append(f"  }};\n")
-    lines.append(f"  inputs.nix-claude = {{\n")
-    lines.append(f'    url = "{_NIX_CLAUDE_URL}";\n')
-    lines.append(f"    inputs.nixpkgs.follows = \"nixpkgs\";\n")
-    lines.append(f"  }};\n")
+    lines.append('    inputs.nixpkgs.follows = "nixpkgs";\n')
+    lines.append("  };\n")
+    lines.append("  inputs.home-manager = {\n")
+    lines.append(f'    url = "{_HOME_MANAGER_URL}";\n')
+    lines.append('    inputs.nixpkgs.follows = "nixpkgs";\n')
+    lines.append("  };\n")
+    lines.append("  inputs.coding-cave = {\n")
+    lines.append(f'    url = "{_CODING_CAVE_URL}";\n')
+    lines.append('    inputs.nixpkgs.follows = "nixpkgs";\n')
+    lines.append('    inputs.home-manager.follows = "home-manager";\n')
+    lines.append("  };\n")
 
     for name, spec in user_inputs.items():
+        if name in _SYSTEM_INPUT_NAMES:
+            continue
         if isinstance(spec, str):
             lines.append(f'  inputs.{name}.url = "{spec}";\n')
         else:
             lines.append(f"  inputs.{name} = {_to_nix(spec)};\n")
 
     lines.append("\n")
-    lines.append("  outputs = { nixpkgs, claude-code, nix-claude, ... }@inputs:\n")
-    lines.append("    let\n")
-    lines.append("      mkCaveEnv = import ./mkCaveEnv.nix {\n")
-    lines.append("        inherit nixpkgs nix-claude;\n")
-    lines.append("        systemClaudeMd = ./system-claude.md;\n")
-    lines.append("        defaultStatusline = ./statusline.sh;\n")
-    lines.append("      };\n")
+    lines.append("  outputs = { nixpkgs, claude-code, home-manager, coding-cave, ... }@inputs:\n")
 
     if has_cave_nix:
+        lines.append("    let\n")
         lines.append("      userCfg = import ./cave.nix;\n")
         lines.append("      userInputs = builtins.removeAttrs inputs\n")
-        lines.append('        ["self" "nixpkgs" "claude-code" "nix-claude"];\n')
-        lines.append("    in mkCaveEnv {\n")
+        lines.append(f'        {_to_nix(sorted(_SYSTEM_INPUT_NAMES))};\n')
+        lines.append("    in coding-cave.lib.mkCaveEnv {\n")
         lines.append("      inherit claude-code;\n")
-        lines.append("      config = { pkgs }: userCfg.config (userInputs // { inherit pkgs; });\n")
+        lines.append("      userModule = { pkgs, ... }:\n")
+        lines.append("        userCfg.config (userInputs // { inherit pkgs; });\n")
         lines.append("    };\n")
     else:
-        lines.append("    in mkCaveEnv { inherit claude-code; };\n")
+        lines.append("    coding-cave.lib.mkCaveEnv {\n")
+        lines.append("      inherit claude-code;\n")
+        lines.append("      userModule = { ... }: { };\n")
+        lines.append("    };\n")
 
     lines.append("}\n")
     return "".join(lines)
 
 
+def _copy_sibling_nix_files(cave_nix_src, user_env):
+    """Copy *.nix files alongside cave.nix into the build dir, so relative
+    imports like `imports = [ ./claude.nix ];` resolve. Returns dict of
+    {filename: content} for hash computation.
+    """
+    sibling_files = {}
+    src_dir = cave_nix_src.parent
+    if not src_dir.is_dir():
+        return sibling_files
+    for entry in src_dir.iterdir():
+        if entry.name == cave_nix_src.name:
+            continue
+        if entry.is_file() and entry.suffix == ".nix":
+            content = entry.read_text()
+            (user_env / entry.name).write_text(content)
+            sibling_files[entry.name] = content
+    return sibling_files
+
+
+def _clean_stale_sibling_files(user_env, current_names):
+    """Remove .nix files in user_env that are not in current_names and are
+    not flake.nix or cave.nix."""
+    keep = current_names | {"flake.nix", "cave.nix"}
+    for entry in user_env.iterdir():
+        if entry.is_file() and entry.suffix == ".nix" and entry.name not in keep:
+            entry.unlink()
+
+
 def _prepare():
-    """Copy cave.nix and generate flake.nix wrapper. Returns cave_nix_content or None."""
+    """Copy cave.nix and generate flake.nix wrapper.
+
+    Returns (cave_nix_content, sibling_files) where sibling_files is a dict
+    of {name: content} for any *.nix files copied alongside cave.nix.
+    """
     user_env = _user_env_dir()
     user_env.mkdir(parents=True, exist_ok=True)
 
@@ -155,27 +202,19 @@ def _prepare():
     if cave_nix.exists():
         cave_nix_content = cave_nix.read_text()
         cave_nix_dest.write_text(cave_nix_content)
+        sibling_files = _copy_sibling_nix_files(cave_nix, user_env)
         user_inputs = _extract_user_inputs(cave_nix_dest)
         flake = _generate_flake(has_cave_nix=True, user_inputs=user_inputs)
     else:
         cave_nix_content = None
+        sibling_files = {}
         cave_nix_dest.unlink(missing_ok=True)
         flake = _generate_flake(has_cave_nix=False)
 
+    _clean_stale_sibling_files(user_env, set(sibling_files.keys()))
     (user_env / "flake.nix").write_text(flake)
 
-    # Copy system files so the flake can reference them with relative paths
-    # (absolute store paths are forbidden in pure evaluation mode).
-    import shutil
-    for src, dest_name in [
-        (_MKCAVEENV_PATH, "mkCaveEnv.nix"),
-        (_SYSTEM_CLAUDE_MD_PATH, "system-claude.md"),
-        (_DEFAULT_STATUSLINE_PATH, "statusline.sh"),
-    ]:
-        dest = user_env / dest_name
-        shutil.copyfile(src, dest)
-
-    return cave_nix_content
+    return cave_nix_content, sibling_files
 
 
 def _do_build(user_env):
@@ -201,23 +240,41 @@ def _do_build(user_env):
     return Path(out_path)
 
 
-def _save_hash(cave_nix_content):
-    _hash_file().write_text(_compute_hash(cave_nix_content))
+def _save_hash(cave_nix_content, sibling_files):
+    _hash_file().write_text(_compute_hash(cave_nix_content, sibling_files))
+
+
+def _read_sibling_files():
+    """Read current sibling .nix files from disk for hash check."""
+    cave_nix = _cave_nix_path()
+    sibling_files = {}
+    if not cave_nix.exists():
+        return sibling_files
+    src_dir = cave_nix.parent
+    if not src_dir.is_dir():
+        return sibling_files
+    for entry in src_dir.iterdir():
+        if entry.name == cave_nix.name:
+            continue
+        if entry.is_file() and entry.suffix == ".nix":
+            sibling_files[entry.name] = entry.read_text()
+    return sibling_files
 
 
 def build():
     """Build cave environment. Skips if unchanged."""
     cave_nix = _cave_nix_path()
     cave_nix_content = cave_nix.read_text() if cave_nix.exists() else None
+    sibling_files = _read_sibling_files()
 
     result_link = _user_env_dir() / "result"
-    if not _needs_build(cave_nix_content):
+    if not _needs_build(cave_nix_content, sibling_files):
         return result_link.resolve()
 
-    cave_nix_content = _prepare()
+    cave_nix_content, sibling_files = _prepare()
     out = _do_build(_user_env_dir())
     if out:
-        _save_hash(cave_nix_content)
+        _save_hash(cave_nix_content, sibling_files)
     return out
 
 
@@ -235,9 +292,10 @@ def update(input_name=None):
 
     cave_nix = _cave_nix_path()
     cave_nix_content = cave_nix.read_text() if cave_nix.exists() else None
+    sibling_files = _read_sibling_files()
     out = _do_build(user_env)
     if out:
-        _save_hash(cave_nix_content)
+        _save_hash(cave_nix_content, sibling_files)
     return out
 
 
@@ -255,12 +313,11 @@ def default_cave_nix():
     return """\
 {
   config = { pkgs, ... }: {
-    packages = with pkgs; [
-      gnupg jq gnugrep gnused gawk findutils
-      curl wget nano
+    home.packages = with pkgs; [
+      jq gawk findutils curl wget nano
     ];
 
-    env = {
+    home.sessionVariables = {
       EDITOR = "nano";
     };
   };

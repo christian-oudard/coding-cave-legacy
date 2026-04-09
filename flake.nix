@@ -10,13 +10,13 @@
       url = "github:sadjow/claude-code-nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    nix-claude = {
-      url = "github:christian-oudard/nix-claude";
+    home-manager = {
+      url = "github:nix-community/home-manager";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
 
-  outputs = { self, nixpkgs, jail-nix, crinj, claude-code-nix, nix-claude }:
+  outputs = { self, nixpkgs, jail-nix, crinj, claude-code-nix, home-manager }:
     let
       systems = [ "x86_64-linux" "aarch64-linux" ];
       eachSystem = f: nixpkgs.lib.genAttrs systems (system: f (import nixpkgs {
@@ -25,32 +25,26 @@
       }));
     in {
       lib.mkCaveEnv = import ./lib/mkCaveEnv.nix {
-        inherit nixpkgs nix-claude;
-        systemClaudeMd = ./defaults/system-claude.md;
-        defaultStatusline = ./defaults/statusline.sh;
+        inherit nixpkgs home-manager;
       };
+
+      # Home-manager module: deep-merge layer over programs.claude-code.
+      # Import this from any HM config that wants to use
+      # `coding-cave.claude-code.{bundles,hooks,memoryFragments,extraSettings}`.
+      homeModules.claudeCode = ./modules/claude-code.nix;
+      homeModules.default = self.homeModules.claudeCode;
 
       packages = eachSystem (pkgs:
         let
           jail = jail-nix.lib.init pkgs;
           python = pkgs.python3.withPackages (ps: [ ps.click ]);
-          mkClaudeConfig = nix-claude.lib.mkClaudeConfig;
-          defaultStatusline = ./defaults/statusline.sh;
-          claudeConfig = mkClaudeConfig {
-            inherit pkgs;
-            skipOnboarding = true;
-            settings = {
-              model = "opus";
-              reasoning_effort = "high";
-              skipDangerousModePermissionPrompt = true;
-              sandbox.enabled = false;
-              statusLine = {
-                type = "command";
-                command = "~/.claude/statusline.sh";
-              };
-            };
-            memory.fragments = [ ./defaults/system-claude.md ];
-          };
+
+          # Default .claude.json content used to skip onboarding for caves
+          # without a user .claude.json yet. Mutable file, not managed by HM.
+          dotClaudeJsonDefault = pkgs.writeText "dot-claude.json" (builtins.toJSON {
+            hasCompletedOnboarding = true;
+            effortCalloutDismissed = true;
+          });
 
           seccompArch = if pkgs.stdenv.hostPlatform.isx86_64 then "x86_64" else "aarch64";
           seccompFilter = pkgs.runCommand "cave-seccomp-filter" {
@@ -112,58 +106,20 @@
               RUNTIME_ARGS+=(--bind "$CODING_CAVE_HOME" /home/cave-coder)
             '')
 
-            # Claude Code config seeding (runs on host before bwrap)
+            # Seed mutable .claude.json (onboarding skip) only if absent.
+            # Everything else under ~/.claude/ comes from the user-env's
+            # baked files/ tree, copied in by the inside-bwrap entry script.
             (add-runtime ''
-              CLAUDE_DIR="$CODING_CAVE_HOME/.claude"
-              mkdir -p "$CLAUDE_DIR"
-              # Merge settings: system defaults < user-env overrides
-              SETTINGS_ARGS=(${claudeConfig}/settings.json)
-              if [ -n "''${CODING_CAVE_USER_ENV:-}" ] && [ -f "''${CODING_CAVE_USER_ENV}/claude/settings.json" ]; then
-                SETTINGS_ARGS+=("''${CODING_CAVE_USER_ENV}/claude/settings.json")
-              fi
-              ${pkgs.jq}/bin/jq -s 'reduce .[] as $item ({}; . * $item)' \
-                "''${SETTINGS_ARGS[@]}" > "$CLAUDE_DIR/settings.json"
-              chmod 644 "$CLAUDE_DIR/settings.json"
-              # Always update statusline script to match current version
-              chmod u+w "$CLAUDE_DIR/statusline.sh" 2>/dev/null || true
-              cp ${defaultStatusline} "$CLAUDE_DIR/statusline.sh"
-              chmod +x "$CLAUDE_DIR/statusline.sh"
-              # CLAUDE.md: system + user-env + user global
-              {
-                cat ${claudeConfig}/CLAUDE.md
-                if [ -n "''${CODING_CAVE_USER_ENV:-}" ] && [ -f "''${CODING_CAVE_USER_ENV}/claude/CLAUDE.md" ]; then
-                  printf '\n'
-                  cat "''${CODING_CAVE_USER_ENV}/claude/CLAUDE.md"
-                fi
-                if [ -n "''${CODING_CAVE_USER_CLAUDE_MD:-}" ] && [ -f "''${CODING_CAVE_USER_CLAUDE_MD}" ]; then
-                  printf '\n'
-                  cat "''${CODING_CAVE_USER_CLAUDE_MD}"
-                fi
-              } > "$CLAUDE_DIR/CLAUDE.md"
-              chmod 644 "$CLAUDE_DIR/CLAUDE.md"
-              # Skills and commands from user-env
-              if [ -n "''${CODING_CAVE_USER_ENV:-}" ]; then
-                if [ -d "''${CODING_CAVE_USER_ENV}/claude/skills" ]; then
-                  chmod -R u+w "$CLAUDE_DIR/skills" 2>/dev/null || true
-                  rm -rf "$CLAUDE_DIR/skills"
-                  mkdir -p "$CLAUDE_DIR/skills"
-                  cp -r --no-preserve=mode "''${CODING_CAVE_USER_ENV}/claude/skills/." "$CLAUDE_DIR/skills/"
-                fi
-                if [ -d "''${CODING_CAVE_USER_ENV}/claude/commands" ]; then
-                  chmod -R u+w "$CLAUDE_DIR/commands" 2>/dev/null || true
-                  rm -rf "$CLAUDE_DIR/commands"
-                  mkdir -p "$CLAUDE_DIR/commands"
-                  cp -r --no-preserve=mode "''${CODING_CAVE_USER_ENV}/claude/commands/." "$CLAUDE_DIR/commands/"
-                fi
-              fi
-              # dot-claude.json (onboarding skip) — only if no .claude.json yet
               if [ ! -f "$CODING_CAVE_HOME/.claude.json" ]; then
-                if [ -n "''${CODING_CAVE_USER_ENV:-}" ] && [ -f "''${CODING_CAVE_USER_ENV}/claude/dot-claude.json" ]; then
-                  cp "''${CODING_CAVE_USER_ENV}/claude/dot-claude.json" "$CODING_CAVE_HOME/.claude.json"
-                elif [ -f ${claudeConfig}/dot-claude.json ]; then
-                  cp ${claudeConfig}/dot-claude.json "$CODING_CAVE_HOME/.claude.json"
-                fi
-                chmod 644 "$CODING_CAVE_HOME/.claude.json" 2>/dev/null || true
+                cp --no-preserve=mode ${dotClaudeJsonDefault} \
+                  "$CODING_CAVE_HOME/.claude.json"
+              fi
+              # Bind the host's per-session CLAUDE.md addendum into the
+              # namespace at a stable path so the entry script can append
+              # it to the freshly-copied ~/.claude/CLAUDE.md.
+              if [ -n "''${CODING_CAVE_USER_CLAUDE_MD:-}" ] && \
+                 [ -f "''${CODING_CAVE_USER_CLAUDE_MD}" ]; then
+                RUNTIME_ARGS+=(--ro-bind "$CODING_CAVE_USER_CLAUDE_MD" /tmp/.cave-user-claude.md)
               fi
             '')
 
@@ -270,11 +226,10 @@
             (wrap-entry (entry: ''
               # cav itself (for `cav version` etc. inside the cave)
               [ -n "''${CODING_CAVE_BIN:-}" ] && export PATH="$CODING_CAVE_BIN:$PATH"
-              # User environment from cave.nix (packages, env vars, files)
+              # User environment from cave.nix (HM-built packages, env vars, files)
               if [ -n "''${CODING_CAVE_USER_ENV:-}" ] && [ -d "''${CODING_CAVE_USER_ENV}" ]; then
-                for pkg in "''${CODING_CAVE_USER_ENV}"/packages/*; do
-                  [ -d "$pkg/bin" ] && export PATH="$pkg/bin:$PATH"
-                done
+                [ -d "''${CODING_CAVE_USER_ENV}/home-path/bin" ] && \
+                  export PATH="''${CODING_CAVE_USER_ENV}/home-path/bin:$PATH"
                 # shellcheck disable=SC1091
                 [ -f "''${CODING_CAVE_USER_ENV}/env.sh" ] && . "''${CODING_CAVE_USER_ENV}/env.sh"
                 if [ -d "''${CODING_CAVE_USER_ENV}/files" ]; then
@@ -287,6 +242,12 @@
                     ${pkgs.coreutils}/bin/cp --no-preserve=mode "$f" "$dest"
                   done
                   cd /
+                fi
+                # Append per-session user CLAUDE.md (bind-mounted by pre-bwrap)
+                if [ -f /tmp/.cave-user-claude.md ] && [ -f "$HOME/.claude/CLAUDE.md" ]; then
+                  ${pkgs.coreutils}/bin/chmod u+w "$HOME/.claude/CLAUDE.md" 2>/dev/null || true
+                  printf '\n' >> "$HOME/.claude/CLAUDE.md"
+                  ${pkgs.coreutils}/bin/cat /tmp/.cave-user-claude.md >> "$HOME/.claude/CLAUDE.md"
                 fi
               fi
               # Git wrapper (syncs agent branches to host-cave on state changes)
@@ -362,10 +323,8 @@
               substituteInPlace $out/lib/cav/user_env.py \
                 --replace-fail "@NIXPKGS_URL@" "path:${nixpkgs}" \
                 --replace-fail "@CLAUDE_CODE_NIX_URL@" "github:sadjow/claude-code-nix" \
-                --replace-fail "@NIX_CLAUDE_URL@" "path:${nix-claude}" \
-                --replace-fail "@MKCAVEENV_PATH@" "${./lib/mkCaveEnv.nix}" \
-                --replace-fail "@SYSTEM_CLAUDE_MD_PATH@" "${./defaults/system-claude.md}" \
-                --replace-fail "@DEFAULT_STATUSLINE_PATH@" "${./defaults/statusline.sh}"
+                --replace-fail "@HOME_MANAGER_URL@" "path:${home-manager}" \
+                --replace-fail "@CODING_CAVE_URL@" "path:${self}"
 
               # Write entry point
               cat > $out/bin/cav <<WRAPPER
