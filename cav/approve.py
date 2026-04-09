@@ -6,24 +6,33 @@ from . import config, git, push, registry
 
 
 def approve(base: Path, agent_id: str | None = None, yes: bool = False):
-    if not agent_id:
-        raise SystemExit(
-            "No agent to approve. Either:\n"
-            "  cav approve <agent-id>\n"
-            "  check out a dev branch first")
-
     slug = config.project_slug(base)
-    name = registry.display_name(base, agent_id)
 
     git.git("fetch", "--prune", config.CAVE_SHARED_REMOTE, cwd=base,
             **config.v())
 
-    # Find this agent's dev branches in the project.
-    dev_branches = []
+    # Index all dev branches by agent.
+    all_dev = {}  # agent_id -> [(branch, base_name)]
     for branch in git.remote_branches(config.CAVE_SHARED_REMOTE, cwd=base):
         parsed = config.parse_dev_branch(branch)
-        if parsed and parsed[1] == agent_id:
-            dev_branches.append((branch, config.resolve_base(branch)))
+        if parsed:
+            aid = parsed[1]
+            all_dev.setdefault(aid, []).append(
+                (branch, config.resolve_base(branch)))
+
+    if not agent_id:
+        if len(all_dev) == 1:
+            agent_id = next(iter(all_dev))
+        elif len(all_dev) == 0:
+            raise SystemExit(f"No agent branches in {slug}.")
+        else:
+            ids = ", ".join(sorted(all_dev))
+            raise SystemExit(
+                f"Multiple agents in {slug}: {ids}\n"
+                f"Specify which: cav approve <agent-id>")
+
+    name = registry.display_name(base, agent_id)
+    dev_branches = all_dev.get(agent_id, [])
 
     if not dev_branches:
         raise SystemExit(f"No commits to approve for agent {agent_id} "

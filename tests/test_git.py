@@ -849,12 +849,12 @@ class TestCAV(unittest.TestCase):
         self.assertIn("Agent 1 work", log)
         self.assertIn("Agent 2 work", log)
 
-    def test_approve_no_arg_on_shared_branch_fails(self):
-        """cav approve without agent-id fails on a base branch."""
+    def test_approve_no_arg_no_agents_fails(self):
+        """cav approve without agent-id fails when no agent branches exist."""
         self._init()
         result = cav_cli("approve", "--yes", cwd=self.user_repo, check=False)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("No agent to approve", result.stderr)
+        self.assertIn("No agent branches in", result.stderr)
 
     def test_approve_nonexistent_agent(self):
         """cav approve with wrong agent-id fails cleanly."""
