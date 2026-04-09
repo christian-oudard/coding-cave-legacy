@@ -322,7 +322,7 @@
                 --replace-fail "@CAVE_NS_SH@" "$out/lib/cav/cave-ns.sh"
               substituteInPlace $out/lib/cav/user_env.py \
                 --replace-fail "@NIXPKGS_URL@" "path:${nixpkgs}" \
-                --replace-fail "@CLAUDE_CODE_NIX_URL@" "github:sadjow/claude-code-nix" \
+                --replace-fail "@CLAUDE_CODE_NIX_URL@" "path:${claude-code-nix}" \
                 --replace-fail "@HOME_MANAGER_URL@" "path:${home-manager}" \
                 --replace-fail "@CODING_CAVE_URL@" "path:${self}"
 
