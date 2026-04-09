@@ -6,28 +6,37 @@ from . import config, git, push, registry
 
 
 def approve(base: Path, agent_id: str | None = None, yes: bool = False):
-    current = git.current_branch(cwd=base)
-    if agent_id:
-        # Explicit agent ID: resolve base branch from current branch
-        parsed = config.parse_dev_branch(current)
-        base_name = parsed[0] if parsed else current
-        branch = config.dev_branch(base_name, agent_id)
-    else:
-        # No agent ID: must be on a dev branch
-        branch = current
-        parsed = config.parse_dev_branch(branch)
-        if not parsed:
-            raise SystemExit(
-                f"Not on a dev branch (current: '{branch}').\n"
-                f"Usage: cav approve <agent-id>  (from any branch)\n"
-                f"  or switch to a dev branch first."
-            )
-        base_name = config.resolve_base(branch)
-        agent_id = parsed[1]
+    if not agent_id:
+        raise SystemExit(
+            "No agent to approve. Either:\n"
+            "  cav approve <agent-id>\n"
+            "  check out a dev branch first")
+
+    slug = config.project_slug(base)
     name = registry.display_name(base, agent_id)
 
-    git.git("fetch", "--prune", config.CAVE_SHARED_REMOTE, cwd=base, **config.v())
+    git.git("fetch", "--prune", config.CAVE_SHARED_REMOTE, cwd=base,
+            **config.v())
 
+    # Find this agent's dev branches in the project.
+    dev_branches = []
+    for branch in git.remote_branches(config.CAVE_SHARED_REMOTE, cwd=base):
+        parsed = config.parse_dev_branch(branch)
+        if parsed and parsed[1] == agent_id:
+            dev_branches.append((branch, config.resolve_base(branch)))
+
+    if not dev_branches:
+        raise SystemExit(f"No commits to approve for agent {agent_id} "
+                         f"in {slug}.")
+
+    if len(dev_branches) > 1:
+        lines = "\n".join(f"  {b}" for b, _ in dev_branches)
+        raise SystemExit(
+            f"Agent {agent_id} has multiple dev branches in {slug}:\n"
+            f"{lines}\n"
+            f"Check out the branch to approve and run: cav approve")
+
+    branch, base_name = dev_branches[0]
     remote_dev = f"{config.CAVE_SHARED_REMOTE}/{branch}"
     remote_base = f"{config.CAVE_SHARED_REMOTE}/{base_name}"
 
@@ -36,55 +45,60 @@ def approve(base: Path, agent_id: str | None = None, yes: bool = False):
     except Exception:
         raise SystemExit(f"No remote branch '{remote_dev}'.")
 
-    # Base branch may not exist yet (first commit in repo)
     r = git.git("rev-parse", "--verify", remote_base,
                 cwd=base, check=False, capture=True, echo=False)
-    creating_branch = r.returncode != 0
-    before_sha = None if creating_branch else r.stdout.strip()
+    creating = r.returncode != 0
+    before_sha = None if creating else r.stdout.strip()
 
-    if not creating_branch:
+    if not creating:
         if before_sha == after_sha:
-            print(f"No commits to approve on {branch}.")
-            return
-
-        # Dev branch must be a fast-forward from the base
+            raise SystemExit(f"No commits to approve for agent {agent_id} "
+                             f"in {slug}.")
         r = git.git("merge-base", "--is-ancestor", before_sha, after_sha,
                     cwd=base, check=False, capture=True, echo=False)
         if r.returncode != 0:
             raise SystemExit(
-                f"Cannot approve: {branch} is not a fast-forward from {base_name}.\n"
-                f"The agent must rebase onto {base_name} first."
-            )
+                f"Cannot approve: {branch} is not a fast-forward from "
+                f"{base_name}.\n"
+                f"The agent must rebase onto {base_name} first.")
 
-    if creating_branch:
+    if creating:
         commits = git.commit_oneline(remote_dev, cwd=base)
     else:
         commits = git.commit_oneline(f"{remote_base}..{remote_dev}", cwd=base)
     n = len(commits)
     word = "commit" if n == 1 else "commits"
-    print(f"\n{n} {word} from {name} to approve into {base_name}:\n")
+    print(f"\n{n} {word} from {name} to merge into {slug}/{base_name}:\n")
     for line in commits:
         print(f"  {line}")
 
     if not yes:
         try:
-            answer = input(f"\nApprove and merge into {base_name}? [Y/n] ")
+            answer = input(f"\nApprove? [Y/n] ")
         except (EOFError, KeyboardInterrupt):
             raise SystemExit("\nAborted.")
         if answer.strip().lower() in ("n", "no"):
             raise SystemExit("Aborted.")
 
-    # Push to shared remote (the approval) and rebase other agents.
-    push.push_base(base, base_name, refspec=f"{after_sha}:refs/heads/{base_name}")
+    _do_approve(slug, base, branch, base_name, agent_id,
+                before_sha, after_sha, creating)
 
-    # Record one approval per commit (enables per-commit rejection)
-    slug = config.project_slug(base)
-    if creating_branch:
+    print(f"Approved.")
+
+
+def _do_approve(slug, project_base, branch, base_name, agent_id,
+                before_sha, after_sha, creating):
+    """Push approval and record it for one project/branch."""
+    push.push_base(project_base, base_name,
+                   refspec=f"{after_sha}:refs/heads/{base_name}")
+
+    # Record one approval per commit.
+    if creating:
         range_spec = after_sha
     else:
         range_spec = f"{before_sha}..{after_sha}"
     shas = git.git_output(
-        "rev-list", "--reverse", range_spec, cwd=base
+        "rev-list", "--reverse", range_spec, cwd=project_base
     ).splitlines()
     NULL_SHA = "0" * 40
     prev = before_sha or NULL_SHA
@@ -92,22 +106,21 @@ def approve(base: Path, agent_id: str | None = None, yes: bool = False):
         registry.record_approval(slug, base_name, agent_id, prev, sha)
         prev = sha
 
-    # Courtesy: sync local base branch (best-effort)
-    if creating_branch:
+    # Courtesy: sync local base branch (best-effort).
+    current = git.current_branch(cwd=project_base)
+    if creating:
         git.git("checkout", "-B", base_name, after_sha,
-                cwd=base, echo=False, capture=True, check=False)
+                cwd=project_base, echo=False, capture=True, check=False)
     elif current == base_name:
         r = git.git("merge", "--ff-only", after_sha,
-                    cwd=base, echo=False, capture=True, check=False)
+                    cwd=project_base, echo=False, capture=True, check=False)
         if r.returncode != 0:
-            print(f"Approved and merged to shared remote, but local '{base_name}' could not be updated.")
-            print(f"Run 'cav pull' to sync.")
+            print(f"Approved, but local '{base_name}' could not "
+                  f"be updated. Run 'cav pull' to sync.")
     else:
         git.git("branch", "-f", base_name, after_sha,
-                cwd=base, echo=False, capture=True, check=False)
+                cwd=project_base, echo=False, capture=True, check=False)
         git.git("checkout", base_name,
-                cwd=base, echo=False, capture=True, check=False)
+                cwd=project_base, echo=False, capture=True, check=False)
     git.git("branch", "-D", branch,
-            cwd=base, echo=False, capture=True, check=False)
-
-    print(f"Approved.")
+            cwd=project_base, echo=False, capture=True, check=False)

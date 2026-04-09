@@ -7,16 +7,14 @@ from pathlib import Path
 from . import config, git, registry
 
 
-def format_all(entries: list[tuple[float, str, str]]) -> str:
-    """Format multi-project status from (last_activity, slug, output) tuples."""
-    active = [(ts, s, o) for ts, s, o in entries if ts]
+def format_projects(entries: list[tuple[float, str, str]]) -> str:
+    """Combine per-project status strings, sorted by activity, with inactive summary."""
+    active = [(ts, o) for ts, _, o in entries if ts]
     inactive = sorted(s for ts, s, _ in entries if not ts)
     if not active:
         return "No running agents in any project."
     active.sort(key=lambda a: a[0], reverse=True)
-    parts = []
-    for _, slug, output in active:
-        parts.append(f"=== {slug} ===\n{output}")
+    parts = [o for _, o in active]
     if inactive:
         parts.append(f"No running agents in: {', '.join(inactive)}")
     return "\n".join(parts)
@@ -48,7 +46,9 @@ def sort_agents(agents: list[AgentInfo]) -> list[AgentInfo]:
 def format_agents(agents: list[AgentInfo], max_commits: int | None = 3) -> str:
     """Format sorted agent list into display text."""
     lines = []
-    for last_activity, _, name, _, state, unapproved in agents:
+    for i, (last_activity, _, name, _, state, unapproved) in enumerate(agents):
+        if i > 0:
+            lines.append("")
         age = _format_age(last_activity) if last_activity else ""
         header = f"{name}  ({state})" + (f"  {age}" if age else "")
         lines.append(header)
@@ -95,38 +95,47 @@ def _remove_agent(base: Path, agent_id: str, branches: list[str]):
     registry.remove_agent(agent_id)
 
 
-def status(base: Path, agent_filter: str | None = None, scoped: bool = True) -> float:
-    """Show agent status. Returns the most recent activity timestamp (0.0 if none)."""
-    git.git("fetch", "--prune", config.CAVE_SHARED_REMOTE, cwd=base, **config.v())
+def format_divergence(local_branch: str, remote_ref: str,
+                      cwd: Path) -> str | None:
+    """Return a divergence message for local vs remote branch, or None."""
+    try:
+        local_sha = git.git_output("rev-parse", local_branch, cwd=cwd)
+        remote_sha = git.git_output("rev-parse", remote_ref, cwd=cwd)
+    except Exception:
+        return None
+    if local_sha == remote_sha:
+        return None
+    behind = git.commits_ahead(remote_ref, local_branch, cwd=cwd)
+    local_ahead = git.commits_ahead(local_branch, remote_ref, cwd=cwd)
+    if behind > 0 and local_ahead > 0:
+        nb = "commit" if behind == 1 else "commits"
+        na = "commit" if local_ahead == 1 else "commits"
+        return (f"{local_branch} and {remote_ref} have diverged,\n"
+                f"and have {local_ahead} and {behind} different "
+                f"{na} and {nb} each, respectively.")
+    if behind > 0:
+        n = "commit" if behind == 1 else "commits"
+        return (f"{local_branch} is behind {remote_ref} "
+                f"by {behind} {n}, and can be fast-forwarded.")
+    if local_ahead > 0:
+        n = "commit" if local_ahead == 1 else "commits"
+        return (f"{local_branch} is ahead of {remote_ref} "
+                f"by {local_ahead} {n}.")
+    return None
+
+
+def render_status(base: Path, agent_filter: str | None = None) -> tuple[float, str]:
+    """Render project status. Returns (most_recent_timestamp, rendered_text)."""
+    slug = config.project_slug(base)
+    parts = []
 
     if not agent_filter:
         local_branch = git.current_branch(cwd=base)
         remote_ref = f"{config.CAVE_SHARED_REMOTE}/{local_branch}"
-        try:
-            local_sha = git.git_output("rev-parse", local_branch, cwd=base)
-            remote_sha = git.git_output("rev-parse", remote_ref, cwd=base)
-        except Exception:
-            remote_sha = local_sha = None
-        if local_sha and remote_sha and local_sha != remote_sha:
-            behind = git.commits_ahead(remote_ref, local_branch, cwd=base)
-            local_ahead = git.commits_ahead(local_branch, remote_ref, cwd=base)
-            if behind > 0 and local_ahead > 0:
-                nb = "commit" if behind == 1 else "commits"
-                na = "commit" if local_ahead == 1 else "commits"
-                print(f"{local_branch} and {remote_ref} have diverged,")
-                print(f"and have {local_ahead} and {behind} different {na} and {nb} each, respectively.")
-                print()
-            elif behind > 0:
-                n = "commit" if behind == 1 else "commits"
-                print(f"{local_branch} is behind {remote_ref} by {behind} {n}, and can be fast-forwarded.")
-                print()
-            elif local_ahead > 0:
-                n = "commit" if local_ahead == 1 else "commits"
-                print(f"{local_branch} is ahead of {remote_ref} by {local_ahead} {n}.")
-                print()
+        div = format_divergence(local_branch, remote_ref, cwd=base)
+        if div:
+            parts.append(div)
 
-    # Agents come from the registry, branches provide detail
-    slug = config.project_slug(base)
     registered = registry.all_agent_ids(slug)
     if agent_filter:
         registered = [a for a in registered if a == agent_filter]
@@ -145,24 +154,20 @@ def status(base: Path, agent_filter: str | None = None, scoped: bool = True) -> 
 
     if not by_agent:
         if agent_filter:
-            print(f"No agent {agent_filter} in registry.")
-        elif scoped:
-            print(f"No running agents in {slug}.")
-        return 0.0
+            return 0.0, f"No agent {agent_filter} in registry."
+        return 0.0, f"No running agents in {slug}."
 
     verbose = config.verbose or bool(agent_filter)
-
     max_commits = None if verbose else 3
 
-    # Collect agent info
     agents: list[AgentInfo] = []
-    for agent_id, branches in by_agent.items():
+    for agent_id, agent_branches in by_agent.items():
         name = registry.display_name(base, agent_id)
         running = registry.is_agent_running(agent_id)
 
         unapproved = []
         last_activity = 0.0
-        for branch, base_name in branches:
+        for branch, base_name in agent_branches:
             remote_dev = f"{config.CAVE_SHARED_REMOTE}/{branch}"
             remote_base = f"{config.CAVE_SHARED_REMOTE}/{base_name}"
             ts = git.commit_timestamp(remote_dev, cwd=base)
@@ -176,20 +181,15 @@ def status(base: Path, agent_filter: str | None = None, scoped: bool = True) -> 
             except Exception:
                 pass
 
-        # Fall back to registry timestamps if no branches
         if not last_activity:
             exit_t = registry.agent_exit_time(agent_id)
             if exit_t:
                 last_activity = exit_t
 
-        total_ahead = sum(a for _, a, _ in unapproved)
-
         state = "running" if running else "stopped"
 
         # Only show agents that are running or have unapproved work.
-        # Exited agents with no pending commits are kept in the registry
-        # for cav -c but aren't interesting for status.
-        if not running and total_ahead == 0:
+        if not running and sum(a for _, a, _ in unapproved) == 0:
             continue
 
         agents.append((last_activity, agent_id, name, running, state, unapproved))
@@ -198,10 +198,9 @@ def status(base: Path, agent_filter: str | None = None, scoped: bool = True) -> 
 
     if not agents:
         if agent_filter:
-            print(f"No agent {agent_filter} in registry.")
-        elif scoped:
-            print(f"No running agents in {slug}.")
-        return 0.0
+            return 0.0, f"No agent {agent_filter} in registry."
+        return 0.0, f"No running agents in {slug}."
 
-    print(format_agents(agents, max_commits))
-    return agents[0][0]  # most recent activity timestamp
+    parts.append(f"=== {slug} ===")
+    parts.append(format_agents(agents, max_commits))
+    return agents[0][0], "\n\n".join(parts)

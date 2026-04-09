@@ -14,6 +14,61 @@ from . import completion as _completion, config, git, registry
 _completion.register()
 
 
+def _parse_agent_id(s: str) -> str:
+    """Extract a numeric agent ID from user input like '6', '@6', 'dotfiles@6'."""
+    return s.lstrip("@").split("@")[-1]
+
+
+def resolve_target(args: tuple[str, ...],
+                   infer_agent: bool = False) -> tuple[Path, str | None]:
+    """Resolve positional args to (project_base, agent_id).
+
+    Accepts 0-2 args. A bare number is an agent ID; anything else is a
+    project slug.  With 0 args, defaults to the cwd project.
+
+    When infer_agent is True and no agent ID is given, the current dev
+    branch (e.g. agent-1/main) is used to infer the agent ID.
+    """
+    agent_id = None
+    project_slug = None
+
+    for arg in args:
+        candidate = _parse_agent_id(arg)
+        if config.AGENT_ID_RE.match(candidate):
+            if agent_id is not None:
+                raise SystemExit(f"Multiple agent IDs given: {agent_id}, {candidate}")
+            agent_id = candidate
+        else:
+            if project_slug is not None:
+                raise SystemExit(f"Multiple projects given: {project_slug}, {arg}")
+            project_slug = arg
+
+    if project_slug:
+        path = registry.project_path(project_slug)
+        if not path:
+            raise SystemExit(f"No project '{project_slug}'. "
+                             f"Check spelling or run: cav init")
+        base = Path(path)
+        if not base.is_dir():
+            raise SystemExit(f"Project '{project_slug}' path missing: {path}")
+    else:
+        base = find_repo_root()
+
+    require_init(base)
+
+    # Infer agent ID from current branch if not given explicitly.
+    if infer_agent and agent_id is None:
+        try:
+            branch = git.current_branch(cwd=base)
+            parsed = config.parse_dev_branch(branch)
+            if parsed:
+                agent_id = parsed[1]
+        except Exception:
+            pass
+
+    return base, agent_id
+
+
 def find_repo_root() -> Path:
     try:
         return Path(git.repo_root())
@@ -256,14 +311,13 @@ def _auto_cleanup_if_clean(base, agent_id):
 
 
 @cli.command()
-@click.argument("agent_id", required=False)
+@click.argument("args", nargs=-1, metavar="[PROJECT] [AGENT-ID]")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
-def approve(agent_id, yes):
+def approve(args, yes):
     """Approve agent work into base branch."""
-    base = find_repo_root()
-    require_init(base)
     from .approve import approve as _approve
-    _approve(base, agent_id=agent_id, yes=yes)
+    base, agent_id = resolve_target(args, infer_agent=True)
+    _approve(base=base, agent_id=agent_id, yes=yes)
 
 
 @cli.command()
@@ -299,15 +353,13 @@ def push(force):
 
 
 @cli.command()
-@click.argument("agent", required=False)
+@click.argument("args", nargs=-1, metavar="[PROJECT] [AGENT-ID]")
 @click.option("-a", "--all", "all_projects", is_flag=True,
               help="Show status for all registered projects")
-def status(agent, all_projects):
+def status(args, all_projects):
     """Show agent and dev branch status."""
-    from .status import status as _status
+    from .status import render_status, format_projects
     if all_projects:
-        import io, contextlib
-        from .status import format_all
         projects = registry.all_projects()
         if not projects:
             raise SystemExit("No registered projects. Run: cav init")
@@ -317,34 +369,22 @@ def status(agent, all_projects):
             if not Path(path).is_dir():
                 missing.append((slug, path))
                 continue
-            buf = io.StringIO()
-            with contextlib.redirect_stdout(buf):
-                last_activity = _status(Path(path), scoped=False)
-            entries.append((last_activity, slug, buf.getvalue()))
-        print(format_all(entries))
+            base = Path(path)
+            git.git("fetch", "--prune", config.CAVE_SHARED_REMOTE,
+                    cwd=base, **config.v())
+            last_activity, text = render_status(base)
+            entries.append((last_activity, slug, text))
+        print(format_projects(entries))
         for slug, path in missing:
             click.echo(
                 f"\"{slug}\" is registered but {path} is missing."
                 f" Restore directory or remove with: cav remove-project {slug}",
                 err=True)
         return
-    agent_id = None
-    if agent:
-        agent_id = agent.lstrip("@").split("@")[-1]
-        if not config.AGENT_ID_RE.match(agent_id):
-            raise SystemExit(f"Invalid agent ID '{agent}'. Use a number (e.g. 3).")
-        # Look up agent globally so cross-project queries work
-        slug = registry.agent_project(agent_id)
-        if not slug:
-            raise SystemExit(f"No agent {agent_id} in registry.")
-        path = registry.project_path(slug)
-        if not path or not Path(path).is_dir():
-            raise SystemExit(f"Agent {agent_id} project \"{slug}\" path missing: {path}")
-        base = Path(path)
-    else:
-        base = find_repo_root()
-    require_init(base)
-    _status(base, agent_filter=agent_id)
+    base, agent_id = resolve_target(args, infer_agent=True)
+    git.git("fetch", "--prune", config.CAVE_SHARED_REMOTE, cwd=base, **config.v())
+    _, text = render_status(base, agent_filter=agent_id)
+    print(text)
 
 
 @cli.command("remove-agent")

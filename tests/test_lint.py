@@ -313,8 +313,8 @@ class TestDeadCode(unittest.TestCase):
 
     # Click commands registered via @cli.command() or @group.command()
     # that vulture can't trace through decorator dispatch.
-    CLICK_COMMANDS = {"version", "env_build", "env_update", "env_metadata",
-                      "completion"}
+    CLICK_COMMANDS = {"agent", "status", "version", "env_build", "env_update",
+                      "env_metadata", "completion"}
     # Click overrides accessed by name from the framework, not by direct call.
     CLICK_OVERRIDES = {"shell_complete", "source_template"}
 
