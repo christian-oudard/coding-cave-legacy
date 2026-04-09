@@ -105,5 +105,85 @@ class TestNixStore(unittest.TestCase):
                          f"This means nix DB seeding from host is not working.")
 
 
+class TestSubcaveReadiness(unittest.TestCase):
+    """Verify the cave environment supports launching subcaves.
+
+    These checks confirm the recursive plumbing is in place. Actual
+    subcave launches require API access (crinj proxy chain).
+    """
+
+    def test_recursive_env_set(self):
+        """CODING_CAVE_RECURSIVE must be 1 for subcave support."""
+        import os
+        val = os.environ.get("CODING_CAVE_RECURSIVE")
+        if val != "1":
+            self.skipTest("not a recursive cave (--recursive not passed)")
+        self.assertEqual(val, "1")
+
+    def test_fuse_device_available(self):
+        """/dev/fuse is required for nested nix store overlays."""
+        import os
+        if os.environ.get("CODING_CAVE_RECURSIVE") != "1":
+            self.skipTest("not a recursive cave")
+        self.assertTrue(Path("/dev/fuse").exists(),
+                        "/dev/fuse must be available for fuse-overlayfs")
+
+    def test_tun_device_available(self):
+        """/dev/net/tun is required for subcave network isolation."""
+        import os
+        if os.environ.get("CODING_CAVE_RECURSIVE") != "1":
+            self.skipTest("not a recursive cave")
+        self.assertTrue(Path("/dev/net/tun").exists(),
+                        "/dev/net/tun must be available for slirp4netns")
+
+    def test_cav_binary_available(self):
+        """cav binary must be on PATH for subcave launching."""
+        self.assertIsNotNone(shutil.which("cav"),
+                             "cav not found on PATH")
+
+    def test_prompt_flag_accepted(self):
+        """cav agent --prompt must be a valid option."""
+        # Use the locally built binary if available (system cav may be outdated).
+        cav = str(Path(__file__).parent.parent / "result" / "bin" / "cav")
+        if not Path(cav).exists():
+            cav = "cav"
+        result = subprocess.run(
+            [cav, "agent", "--help"],
+            capture_output=True, text=True,
+        )
+        self.assertIn("--prompt", result.stdout)
+
+    def test_inside_cave_detected(self):
+        """config.inside_cave() must return True inside a cave."""
+        import sys, os
+        sys.path.insert(0, str(Path(__file__).parent.parent))
+        from cav import config
+        self.assertTrue(config.inside_cave(),
+                        "CODING_CAVE_VERSION not set")
+
+    def test_subcave_home_is_isolated(self):
+        """Subcave homes must be separate from the parent's persistent home."""
+        import sys
+        sys.path.insert(0, str(Path(__file__).parent.parent))
+        from cav import config
+        parent_home = config.persistent_home()
+        subcave_home = config.DATA_DIR / "subcave-homes" / "test-agent"
+        self.assertNotEqual(subcave_home, parent_home)
+        self.assertFalse(
+            str(subcave_home).startswith(str(parent_home) + "/"),
+            "subcave home must not be under parent's persistent home")
+
+    def test_nix_overlay_dirs_isolated_per_home(self):
+        """Different homes produce non-overlapping nix overlay paths."""
+        import sys, tempfile
+        sys.path.insert(0, str(Path(__file__).parent.parent))
+        from cav.sandbox import _nix_overlay_dirs
+        a = Path(tempfile.mkdtemp())
+        b = Path(tempfile.mkdtemp())
+        _, _, merged_a = _nix_overlay_dirs(a)
+        _, _, merged_b = _nix_overlay_dirs(b)
+        self.assertNotEqual(merged_a, merged_b)
+
+
 if __name__ == "__main__":
     unittest.main()

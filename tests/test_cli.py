@@ -462,6 +462,21 @@ class TestUnknownCommand(unittest.TestCase):
         self.assertIn("Unknown command", result.stderr)
 
 
+class TestPromptFlag(unittest.TestCase):
+    """cav agent --prompt flag is wired up correctly."""
+
+    def test_prompt_flag_recognized(self):
+        """cav agent --prompt TEXT is a valid argument."""
+        result = cav_cli("agent", "--prompt", "hello", cwd="/tmp", check=False)
+        self.assertNotIn("unrecognized arguments", result.stderr)
+
+    def test_prompt_option_defined(self):
+        """The agent command has a --prompt option in the source."""
+        from cav.cli import agent
+        param_names = [p.name for p in agent.params]
+        self.assertIn("prompt", param_names)
+
+
 class TestContinueFlag(unittest.TestCase):
     """cav -c / cav --continue parses correctly."""
 

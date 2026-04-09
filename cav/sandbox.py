@@ -666,7 +666,8 @@ def _seed_claude_config(home: Path, project_slug: str):
 
 def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
            project_slug: str = "project", recursive: bool = False,
-           session_id: str | None = None, resuming: bool = False):
+           session_id: str | None = None, resuming: bool = False,
+           prompt: str | None = None):
     """Launch claude in a bwrap sandbox via the jail.nix binary.
 
     workspaces: list of (workspace_path, shared_repo, slug) tuples.
@@ -845,7 +846,9 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
 
     try:
         claude_cmd = [SANDBOX_BIN, "claude", "--dangerously-skip-permissions"]
-        if session_id:
+        if prompt:
+            claude_cmd += ["--print", prompt]
+        elif session_id:
             if resuming:
                 claude_cmd += ["--resume", session_id]
             else:

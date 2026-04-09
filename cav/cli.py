@@ -134,7 +134,9 @@ def init(path):
               help="Additional project to mount (repeatable)")
 @click.option("--recursive", is_flag=True,
               help="Allow agent to launch subcaves (exposes /dev/fuse)")
-def agent(continue_agent, resume_agent, extra_projects, recursive):
+@click.option("--prompt", type=str, default=None,
+              help="Non-interactive mode: execute prompt, print response, exit")
+def agent(continue_agent, resume_agent, extra_projects, recursive, prompt):
     """Launch an agent in a sandbox."""
     base = find_repo_root()
     require_init(base)
@@ -210,7 +212,7 @@ def agent(continue_agent, resume_agent, extra_projects, recursive):
     try:
         rc = launch(workspaces, name, project_slug=projects[0][1],
                     recursive=recursive, session_id=session_id,
-                    resuming=resuming)
+                    resuming=resuming, prompt=prompt)
     finally:
         if session_id and not config.session_file_exists(projects[0][1], session_id):
             registry.clear_session_id(agent_id)
