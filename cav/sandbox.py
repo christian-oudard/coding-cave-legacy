@@ -191,10 +191,18 @@ def _host_home() -> Path:
 def _crinj_ca_path() -> Path:
     """Find crinj CA certificate.
 
-    At depth 0, crinj generates the cert in the host home. At depth > 0,
-    crinj runs inside the cave (cert in cave home), or the parent's cert
-    is bind-mounted at /etc/crinj-ca.pem by jail.nix.
+    Inside a cave, prefer /etc/crinj-ca.pem (the ancestor cert inherited
+    from jail.nix). Each nesting level's crinj runs in tunnel/passthrough
+    mode, so the MITM cert is always from the outermost (host) crinj.
+    The inherited /etc/crinj-ca.pem is the right cert at every depth.
+
+    At depth 0 (host), crinj generates its cert in the home directory.
     """
+    if config.inside_cave():
+        inherited = Path("/etc/crinj-ca.pem")
+        if inherited.exists():
+            return inherited
+
     host_home = _host_home()
     cave_home = Path.home()
     xdg = os.environ.get("XDG_DATA_HOME", host_home / ".local" / "share")
@@ -202,7 +210,6 @@ def _crinj_ca_path() -> Path:
         cave_home / ".crinj" / "gateway" / "ca.pem",
         host_home / ".crinj" / "gateway" / "ca.pem",
         Path(xdg) / "crinj" / "gateway" / "ca.pem",
-        Path("/etc/crinj-ca.pem"),
     ]:
         if path.exists():
             return path

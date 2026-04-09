@@ -102,7 +102,7 @@ def create(base: Path, agent_id: str) -> Path:
                 echo=False, capture=True)
         r = git.git("push", config.HOST_SHARED_REMOTE, dev,
                     cwd=ws_path, echo=False, capture=True, check=False)
-        if r.returncode:
+        if r.returncode and not config.inside_cave():
             msg = (r.stderr or r.stdout or "").strip()
             raise SystemExit(
                 f"Failed to push initial branch '{dev}' to shared repo.\n"
