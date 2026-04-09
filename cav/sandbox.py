@@ -216,7 +216,14 @@ def _crinj_listening() -> bool:
 
 
 def _start_crinj() -> str:
-    """Start crinj if not already running. Returns proxy address."""
+    """Start crinj if not already running. Returns proxy address.
+
+    Always passes --allow-empty-rules so the same launch path works at
+    every nesting level (host == cave == subcave). Inner crinj instances
+    chain through HTTPS_PROXY (set by the cave entrypoint from
+    CODING_CAVE_PROXY_ADDR) so traffic flows out to the parent without
+    re-injection; the outermost crinj is the one with real rules.
+    """
     if not shutil.which("crinj"):
         raise SystemExit("crinj not found on PATH")
 
@@ -225,8 +232,17 @@ def _start_crinj() -> str:
     else:
         log.debug("starting crinj...")
         config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+        # Crinj always reads its config file, even with --allow-empty-rules.
+        # Touch an empty rules.toml if missing so a fresh cave home works
+        # without manual setup; the host case is a no-op when the user
+        # already has real rules.
+        rules = Path(os.environ.get(
+            "XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "crinj" / "rules.toml"
+        if not rules.exists():
+            rules.parent.mkdir(parents=True, exist_ok=True)
+            rules.touch()
         proc = subprocess.Popen(
-            ["crinj", "--port", str(CRINJ_PORT)],
+            ["crinj", "--port", str(CRINJ_PORT), "--allow-empty-rules"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             start_new_session=True,
@@ -299,52 +315,110 @@ def _prune_nix_caches() -> None:
             db_path.unlink(missing_ok=True)
 
 
-DB_RESEED_THRESHOLD = 24 * 3600  # 24 hours
+def _parse_drv_outputs(drv_path: str) -> dict[str, str]:
+    """Parse a .drv file and return {output_name: output_path}."""
+    try:
+        content = Path(drv_path).read_text()
+    except (OSError, UnicodeDecodeError):
+        return {}
+    end = content.find(']')
+    if end < 0:
+        return {}
+    import re
+    return dict(re.findall(r'\("([^"]+)","(/nix/store/[^"]+)"', content[:end]))
 
 
-def _seed_nix_db(merged_path: str = "", force: bool = False) -> Path | None:
-    """Backup host nix DB, preserving cave-installed package registrations.
+def _repair_derivation_outputs(db: "sqlite3.Connection", store_root: Path):
+    """Fill missing DerivationOutputs entries from .drv files on disk.
 
-    Skips re-seeding if the DB already exists and is younger than
-    DB_RESEED_THRESHOLD (default 24h), unless force is True.
+    Nix doesn't populate DerivationOutputs for builds done in an overlay
+    store. This causes nix-store --realise to fail with map::at when later
+    operations look up derivation outputs.
+    """
+    missing = db.execute(
+        "SELECT vp.id, vp.path, vp.deriver FROM ValidPaths vp "
+        "LEFT JOIN DerivationOutputs do2 ON do2.path = vp.path "
+        "WHERE vp.deriver != '' AND do2.path IS NULL"
+    ).fetchall()
+    if not missing:
+        return
+    # Cache: deriver path -> (ValidPaths.id, parsed outputs)
+    drv_cache: dict[str, tuple[int | None, dict[str, str]]] = {}
+    repaired = 0
+    for _vid, path, deriver in missing:
+        if deriver not in drv_cache:
+            drv_row = db.execute(
+                "SELECT id FROM ValidPaths WHERE path = ?", (deriver,)
+            ).fetchone()
+            drv_id = drv_row[0] if drv_row else None
+            outputs = _parse_drv_outputs(deriver) if drv_id else {}
+            drv_cache[deriver] = (drv_id, outputs)
+        drv_id, outputs = drv_cache[deriver]
+        if not drv_id:
+            continue
+        # Find which output name maps to this path
+        output_name = None
+        for name, out_path in outputs.items():
+            if out_path == path:
+                output_name = name
+                break
+        if not output_name:
+            continue
+        db.execute(
+            "INSERT OR IGNORE INTO DerivationOutputs (drv, id, path) "
+            "VALUES (?, ?, ?)", (drv_id, output_name, path),
+        )
+        repaired += 1
+    if repaired:
+        db.commit()
 
-    Always starts from a fresh host backup (fast, self-cleaning), then
+
+def _seed_nix_db(home: Path, merged_path: str = "") -> Path | None:
+    """Backup parent nix DB, preserving cave-installed package registrations.
+
+    Always starts from a fresh backup of whatever nix DB is visible at
+    /nix/var/nix/db/db.sqlite (the real host DB when launched on the host,
+    or the parent cave's bind-mounted DB when launched inside a cave), then
     merges back cave-only paths whose files still exist on disk. Finally,
-    removes stale entries for paths the host GC'd after the snapshot.
+    removes stale entries for paths the parent GC'd after the snapshot.
 
     Args:
+        home: The child's persistent home directory. DB is stored under
+            its data dir so each nesting level has its own DB.
         merged_path: The mounted fuse-overlayfs merged directory. When
             provided, stale DB entries are validated against this path
-            (which reflects the live host store plus the cave upper layer).
-        force: Re-seed even if the DB is fresh.
+            (which reflects the parent store plus this level's upper layer).
 
-    Returns the DB directory path, or None if the host DB doesn't exist.
+    Returns the DB directory path, or None if the parent DB doesn't exist.
     """
-    host_db = Path("/nix/var/nix/db/db.sqlite")
-    if not host_db.exists():
+    parent_db = Path("/nix/var/nix/db/db.sqlite")
+    if not parent_db.exists():
         return None
 
-    db_dir = config.nix_db_dir()
+    db_dir = home / ".local" / "share" / "coding-cave" / "nix-overlay" / "shared" / "db"
     db_dir.mkdir(parents=True, exist_ok=True)
     cave_db = db_dir / "db.sqlite"
 
-    # Skip re-seed if the DB is fresh enough
-    if not force and cave_db.exists():
-        age = time.time() - cave_db.stat().st_mtime
-        if age < DB_RESEED_THRESHOLD:
-            return db_dir
-
     # Use the merged overlay for existence checks when available,
-    # otherwise fall back to the host's /nix/store.
-    store_root = Path(merged_path) if merged_path else Path("/nix/store")
+    # otherwise fall back to the parent's /nix/store view.
+    # When the overlay mount is deferred to cave-ns.sh, the merged dir
+    # exists but is empty. Fall back to /nix/store in that case to
+    # avoid deleting all DB entries as "stale".
+    store_root = Path("/nix/store")
+    if merged_path:
+        candidate = Path(merged_path)
+        if any(candidate.iterdir()):
+            store_root = candidate
 
     try:
-        # Collect cave-only paths before overwriting
+        # Collect cave-only paths and their DerivationOutputs before overwriting
         cave_only_rows = []
+        cave_only_deriv_outputs = []  # (drv_path, output_name, output_path)
         if cave_db.exists():
             old = sqlite3.connect(f"file:{cave_db}?mode=ro", uri=True)
-            host = sqlite3.connect(f"file:{host_db}?mode=ro", uri=True)
+            host = sqlite3.connect(f"file:{parent_db}?mode=ro", uri=True)
             host_paths = {r[0] for r in host.execute("SELECT path FROM ValidPaths")}
+            cave_only_paths = set()
             for row in old.execute(
                 "SELECT path, hash, registrationTime, deriver, narSize, "
                 "ultimate, sigs, ca FROM ValidPaths"
@@ -353,13 +427,21 @@ def _seed_nix_db(merged_path: str = "", force: bool = False) -> Path | None:
                     basename = Path(row[0]).name
                     if (store_root / basename).exists():
                         cave_only_rows.append(row)
+                        cave_only_paths.add(row[0])
+            # Preserve DerivationOutputs for cave-only derivations
+            for row in old.execute(
+                "SELECT vp.path, do2.id, do2.path FROM DerivationOutputs do2 "
+                "JOIN ValidPaths vp ON vp.id = do2.drv"
+            ):
+                if row[0] in cave_only_paths:
+                    cave_only_deriv_outputs.append(row)
             host.close()
             old.close()
 
-        # Fresh backup from host
+        # Fresh backup from parent DB
         for wal in db_dir.glob("db.sqlite-*"):
             wal.unlink()
-        src = sqlite3.connect(f"file:{host_db}?mode=ro", uri=True)
+        src = sqlite3.connect(f"file:{parent_db}?mode=ro", uri=True)
         dst = sqlite3.connect(str(cave_db))
         src.backup(dst)
 
@@ -373,6 +455,24 @@ def _seed_nix_db(merged_path: str = "", force: bool = False) -> Path | None:
                     (path, h, reg_time, deriver, nar_size, ult, sigs, ca),
                 )
             dst.commit()
+
+        # Restore cave-only DerivationOutputs (ids changed, remap via path)
+        for drv_path, output_name, output_path in cave_only_deriv_outputs:
+            drv_row = dst.execute(
+                "SELECT id FROM ValidPaths WHERE path = ?", (drv_path,)
+            ).fetchone()
+            if drv_row:
+                dst.execute(
+                    "INSERT OR IGNORE INTO DerivationOutputs (drv, id, path) "
+                    "VALUES (?, ?, ?)", (drv_row[0], output_name, output_path),
+                )
+        if cave_only_deriv_outputs:
+            dst.commit()
+
+        # Repair DerivationOutputs for overlay-built paths.
+        # Nix doesn't populate this table for builds in the overlay store,
+        # causing "map::at" errors from nix-store --realise.
+        _repair_derivation_outputs(dst, store_root)
 
         # Remove stale entries: paths the host GC'd after the DB snapshot.
         # The overlay reflects the live host store, so missing paths are
@@ -403,8 +503,13 @@ def _seed_nix_db(merged_path: str = "", force: bool = False) -> Path | None:
     return db_dir
 
 
-def _nix_overlay_dirs() -> tuple[Path, Path, Path]:
-    shared = config.nix_overlay_dir() / "shared"
+def _nix_overlay_dirs(home: Path) -> tuple[Path, Path, Path]:
+    """Return (upper, work, merged) for the nix store overlay.
+
+    Each nesting level gets its own home directory, so the "shared/"
+    overlay is naturally distinct per level without needing lineage.
+    """
+    shared = home / ".local" / "share" / "coding-cave" / "nix-overlay" / "shared"
     upper = shared / "upper"
     work = shared / "work"
     merged = shared / "merged"
@@ -431,17 +536,18 @@ def _mount_fuse_overlay(upper: Path, work: Path, merged: Path):
     )
 
 
-def _setup_shared_nix_overlay() -> str:
+def _setup_shared_nix_overlay(home: Path) -> str:
     """Mount the shared writable nix store overlay. Returns merged path.
 
-    All agents share a single overlay. The overlay persists across agent
-    launches and is not torn down when an agent exits.
+    All agents at a given nesting level share a single overlay. The
+    overlay persists across agent launches and is not torn down when an
+    agent exits. Each nesting level gets its own overlay via its own home.
 
     Tries a direct mount (works when fusermount3 is setuid). If that fails,
     defers the mount to cave-ns.sh which runs inside the user namespace
     created by unshare(1).
     """
-    upper, work, merged = _nix_overlay_dirs()
+    upper, work, merged = _nix_overlay_dirs(home)
 
     if any(merged.iterdir()):
         return str(merged)
@@ -566,7 +672,12 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
     workspaces: list of (workspace_path, shared_repo, slug) tuples.
     project_slug: slug of the primary project (for cd on entry).
     """
-    home = config.persistent_home()
+    if config.inside_cave():
+        # Subcave: isolated home so nix overlay dirs don't collide
+        # with the parent's. Keyed by agent name (unique per project).
+        home = config.DATA_DIR / "subcave-homes" / agent_name
+    else:
+        home = config.persistent_home()
     home.mkdir(parents=True, exist_ok=True)
     for _, _, slug in workspaces:
         _seed_claude_config(home, slug)
@@ -635,8 +746,8 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
     user_env_path = user_env.build()
 
     log.info("setting up nix overlay...")
-    nix_merged = _setup_shared_nix_overlay()
-    nix_db_dir = _seed_nix_db(nix_merged)
+    nix_merged = _setup_shared_nix_overlay(home)
+    nix_db_dir = _seed_nix_db(home, nix_merged)
     log.info("nix overlay ready")
 
     # Encode multiple workspaces as colon-separated lists
@@ -751,7 +862,7 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
         os.set_inheritable(sync_w, True)
 
         # Nix overlay env vars for cave-ns.sh.
-        upper, work, merged = _nix_overlay_dirs()
+        upper, work, merged = _nix_overlay_dirs(home)
         env["CAVE_NS_SYNC_FD"] = str(sync_w)
         env["CAVE_NS_OVERLAY_MERGED"] = str(merged)
         env["CAVE_NS_OVERLAY_UPPER"] = str(upper)

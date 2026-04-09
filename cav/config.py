@@ -64,14 +64,6 @@ def shared_repo_path(base: Path) -> Path:
 
 # -- Data dir paths (global, ~/.local/share/coding-cave/) --
 
-def nix_overlay_dir() -> Path:
-    return DATA_DIR / "nix-overlay"
-
-
-def nix_db_dir() -> Path:
-    return DATA_DIR / "nix-overlay" / "shared" / "db"
-
-
 def persistent_home() -> Path:
     return DATA_DIR / "home"
 

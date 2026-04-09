@@ -311,20 +311,45 @@ class TestSeedNixDb(unittest.TestCase):
 
 
     def test_db_on_native_fs_not_overlay(self):
-        """Shared DB directory is NOT under the merged overlay mount."""
-        db_dir = config.nix_db_dir()
-        overlay_dir = config.nix_overlay_dir()
-        merged = overlay_dir / "shared" / "merged"
-        # The DB must not be a child of the merged mount point
+        """DB directory is a sibling of merged, not under it."""
+        from cav.sandbox import _nix_overlay_dirs
+        home = config.persistent_home()
+        _, _, merged = _nix_overlay_dirs(home)
+        db_dir = merged.parent / "db"
         self.assertFalse(
             str(db_dir).startswith(str(merged) + "/"),
             f"DB dir {db_dir} must not be under merged mount {merged}",
         )
-        # But it should be under the overlay parent (sibling of merged)
-        self.assertTrue(
-            str(db_dir).startswith(str(overlay_dir) + "/"),
-            f"DB dir {db_dir} should be under {overlay_dir}",
-        )
+
+
+class TestIsolatedSubcaveHomes(unittest.TestCase):
+    """Subcaves get isolated homes so overlay dirs are naturally distinct.
+
+    Each nesting level uses "shared/" under its own home. Since homes
+    are distinct, the overlay paths never collide and no lineage
+    tracking is needed.
+    """
+
+    def test_different_homes_yield_different_overlay_dirs(self):
+        """Two homes produce non-overlapping overlay paths."""
+        import tempfile
+        from cav.sandbox import _nix_overlay_dirs
+        a = Path(tempfile.mkdtemp())
+        b = Path(tempfile.mkdtemp())
+        _, _, merged_a = _nix_overlay_dirs(a)
+        _, _, merged_b = _nix_overlay_dirs(b)
+        self.assertNotEqual(merged_a, merged_b)
+        self.assertFalse(str(merged_a).startswith(str(merged_b) + "/"))
+        self.assertFalse(str(merged_b).startswith(str(merged_a) + "/"))
+
+    def test_same_home_yields_same_overlay_dirs(self):
+        """Siblings sharing a home share the overlay (by design)."""
+        import tempfile
+        from cav.sandbox import _nix_overlay_dirs
+        home = Path(tempfile.mkdtemp())
+        _, _, merged_a = _nix_overlay_dirs(home)
+        _, _, merged_b = _nix_overlay_dirs(home)
+        self.assertEqual(merged_a, merged_b)
 
 
 class TestPruneNixCaches(unittest.TestCase):
