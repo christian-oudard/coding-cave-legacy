@@ -117,7 +117,7 @@ Force-rebuilds the cave environment from `~/.config/coding-cave/cave.nix` (or th
 
 ### `cav env update [INPUT]`
 
-Updates flake inputs and rebuilds the cave environment. With an argument, updates only that input (e.g. `cav env update claude-code-nix`). Without, updates all inputs.
+Updates the flake lock file without rebuilding. With an argument, updates only that input (e.g. `cav env update claude-code-nix`). Without, updates all inputs. Run `cav env build` separately to rebuild after updating.
 
 ### `cav env metadata`
 

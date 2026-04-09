@@ -501,7 +501,7 @@ def env_build():
 @env.command("update")
 @click.argument("input_name", required=False)
 def env_update(input_name):
-    """Update flake inputs and rebuild the cave environment."""
+    """Update flake lock file (does not rebuild)."""
     from . import user_env
     user_env.update(input_name)
 

@@ -279,7 +279,7 @@ def build():
 
 
 def update(input_name=None):
-    """Update flake inputs and rebuild."""
+    """Update flake lock file without rebuilding."""
     _prepare()
     user_env = _user_env_dir()
 
@@ -289,15 +289,7 @@ def update(input_name=None):
     r = subprocess.run(cmd, cwd=str(user_env))
     if r.returncode != 0:
         raise SystemExit("nix flake update failed.")
-
-    cave_nix = _cave_nix_path()
-    cave_nix_content = cave_nix.read_text() if cave_nix.exists() else None
-    sibling_files = _read_sibling_files()
-    out = _do_build(user_env)
-    if out:
-        _save_hash(cave_nix_content, sibling_files)
-    return out
-
+    print("Run 'cav env build' to rebuild with updated inputs.", file=sys.stderr)
 
 def metadata():
     """Show flake metadata for the cave environment."""
