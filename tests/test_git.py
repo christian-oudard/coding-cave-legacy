@@ -26,11 +26,16 @@ from tests import find_agent_by_session
 def _clean_env():
     """Base environment for test subprocesses.
 
-    Strip CODING_CAVE_* vars (except DATA_DIR) so test repos behave as
-    host-side repos even when tests run inside a cave.
+    Strip CODING_CAVE_* vars (except DATA_DIR) and the cave's ~/bin
+    (which contains a git wrapper) so test repos behave as host-side
+    repos even when tests run inside a cave.
     """
-    return {k: v for k, v in os.environ.items()
-            if not k.startswith("CODING_CAVE_") or k == "CODING_CAVE_DATA_DIR"}
+    cave_bin = str(Path.home() / "bin")
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith("CODING_CAVE_") or k == "CODING_CAVE_DATA_DIR"}
+    env["PATH"] = ":".join(
+        p for p in env.get("PATH", "").split(":") if p != cave_bin)
+    return env
 
 
 def run(cmd, cwd=None, check=True, env=None):
@@ -59,7 +64,7 @@ def git_out(*args, cwd=None):
 def cav_cli(*args, cwd=None, check=True):
     """Run cav CLI via python -m."""
     return run(
-        ["python3", "-m", "cav.cli"] + list(args),
+        [sys.executable, "-m", "cav.cli"] + list(args),
         cwd=cwd, check=check,
     )
 
@@ -219,7 +224,7 @@ class TestCAV(unittest.TestCase):
         wrapper = bin_dir / "git"
         wrapper.write_text(GIT_WRAPPER)
         wrapper.chmod(0o755)
-        env = {**os.environ, "PATH": f"{bin_dir}:{os.environ.get('PATH', '')}"}
+        env = {"PATH": f"{bin_dir}:{_clean_env()['PATH']}"}
 
         # Make 2 commits and push
         (ws / "a.py").write_text("a\n")
@@ -1776,9 +1781,7 @@ class TestGitWrapper(unittest.TestCase):
 
     def _env(self):
         """Return env with the git wrapper on PATH."""
-        env = os.environ.copy()
-        env["PATH"] = self._wrapper_bin + ":" + env.get("PATH", "")
-        return env
+        return {"PATH": f"{self._wrapper_bin}:{_clean_env()['PATH']}"}
 
     def test_auto_rebase_on_commit(self):
         """Git wrapper rebases dev branch onto updated main after commit."""

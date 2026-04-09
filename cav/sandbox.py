@@ -919,8 +919,17 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
         # Start slirp4netns (network comes up after firewall).
         slirp_proc = _start_slirp4netns(proc.pid)
 
+        _forwarding = False
+
         def fwd(s, _f):
-            _signal_descendants(proc.pid, s)
+            nonlocal _forwarding
+            if _forwarding:
+                return
+            _forwarding = True
+            try:
+                _signal_descendants(proc.pid, s)
+            finally:
+                _forwarding = False
 
         fwd_signals = (signal.SIGINT, signal.SIGTERM, signal.SIGWINCH)
         orig = {s: signal.getsignal(s) for s in fwd_signals}

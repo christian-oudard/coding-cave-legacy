@@ -62,7 +62,7 @@ def _push_shared_branches(base: Path):
 def _offer_cave_nix():
     """Offer to create a default cave.nix if none exists."""
     cave_nix = Path(os.environ.get("CODING_CAVE_HOST_HOME", Path.home())) / ".config" / "coding-cave" / "cave.nix"
-    if cave_nix.exists():
+    if cave_nix.exists() or not sys.stdin.isatty():
         return
     try:
         answer = input("Create default cave.nix? [Y/n] ").strip().lower()
