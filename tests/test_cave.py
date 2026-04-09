@@ -170,6 +170,7 @@ class TestSubcaveLaunch(unittest.TestCase):
             'LINEAGE: echo $CODING_CAVE_LINEAGE\n'
             'NIXHASH: nix-store --query --hash /nix/store/*-bash-5* 2>/dev/null | head -1\n'
             'PROJECT: ls /projects/coding-cave/CLAUDE.md 2>&1\n'
+            'NIXDEV: nix develop /projects/coding-cave --command python3 -c "import click; print(click.__name__)" 2>&1 | tail -1\n'
         )
 
     def _get(self, label):
@@ -201,6 +202,10 @@ class TestSubcaveLaunch(unittest.TestCase):
     def test_project_mounted(self):
         """Subcave has the project directory mounted."""
         self.assertIn("CLAUDE.md", self._get("PROJECT"))
+
+    def test_nix_develop(self):
+        """Subcave can run nix develop and import devShell packages."""
+        self.assertEqual(self._get("NIXDEV"), "click")
 
 
 if __name__ == "__main__":
