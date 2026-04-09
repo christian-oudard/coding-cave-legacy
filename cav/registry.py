@@ -49,15 +49,15 @@ def _is_pid_alive(pid: int) -> bool:
 
 
 def _sweep_dead_pids(db, now: float) -> None:
-    """Mark agents with dead PIDs as exited. Call inside a transaction."""
+    """Mark agents with dead host PIDs as exited. Call inside a transaction."""
     rows = db.execute(
-        "SELECT agent_id, pid FROM agents "
-        "WHERE exited_at IS NULL AND pid IS NOT NULL"
+        "SELECT agent_id, host_pid FROM agents "
+        "WHERE exited_at IS NULL AND host_pid IS NOT NULL"
     ).fetchall()
     for aid, p in rows:
         if not _is_pid_alive(p):
             db.execute(
-                "UPDATE agents SET exited_at = ?, pid = NULL "
+                "UPDATE agents SET exited_at = ?, host_pid = NULL, cave_pid = NULL "
                 "WHERE agent_id = ?",
                 (now, aid)
             )
@@ -166,11 +166,11 @@ def read_agent_launch_opts(agent_id: str) -> tuple[list[str], bool]:
 # -- Agent lifecycle --
 
 def is_agent_running(agent_id: str) -> bool:
-    """Check if an agent process is alive by PID."""
+    """Check if an agent process is alive by its host PID."""
     db = _open()
     try:
         row = db.execute(
-            "SELECT pid, exited_at FROM agents WHERE agent_id = ?",
+            "SELECT host_pid, exited_at FROM agents WHERE agent_id = ?",
             (agent_id,)
         ).fetchone()
         if not row:
@@ -182,7 +182,8 @@ def is_agent_running(agent_id: str) -> bool:
             return True
         # Process died without marking exit
         db.execute(
-            "UPDATE agents SET exited_at = ?, pid = NULL WHERE agent_id = ?",
+            "UPDATE agents SET exited_at = ?, host_pid = NULL, cave_pid = NULL "
+            "WHERE agent_id = ?",
             (time.time(), agent_id)
         )
         db.commit()
@@ -209,6 +210,8 @@ def acquire_agent_id(base: Path) -> str:
 
     Agent IDs are globally unique across all projects.
     The base path records which project this session started from.
+    Records host_pid (cav CLI process). cave_pid is set later by the
+    sandbox launcher, once the bwrap child exists.
     Returns agent_id. Call mark_agent_exited() when the agent exits.
     """
     slug = config.project_slug(base)
@@ -231,7 +234,7 @@ def acquire_agent_id(base: Path) -> str:
         sid = str(uuid.uuid4())
         db.execute(
             "INSERT OR REPLACE INTO agents "
-            "(agent_id, project, pid, started_at, exited_at, session_id) "
+            "(agent_id, project, host_pid, started_at, exited_at, session_id) "
             "VALUES (?, ?, ?, ?, NULL, ?)",
             (aid, slug, pid, now, sid)
         )
@@ -259,7 +262,7 @@ def continue_agent_id(base: Path, agent_id: str | None = None) -> str | None:
 
         if agent_id is not None:
             row = db.execute(
-                "SELECT pid, exited_at FROM agents WHERE agent_id = ?",
+                "SELECT host_pid, exited_at FROM agents WHERE agent_id = ?",
                 (agent_id,)
             ).fetchone()
             if not row:
@@ -268,7 +271,8 @@ def continue_agent_id(base: Path, agent_id: str | None = None) -> str | None:
             if exited_at is None and p is not None and _is_pid_alive(p):
                 raise SystemExit(f"Agent {agent_id} is still running.")
             db.execute(
-                "UPDATE agents SET pid = ?, started_at = ?, exited_at = NULL "
+                "UPDATE agents SET host_pid = ?, cave_pid = NULL, "
+                "started_at = ?, exited_at = NULL "
                 "WHERE agent_id = ?",
                 (pid, now, agent_id)
             )
@@ -284,7 +288,7 @@ def continue_agent_id(base: Path, agent_id: str | None = None) -> str | None:
         ).fetchone()
         if not row:
             all_rows = db.execute(
-                "SELECT agent_id, project, exited_at, pid FROM agents"
+                "SELECT agent_id, project, exited_at, host_pid FROM agents"
             ).fetchall()
             if all_rows:
                 _vprint(f"continue: no exited agent for project "
@@ -292,14 +296,15 @@ def continue_agent_id(base: Path, agent_id: str | None = None) -> str | None:
                 for r in all_rows:
                     state = ("running" if r[2] is None else "exited")
                     _vprint(f"  agent {r[0]}: project={r[1]}, "
-                            f"{state}, pid={r[3]}")
+                            f"{state}, host_pid={r[3]}")
             else:
                 _vprint("continue: registry is empty")
             return None
 
         aid = row[0]
         db.execute(
-            "UPDATE agents SET pid = ?, started_at = ?, exited_at = NULL "
+            "UPDATE agents SET host_pid = ?, cave_pid = NULL, "
+            "started_at = ?, exited_at = NULL "
             "WHERE agent_id = ?",
             (pid, now, aid)
         )
@@ -358,10 +363,47 @@ def mark_agent_exited(agent_id: str) -> None:
     db = _open()
     try:
         db.execute(
-            "UPDATE agents SET exited_at = ?, pid = NULL WHERE agent_id = ?",
+            "UPDATE agents SET exited_at = ?, host_pid = NULL, cave_pid = NULL "
+            "WHERE agent_id = ?",
             (time.time(), agent_id)
         )
         db.commit()
+    finally:
+        db.close()
+
+
+def set_cave_pid(agent_id: str, pid: int) -> None:
+    """Record the bwrap child PID (lives inside the cave's mount namespace).
+
+    Called by the sandbox launcher once Popen has produced a child PID.
+    Used by cav cp to reach cave-internal absolute paths via
+    /proc/<cave_pid>/root/<path>, which the kernel resolves through the
+    target process's mount namespace.
+    """
+    db = _open()
+    try:
+        db.execute(
+            "UPDATE agents SET cave_pid = ? WHERE agent_id = ?",
+            (pid, agent_id)
+        )
+        db.commit()
+    finally:
+        db.close()
+
+
+def cave_pid(agent_id: str) -> int | None:
+    """Return the bwrap child PID for a running agent, or None.
+
+    None if the agent is not in the registry, not yet launched, or
+    already exited.
+    """
+    db = _open()
+    try:
+        row = db.execute(
+            "SELECT cave_pid FROM agents WHERE agent_id = ?",
+            (agent_id,)
+        ).fetchone()
+        return row[0] if row and row[0] else None
     finally:
         db.close()
 

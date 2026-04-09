@@ -48,12 +48,42 @@ def _check_in_dir(path: Path, directory: Path) -> None:
     Resolves symlinks in existing ancestor components to catch symlink
     escapes (e.g. agent creates evil -> /etc in worktree, user copies
     to cave:evil/target which would write to /etc/target on host).
+
+    Strict: a leaf symlink pointing outside also fails. Use this for
+    source paths and glob matches, where following the link would read
+    host data. For destinations (where we unlink-and-replace before
+    writing), use _check_dest_in_dir instead.
     """
     real_dir = str(directory.resolve())
     # Resolve what exists, keep the tail that doesn't exist yet.
     # This catches symlinks in intermediate directories.
     real_path = str(_resolve_existing(path))
     if real_path != real_dir and not real_path.startswith(real_dir + os.sep):
+        raise SystemExit(f"Path escapes worktree: {path}")
+
+
+def _check_dest_in_dir(path: Path, directory: Path) -> None:
+    """Like _check_in_dir but treats the leaf component literally.
+
+    Host-to-cave copies unlink any existing leaf symlink before writing
+    (cp() does base.unlink() + copy2 with follow_symlinks=False), so the
+    write lands at the literal path regardless of what the leaf used to
+    point to. Following a leaf symlink here would wrongly reject the
+    legitimate "overwrite a symlink with real content" case.
+
+    Intermediate symlinks are still resolved and escapes still rejected,
+    so `ws/evil/target` with `evil -> /etc` still fails.
+    """
+    real_dir = str(directory.resolve())
+    path = Path(os.path.normpath(path))
+    parent = path.parent
+    if parent == path:
+        # Degenerate root path; fall back to strict check.
+        _check_in_dir(path, directory)
+        return
+    parent_real = _resolve_existing(parent)
+    final = os.path.normpath(str(parent_real / path.name))
+    if final != real_dir and not final.startswith(real_dir + os.sep):
         raise SystemExit(f"Path escapes worktree: {path}")
 
 
@@ -82,13 +112,16 @@ def _resolve_existing(path: Path) -> Path:
     return resolved
 
 
-def _worktree_for_slug(slug: str, agent_id: str | None) -> Path:
-    """Return the worktree directory for slug and optional agent_id."""
+def _worktree_for_slug(slug: str, agent_id: str | None) -> tuple[Path, str]:
+    """Return (worktree_dir, agent_id) for slug and optional agent_id.
+
+    Prompts when slug has multiple registered agents and agent_id is None.
+    """
     if agent_id is not None:
         ws = config.worktree_dir(slug, agent_id)
         if not ws.exists():
             raise SystemExit(f"No worktree found for {slug}@{agent_id}.")
-        return ws
+        return ws, agent_id
 
     slug_dir = config.DATA_DIR / "worktrees" / slug
     if not slug_dir.exists():
@@ -101,21 +134,75 @@ def _worktree_for_slug(slug: str, agent_id: str | None) -> Path:
     if not agents:
         raise SystemExit(f"No worktrees found for project '{slug}'.")
     if len(agents) == 1:
-        return agents[0]
+        return agents[0], agents[0].name
 
-    # Multiple agents: prompt the user to pick one.
+    aid = _pick_agent_prompt(slug, [p.name for p in agents])
+    return config.worktree_dir(slug, aid), aid
+
+
+def _pick_agent_prompt(slug: str, agent_ids: list[str]) -> str:
+    """Prompt the user to pick one of agent_ids for slug."""
     print(f"Multiple agents for '{slug}':", file=sys.stderr)
-    by_key = {}
-    for ws in agents:
-        aid = ws.name
+    for aid in agent_ids:
         state = "running" if registry.is_agent_running(aid) else "exited"
         print(f"  {aid}) {slug}@{aid}  [{state}]", file=sys.stderr)
-        by_key[aid] = ws
     try:
         choice = input("Agent: ").strip()
-        return by_key[choice]
-    except (KeyError, EOFError):
+    except EOFError:
         raise SystemExit("Invalid choice.")
+    if choice not in agent_ids:
+        raise SystemExit("Invalid choice.")
+    return choice
+
+
+def _cave_root_for_slug(slug: str, agent_id: str | None) -> tuple[Path, str]:
+    """Return (/proc/<cave_pid>/root, agent_id) for a running cave.
+
+    Picks an agent from slug that has a live cave_pid (i.e. the bwrap
+    child is up). Prompts if multiple candidates. Raises SystemExit with
+    a clear message if no agent is running or /proc is unreachable.
+    """
+    candidates = [
+        aid for aid in registry.all_agent_ids(slug)
+        if registry.is_agent_running(aid) and registry.cave_pid(aid) is not None
+    ]
+    if agent_id is not None:
+        if agent_id not in candidates:
+            raise SystemExit(
+                f"Agent {slug}@{agent_id} is not running. Cave-internal "
+                f"absolute paths require a live cave (only /projects/"
+                f"{slug}/... is accessible on exited agents)."
+            )
+        chosen = agent_id
+    elif not candidates:
+        raise SystemExit(
+            f"No running cave for project '{slug}'. Cave-internal absolute "
+            f"paths require a live cave."
+        )
+    elif len(candidates) == 1:
+        chosen = candidates[0]
+    else:
+        chosen = _pick_agent_prompt(slug, candidates)
+
+    pid = registry.cave_pid(chosen)
+    cave_root = Path(f"/proc/{pid}/root")
+    # Smoke-test access: if our PID namespace can't see the target,
+    # stat() on the magic link fails with ENOENT or EACCES.
+    try:
+        os.stat(cave_root)
+    except FileNotFoundError:
+        raise SystemExit(
+            f"Cannot reach cave {slug}@{chosen} (pid {pid}) via /proc. "
+            f"cav cp for cave-internal paths only works from the host; "
+            f"from inside another cave the target's PID namespace is "
+            f"not visible."
+        )
+    except PermissionError:
+        raise SystemExit(
+            f"Permission denied on /proc/{pid}/root. "
+            f"Cave {slug}@{chosen} runs as a different user."
+        )
+    return cave_root, chosen
 
 
 def _cwd_info() -> tuple[str, str | None]:
@@ -146,18 +233,34 @@ def _cwd_info() -> tuple[str, str | None]:
     raise SystemExit("CWD is not inside a registered project.")
 
 
-def _resolve_cave_path(spec: str) -> tuple[Path, str] | tuple[None, None]:
-    """Parse a cave path spec. Returns (host_path, slug) or (None, None).
+def _resolve_cave_path(
+    spec: str, is_dest: bool = False
+) -> tuple[Path | None, str | None, str | None]:
+    """Parse a cave path spec. Returns (host_path, slug, agent_id).
+
+    Returns (None, None, None) if spec has no cave prefix.
 
     Spec forms:
       slug:path         project-relative path in agent worktree
       slug@N:path       specific agent N's worktree
       cave:path         auto-detect slug from CWD
       slug:~/path       persistent cave home (no worktree needed)
-      slug:/abs/path    absolute path inside /projects/<slug>
+      slug:/abs/path    absolute path; if under /projects/<slug>, resolves
+                        to the worktree. Otherwise reaches into the
+                        running cave via /proc/<cave_pid>/root/<path>.
+
+    agent_id in the return value is the agent ultimately selected, even
+    for forms where the caller didn't specify one (e.g. via the picker
+    or a single-agent auto-pick). It's None for home-only paths which
+    don't bind to any agent.
+
+    is_dest: when True, the path will be written to (host -> cave
+    direction). A leaf symlink is tolerated because cp() unlinks it
+    before writing. When False (default), leaf symlinks are rejected
+    as escapes.
     """
     if ":" not in spec:
-        return None, None
+        return None, None, None
 
     prefix, _, path = spec.partition(":")
 
@@ -189,23 +292,33 @@ def _resolve_cave_path(spec: str) -> tuple[Path, str] | tuple[None, None]:
         if not str(result).startswith(str(Path(os.path.normpath(home))) + os.sep) \
                 and str(result) != str(Path(os.path.normpath(home))):
             raise SystemExit(f"Path escapes cave home: {result}")
-        return result, slug
+        return result, slug, None
+
+    check = _check_dest_in_dir if is_dest else _check_in_dir
 
     if path.startswith("/"):
         project_prefix = f"/projects/{slug}"
         if path == project_prefix or path.startswith(project_prefix + "/"):
             rel = path[len(project_prefix):].lstrip("/")
-        else:
-            raise SystemExit(f"Absolute cave path not under /projects/{slug}: {path}")
-        ws = _worktree_for_slug(slug, agent_id)
-        result = _norm(ws, rel) if rel else Path(os.path.normpath(ws))
-        _check_in_dir(result, ws)
-        return result, slug
+            ws, chosen = _worktree_for_slug(slug, agent_id)
+            result = _norm(ws, rel) if rel else Path(os.path.normpath(ws))
+            check(result, ws)
+            return result, slug, chosen
 
-    ws = _worktree_for_slug(slug, agent_id)
+        # Cave-internal absolute path: reach in via /proc/<cave_pid>/root.
+        # The kernel's pathwalk resolves the path inside the target's
+        # mount namespace, so symlinks and .. stay contained. We still
+        # normalize client-side to strip any leading .. that would
+        # otherwise be meaningless here.
+        cave_root, chosen = _cave_root_for_slug(slug, agent_id)
+        rel = os.path.normpath("/" + path).lstrip("/")
+        result = cave_root / rel if rel else cave_root
+        return result, slug, chosen
+
+    ws, chosen = _worktree_for_slug(slug, agent_id)
     result = _norm(ws, path) if path else Path(os.path.normpath(ws))
-    _check_in_dir(result, ws)
-    return result, slug
+    check(result, ws)
+    return result, slug, chosen
 
 
 def _complete_cp_path(ctx, param, incomplete: str):
@@ -250,18 +363,29 @@ def _complete_cp_path(ctx, param, incomplete: str):
             else:
                 return []
         else:
-            ws = _completer_worktree(slug, agent_id)
-            if ws is None:
-                return []
-            base_dir = ws
-            # Treat /projects/<slug>/... as worktree-relative for listing.
             project_prefix = f"/projects/{slug}"
-            if path_part == project_prefix or path_part.startswith(project_prefix + "/"):
-                rel = path_part[len(project_prefix):].lstrip("/")
-                marker = f"{project_prefix}/"
-            else:
+            if (path_part.startswith("/")
+                    and path_part != project_prefix
+                    and not path_part.startswith(project_prefix + "/")):
+                # Cave-internal absolute path: list from /proc/<cave_pid>/root.
+                cave_root = _completer_cave_root(slug, agent_id)
+                if cave_root is None:
+                    return []
+                base_dir = cave_root
                 rel = path_part.lstrip("/")
-                marker = "/" if path_part.startswith("/") else ""
+                marker = "/"
+            else:
+                ws = _completer_worktree(slug, agent_id)
+                if ws is None:
+                    return []
+                base_dir = ws
+                # Treat /projects/<slug>/... as worktree-relative for listing.
+                if path_part == project_prefix or path_part.startswith(project_prefix + "/"):
+                    rel = path_part[len(project_prefix):].lstrip("/")
+                    marker = f"{project_prefix}/"
+                else:
+                    rel = path_part.lstrip("/")
+                    marker = "/" if path_part.startswith("/") else ""
     except Exception:
         return []
 
@@ -349,6 +473,35 @@ def _completer_worktree(slug: str, agent_id: str | None) -> Path | None:
     return candidates[0]
 
 
+def _completer_cave_root(slug: str, agent_id: str | None) -> Path | None:
+    """Return /proc/<cave_pid>/root for completion. Never prompts.
+
+    Picks the lowest-numbered running agent with a live cave_pid. With an
+    explicit agent_id, requires that specific agent to be running. Returns
+    None (suppressing suggestions) if no cave is reachable, since the
+    completer swallows errors rather than erroring at the shell.
+    """
+    candidates = [
+        aid for aid in registry.all_agent_ids(slug)
+        if registry.is_agent_running(aid) and registry.cave_pid(aid) is not None
+    ]
+    if not candidates:
+        return None
+    if agent_id is not None:
+        if agent_id not in candidates:
+            return None
+        chosen = agent_id
+    else:
+        chosen = sorted(candidates, key=int)[0]
+    pid = registry.cave_pid(chosen)
+    root = Path(f"/proc/{pid}/root")
+    try:
+        os.stat(root)
+    except OSError:
+        return None
+    return root
+
+
 def _parse_path_component(p: str) -> tuple[str, str, bool]:
     """Process backslash escapes in a single path component.
 
@@ -415,7 +568,7 @@ def _expand_cave_glob(spec: str) -> list[str]:
         static_path = "~" if path.startswith("~") else "."
     pattern = "/".join(pat for _, pat, _ in parsed[split_at:])
 
-    base_host, _slug = _resolve_cave_path(f"{prefix}:{static_path}")
+    base_host, _slug, chosen_id = _resolve_cave_path(f"{prefix}:{static_path}")
     if not base_host.is_dir():
         raise SystemExit(f"Not a directory: {prefix}:{static_path}")
 
@@ -423,20 +576,22 @@ def _expand_cave_glob(spec: str) -> list[str]:
     if not matches:
         raise SystemExit(f"No matches for: {spec}")
 
-    # Reject any match that escapes the static base via symlink.
-    for m in matches:
-        _check_in_dir(m, base_host)
+    # Reject symlink escapes on worktree-based globs. For /proc/<pid>/root
+    # paths the kernel's pathwalk already contains symlinks within the
+    # cave's mount namespace, so no client-side check is needed (and
+    # Path.resolve would give wrong answers because it walks symlinks
+    # using host-side semantics).
+    is_proc_path = str(base_host).startswith("/proc/")
+    if not is_proc_path:
+        for m in matches:
+            _check_in_dir(m, base_host)
 
-    # If the picker resolved to a specific agent worktree, encode it into
-    # the expanded specs so subsequent _resolve_cave_path calls don't
-    # re-prompt. Home paths don't need this (no per-agent worktree).
+    # Encode the selected agent into the expanded specs so subsequent
+    # _resolve_cave_path calls don't re-prompt the picker. Home paths
+    # don't bind to any agent, so chosen_id is None there.
     out_prefix = prefix
-    if "@" not in prefix:
-        try:
-            rel = base_host.relative_to(config.DATA_DIR / "worktrees")
-            out_prefix = f"{prefix}@{rel.parts[1]}"  # parts = (slug, agent_id, ...)
-        except (ValueError, IndexError):
-            pass
+    if "@" not in prefix and chosen_id is not None:
+        out_prefix = f"{prefix}@{chosen_id}"
 
     results = []
     for m in matches:
@@ -453,10 +608,13 @@ def cp(srcs: list[str], dest: str, recursive: bool = False, force: bool = False)
         expanded.extend(_expand_cave_glob(src))
     srcs = expanded
 
-    dest_path, _dest_slug = _resolve_cave_path(dest)
+    # The destination is about to be written to (host -> cave direction),
+    # so a leaf symlink is fine: cp() unlinks it before copying. Sources
+    # use the strict check.
+    dest_path, _dest_slug, _dest_aid = _resolve_cave_path(dest, is_dest=True)
     # Direction is determined by the first src: if it has a cave prefix,
     # we're copying cave -> host regardless of how many globbed matches.
-    first_src_path, _src_slug = _resolve_cave_path(srcs[0])
+    first_src_path, _src_slug, _src_aid = _resolve_cave_path(srcs[0])
 
     if dest_path is not None:
         # host -> cave
@@ -495,7 +653,7 @@ def cp(srcs: list[str], dest: str, recursive: bool = False, force: bool = False)
         if len(srcs) > 1 and not host_dest.is_dir():
             raise SystemExit(f"cp: base '{dest}': not a directory")
         for src in srcs:
-            src_path, _ = _resolve_cave_path(src)
+            src_path, _, _ = _resolve_cave_path(src)
             # Use O_NOFOLLOW to atomically reject symlinks, preventing TOCTOU
             # where the agent replaces a regular file with a symlink between
             # our check and the copy.

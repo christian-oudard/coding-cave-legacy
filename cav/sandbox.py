@@ -15,7 +15,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import config, daemon, git, user_env
+from . import config, daemon, git, registry, user_env
 
 log = config.log
 
@@ -783,6 +783,10 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
         log.info("launching sandbox...")
         proc = subprocess.Popen(ns_cmd, env=env, close_fds=False)
         os.close(sync_w)
+
+        # Record the bwrap child PID so cav cp can reach cave-internal
+        # absolute paths via /proc/<cave_pid>/root/<path>.
+        registry.set_cave_pid(agent_id, proc.pid)
 
         # Wait for cave-ns.sh to signal that the namespace exists.
         data = os.read(sync_r, 1)

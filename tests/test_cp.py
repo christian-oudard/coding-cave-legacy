@@ -14,14 +14,29 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from cav import config, registry
 from cav.cp import (
     cp, _resolve_cave_path, _worktree_for_slug, _complete_cp_path,
-    _expand_cave_glob,
+    _expand_cave_glob, _cave_root_for_slug, _completer_cave_root,
 )
 
 
 def _make_worktree(data_dir: Path, slug: str, agent_id: str) -> Path:
-    """Create a fake worktree directory structure."""
+    """Create a fake worktree directory structure and register the agent.
+
+    _worktree_for_slug filters worktree dirs by agents present in the
+    registry, so tests that want their worktree to be visible also need
+    the agent row.
+    """
     ws = data_dir / "worktrees" / slug / agent_id
     ws.mkdir(parents=True)
+    db = registry._open()
+    try:
+        db.execute(
+            "INSERT OR REPLACE INTO agents "
+            "(agent_id, project, started_at) VALUES (?, ?, ?)",
+            (agent_id, slug, 0.0),
+        )
+        db.commit()
+    finally:
+        db.close()
     return ws
 
 
@@ -398,19 +413,50 @@ class TestCpPathResolution(CpTestCase):
         self.ws = _make_worktree(self.data_dir, "proj", "1")
 
     def test_no_cave_prefix_returns_none(self):
-        path, slug = _resolve_cave_path("just/a/host/path")
+        path, slug, aid = _resolve_cave_path("just/a/host/path")
         assert path is None
         assert slug is None
+        assert aid is None
 
     def test_traversal_blocked_relative(self):
         with self.assertRaises(SystemExit) as ctx:
             _resolve_cave_path("proj:../../etc/passwd")
         assert "escapes" in str(ctx.exception).lower()
 
-    def test_traversal_blocked_abs(self):
+    def test_leaf_symlink_escape_rejected_for_source(self):
+        """A leaf symlink pointing outside the worktree is a cave-to-host
+        source escape: the strict check must reject it."""
+        outside = Path(self.tmpdir) / "outside.txt"
+        outside.write_text("secret")
+        (self.ws / "leaked").symlink_to(outside)
+        with self.assertRaises(SystemExit) as ctx:
+            _resolve_cave_path("proj:leaked")
+        assert "escapes" in str(ctx.exception).lower()
+
+    def test_leaf_symlink_tolerated_for_destination(self):
+        """Writing to a leaf symlink is fine: cp() unlinks before copying."""
+        outside = Path(self.tmpdir) / "outside.txt"
+        outside.write_text("old")
+        (self.ws / "leaked").symlink_to(outside)
+        path, _, _ = _resolve_cave_path("proj:leaked", is_dest=True)
+        assert path == self.ws / "leaked"
+
+    def test_intermediate_symlink_escape_rejected_for_destination(self):
+        """Even with is_dest=True, an intermediate symlink escape is blocked."""
+        outside = Path(self.tmpdir) / "outside"
+        outside.mkdir()
+        (self.ws / "evil").symlink_to(outside)
+        with self.assertRaises(SystemExit) as ctx:
+            _resolve_cave_path("proj:evil/target", is_dest=True)
+        assert "escapes" in str(ctx.exception).lower()
+
+    def test_abs_outside_worktree_needs_running_cave(self):
+        # Absolute paths outside /projects/<slug> reach in via
+        # /proc/<cave_pid>/root, which requires a running cave. With no
+        # running cave registered, we should get a clear error.
         with self.assertRaises(SystemExit) as ctx:
             _resolve_cave_path("proj:/etc/passwd")
-        assert "/projects/proj" in str(ctx.exception)
+        assert "running cave" in str(ctx.exception).lower()
 
     def test_invalid_agent_id(self):
         with self.assertRaises(SystemExit) as ctx:
@@ -529,9 +575,6 @@ class TestCpCompleter(CpTestCase):
         db = registry._open()
         db.execute("INSERT INTO projects (slug, path) VALUES (?, ?)",
                    ("demo", self.tmpdir))
-        db.execute(
-            "INSERT INTO agents (agent_id, project, started_at) VALUES (?, ?, ?)",
-            ("1", "demo", 0.0))
         db.commit()
         db.close()
 
@@ -576,23 +619,11 @@ class TestCpCompleter(CpTestCase):
     def test_specific_agent_id(self):
         ws2 = _make_worktree(self.data_dir, "demo", "2")
         (ws2 / "only2.txt").write_text("")
-        db = registry._open()
-        db.execute(
-            "INSERT INTO agents (agent_id, project, started_at) VALUES (?, ?, ?)",
-            ("2", "demo", 0.0))
-        db.commit()
-        db.close()
         vals = _values(_complete_cp_path(None, None, "demo@2:"))
         assert "demo@2:only2.txt" in vals
 
     def test_never_prompts_with_multiple_agents(self):
         _make_worktree(self.data_dir, "demo", "2")
-        db = registry._open()
-        db.execute(
-            "INSERT INTO agents (agent_id, project, started_at) VALUES (?, ?, ?)",
-            ("2", "demo", 0.0))
-        db.commit()
-        db.close()
         # Picker would call input(); patch to detect any call.
         with patch("builtins.input", side_effect=AssertionError("must not prompt")):
             vals = _values(_complete_cp_path(None, None, "demo:"))
@@ -786,3 +817,232 @@ class TestCpCaveGlob(CpTestCase):
 
         names = sorted(p.name for p in out.iterdir())
         assert names == ["x.png", "y.png"]
+
+
+class TestCpCaveInternal(CpTestCase):
+    """Copy cave-internal absolute paths (outside /projects/<slug>).
+
+    These exercise the /proc/<cave_pid>/root code path, which the kernel
+    resolves through the target process's mount namespace. The tests
+    patch _cave_root_for_slug to point at a temp directory that stands
+    in for the cave's filesystem root.
+    """
+
+    def setUp(self):
+        super().setUp()
+        # Worktree + agent row so the "not outside worktree" tests still
+        # succeed and so the glob picker has something to pick from.
+        self.ws = _make_worktree(self.data_dir, "proj", "1")
+        # Temp "cave root". In production this would be /proc/<pid>/root.
+        self.cave_root = Path(self.tmpdir) / "caveroot"
+        (self.cave_root / "tmp").mkdir(parents=True)
+        (self.cave_root / "tmp" / "a.png").write_bytes(b"A")
+        (self.cave_root / "tmp" / "b.png").write_bytes(b"B")
+        (self.cave_root / "tmp" / "c.txt").write_bytes(b"C")
+
+        self._patcher = patch(
+            "cav.cp._cave_root_for_slug",
+            return_value=(self.cave_root, "1"),
+        )
+        self._patcher.start()
+
+    def tearDown(self):
+        self._patcher.stop()
+        super().tearDown()
+
+    def test_resolve_absolute_path_uses_cave_root(self):
+        path, slug, aid = _resolve_cave_path("proj:/tmp/a.png")
+        assert path == self.cave_root / "tmp" / "a.png"
+        assert slug == "proj"
+        assert aid == "1"
+
+    def test_copy_literal_absolute_file_to_host(self):
+        out = Path(self.tmpdir) / "out.png"
+        cp(["proj:/tmp/a.png"], str(out))
+        assert out.read_bytes() == b"A"
+
+    def test_copy_glob_absolute_to_host_directory(self):
+        out = Path(self.tmpdir) / "out"
+        out.mkdir()
+        cp(["proj:/tmp/*.png"], str(out))
+        names = sorted(p.name for p in out.iterdir())
+        assert names == ["a.png", "b.png"]
+        assert (out / "a.png").read_bytes() == b"A"
+        assert (out / "b.png").read_bytes() == b"B"
+
+    def test_expand_absolute_glob(self):
+        expanded = _expand_cave_glob("proj@1:/tmp/*.png")
+        assert expanded == ["proj@1:/tmp/a.png", "proj@1:/tmp/b.png"]
+
+
+class TestCpCaveInternalNoRunningAgent(CpTestCase):
+    """Cave-internal paths without a live cave should fail clearly."""
+
+    def setUp(self):
+        super().setUp()
+        # Register a worktree but mark the agent as having no cave_pid,
+        # i.e. the sandbox never started or has exited.
+        _make_worktree(self.data_dir, "proj", "1")
+
+    def test_abs_outside_worktree_needs_running_cave(self):
+        with self.assertRaises(SystemExit) as ctx:
+            _resolve_cave_path("proj:/tmp/foo.png")
+        assert "running cave" in str(ctx.exception).lower()
+
+    def test_specific_agent_not_running_errors(self):
+        with self.assertRaises(SystemExit) as ctx:
+            _resolve_cave_path("proj@1:/tmp/foo.png")
+        assert "not running" in str(ctx.exception).lower()
+
+    def test_cave_root_for_slug_no_candidates(self):
+        with self.assertRaises(SystemExit) as ctx:
+            _cave_root_for_slug("proj", None)
+        assert "running cave" in str(ctx.exception).lower()
+
+
+class TestCpCaveRootPicker(CpTestCase):
+    """Picker behavior when multiple running agents have cave_pids."""
+
+    def setUp(self):
+        super().setUp()
+        _make_worktree(self.data_dir, "proj", "1")
+        _make_worktree(self.data_dir, "proj", "2")
+        # Mark both as running with a valid cave_pid. Use our own pid so
+        # is_agent_running and os.stat(/proc/<pid>/root) both succeed
+        # without needing a real bwrap child.
+        our_pid = os.getpid()
+        db = registry._open()
+        for aid in ("1", "2"):
+            db.execute(
+                "UPDATE agents SET host_pid = ?, cave_pid = ? "
+                "WHERE agent_id = ?",
+                (our_pid, our_pid, aid),
+            )
+        db.commit()
+        db.close()
+
+    def test_picker_fires_once_and_picks(self):
+        with patch("builtins.input", return_value="2"):
+            cave_root, chosen = _cave_root_for_slug("proj", None)
+        assert chosen == "2"
+        # cave_root is /proc/<our_pid>/root, which is the host root.
+        assert str(cave_root) == f"/proc/{os.getpid()}/root"
+
+    def test_explicit_agent_id_bypasses_picker(self):
+        with patch("builtins.input", side_effect=AssertionError("no prompt")):
+            cave_root, chosen = _cave_root_for_slug("proj", "1")
+        assert chosen == "1"
+
+
+class TestCpCompleterCaveInternal(CpTestCase):
+    """Shell completion for cave-internal absolute paths.
+
+    Exercises the /proc/<cave_pid>/root branch of _complete_cp_path by
+    patching _completer_cave_root to return a temp directory.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.ws = _make_worktree(self.data_dir, "demo", "1")
+        db = registry._open()
+        db.execute("INSERT INTO projects (slug, path) VALUES (?, ?)",
+                   ("demo", self.tmpdir))
+        db.commit()
+        db.close()
+
+        # Stand-in for /proc/<cave_pid>/root.
+        self.cave_root = Path(self.tmpdir) / "caveroot"
+        (self.cave_root / "tmp").mkdir(parents=True)
+        (self.cave_root / "tmp" / "a.png").write_bytes(b"A")
+        (self.cave_root / "tmp" / "b.png").write_bytes(b"B")
+        (self.cave_root / "tmp" / "notes.txt").write_bytes(b"N")
+        (self.cave_root / "tmp" / "sub").mkdir()
+        (self.cave_root / "etc").mkdir()
+
+        self._patcher = patch(
+            "cav.cp._completer_cave_root",
+            return_value=self.cave_root,
+        )
+        self._patcher.start()
+
+    def tearDown(self):
+        self._patcher.stop()
+        super().tearDown()
+
+    def test_lists_cave_root(self):
+        vals = _values(_complete_cp_path(None, None, "demo:/"))
+        assert "demo:/tmp/" in vals
+        assert "demo:/etc/" in vals
+
+    def test_lists_tmp_subdir(self):
+        vals = _values(_complete_cp_path(None, None, "demo:/tmp/"))
+        assert "demo:/tmp/a.png" in vals
+        assert "demo:/tmp/b.png" in vals
+        assert "demo:/tmp/notes.txt" in vals
+        assert "demo:/tmp/sub/" in vals
+
+    def test_filters_by_partial(self):
+        vals = _values(_complete_cp_path(None, None, "demo:/tmp/a"))
+        assert vals == ["demo:/tmp/a.png"]
+
+    def test_directory_gets_trailing_slash(self):
+        vals = _values(_complete_cp_path(None, None, "demo:/tm"))
+        assert vals == ["demo:/tmp/"]
+
+    def test_projects_slug_still_uses_worktree(self):
+        """/projects/<slug>/... must not fall through to cave root."""
+        (self.ws / "file.txt").write_text("")
+        vals = _values(_complete_cp_path(None, None, "demo:/projects/demo/"))
+        assert "demo:/projects/demo/file.txt" in vals
+
+    def test_no_cave_returns_empty(self):
+        """If _completer_cave_root returns None, no suggestions."""
+        self._patcher.stop()
+        with patch("cav.cp._completer_cave_root", return_value=None):
+            vals = _complete_cp_path(None, None, "demo:/tmp/")
+        # Restart for tearDown.
+        self._patcher.start()
+        assert vals == []
+
+
+class TestCompleterCaveRootHelper(CpTestCase):
+    """Unit tests for _completer_cave_root."""
+
+    def test_no_agents_returns_none(self):
+        _make_worktree(self.data_dir, "proj", "1")
+        # Agent exists but has no cave_pid and isn't running.
+        assert _completer_cave_root("proj", None) is None
+
+    def test_picks_lowest_running_agent(self):
+        _make_worktree(self.data_dir, "proj", "1")
+        _make_worktree(self.data_dir, "proj", "2")
+        our_pid = os.getpid()
+        db = registry._open()
+        for aid in ("1", "2"):
+            db.execute(
+                "UPDATE agents SET host_pid = ?, cave_pid = ? "
+                "WHERE agent_id = ?",
+                (our_pid, our_pid, aid),
+            )
+        db.commit()
+        db.close()
+
+        root = _completer_cave_root("proj", None)
+        assert str(root) == f"/proc/{our_pid}/root"
+
+    def test_explicit_agent_id_not_running_returns_none(self):
+        _make_worktree(self.data_dir, "proj", "1")
+        _make_worktree(self.data_dir, "proj", "2")
+        our_pid = os.getpid()
+        db = registry._open()
+        # Only agent 1 has a cave_pid.
+        db.execute(
+            "UPDATE agents SET host_pid = ?, cave_pid = ? WHERE agent_id = ?",
+            (our_pid, our_pid, "1"),
+        )
+        db.commit()
+        db.close()
+
+        assert _completer_cave_root("proj", "2") is None
+        root = _completer_cave_root("proj", "1")
+        assert str(root) == f"/proc/{our_pid}/root"
