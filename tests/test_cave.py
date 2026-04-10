@@ -134,11 +134,6 @@ def _subcave(prompt, timeout=120):
 class TestSubcaveReadiness(unittest.TestCase):
     """Verify the cave environment supports launching subcaves."""
 
-    def test_recursive_env_set(self):
-        """CODING_CAVE_RECURSIVE must be 1."""
-        import os
-        self.assertEqual(os.environ.get("CODING_CAVE_RECURSIVE"), "1")
-
     def test_fuse_device_available(self):
         """/dev/fuse is required for nested nix store overlays."""
         self.assertTrue(Path("/dev/fuse").exists())

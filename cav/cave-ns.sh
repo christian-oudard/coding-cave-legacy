@@ -20,15 +20,38 @@ printf '1' >&"$CAVE_NS_SYNC_FD"
 eval exec "$CAVE_NS_SYNC_FD>&-"
 
 # Mount nix store overlay if the direct mount didn't succeed.
-if [ -n "$CAVE_NS_OVERLAY_MERGED" ] && [ -n "$CAVE_NS_MOUNTPOINT" ] \
-   && ! "$CAVE_NS_MOUNTPOINT" -q "$CAVE_NS_OVERLAY_MERGED"; then
-    # fuse-overlayfs needs fusermount on PATH to register the mount.
-    if [ -n "$CAVE_NS_FUSERMOUNT" ]; then
-        export PATH="${CAVE_NS_FUSERMOUNT%/*}:$PATH"
+if [ -n "$CAVE_NS_OVERLAY_MERGED" ] && [ -n "$CAVE_NS_FUSE_OVERLAYFS" ]; then
+    need_mount=0
+
+    if [ -n "$CAVE_NS_MOUNTPOINT" ]; then
+        if ! "$CAVE_NS_MOUNTPOINT" -q "$CAVE_NS_OVERLAY_MERGED"; then
+            need_mount=1
+        else
+            # Mounted, but verify it's functional via a write probe.
+            probe="$CAVE_NS_OVERLAY_MERGED/.overlay_probe"
+            if touch "$probe" 2>/dev/null && rm "$probe" 2>/dev/null; then
+                need_mount=0
+            else
+                # Stale mount. Unmount before remounting.
+                if [ -n "$CAVE_NS_FUSERMOUNT" ]; then
+                    "$CAVE_NS_FUSERMOUNT" -u "$CAVE_NS_OVERLAY_MERGED" 2>/dev/null || true
+                fi
+                need_mount=1
+            fi
+        fi
+    else
+        # No mountpoint binary, assume we need to mount.
+        need_mount=1
     fi
-    "$CAVE_NS_FUSE_OVERLAYFS" \
-        -o "lowerdir=/nix/store,upperdir=$CAVE_NS_OVERLAY_UPPER,workdir=$CAVE_NS_OVERLAY_WORK" \
-        "$CAVE_NS_OVERLAY_MERGED"
+
+    if [ "$need_mount" = 1 ]; then
+        if [ -n "$CAVE_NS_FUSERMOUNT" ]; then
+            export PATH="${CAVE_NS_FUSERMOUNT%/*}:$PATH"
+        fi
+        "$CAVE_NS_FUSE_OVERLAYFS" \
+            -o "lowerdir=/nix/store,upperdir=$CAVE_NS_OVERLAY_UPPER,workdir=$CAVE_NS_OVERLAY_WORK" \
+            "$CAVE_NS_OVERLAY_MERGED"
+    fi
 fi
 
 exec "$@"

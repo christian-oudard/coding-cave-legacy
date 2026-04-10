@@ -1325,7 +1325,6 @@ class TestCAV(unittest.TestCase):
                 "CODING_CAVE_AGENT_NAME": agent_name,
                 "CODING_CAVE_HOST_HOME": parent_env.get(
                     "CODING_CAVE_HOST_HOME", "/home/testuser"),
-                "CODING_CAVE_RECURSIVE": "1",
             }
             parent_lineage = parent_env.get("CODING_CAVE_LINEAGE", "")
             parent_agent = parent_env.get("CODING_CAVE_AGENT_NAME", "")

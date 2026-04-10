@@ -582,6 +582,17 @@ def _mount_fuse_overlay(upper: Path, work: Path, merged: Path):
     )
 
 
+def _unmount_stale_overlay(merged: Path) -> None:
+    """Try to unmount a dead fuse-overlayfs on merged/."""
+    for name in ("fusermount3", "fusermount"):
+        bin = shutil.which(name)
+        if bin:
+            subprocess.run([bin, "-u", str(merged)],
+                           capture_output=True, check=False)
+            return
+
+
+
 def _overlay_alive(merged: Path) -> bool:
     """Check if the fuse-overlayfs mount at merged is functional.
 
@@ -612,6 +623,11 @@ def _setup_shared_nix_overlay(home: Path) -> str:
 
     if _overlay_alive(merged):
         return str(merged)
+
+    # Unmount stale fuse-overlayfs if one is lingering on merged/.
+    # Without this, the new mount attempt fails ("already mounted") and
+    # cave-ns.sh's mountpoint check also skips remounting.
+    _unmount_stale_overlay(merged)
 
     # Before mounting, clean the upper layer of paths the host GC'd.
     # If the host ran nix store gc after the overlay was last used,
@@ -870,7 +886,6 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
     if nix_db_dir:
         env["CODING_CAVE_NIX_DB_DIR"] = str(nix_db_dir)
 
-    env["CODING_CAVE_RECURSIVE"] = "1"
     env["CODING_CAVE_DNS_SERVER"] = SLIRP_DNS
 
     # Lineage: build dot-separated chain of parent agent names
