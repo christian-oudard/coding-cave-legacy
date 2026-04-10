@@ -48,9 +48,12 @@ if [ -n "$CAVE_NS_OVERLAY_MERGED" ] && [ -n "$CAVE_NS_FUSE_OVERLAYFS" ]; then
         if [ -n "$CAVE_NS_FUSERMOUNT" ]; then
             export PATH="${CAVE_NS_FUSERMOUNT%/*}:$PATH"
         fi
-        "$CAVE_NS_FUSE_OVERLAYFS" \
-            -o "lowerdir=/nix/store,upperdir=$CAVE_NS_OVERLAY_UPPER,workdir=$CAVE_NS_OVERLAY_WORK" \
-            "$CAVE_NS_OVERLAY_MERGED"
+        # squash_to_uid must match the namespace uid, not the parent's.
+        # unshare --map-user=0 remaps the parent uid to 0 here. Using
+        # the parent uid would reference an unmapped uid (shows as 65534).
+        opts="lowerdir=/nix/store,upperdir=$CAVE_NS_OVERLAY_UPPER,workdir=$CAVE_NS_OVERLAY_WORK"
+        opts="$opts,squash_to_uid=0,squash_to_gid=0"
+        "$CAVE_NS_FUSE_OVERLAYFS" -o "$opts" "$CAVE_NS_OVERLAY_MERGED"
     fi
 fi
 

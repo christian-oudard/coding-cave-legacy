@@ -48,7 +48,7 @@ let
     in
     pkgs.runCommand "cave-user-env" { nativeBuildInputs = [ pkgs.rsync ]; } ''
       mkdir -p $out/files
-      rsync -aL --chmod=u+rwX,go=rX ${hmEval.config.home-files}/ $out/files/
+      rsync -rltL --chmod=u+rwX,go=rX ${hmEval.config.home-files}/ $out/files/
       ln -s ${hmEval.config.home.path} $out/home-path
       cp ${sessionVarsFile} $out/env.sh
     '';

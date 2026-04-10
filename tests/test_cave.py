@@ -191,7 +191,7 @@ class TestSubcaveLaunch(unittest.TestCase):
 
     def test_nix_store_registered(self):
         """Subcave nix DB has registered store paths from parent."""
-        self.assertRegex(self._get("NIXHASH"), r'sha256:',
+        self.assertRegex(self._get("NIXHASH"), r'sha256[:-]',
                          "nix store query should return a hash")
 
     def test_project_mounted(self):

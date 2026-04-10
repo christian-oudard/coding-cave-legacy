@@ -596,9 +596,11 @@ def _unmount_stale_overlay(merged: Path) -> None:
 def _overlay_alive(merged: Path) -> bool:
     """Check if the fuse-overlayfs mount at merged is functional.
 
-    A stale mount (fuse daemon died) leaves the directory present but
-    inoperable. Test with a probe file to confirm writes actually work.
+    Must verify both that the overlay has content (is mounted, not just an
+    empty directory) and that writes work (daemon hasn't died).
     """
+    if not any(merged.iterdir()):
+        return False
     probe = merged / ".overlay_probe"
     try:
         probe.touch()
@@ -656,7 +658,7 @@ def _setup_shared_nix_overlay(home: Path) -> str:
 
     try:
         _mount_fuse_overlay(upper, work, merged)
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, FileNotFoundError):
         pass  # Deferred: mounted in child via cave-ns.sh
 
     return str(merged)
@@ -974,15 +976,24 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
 
         # cave-ns.sh runs inside unshare(1) without nix-wrapped PATH.
         # Resolve absolute paths for the binaries it needs.
-        mountpoint_bin = shutil.which("mountpoint")
+        # In subcaves, these binaries aren't on PATH but the parent passed
+        # their absolute store paths via CAVE_NS_* env vars. Inherit them.
+        mountpoint_bin = (shutil.which("mountpoint")
+                          or os.environ.get("CAVE_NS_MOUNTPOINT"))
         if mountpoint_bin:
             env["CAVE_NS_MOUNTPOINT"] = mountpoint_bin
-        fuse_overlayfs_bin = shutil.which("fuse-overlayfs")
+        fuse_overlayfs_bin = (shutil.which("fuse-overlayfs")
+                              or os.environ.get("CAVE_NS_FUSE_OVERLAYFS"))
         if fuse_overlayfs_bin:
             env["CAVE_NS_FUSE_OVERLAYFS"] = fuse_overlayfs_bin
-        fusermount_bin = shutil.which("fusermount3") or shutil.which("fusermount")
+        fusermount_bin = (shutil.which("fusermount3")
+                          or shutil.which("fusermount")
+                          or os.environ.get("CAVE_NS_FUSERMOUNT"))
         if fusermount_bin:
             env["CAVE_NS_FUSERMOUNT"] = fusermount_bin
+        # squash_to_uid/gid is determined inside cave-ns.sh using the
+        # namespace uid (id -u), not the parent uid. The unshare namespace
+        # remaps uids so the parent's os.getuid() would be unmapped there.
 
         unshare_bin = shutil.which("unshare")
         if not unshare_bin:
