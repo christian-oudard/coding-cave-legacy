@@ -769,7 +769,7 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
     # namespace via slirp4netns. Only the agent's daemon port and crinj
     # proxy port are forwarded via add_hostfwd. Other host loopback
     # services (including other agents' daemons) are unreachable.
-    daemon_host = SLIRP_GATEWAY
+    gateway = SLIRP_GATEWAY
 
     # Migrate old workspaces: rename "cave" -> "host-cave" if needed.
     for ws, _, _ in workspaces:
@@ -803,7 +803,7 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
 
     # Now set the remote to the slirp-reachable address for inside the namespace
     for ws, _, slug in workspaces:
-        url = daemon.remote_url(agent_id, slug, host=daemon_host)
+        url = daemon.remote_url(agent_id, slug, host=gateway)
         git.git("remote", "set-url", config.HOST_SHARED_REMOTE, url,
                 cwd=ws, echo=False)
 
@@ -896,7 +896,8 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
     # through http_proxy at each level automatically.
     log.info("starting crinj proxy...")
     _start_crinj()
-    env["CODING_CAVE_PROXY_ADDR"] = f"{daemon_host}:{CRINJ_PORT}"
+    env["CODING_CAVE_GATEWAY"] = gateway
+    env["CODING_CAVE_PROXY_ADDR"] = f"{gateway}:{CRINJ_PORT}"
     env["CODING_CAVE_PROXY_CA"] = str(_crinj_ca_path())
     # Placeholder token so Claude Code considers itself "logged in".
     # Crinj replaces the Authorization header, so this never hits the API.

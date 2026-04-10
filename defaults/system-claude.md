@@ -5,6 +5,7 @@
 - There is no sudo. If you need changes to the cave environment, ask the user.
 - Install Nix packages with `nix shell nixpkgs#<pkg> --command <cmd>`, `nix run nixpkgs#<pkg>`, or `nix develop` for projects with a flake.nix devShell.
 - Web requests work (credentials are injected automatically), but there are no SSH keys or API tokens in the environment.
+- If the cave was launched with `--port`, host TCP ports are reachable at `$CODING_CAVE_GATEWAY:<port>`.
 
 ## Git
 

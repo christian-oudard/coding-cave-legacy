@@ -223,11 +223,14 @@
             (try-fwd-env "CODING_CAVE_GIT_GPGSIGN")
             (try-fwd-env "CODING_CAVE_AGENT_NAME")
             (try-fwd-env "CODING_CAVE_LINEAGE")
-            (try-fwd-env "CLAUDE_CODE_OAUTH_TOKEN")
+            (try-fwd-env "CODING_CAVE_GATEWAY")
             (try-fwd-env "CODING_CAVE_PROXY_ADDR")
             (try-fwd-env "CODING_CAVE_PROJECT_SLUG")
             (try-fwd-env "CODING_CAVE_USER_ENV")
             (try-fwd-env "CODING_CAVE_BIN")
+            # Dummy token so Claude Code considers itself logged in.
+            # Crinj replaces the Authorization header with real credentials.
+            (try-fwd-env "CLAUDE_CODE_OAUTH_TOKEN")
 
             # Entry: configure git identity, user env, proxy, cd to project, run command
             (wrap-entry (entry: ''
