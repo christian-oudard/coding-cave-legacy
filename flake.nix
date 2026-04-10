@@ -391,7 +391,7 @@
           git config --global init.defaultBranch main
           git config --global user.email "test@test.com"
           git config --global user.name "Test"
-          python3 -m unittest -v tests.test_hook tests.test_cli tests.test_alternates tests.test_nixdb tests.test_lint tests.test_cp_security
+          python3 -m unittest -v tests.test_hook tests.test_cli tests.test_alternates tests.test_nixdb tests.test_lint tests.test_cp_security tests.test_user_env
           touch $out
         '';
       });

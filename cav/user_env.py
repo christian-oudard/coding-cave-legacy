@@ -227,8 +227,6 @@ def _do_build(user_env):
     )
     if r.returncode != 0:
         print("Warning: cave environment build failed.", file=sys.stderr)
-        if result_link.exists():
-            return result_link.resolve()
         return None
 
     out_path = r.stdout.strip().split("\n")[0]
