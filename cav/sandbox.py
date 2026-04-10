@@ -327,8 +327,16 @@ def _rm_store_path(path: Path):
     """Remove a nix store path from the overlay upper layer.
 
     Nix store paths are read-only (dr-xr-xr-x). shutil.rmtree fails on
-    them unless we chmod the parent directory first.
+    them unless we chmod the parent directory first.  Non-directory entries
+    (symlinks, .drv files, regular files) are unlinked directly.
     """
+    if path.is_symlink() or not path.is_dir():
+        try:
+            path.unlink()
+        except PermissionError:
+            os.chmod(str(path.parent), stat.S_IRWXU)
+            path.unlink()
+        return
     def _make_writable(_func, p, _exc):
         parent = os.path.dirname(p)
         os.chmod(parent, stat.S_IRWXU)
