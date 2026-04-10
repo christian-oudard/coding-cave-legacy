@@ -8,6 +8,7 @@ handles bwrap args, /etc, SSL certs, PATH, and entry script.
 import os
 import shutil
 import signal
+import stat
 import socket
 import sqlite3
 import subprocess
@@ -322,6 +323,19 @@ def _prune_nix_caches() -> None:
             db_path.unlink(missing_ok=True)
 
 
+def _rm_store_path(path: Path):
+    """Remove a nix store path from the overlay upper layer.
+
+    Nix store paths are read-only (dr-xr-xr-x). shutil.rmtree fails on
+    them unless we chmod the parent directory first.
+    """
+    def _make_writable(_func, p, _exc):
+        parent = os.path.dirname(p)
+        os.chmod(parent, stat.S_IRWXU)
+        _func(p)
+    shutil.rmtree(path, onexc=_make_writable)
+
+
 def _parse_drv_outputs(drv_path: str) -> dict[str, str]:
     """Parse a .drv file and return {output_name: output_path}."""
     try:
@@ -500,6 +514,23 @@ def _seed_nix_db(home: Path, merged_path: str = "") -> Path | None:
             )
             dst.commit()
 
+        # Clean the overlay upper layer:
+        # 1. Remove orphaned store paths not in the DB (leftover build
+        #    artifacts whose DB entries were lost during re-seeding).
+        # 2. Remove stale .lock files (nix build locks are transient).
+        if merged_path:
+            upper = Path(merged_path).parent / "upper"
+            if upper.is_dir():
+                db_paths = {Path(r[0]).name
+                            for r in dst.execute("SELECT path FROM ValidPaths")}
+                for entry in upper.iterdir():
+                    if entry.name.startswith("."):
+                        continue
+                    if entry.name.endswith(".lock"):
+                        entry.unlink(missing_ok=True)
+                    elif entry.name not in db_paths:
+                        _rm_store_path(entry)
+
         dst.close()
         src.close()
     except sqlite3.Error:
@@ -558,6 +589,31 @@ def _setup_shared_nix_overlay(home: Path) -> str:
 
     if any(merged.iterdir()):
         return str(merged)
+
+    # Before mounting, clean the upper layer of paths the host GC'd.
+    # If the host ran nix store gc after the overlay was last used,
+    # the upper dir may reference paths no longer in the lower layer
+    # (host's /nix/store). This stale metadata confuses fuse-overlayfs.
+    # Also clean the work dir since it caches inode state that becomes
+    # invalid when lower-layer paths disappear.
+    host_store = Path("/nix/store")
+    stale = []
+    for entry in upper.iterdir():
+        if entry.name.startswith("."):
+            continue
+        if entry.name.endswith(".lock"):
+            entry.unlink(missing_ok=True)
+            continue
+        if not (host_store / entry.name).exists():
+            stale.append(entry)
+    for entry in stale:
+        _rm_store_path(entry)
+    if stale:
+        # Reset work dir to clear stale inode metadata
+        work_inner = work / "work"
+        if work_inner.is_dir():
+            shutil.rmtree(work_inner, ignore_errors=True)
+            work_inner.mkdir()
 
     try:
         _mount_fuse_overlay(upper, work, merged)
@@ -885,6 +941,9 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
         fuse_overlayfs_bin = shutil.which("fuse-overlayfs")
         if fuse_overlayfs_bin:
             env["CAVE_NS_FUSE_OVERLAYFS"] = fuse_overlayfs_bin
+        fusermount_bin = shutil.which("fusermount3") or shutil.which("fusermount")
+        if fusermount_bin:
+            env["CAVE_NS_FUSERMOUNT"] = fusermount_bin
 
         unshare_bin = shutil.which("unshare")
         if not unshare_bin:

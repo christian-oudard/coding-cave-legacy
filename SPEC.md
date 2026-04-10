@@ -73,7 +73,7 @@ The cave environment is configured by `~/.config/coding-cave/cave.nix`. This is 
 
 Adds a project to the coding-cave registry. Sets up the shared bare repo, and branch protection hooks. A valid project is a git repository with at least one commit, because only committed work is shared with the agent.
 
-### `cav agent [-c,--continue | -r,--resume <agent_id/session_id>] [-p,--project <project_slug>] [--port <port>] [--recursive]`
+### `cav agent [-c,--continue | -r,--resume <agent_id/session_id>] [-p,--project <project_slug>] [--port <port>]`
 
 Launches a Claude Code CLI agent in a coding-cave session. Auto-assigns a numeric ID. There are no agent ID duplicates among running agents or stopped agents with unmerged work.
 
@@ -83,7 +83,7 @@ Allow access to multiple projects with the `--project` flag (repeatable).
 
 With `--port`, expose a host TCP port inside the cave (repeatable). The agent can reach it at `10.0.2.2:<port>`. Ports are persisted across `--continue`/`--resume`.
 
-With `--recursive`, the cave agent can launch their own sub-caves. This is mainly for automated testing of coding-cave features.
+All caves are recursive. Agents can launch sub-caves for testing coding-cave features.
 
 ### `cav approve [agent-id]`
 

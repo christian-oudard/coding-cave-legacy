@@ -94,10 +94,11 @@ def create(base: Path, agent_id: str) -> Path:
     # If the dev branch already exists on the remote (re-creating a
     # workspace for a continuing agent), check it out with tracking.
     # Otherwise create a fresh branch from the base and push it.
-    try:
-        git.git_output("rev-parse", "--verify", remote_ref, cwd=ws_path)
+    r = git.git("rev-parse", "--verify", remote_ref,
+                cwd=ws_path, check=False, capture=True, echo=False)
+    if r.returncode == 0:
         git.git("checkout", dev, cwd=ws_path, echo=False, capture=True)
-    except subprocess.CalledProcessError:
+    else:
         git.git("checkout", "-b", dev, base_ref, cwd=ws_path,
                 echo=False, capture=True)
         r = git.git("push", config.HOST_SHARED_REMOTE, dev,

@@ -7,7 +7,6 @@ CREATE TABLE agents (
     started_at REAL,
     exited_at REAL,
     extra_projects TEXT,
-    recursive INTEGER DEFAULT 0,
     host_ports TEXT
 );
 
