@@ -84,7 +84,7 @@ case "$_cmd" in
         echo "WARNING: rebase onto host-cave/$_base failed (conflicts). Run: git fetch host-cave && git rebase host-cave/$_base" >&2
       fi
     fi
-    "$_CAV_REAL_GIT" push --force host-cave HEAD >/dev/null 2>&1 || true
+    "$_CAV_REAL_GIT" push --force host-cave "HEAD:refs/heads/$_branch" >/dev/null 2>&1 || true
     ;;
   reset|checkout|switch|merge|rebase)
     # Light sync: just push current state.
