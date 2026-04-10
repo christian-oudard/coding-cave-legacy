@@ -436,7 +436,7 @@ def _seed_nix_db(home: Path, merged_path: str = "") -> Path | None:
     store_root = Path("/nix/store")
     if merged_path:
         candidate = Path(merged_path)
-        if any(candidate.iterdir()):
+        if _overlay_alive(candidate):
             store_root = candidate
 
     try:
@@ -582,6 +582,21 @@ def _mount_fuse_overlay(upper: Path, work: Path, merged: Path):
     )
 
 
+def _overlay_alive(merged: Path) -> bool:
+    """Check if the fuse-overlayfs mount at merged is functional.
+
+    A stale mount (fuse daemon died) leaves the directory present but
+    inoperable. Test with a probe file to confirm writes actually work.
+    """
+    probe = merged / ".overlay_probe"
+    try:
+        probe.touch()
+        probe.unlink()
+        return True
+    except OSError:
+        return False
+
+
 def _setup_shared_nix_overlay(home: Path) -> str:
     """Mount the shared writable nix store overlay. Returns merged path.
 
@@ -595,7 +610,7 @@ def _setup_shared_nix_overlay(home: Path) -> str:
     """
     upper, work, merged = _nix_overlay_dirs(home)
 
-    if any(merged.iterdir()):
+    if _overlay_alive(merged):
         return str(merged)
 
     # Before mounting, clean the upper layer of paths the host GC'd.

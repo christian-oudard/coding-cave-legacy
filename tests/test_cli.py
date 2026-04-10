@@ -891,15 +891,17 @@ class TestLaunchOpts(unittest.TestCase):
         from cav import registry
         aid = registry.acquire_agent_id(self.base)
         registry.save_agent_launch_opts(aid, ["coding-cave", "other"])
-        slugs = registry.read_agent_launch_opts(aid)
+        slugs, ports = registry.read_agent_launch_opts(aid)
         self.assertEqual(slugs, ["coding-cave", "other"])
+        self.assertEqual(ports, [])
 
     def test_read_defaults_without_save(self):
         """read_agent_launch_opts returns defaults when nothing saved."""
         from cav import registry
         aid = registry.acquire_agent_id(self.base)
-        slugs = registry.read_agent_launch_opts(aid)
+        slugs, ports = registry.read_agent_launch_opts(aid)
         self.assertEqual(slugs, [])
+        self.assertEqual(ports, [])
 
     def test_opts_survive_exit_and_continue(self):
         """Launch opts persist through exit and are available on continue."""
@@ -910,14 +912,16 @@ class TestLaunchOpts(unittest.TestCase):
 
         continued = registry.continue_agent_id(self.base)
         self.assertEqual(continued, aid)
-        slugs = registry.read_agent_launch_opts(continued)
+        slugs, ports = registry.read_agent_launch_opts(continued)
         self.assertEqual(slugs, ["extra-proj"])
+        self.assertEqual(ports, [])
 
     def test_nonexistent_agent_returns_defaults(self):
         """read_agent_launch_opts returns defaults for unknown agent."""
         from cav import registry
-        slugs = registry.read_agent_launch_opts("999")
+        slugs, ports = registry.read_agent_launch_opts("999")
         self.assertEqual(slugs, [])
+        self.assertEqual(ports, [])
 
 
 if __name__ == "__main__":

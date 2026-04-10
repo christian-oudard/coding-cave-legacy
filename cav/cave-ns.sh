@@ -24,7 +24,7 @@ if [ -n "$CAVE_NS_OVERLAY_MERGED" ] && [ -n "$CAVE_NS_MOUNTPOINT" ] \
    && ! "$CAVE_NS_MOUNTPOINT" -q "$CAVE_NS_OVERLAY_MERGED"; then
     # fuse-overlayfs needs fusermount on PATH to register the mount.
     if [ -n "$CAVE_NS_FUSERMOUNT" ]; then
-        export PATH="$(dirname "$CAVE_NS_FUSERMOUNT"):$PATH"
+        export PATH="${CAVE_NS_FUSERMOUNT%/*}:$PATH"
     fi
     "$CAVE_NS_FUSE_OVERLAYFS" \
         -o "lowerdir=/nix/store,upperdir=$CAVE_NS_OVERLAY_UPPER,workdir=$CAVE_NS_OVERLAY_WORK" \
