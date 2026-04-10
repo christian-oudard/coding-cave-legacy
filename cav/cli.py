@@ -132,9 +132,11 @@ def init(path):
               help="Resume a specific agent (e.g. @3, coding-cave@3)")
 @click.option("-p", "--project", "extra_projects", multiple=True, metavar="PATH",
               help="Additional project to mount (repeatable)")
+@click.option("--port", "host_ports", type=int, multiple=True, metavar="PORT",
+              help="Expose a host TCP port inside the cave (repeatable)")
 @click.option("--prompt", type=str, default=None,
               help="Non-interactive mode: execute prompt, print response, exit")
-def agent(continue_agent, resume_agent, extra_projects, prompt):
+def agent(continue_agent, resume_agent, extra_projects, host_ports, prompt):
     """Launch an agent in a sandbox."""
     base = find_repo_root()
     require_init(base)
@@ -173,12 +175,14 @@ def agent(continue_agent, resume_agent, extra_projects, prompt):
 
     # Restore saved launch options when continuing
     if continue_agent or resume_agent:
-        saved_slugs = registry.read_agent_launch_opts(agent_id)
+        saved_slugs, saved_ports = registry.read_agent_launch_opts(agent_id)
         if not extra_projects and saved_slugs:
             extra_projects = tuple(
                 registry.project_path(s) for s in saved_slugs
                 if registry.project_path(s)
             )
+        if not host_ports and saved_ports:
+            host_ports = tuple(saved_ports)
 
     projects = [(base, config.project_slug(base))]
 
@@ -193,7 +197,8 @@ def agent(continue_agent, resume_agent, extra_projects, prompt):
         projects.append((extra, slug))
 
     registry.save_agent_launch_opts(
-        agent_id, [slug for _, slug in projects[1:]])
+        agent_id, [slug for _, slug in projects[1:]],
+        list(host_ports) if host_ports else None)
 
     workspaces = []
     for project_base, slug in projects:
@@ -208,7 +213,8 @@ def agent(continue_agent, resume_agent, extra_projects, prompt):
     try:
         rc = launch(workspaces, name, project_slug=projects[0][1],
                     session_id=session_id, resuming=resuming,
-                    prompt=prompt)
+                    prompt=prompt,
+                    host_ports=list(host_ports) if host_ports else [])
     finally:
         if session_id and not config.session_file_exists(projects[0][1], session_id):
             registry.clear_session_id(agent_id)

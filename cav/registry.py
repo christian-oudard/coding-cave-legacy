@@ -34,6 +34,11 @@ def _open() -> sqlite3.Connection:
     ).fetchone()
     if not has_tables:
         db.executescript(_SCHEMA)
+    else:
+        # Migrations for existing databases.
+        cols = {r[1] for r in db.execute("PRAGMA table_info(agents)")}
+        if "host_ports" not in cols:
+            db.execute("ALTER TABLE agents ADD COLUMN host_ports TEXT")
     return db
 
 
@@ -131,30 +136,36 @@ def read_session_id(agent_id: str) -> str | None:
 
 # -- Launch options --
 
-def save_agent_launch_opts(agent_id: str, extra_slugs: list[str]) -> None:
+def save_agent_launch_opts(agent_id: str, extra_slugs: list[str],
+                           host_ports: list[int] | None = None) -> None:
     """Persist launch options so cav -c can restore them."""
     db = _open()
     try:
         db.execute(
-            "UPDATE agents SET extra_projects = ? WHERE agent_id = ?",
-            (json.dumps(extra_slugs) if extra_slugs else None, agent_id)
+            "UPDATE agents SET extra_projects = ?, host_ports = ? "
+            "WHERE agent_id = ?",
+            (json.dumps(extra_slugs) if extra_slugs else None,
+             json.dumps(host_ports) if host_ports else None,
+             agent_id)
         )
         db.commit()
     finally:
         db.close()
 
 
-def read_agent_launch_opts(agent_id: str) -> list[str]:
-    """Read saved launch options. Returns extra_project_slugs."""
+def read_agent_launch_opts(agent_id: str) -> tuple[list[str], list[int]]:
+    """Read saved launch options. Returns (extra_project_slugs, host_ports)."""
     db = _open()
     try:
         row = db.execute(
-            "SELECT extra_projects FROM agents WHERE agent_id = ?",
+            "SELECT extra_projects, host_ports FROM agents WHERE agent_id = ?",
             (agent_id,)
         ).fetchone()
         if not row:
-            return []
-        return json.loads(row[0]) if row[0] else []
+            return [], []
+        slugs = json.loads(row[0]) if row[0] else []
+        ports = json.loads(row[1]) if row[1] else []
+        return slugs, ports
     finally:
         db.close()
 

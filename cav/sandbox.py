@@ -674,7 +674,8 @@ def _seed_claude_config(home: Path, project_slug: str):
 def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
            project_slug: str = "project",
            session_id: str | None = None, resuming: bool = False,
-           prompt: str | None = None):
+           prompt: str | None = None,
+           host_ports: list[int] | None = None):
     """Launch claude in a bwrap sandbox via the jail.nix binary.
 
     workspaces: list of (workspace_path, shared_repo, slug) tuples.
@@ -914,7 +915,8 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
             raise SystemExit("sandbox child died during namespace setup")
 
         # Apply firewall before starting network. Zero gap.
-        _apply_firewall(proc.pid, [daemon_port, CRINJ_PORT])
+        allowed = [daemon_port, CRINJ_PORT] + (host_ports or [])
+        _apply_firewall(proc.pid, allowed)
 
         # Start slirp4netns (network comes up after firewall).
         slirp_proc = _start_slirp4netns(proc.pid)
