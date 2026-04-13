@@ -223,8 +223,53 @@ def _crinj_listening() -> bool:
         return s.connect_ex(("127.0.0.1", CRINJ_PORT)) == 0
 
 
-def _start_crinj() -> str:
-    """Start crinj if not already running. Returns proxy address.
+def _crinj_pid_file() -> Path:
+    return config.DATA_DIR / "crinj.pid"
+
+
+def _crinj_signal(sig: signal.Signals) -> None:
+    """Send a signal to the running crinj process via its PID file."""
+    pid_file = _crinj_pid_file()
+    try:
+        pid = int(pid_file.read_text().strip())
+        os.kill(pid, sig)
+        log.debug(f"sent {sig.name} to crinj pid {pid}")
+    except (FileNotFoundError, ValueError, ProcessLookupError) as exc:
+        log.debug(f"could not signal crinj: {exc}")
+
+
+def _crinj_sessions_dir() -> Path:
+    return config.DATA_DIR / "crinj-sessions"
+
+
+def _crinj_register_session() -> Path:
+    """Register this process as a crinj user. Returns the session file."""
+    d = _crinj_sessions_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    # Prune stale entries from dead processes.
+    for f in d.iterdir():
+        try:
+            os.kill(int(f.name), 0)
+        except (OSError, ValueError):
+            f.unlink(missing_ok=True)
+    session_file = d / str(os.getpid())
+    session_file.touch()
+    return session_file
+
+
+def _crinj_unregister_session(session_file: Path) -> bool:
+    """Unregister this session. Returns True if this was the last one."""
+    session_file.unlink(missing_ok=True)
+    d = _crinj_sessions_dir()
+    return not any(d.iterdir()) if d.is_dir() else True
+
+
+def _start_crinj() -> subprocess.Popen | None:
+    """Start crinj if not already running.
+
+    Returns the Popen handle if we started it, or None if an existing
+    instance was reused. Callers use _crinj_register/unregister_session
+    to track when the last session exits and crinj can be killed.
 
     Always passes --allow-empty-rules so the same launch path works at
     every nesting level (host == cave == subcave). Inner crinj instances
@@ -236,37 +281,39 @@ def _start_crinj() -> str:
         raise SystemExit("crinj not found on PATH")
 
     if _crinj_listening():
-        log.debug("crinj already listening")
-    else:
-        log.debug("starting crinj...")
-        config.DATA_DIR.mkdir(parents=True, exist_ok=True)
-        # Crinj always reads its config file, even with --allow-empty-rules.
-        # Touch an empty rules.toml if missing so a fresh cave home works
-        # without manual setup; the host case is a no-op when the user
-        # already has real rules.
-        rules = Path(os.environ.get(
-            "XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "crinj" / "rules.toml"
-        if not rules.exists():
-            rules.parent.mkdir(parents=True, exist_ok=True)
-            rules.touch()
-        proc = subprocess.Popen(
-            ["crinj", "--port", str(CRINJ_PORT), "--allow-empty-rules"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            start_new_session=True,
-        )
-        for i in range(20):
-            if _crinj_listening():
-                log.debug(f"crinj ready after {(i + 1) * 0.25:.1f}s")
-                break
-            if proc.poll() is not None:
-                stderr = proc.stderr.read().decode(errors="replace").strip()
-                raise SystemExit(f"crinj exited {proc.returncode}: {stderr}")
-            time.sleep(0.25)
-        else:
-            raise SystemExit("crinj failed to start within 5s")
+        log.debug("crinj already listening, sending SIGHUP to reload config")
+        _crinj_signal(signal.SIGHUP)
+        return None
 
-    return f"127.0.0.1:{CRINJ_PORT}"
+    log.debug("starting crinj...")
+    config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    # Crinj always reads its config file, even with --allow-empty-rules.
+    # Touch an empty rules.toml if missing so a fresh cave home works
+    # without manual setup; the host case is a no-op when the user
+    # already has real rules.
+    rules = Path(os.environ.get(
+        "XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "crinj" / "rules.toml"
+    if not rules.exists():
+        rules.parent.mkdir(parents=True, exist_ok=True)
+        rules.touch()
+    proc = subprocess.Popen(
+        ["crinj", "--port", str(CRINJ_PORT), "--allow-empty-rules"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+    for i in range(20):
+        if _crinj_listening():
+            log.debug(f"crinj ready after {(i + 1) * 0.25:.1f}s")
+            break
+        if proc.poll() is not None:
+            stderr = proc.stderr.read().decode(errors="replace").strip()
+            raise SystemExit(f"crinj exited {proc.returncode}: {stderr}")
+        time.sleep(0.25)
+    else:
+        raise SystemExit("crinj failed to start within 5s")
+
+    _crinj_pid_file().write_text(str(proc.pid))
+    return proc
 
 
 def _prune_nix_caches() -> None:
@@ -935,7 +982,8 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
     # crinj (on the host) replaces them with real credentials. Traffic chains
     # through http_proxy at each level automatically.
     log.info("starting crinj proxy...")
-    _start_crinj()
+    crinj_session = _crinj_register_session()
+    crinj_proc = _start_crinj()
     env["CODING_CAVE_GATEWAY"] = gateway
     env["CODING_CAVE_PROXY_ADDR"] = f"{gateway}:{CRINJ_PORT}"
     env["CODING_CAVE_PROXY_CA"] = str(_crinj_ca_path())
@@ -1052,6 +1100,10 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
         finally:
             slirp_proc.terminate()
             slirp_proc.wait(timeout=5)
+            if _crinj_unregister_session(crinj_session):
+                _crinj_signal(signal.SIGTERM)
+                if crinj_proc is not None:
+                    crinj_proc.wait(timeout=5)
             for s, handler in orig.items():
                 signal.signal(s, handler)
 
