@@ -15,8 +15,15 @@ let
   resolvedBundles = map resolveBundle cfg.bundles;
 
   # Bundle settings merge in declaration order; user extraSettings on top.
-  mergedSettings = lib.foldl' lib.recursiveUpdate { }
-    ((map (b: b.settings or { }) resolvedBundles) ++ [ cfg.extraSettings ]);
+  # Strip permissions.allow/deny: caves run --dangerously-skip-permissions,
+  # so the host user's deny list would only block legitimate cave commands.
+  mergedSettings = let
+    raw = lib.foldl' lib.recursiveUpdate { }
+      ((map (b: b.settings or { }) resolvedBundles) ++ [ cfg.extraSettings ]);
+    perms = raw.permissions or { };
+  in raw // lib.optionalAttrs (raw ? permissions) {
+    permissions = removeAttrs perms [ "allow" "deny" ];
+  };
 
   # Skills/commands attrsets are merged across bundles. Later bundles win
   # on key collisions.
