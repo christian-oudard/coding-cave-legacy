@@ -1,7 +1,6 @@
 """cav init: create the shared infrastructure."""
 
 import os
-import subprocess
 import sys
 from pathlib import Path
 
@@ -98,15 +97,13 @@ def init(path: str):
         return
 
     # Check for conflicting remote before creating anything
-    try:
-        existing_url = git.git_output(
-            "remote", "get-url", config.CAVE_SHARED_REMOTE, cwd=base)
+    r = git.git("remote", "get-url", config.CAVE_SHARED_REMOTE,
+                cwd=base, check=False, capture=True, echo=False)
+    if r.returncode == 0:
         raise SystemExit(
             f"Remote '{config.CAVE_SHARED_REMOTE}' already exists, pointing to:\n"
-            f"  {existing_url}\n"
+            f"  {r.stdout.strip()}\n"
             f"Remove it first: git remote remove {config.CAVE_SHARED_REMOTE}")
-    except subprocess.CalledProcessError:
-        pass  # No conflicting remote, good
 
     _require_commits(base)
 
