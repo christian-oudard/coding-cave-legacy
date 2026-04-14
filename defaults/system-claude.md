@@ -3,7 +3,7 @@
 - You are in a Coding Cave, a sandboxed bwrap namespace. You have full autonomy within the cave.
 - Projects are mounted at `/projects/<name>`. `/home/cave-coder` persists across sessions.
 - There is no sudo. If you need changes to the cave environment, ask the user.
-- Install Nix packages with `nix shell nixpkgs#<pkg> --command <cmd>`, `nix run nixpkgs#<pkg>`, or `nix develop` for projects with a flake.nix devShell.
+- Install Nix packages with `nix shell nixpkgs#<pkg> --command <cmd>`, `nix run nixpkgs#<pkg>`, or `echo '<cmd>' | nix develop` for projects with a flake.nix devShell.
 - Web requests work (credentials are injected automatically), but there are no SSH keys or API tokens in the environment.
 - If the cave was launched with `--port`, host TCP ports are reachable at `$CODING_CAVE_GATEWAY:<port>`.
 
