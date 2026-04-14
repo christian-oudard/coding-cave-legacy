@@ -88,6 +88,8 @@ def init(path: str):
         install_hooks(shared)
         git.git("config", "receive.advertisePushOptions", "true",
                 cwd=shared, echo=False)
+        git.git("config", "receive.shallowUpdate", "true",
+                cwd=shared, echo=False)
         registry.register_project(base)
         # Re-sync: push any commits added since last init.
         _require_commits(base)
@@ -111,8 +113,9 @@ def init(path: str):
     cav.mkdir(parents=True, exist_ok=True)
     git.git("init", "--bare", str(shared), echo=False)
 
-    # Enable push options
+    # Enable push options and shallow updates (for shallow clones)
     git.git("config", "receive.advertisePushOptions", "true", cwd=shared, echo=False)
+    git.git("config", "receive.shallowUpdate", "true", cwd=shared, echo=False)
 
     # Install hooks
     install_hooks(shared)

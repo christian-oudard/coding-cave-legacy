@@ -2011,5 +2011,166 @@ class TestReview(TestCAV):
         self.assertIn("2 commits ahead of main", output)
 
 
+class TestShallowClone(unittest.TestCase):
+    """Verify that cav works on shallow-cloned repos (--depth=1 --single-branch)."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.data_dir = Path(self.tmpdir) / "data"
+
+        # Create a "remote" repo with multiple commits (simulating GitHub).
+        origin = Path(self.tmpdir) / "origin"
+        origin.mkdir()
+        git("init", "-b", "main", cwd=origin)
+        git("config", "user.email", "test@test.com", cwd=origin)
+        git("config", "user.name", "Test User", cwd=origin)
+        (origin / "README.md").write_text("# Project\n")
+        git("add", "README.md", cwd=origin)
+        git("commit", "-m", "Initial commit", cwd=origin)
+        (origin / "lib.py").write_text("# lib\n")
+        git("add", "lib.py", cwd=origin)
+        git("commit", "-m", "Add lib", cwd=origin)
+
+        # Shallow clone (like `gh repo clone ... -- --depth=1 --single-branch`)
+        self.user_repo = Path(self.tmpdir) / "project"
+        git("clone", "--depth=1", "--single-branch",
+            str(origin), str(self.user_repo))
+
+        os.environ["CODING_CAVE_DATA_DIR"] = str(self.data_dir)
+        config.DATA_DIR = self.data_dir
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir)
+
+    def _init(self):
+        from cav.init import init
+        init(str(self.user_repo))
+
+    def _create_agent(self, name):
+        ws = workspace.create(self.user_repo, name)
+        git("config", "user.email", f"{name}@test.com", cwd=ws)
+        git("config", "user.name", name, cwd=ws)
+        return ws
+
+    def test_init_on_shallow_clone(self):
+        """cav init works on a shallow clone."""
+        self._init()
+        shared = config.shared_repo_path(self.user_repo)
+        self.assertTrue(shared.exists())
+        val = git_out("config", "receive.shallowUpdate", cwd=shared)
+        self.assertEqual(val, "true")
+
+    def test_workspace_creation(self):
+        """Workspace can be created from a shallow clone."""
+        self._init()
+        ws = self._create_agent("1")
+        self.assertTrue(ws.exists())
+        branch = git_out("rev-parse", "--abbrev-ref", "HEAD", cwd=ws)
+        self.assertEqual(branch, "agent-1/main")
+
+    def test_agent_push_and_approve(self):
+        """Agent can push work and user can approve on a shallow clone."""
+        from cav.approve import approve
+        self._init()
+        ws = self._create_agent("1")
+
+        (ws / "feature.py").write_text("print('hello')\n")
+        git("add", "feature.py", cwd=ws)
+        git("commit", "-m", "Add feature", cwd=ws)
+
+        git("push", "host-cave", "agent-1/main", cwd=ws, env=agent_env("1"))
+
+        approve(self.user_repo, agent_id="1", yes=True)
+
+        log = git_out("log", "--oneline", cwd=self.user_repo)
+        self.assertIn("Add feature", log)
+
+    def test_agent_pull_after_approve(self):
+        """Agent can fetch updated main after another agent's work is approved."""
+        self._init()
+        ws1 = self._create_agent("1")
+        ws2 = self._create_agent("2")
+
+        # Agent 1 pushes and gets approved
+        (ws1 / "a1.py").write_text("# a1\n")
+        git("add", "a1.py", cwd=ws1)
+        git("commit", "-m", "Agent 1 work", cwd=ws1)
+        git("push", "host-cave", "agent-1/main", cwd=ws1, env=agent_env("1"))
+        git("push", "host-cave", "agent-1/main:main", cwd=ws1)
+
+        # Agent 2 fetches and rebases on updated main
+        (ws2 / "a2.py").write_text("# a2\n")
+        git("add", "a2.py", cwd=ws2)
+        git("commit", "-m", "Agent 2 work", cwd=ws2)
+        git("fetch", "host-cave", cwd=ws2)
+        git("rebase", "host-cave/main", cwd=ws2)
+
+        log = git_out("log", "--oneline", cwd=ws2)
+        self.assertIn("Agent 1 work", log)
+        self.assertIn("Agent 2 work", log)
+
+    def test_status(self):
+        """cav status works on a shallow clone."""
+        from cav.status import status
+        self._init()
+        registry.acquire_agent_id(self.user_repo)  # register agent 1
+        ws = self._create_agent("1")
+
+        (ws / "feature.py").write_text("# feature\n")
+        git("add", "feature.py", cwd=ws)
+        git("commit", "-m", "Shallow feature", cwd=ws)
+        git("push", "host-cave", "agent-1/main", cwd=ws, env=agent_env("1"))
+
+        import io
+        captured = io.StringIO()
+        old_stdout = sys.stdout
+        sys.stdout = captured
+        try:
+            status(self.user_repo)
+        finally:
+            sys.stdout = old_stdout
+        output = captured.getvalue()
+        self.assertIn("agent-1/main", output)
+        self.assertIn("Shallow feature", output)
+
+    def test_pull_on_dev_branch(self):
+        """cav pull works on a shallow clone's dev branch."""
+        from cav.pull import pull
+        self._init()
+        ws = self._create_agent("1")
+
+        (ws / "v1.py").write_text("# v1\n")
+        git("add", "v1.py", cwd=ws)
+        git("commit", "-m", "Version 1", cwd=ws)
+        git("push", "host-cave", "agent-1/main", cwd=ws, env=agent_env("1"))
+
+        # User checks out the dev branch
+        git("fetch", "cave", cwd=self.user_repo)
+        git("checkout", "-b", "agent-1/main", "cave/agent-1/main",
+            cwd=self.user_repo)
+
+        # Agent pushes more work
+        (ws / "v2.py").write_text("# v2\n")
+        git("add", "v2.py", cwd=ws)
+        git("commit", "-m", "Version 2", cwd=ws)
+        git("push", "host-cave", "agent-1/main", cwd=ws, env=agent_env("1"))
+
+        # pull picks up the new work
+        pull(self.user_repo)
+        log = git_out("log", "--oneline", cwd=self.user_repo)
+        self.assertIn("Version 2", log)
+
+    def test_reinit_enables_shallow_update(self):
+        """Re-running cav init on an existing shallow project sets shallowUpdate."""
+        from cav.init import init
+        self._init()
+        shared = config.shared_repo_path(self.user_repo)
+        # Clear it, then re-init
+        git("config", "--unset", "receive.shallowUpdate", cwd=shared)
+        init(str(self.user_repo))
+        val = git_out("config", "receive.shallowUpdate", cwd=shared)
+        self.assertEqual(val, "true")
+
+
 if __name__ == "__main__":
     unittest.main()

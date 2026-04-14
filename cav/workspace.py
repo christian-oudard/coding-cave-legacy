@@ -47,6 +47,10 @@ def create(base: Path, agent_id: str) -> Path:
     ws_path.parent.mkdir(parents=True, exist_ok=True)
     shared = config.shared_repo_path(base)
 
+    # Ensure the shared repo accepts pushes from shallow clones.
+    git.git("config", "receive.shallowUpdate", "true",
+            cwd=shared, echo=False, capture=True)
+
     # Sync user repo to shared repo so the clone has all branches.
     # Only push base branches; dev branches are managed by agents
     # and the host's local copies can be stale (behind the shared remote).
