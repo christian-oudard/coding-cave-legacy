@@ -477,7 +477,7 @@ def _seed_nix_db(home: Path, merged_path: str = "") -> Path | None:
 
     # Use the merged overlay for existence checks when available,
     # otherwise fall back to the parent's /nix/store view.
-    # When the overlay mount is deferred to cave-ns.sh, the merged dir
+    # When the overlay mount is deferred to supervisor.py, the merged dir
     # exists but is empty. Fall back to /nix/store in that case to
     # avoid deleting all DB entries as "stale".
     store_root = Path("/nix/store")
@@ -639,7 +639,6 @@ def _unmount_stale_overlay(merged: Path) -> None:
             return
 
 
-
 def _overlay_alive(merged: Path) -> bool:
     """Check if the fuse-overlayfs mount at merged is functional.
 
@@ -665,7 +664,7 @@ def _setup_shared_nix_overlay(home: Path) -> str:
     agent exits. Each nesting level gets its own overlay via its own home.
 
     Tries a direct mount (works when fusermount3 is setuid). If that fails,
-    defers the mount to cave-ns.sh which runs inside the user namespace
+    defers the mount to supervisor.py which runs inside the user namespace
     created by unshare(1).
     """
     upper, work, merged = _nix_overlay_dirs(home)
@@ -675,7 +674,7 @@ def _setup_shared_nix_overlay(home: Path) -> str:
 
     # Unmount stale fuse-overlayfs if one is lingering on merged/.
     # Without this, the new mount attempt fails ("already mounted") and
-    # cave-ns.sh's mountpoint check also skips remounting.
+    # supervisor.py's mountpoint check also skips remounting.
     _unmount_stale_overlay(merged)
 
     # Before mounting, clean the upper layer of paths the host GC'd.
@@ -696,25 +695,26 @@ def _setup_shared_nix_overlay(home: Path) -> str:
             stale.append(entry)
     for entry in stale:
         _rm_store_path(entry)
-    if stale:
-        # Reset work dir to clear stale inode metadata
-        work_inner = work / "work"
-        if work_inner.is_dir():
-            shutil.rmtree(work_inner, ignore_errors=True)
-            work_inner.mkdir()
+    # Always reset work dir when remounting. The previous fuse-overlayfs
+    # daemon may have left corrupted inode metadata that prevents the
+    # new daemon from creating directories.
+    work_inner = work / "work"
+    if work_inner.is_dir():
+        shutil.rmtree(work_inner, ignore_errors=True)
+        work_inner.mkdir()
 
     try:
         _mount_fuse_overlay(upper, work, merged)
     except (subprocess.CalledProcessError, FileNotFoundError):
-        pass  # Deferred: mounted in child via cave-ns.sh
+        pass  # Deferred: mounted in child via supervisor.py
 
     return str(merged)
 
 
 SLIRP_GATEWAY = "10.0.2.2"
 
-# Substituted at nix build time with the cave-ns.sh helper path.
-CAVE_NS_SH = "@CAVE_NS_SH@"
+# Substituted at nix build time with the supervisor.py helper path.
+SUPERVISOR_PY = "@SUPERVISOR_PY@"
 
 
 def _apply_firewall(pid: int, allowed_ports: list[int]):
@@ -1006,7 +1006,7 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
                 claude_cmd += ["--session-id", session_id]
         daemon_port = daemon._agent_port(agent_id)
 
-        # One-directional sync pipe: cave-ns.sh writes a byte after
+        # One-directional sync pipe: supervisor.py writes a byte after
         # unshare(1) has created the namespace, then continues exec'ing
         # into bwrap without waiting. The parent reads the byte, applies
         # iptables (firewall before network), then starts slirp4netns.
@@ -1015,14 +1015,14 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
         sync_r, sync_w = os.pipe()
         os.set_inheritable(sync_w, True)
 
-        # Nix overlay env vars for cave-ns.sh.
+        # Nix overlay env vars for supervisor.py.
         upper, work, merged = _nix_overlay_dirs(home)
         env["CAVE_NS_SYNC_FD"] = str(sync_w)
         env["CAVE_NS_OVERLAY_MERGED"] = str(merged)
         env["CAVE_NS_OVERLAY_UPPER"] = str(upper)
         env["CAVE_NS_OVERLAY_WORK"] = str(work)
 
-        # cave-ns.sh runs inside unshare(1) without nix-wrapped PATH.
+        # supervisor.py runs inside unshare(1) without nix-wrapped PATH.
         # Resolve absolute paths for the binaries it needs.
         # In subcaves, these binaries aren't on PATH but the parent passed
         # their absolute store paths via CAVE_NS_* env vars. Inherit them.
@@ -1039,9 +1039,10 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
                           or os.environ.get("CAVE_NS_FUSERMOUNT"))
         if fusermount_bin:
             env["CAVE_NS_FUSERMOUNT"] = fusermount_bin
-        # squash_to_uid/gid is determined inside cave-ns.sh using the
-        # namespace uid (id -u), not the parent uid. The unshare namespace
-        # remaps uids so the parent's os.getuid() would be unmapped there.
+        # squash_to_uid/gid is determined inside supervisor.py using the
+        # namespace uid (os.getuid()), not the parent uid. The unshare
+        # namespace remaps uids so the parent's os.getuid() would be
+        # unmapped there.
 
         unshare_bin = shutil.which("unshare")
         if not unshare_bin:
@@ -1054,7 +1055,7 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
         ns_cmd = [
             unshare_bin, "--user", "--net", "--mount",
             "--map-user=0", "--map-group=0",
-            "--", CAVE_NS_SH,
+            "--", sys.executable, SUPERVISOR_PY,
         ] + claude_cmd
 
         log.info("launching sandbox...")
@@ -1065,7 +1066,7 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
         # absolute paths via /proc/<cave_pid>/root/<path>.
         registry.set_cave_pid(agent_id, proc.pid)
 
-        # Wait for cave-ns.sh to signal that the namespace exists.
+        # Wait for supervisor.py to signal that the namespace exists.
         data = os.read(sync_r, 1)
         os.close(sync_r)
         if not data:

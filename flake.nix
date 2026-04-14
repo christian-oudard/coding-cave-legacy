@@ -18,7 +18,7 @@
 
   outputs = { self, nixpkgs, jail-nix, crinj, claude-code-nix, home-manager }:
     let
-      systems = [ "x86_64-linux" "aarch64-linux" ];
+      systems = [ "x86_64-linux" ];
       eachSystem = f: nixpkgs.lib.genAttrs systems (system: f (import nixpkgs {
         inherit system;
         config.allowUnfreePredicate = pkg: (nixpkgs.lib.getName pkg) == "claude-code";
@@ -333,7 +333,7 @@
               substituteInPlace $out/lib/cav/sandbox.py \
                 --replace-fail "@SANDBOX_BIN@" "${sandbox}/bin/coding-cave" \
                 --replace-fail "@CAV_BIN@" "$out/bin" \
-                --replace-fail "@CAVE_NS_SH@" "$out/lib/cav/cave-ns.sh"
+                --replace-fail "@SUPERVISOR_PY@" "$out/lib/cav/supervisor.py"
               substituteInPlace $out/lib/cav/user_env.py \
                 --replace-fail "@NIXPKGS_URL@" "path:${nixpkgs}" \
                 --replace-fail "@CLAUDE_CODE_NIX_URL@" "path:${claude-code-nix}" \
@@ -348,7 +348,7 @@
               from cav.cli import main
               main()
               WRAPPER
-              chmod +x $out/bin/cav $out/lib/cav/hooks/pre-receive $out/lib/cav/cave-ns.sh
+              chmod +x $out/bin/cav $out/lib/cav/hooks/pre-receive
 
               # Wrap with runtime dependencies on PATH
               wrapProgram $out/bin/cav \
@@ -391,7 +391,7 @@
           git config --global init.defaultBranch main
           git config --global user.email "test@test.com"
           git config --global user.name "Test"
-          python3 -m unittest -v tests.test_hook tests.test_cli tests.test_alternates tests.test_nixdb tests.test_lint tests.test_cp_security tests.test_user_env
+          python3 -m unittest -v tests.test_hook tests.test_cli tests.test_alternates tests.test_nixdb tests.test_lint tests.test_cp_security tests.test_user_env tests.test_supervisor
           touch $out
         '';
       });
