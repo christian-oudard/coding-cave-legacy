@@ -229,9 +229,9 @@
             (try-fwd-env "CODING_CAVE_USER_ENV")
             (try-fwd-env "CODING_CAVE_BIN")
             # Subcave overlay: binary paths inherited from parent
-            (try-fwd-env "CAVE_NS_FUSE_OVERLAYFS")
-            (try-fwd-env "CAVE_NS_FUSERMOUNT")
-            (try-fwd-env "CAVE_NS_MOUNTPOINT")
+            (try-fwd-env "CODING_CAVE_NS_FUSE_OVERLAYFS")
+            (try-fwd-env "CODING_CAVE_NS_FUSERMOUNT")
+            (try-fwd-env "CODING_CAVE_NS_MOUNTPOINT")
             # Dummy token so Claude Code considers itself logged in.
             # Crinj replaces the Authorization header with real credentials.
             (try-fwd-env "CLAUDE_CODE_OAUTH_TOKEN")

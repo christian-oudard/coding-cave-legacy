@@ -51,6 +51,33 @@ cave user, allowing nix to `chmod` them during store path registration
 The overlay persists across agent launches. It is not torn down when an
 agent exits.
 
+## Lock file isolation
+
+The host nix daemon creates lock files in `/nix/store/` (e.g.
+`<hash>-foo.lock`) to coordinate concurrent builds. These are empty
+files with mode 600 owned by root, used solely for `flock()`.
+
+The fuse-overlayfs daemon runs as host uid 1000 (mapped to namespace
+uid 0) and cannot read these root-owned mode-600 files. When the
+cave's nix tries to open one, the daemon's copy-up from the lower
+layer fails with `EPERM`.
+
+The fix has two parts. At startup, the supervisor creates empty
+shadow files in the upper directory for any existing lock files
+(detected via `glob("/nix/store/*.lock")` filtered by zero size).
+At runtime, an inotify watcher on `/nix/store` (the host's real
+store, visible from the supervisor namespace) detects new `*.lock`
+files and creates shadows immediately. The overlay prefers
+upper-layer files, so the cave gets writable copies it can lock
+independently.
+
+This is a workaround for a missing feature in fuse-overlayfs:
+its copy-up unconditionally reads the lower file's contents, even
+when the file is empty and there is nothing to copy. Kernel
+overlayfs does not have this problem (copy-up runs in kernel
+space), but cannot be used here because it lacks `squash_to_uid`
+and cannot preserve ownership for unmapped uids in user namespaces.
+
 ## Isolation properties
 
 - A level can read every package in any ancestor level (multi-level

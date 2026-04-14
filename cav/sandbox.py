@@ -569,10 +569,10 @@ def _seed_nix_db(home: Path, merged_path: str = "") -> Path | None:
             )
             dst.commit()
 
-        # Clean the overlay upper layer:
-        # 1. Remove orphaned store paths not in the DB (leftover build
-        #    artifacts whose DB entries were lost during re-seeding).
-        # 2. Remove stale .lock files (nix build locks are transient).
+        # Clean the overlay upper layer: remove orphaned store paths
+        # not in the DB (leftover build artifacts whose DB entries were
+        # lost during re-seeding). Lock file shadows are cleaned by
+        # _setup_shared_nix_overlay, not here.
         if merged_path:
             upper = Path(merged_path).parent / "upper"
             if upper.is_dir():
@@ -582,14 +582,16 @@ def _seed_nix_db(home: Path, merged_path: str = "") -> Path | None:
                     if entry.name.startswith("."):
                         continue
                     if entry.name.endswith(".lock"):
-                        entry.unlink(missing_ok=True)
-                    elif entry.name not in db_paths:
+                        # Skip lock file shadows. These are managed by
+                        # _setup_shared_nix_overlay and supervisor.py.
+                        continue
+                    if entry.name not in db_paths:
                         _rm_store_path(entry)
 
         dst.close()
         src.close()
-    except sqlite3.Error:
-        pass
+    except sqlite3.Error as e:
+        log.warning(f"nix DB seed failed: {e}")
 
     _prune_nix_caches()
 
@@ -611,32 +613,18 @@ def _nix_overlay_dirs(home: Path) -> tuple[Path, Path, Path]:
     return upper, work, merged
 
 
-def _mount_fuse_overlay(upper: Path, work: Path, merged: Path):
-    # squash_to_uid/gid: Host store paths are owned by the nix daemon
-    # (uid 65534). Without squashing, fuse-overlayfs can't copy-up these
-    # files on chmod/chown, causing EPERM when nix tries to register
-    # or validate existing store paths.
-    uid = os.getuid()
-    gid = os.getgid()
-    subprocess.run(
-        [
-            "fuse-overlayfs",
-            "-o", (f"lowerdir=/nix/store,upperdir={upper},workdir={work}"
-                   f",squash_to_uid={uid},squash_to_gid={gid}"),
-            str(merged),
-        ],
-        check=True, capture_output=True, text=True,
-    )
-
 
 def _unmount_stale_overlay(merged: Path) -> None:
-    """Try to unmount a dead fuse-overlayfs on merged/."""
+    """Unmount a stale fuse-overlayfs on merged/."""
     for name in ("fusermount3", "fusermount"):
         bin = shutil.which(name)
         if bin:
-            subprocess.run([bin, "-u", str(merged)],
-                           capture_output=True, check=False)
+            r = subprocess.run([bin, "-u", str(merged)],
+                               capture_output=True, text=True)
+            if r.returncode != 0:
+                log.warning(f"unmount {merged} failed: {r.stderr.strip()}")
             return
+    log.warning(f"cannot unmount {merged}: fusermount not found")
 
 
 def _overlay_alive(merged: Path) -> bool:
@@ -657,56 +645,48 @@ def _overlay_alive(merged: Path) -> bool:
 
 
 def _setup_shared_nix_overlay(home: Path) -> str:
-    """Mount the shared writable nix store overlay. Returns merged path.
+    """Prepare the nix store overlay directories. Returns merged path.
 
-    All agents at a given nesting level share a single overlay. The
-    overlay persists across agent launches and is not torn down when an
-    agent exits. Each nesting level gets its own overlay via its own home.
-
-    Tries a direct mount (works when fusermount3 is setuid). If that fails,
-    defers the mount to supervisor.py which runs inside the user namespace
-    created by unshare(1).
+    Does not mount. The actual fuse-overlayfs mount happens inside the
+    user namespace via supervisor.py, which is the sole mounter. Mounting
+    here (in the parent namespace) would create a stacked mount that
+    supervisor.py can't unmount, causing two fuse daemons to share the
+    same upper/work dirs and corrupting directory creation.
     """
     upper, work, merged = _nix_overlay_dirs(home)
 
-    if _overlay_alive(merged):
-        return str(merged)
-
     # Unmount stale fuse-overlayfs if one is lingering on merged/.
-    # Without this, the new mount attempt fails ("already mounted") and
-    # supervisor.py's mountpoint check also skips remounting.
     _unmount_stale_overlay(merged)
 
-    # Before mounting, clean the upper layer of paths the host GC'd.
-    # If the host ran nix store gc after the overlay was last used,
-    # the upper dir may reference paths no longer in the lower layer
-    # (host's /nix/store). This stale metadata confuses fuse-overlayfs.
-    # Also clean the work dir since it caches inode state that becomes
-    # invalid when lower-layer paths disappear.
+    # Clean the upper layer of stale entries.
     host_store = Path("/nix/store")
     stale = []
     for entry in upper.iterdir():
         if entry.name.startswith("."):
             continue
         if entry.name.endswith(".lock"):
-            entry.unlink(missing_ok=True)
-            continue
+            # Remove stale nix lock files and lock-file shadows (empty
+            # regular files) and char-device whiteouts from previous
+            # buggy code. Keep source derivations (non-empty, e.g.
+            # Cargo.lock) for the GC check below.
+            s = entry.lstat()
+            if stat.S_ISCHR(s.st_mode) or s.st_size == 0:
+                entry.unlink()
+                continue
         if not (host_store / entry.name).exists():
             stale.append(entry)
     for entry in stale:
         _rm_store_path(entry)
-    # Always reset work dir when remounting. The previous fuse-overlayfs
-    # daemon may have left corrupted inode metadata that prevents the
-    # new daemon from creating directories.
+    # Always reset work dir. The previous fuse-overlayfs daemon may have
+    # left corrupted inode metadata. Work dir entries inherit nix store
+    # permissions (read-only), so chmod before removing.
     work_inner = work / "work"
     if work_inner.is_dir():
-        shutil.rmtree(work_inner, ignore_errors=True)
+        def _make_work_writable(_func, p, _exc):
+            os.chmod(os.path.dirname(p), stat.S_IRWXU)
+            _func(p)
+        shutil.rmtree(work_inner, onexc=_make_work_writable)
         work_inner.mkdir()
-
-    try:
-        _mount_fuse_overlay(upper, work, merged)
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        pass  # Deferred: mounted in child via supervisor.py
 
     return str(merged)
 
@@ -1017,28 +997,28 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
 
         # Nix overlay env vars for supervisor.py.
         upper, work, merged = _nix_overlay_dirs(home)
-        env["CAVE_NS_SYNC_FD"] = str(sync_w)
-        env["CAVE_NS_OVERLAY_MERGED"] = str(merged)
-        env["CAVE_NS_OVERLAY_UPPER"] = str(upper)
-        env["CAVE_NS_OVERLAY_WORK"] = str(work)
+        env["CODING_CAVE_NS_SYNC_FD"] = str(sync_w)
+        env["CODING_CAVE_NS_OVERLAY_MERGED"] = str(merged)
+        env["CODING_CAVE_NS_OVERLAY_UPPER"] = str(upper)
+        env["CODING_CAVE_NS_OVERLAY_WORK"] = str(work)
 
         # supervisor.py runs inside unshare(1) without nix-wrapped PATH.
         # Resolve absolute paths for the binaries it needs.
         # In subcaves, these binaries aren't on PATH but the parent passed
-        # their absolute store paths via CAVE_NS_* env vars. Inherit them.
+        # their absolute store paths via CODING_CAVE_NS_* env vars. Inherit them.
         mountpoint_bin = (shutil.which("mountpoint")
-                          or os.environ.get("CAVE_NS_MOUNTPOINT"))
+                          or os.environ.get("CODING_CAVE_NS_MOUNTPOINT"))
         if mountpoint_bin:
-            env["CAVE_NS_MOUNTPOINT"] = mountpoint_bin
+            env["CODING_CAVE_NS_MOUNTPOINT"] = mountpoint_bin
         fuse_overlayfs_bin = (shutil.which("fuse-overlayfs")
-                              or os.environ.get("CAVE_NS_FUSE_OVERLAYFS"))
+                              or os.environ.get("CODING_CAVE_NS_FUSE_OVERLAYFS"))
         if fuse_overlayfs_bin:
-            env["CAVE_NS_FUSE_OVERLAYFS"] = fuse_overlayfs_bin
+            env["CODING_CAVE_NS_FUSE_OVERLAYFS"] = fuse_overlayfs_bin
         fusermount_bin = (shutil.which("fusermount3")
                           or shutil.which("fusermount")
-                          or os.environ.get("CAVE_NS_FUSERMOUNT"))
+                          or os.environ.get("CODING_CAVE_NS_FUSERMOUNT"))
         if fusermount_bin:
-            env["CAVE_NS_FUSERMOUNT"] = fusermount_bin
+            env["CODING_CAVE_NS_FUSERMOUNT"] = fusermount_bin
         # squash_to_uid/gid is determined inside supervisor.py using the
         # namespace uid (os.getuid()), not the parent uid. The unshare
         # namespace remaps uids so the parent's os.getuid() would be
