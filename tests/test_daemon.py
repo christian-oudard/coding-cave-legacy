@@ -15,7 +15,8 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from cav import config, daemon, workspace
+from cav import config, constants, daemon, workspace
+from cav.constants import DAEMON_BASE_PORT, HOST_SHARED_REMOTE
 
 # Use a high base port for tests to avoid conflicts with running agents.
 TEST_DAEMON_BASE_PORT = 19400
@@ -42,8 +43,8 @@ class TestDaemon(unittest.TestCase):
 
         os.environ["CODING_CAVE_DATA_DIR"] = str(self.data_dir)
         config.DATA_DIR = self.data_dir
-        self._orig_base_port = config.DAEMON_BASE_PORT
-        config.DAEMON_BASE_PORT = TEST_DAEMON_BASE_PORT
+        self._orig_base_port = constants.DAEMON_BASE_PORT
+        constants.DAEMON_BASE_PORT = TEST_DAEMON_BASE_PORT
 
         self.user_repo.mkdir()
         git("init", "-b", "main", cwd=self.user_repo)
@@ -65,16 +66,16 @@ class TestDaemon(unittest.TestCase):
 
     def tearDown(self):
         daemon.stop(self.daemon_proc, self.daemon_dir)
-        config.DAEMON_BASE_PORT = self._orig_base_port
+        constants.DAEMON_BASE_PORT = self._orig_base_port
         shutil.rmtree(self.tmpdir)
 
     def _ws_with_daemon_remote(self, agent_id):
         """Create workspace and point remote to daemon."""
-        ws = workspace.create(self.user_repo, agent_id)
+        ws, _ = workspace.create(self.user_repo, agent_id)
         git("config", "user.email", f"{agent_id}@test.com", cwd=ws)
         git("config", "user.name", f"Agent {agent_id}", cwd=ws)
         url = daemon.remote_url(agent_id, self.slug)
-        git("remote", "set-url", config.HOST_SHARED_REMOTE, url, cwd=ws)
+        git("remote", "set-url", HOST_SHARED_REMOTE, url, cwd=ws)
         return ws
 
     def test_fetch_via_daemon(self):

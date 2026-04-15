@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 from . import config, git, registry
+from .constants import CAVE_SHARED_REMOTE
 
 
 def install_hooks(shared: Path):
@@ -54,7 +55,7 @@ def _push_shared_branches(base: Path):
     for branch in branches.splitlines():
         if config.parse_dev_branch(branch):
             continue
-        git.git("push", "--no-set-upstream", config.CAVE_SHARED_REMOTE, branch,
+        git.git("push", "--no-set-upstream", CAVE_SHARED_REMOTE, branch,
                 cwd=base, echo=False, check=False, capture=True)
 
 
@@ -99,17 +100,16 @@ def init(path: str):
         return
 
     # Check for conflicting remote before creating anything
-    r = git.git("remote", "get-url", config.CAVE_SHARED_REMOTE,
+    r = git.git("remote", "get-url", CAVE_SHARED_REMOTE,
                 cwd=base, check=False, capture=True, echo=False)
     if r.returncode == 0:
         raise SystemExit(
-            f"Remote '{config.CAVE_SHARED_REMOTE}' already exists, pointing to:\n"
+            f"Remote '{CAVE_SHARED_REMOTE}' already exists, pointing to:\n"
             f"  {r.stdout.strip()}\n"
-            f"Remove it first: git remote remove {config.CAVE_SHARED_REMOTE}")
+            f"Remove it first: git remote remove {CAVE_SHARED_REMOTE}")
 
     _require_commits(base)
 
-    # Create bare repo
     cav.mkdir(parents=True, exist_ok=True)
     git.git("init", "--bare", str(shared), echo=False)
 
@@ -121,7 +121,7 @@ def init(path: str):
     install_hooks(shared)
 
     # Add shared remote
-    git.git("remote", "add", config.CAVE_SHARED_REMOTE, str(shared), cwd=base, echo=False)
+    git.git("remote", "add", CAVE_SHARED_REMOTE, str(shared), cwd=base, echo=False)
 
     _warn_dirty(base)
     _push_shared_branches(base)

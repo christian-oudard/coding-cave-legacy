@@ -5,6 +5,7 @@ jail.nix-generated sandbox binary, and launches it. The sandbox binary
 handles bwrap args, /etc, SSL certs, PATH, and entry script.
 """
 
+import logging
 import os
 import shutil
 import signal
@@ -17,8 +18,9 @@ import time
 from pathlib import Path
 
 from . import config, daemon, git, registry, user_env
+from .constants import CAVE_SHARED_REMOTE, HOST_SHARED_REMOTE, VERSION
 
-log = config.log
+log = logging.getLogger("cav")
 
 GIT_WRAPPER = """\
 #!/bin/sh
@@ -827,38 +829,38 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
 
     # Migrate old workspaces: rename "cave" -> "host-cave" if needed.
     for ws, _, _ in workspaces:
-        r = git.git("remote", "get-url", config.HOST_SHARED_REMOTE, cwd=ws,
+        r = git.git("remote", "get-url", HOST_SHARED_REMOTE, cwd=ws,
                     echo=False, check=False, capture=True)
         if r.returncode != 0:
-            git.git("remote", "rename", config.CAVE_SHARED_REMOTE, config.HOST_SHARED_REMOTE,
+            git.git("remote", "rename", CAVE_SHARED_REMOTE, HOST_SHARED_REMOTE,
                     cwd=ws, echo=False, check=False, capture=True)
 
     # Update workspace remotes to use git:// via daemon (localhost for
     # host-side sync, then switch to slirp address for inside the namespace)
     for ws, _, slug in workspaces:
         url = daemon.remote_url(agent_id, slug)
-        git.git("remote", "set-url", config.HOST_SHARED_REMOTE, url,
+        git.git("remote", "set-url", HOST_SHARED_REMOTE, url,
                 cwd=ws, echo=False)
 
     # Sync: fetch latest and fast-forward local base branches
     log.info("syncing workspace branches...")
     for ws, _, _ in workspaces:
-        git.git("fetch", config.HOST_SHARED_REMOTE, cwd=ws, echo=False, check=False,
+        git.git("fetch", HOST_SHARED_REMOTE, cwd=ws, echo=False, check=False,
                 capture=True)
         current = git.current_branch(cwd=ws)
-        for branch in git.remote_branches(config.HOST_SHARED_REMOTE, cwd=ws):
+        for branch in git.remote_branches(HOST_SHARED_REMOTE, cwd=ws):
             if config.parse_dev_branch(branch):
                 continue
             if branch == current:
                 continue  # Can't force-update the checked-out branch
-            remote_ref = f"{config.HOST_SHARED_REMOTE}/{branch}"
+            remote_ref = f"{HOST_SHARED_REMOTE}/{branch}"
             git.git("branch", "-f", branch, remote_ref, cwd=ws,
                     echo=False, check=False, capture=True)
 
     # Now set the remote to the slirp-reachable address for inside the namespace
     for ws, _, slug in workspaces:
         url = daemon.remote_url(agent_id, slug, host=gateway)
-        git.git("remote", "set-url", config.HOST_SHARED_REMOTE, url,
+        git.git("remote", "set-url", HOST_SHARED_REMOTE, url,
                 cwd=ws, echo=False)
 
     # Build cave environment (skipped if unchanged)
@@ -885,7 +887,7 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
         if var in os.environ:
             env[var] = os.environ[var]
     env.update({
-        "CODING_CAVE_VERSION": config.VERSION,
+        "CODING_CAVE_VERSION": VERSION,
         "CODING_CAVE_NIX_MERGED": nix_merged,
         "CODING_CAVE_HOME": str(home),
         "CODING_CAVE_WORKSPACES": ws_paths,

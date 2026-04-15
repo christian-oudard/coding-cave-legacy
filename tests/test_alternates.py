@@ -12,6 +12,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from cav import config, workspace
+from cav.constants import HOST_SHARED_REPO_DIR
 
 
 def git(*args, cwd=None):
@@ -48,22 +49,22 @@ class TestAlternates(unittest.TestCase):
 
     def test_alternates_is_relative(self):
         """Alternates uses a relative path so it works on both host and cave."""
-        ws = workspace.create(self.user_repo, "1")
+        ws, _ = workspace.create(self.user_repo, "1")
 
         alternates = ws / ".git" / "objects" / "info" / "alternates"
         alt_path = alternates.read_text().strip()
 
         self.assertFalse(alt_path.startswith("/"),
                          f"alternates should be relative: {alt_path}")
-        self.assertIn(".coding-cave/cave-shared.git/objects", alt_path)
+        self.assertIn(f".coding-cave/{HOST_SHARED_REPO_DIR}/objects", alt_path)
 
     def test_alternates_resolves_on_host(self):
         """Relative alternates resolve to the shared repo objects on the host."""
-        ws = workspace.create(self.user_repo, "1")
+        ws, _ = workspace.create(self.user_repo, "1")
         shared = config.shared_repo_path(self.user_repo)
 
         # The mount-point directory should have a symlink to real objects.
-        mount_point = ws / ".coding-cave" / "cave-shared.git"
+        mount_point = ws / ".coding-cave" / HOST_SHARED_REPO_DIR
         self.assertTrue(mount_point.is_dir())
         objects_link = mount_point / "objects"
         self.assertTrue(objects_link.is_symlink())
@@ -71,7 +72,7 @@ class TestAlternates(unittest.TestCase):
 
     def test_objects_accessible_via_alternates(self):
         """Git operations in the shared clone can access objects from the bare repo."""
-        ws = workspace.create(self.user_repo, "1")
+        ws, _ = workspace.create(self.user_repo, "1")
 
         # The clone should see the same history as the bare repo
         log = subprocess.run(
@@ -82,7 +83,7 @@ class TestAlternates(unittest.TestCase):
 
     def test_coding_cave_dir_excluded(self):
         """The .coding-cave mount-point directory is excluded from git tracking."""
-        ws = workspace.create(self.user_repo, "1")
+        ws, _ = workspace.create(self.user_repo, "1")
 
         result = subprocess.run(
             ["git", "status", "--porcelain"], cwd=ws,
@@ -91,10 +92,10 @@ class TestAlternates(unittest.TestCase):
         self.assertNotIn(".coding-cave", result.stdout)
 
     def test_bwrap_mount_point_exists(self):
-        """The .coding-cave/cave-shared.git dir exists as a bwrap mount target."""
-        ws = workspace.create(self.user_repo, "1")
+        """The HOST_SHARED_REPO_DIR dir exists as a bwrap mount target."""
+        ws, _ = workspace.create(self.user_repo, "1")
 
-        mount_point = ws / ".coding-cave" / "cave-shared.git"
+        mount_point = ws / ".coding-cave" / HOST_SHARED_REPO_DIR
         self.assertTrue(mount_point.is_dir())
         # Must be a real directory (not a symlink) for bwrap --ro-bind.
         self.assertFalse(mount_point.is_symlink())

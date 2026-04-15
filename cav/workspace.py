@@ -9,6 +9,7 @@ import subprocess
 from pathlib import Path
 
 from . import config, git
+from .constants import AGENT_ID_RE, CAVE_SHARED_REMOTE, HOST_SHARED_REMOTE, HOST_SHARED_REPO_DIR
 
 
 def _repo_is_empty(path: Path) -> bool:
@@ -17,9 +18,9 @@ def _repo_is_empty(path: Path) -> bool:
     return r.returncode != 0
 
 
-def create(base: Path, agent_id: str) -> Path:
-    """Create a workspace for an agent. Returns the clone path."""
-    if not config.AGENT_ID_RE.match(agent_id):
+def create(base: Path, agent_id: str) -> tuple[Path, Path]:
+    """Create a workspace for an agent. Returns (clone_path, shared_repo)."""
+    if not AGENT_ID_RE.match(agent_id):
         raise SystemExit(
             f"Invalid agent ID '{agent_id}'. Must be a number (e.g. 1, 2, 3)."
         )
@@ -33,9 +34,10 @@ def create(base: Path, agent_id: str) -> Path:
 
     slug = config.project_slug(base)
     ws_path = config.worktree_dir(slug, agent_id)
+    shared = config.shared_repo_path(base)
 
     if ws_path.exists():
-        return ws_path
+        return ws_path, shared
 
     # "HEAD" means detached HEAD, which is not a valid base.
     if base_name == "HEAD":
@@ -45,7 +47,6 @@ def create(base: Path, agent_id: str) -> Path:
         )
 
     ws_path.parent.mkdir(parents=True, exist_ok=True)
-    shared = config.shared_repo_path(base)
 
     # Ensure the shared repo accepts pushes from shallow clones.
     git.git("config", "receive.shallowUpdate", "true",
@@ -61,7 +62,7 @@ def create(base: Path, agent_id: str) -> Path:
         for branch in branches.splitlines():
             if config.parse_dev_branch(branch):
                 continue
-            git.git("push", "--no-set-upstream", config.CAVE_SHARED_REMOTE, branch,
+            git.git("push", "--no-set-upstream", CAVE_SHARED_REMOTE, branch,
                     cwd=base, echo=False, check=False, capture=True)
 
     # Lightweight clone sharing objects with the bare repo
@@ -71,29 +72,29 @@ def create(base: Path, agent_id: str) -> Path:
     # git clone --shared writes a host-absolute path in alternates, which
     # won't resolve inside the cave (different mount namespace).  We create
     # a mount-point directory with a symlink for host access, then use a
-    # relative alternates path.  Inside the cave, bwrap overlays the real
-    # shared repo on the mount-point directory, hiding the symlink.
-    mount_point = ws_path / ".coding-cave" / "cave-shared.git"
+    # relative alternates path.  Inside the cave, bwrap mounts the real
+    # shared repo at HOST_SHARED_REPO_DIR (read-only), hiding the symlink.
+    mount_point = ws_path / ".coding-cave" / HOST_SHARED_REPO_DIR
     mount_point.mkdir(parents=True)
     (mount_point / "objects").symlink_to(shared / "objects")
     alt = ws_path / ".git" / "objects" / "info" / "alternates"
-    alt.write_text("../../.coding-cave/cave-shared.git/objects\n")
+    alt.write_text(f"../../.coding-cave/{HOST_SHARED_REPO_DIR}/objects\n")
     exclude = ws_path / ".git" / "info" / "exclude"
     with exclude.open("a") as f:
         f.write("/.coding-cave\n")
 
     # Rename origin -> host-cave (points to the shared remote)
-    git.git("remote", "rename", "origin", config.HOST_SHARED_REMOTE, cwd=ws_path, echo=False, capture=True)
+    git.git("remote", "rename", "origin", HOST_SHARED_REMOTE, cwd=ws_path, echo=False, capture=True)
 
     dev = config.dev_branch(base_name, agent_id)
 
     if empty:
         # No commits yet, create an orphan branch so the agent can make the first commit.
         git.git("checkout", "--orphan", dev, cwd=ws_path, echo=False, capture=True)
-        return ws_path
+        return ws_path, shared
 
-    remote_ref = f"refs/remotes/{config.HOST_SHARED_REMOTE}/{dev}"
-    base_ref = f"refs/remotes/{config.HOST_SHARED_REMOTE}/{base_name}"
+    remote_ref = f"refs/remotes/{HOST_SHARED_REMOTE}/{dev}"
+    base_ref = f"refs/remotes/{HOST_SHARED_REMOTE}/{base_name}"
 
     # If the dev branch already exists on the remote (re-creating a
     # workspace for a continuing agent), check it out with tracking.
@@ -105,7 +106,7 @@ def create(base: Path, agent_id: str) -> Path:
     else:
         git.git("checkout", "-b", dev, base_ref, cwd=ws_path,
                 echo=False, capture=True)
-        r = git.git("push", config.HOST_SHARED_REMOTE, dev,
+        r = git.git("push", HOST_SHARED_REMOTE, dev,
                     cwd=ws_path, echo=False, capture=True, check=False)
         if r.returncode and not config.inside_cave():
             msg = (r.stderr or r.stdout or "").strip()
@@ -114,4 +115,4 @@ def create(base: Path, agent_id: str) -> Path:
                 f"{msg}"
             )
 
-    return ws_path
+    return ws_path, shared

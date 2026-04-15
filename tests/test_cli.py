@@ -332,7 +332,7 @@ class TestInitNewProject(unittest.TestCase):
         from cav.approve import approve
         config.DATA_DIR = Path(self.tmpdir) / "data"
         init(str(project))
-        ws = workspace.create(project, "1")
+        ws, _ = workspace.create(project, "1")
         # Agent adds a file
         git("config", "user.email", "test@test.com", cwd=ws)
         git("config", "user.name", "Test", cwd=ws)

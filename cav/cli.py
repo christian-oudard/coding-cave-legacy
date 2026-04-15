@@ -10,6 +10,7 @@ from pathlib import Path
 import click
 
 from . import completion as _completion, config, git, registry
+from .constants import AGENT_ID_RE, CAVE_SHARED_REMOTE, HOST_SHARED_REPO_DIR, VERSION
 
 _completion.register()
 
@@ -34,7 +35,7 @@ def resolve_target(args: tuple[str, ...],
 
     for arg in args:
         candidate = _parse_agent_id(arg)
-        if config.AGENT_ID_RE.match(candidate):
+        if AGENT_ID_RE.match(candidate):
             if agent_id is not None:
                 raise SystemExit(f"Multiple agent IDs given: {agent_id}, {candidate}")
             agent_id = candidate
@@ -77,17 +78,16 @@ def find_repo_root() -> Path:
 
 
 def require_init(base: Path):
-    if config.shared_repo_path(base).exists():
+    shared = config.shared_repo_path(base)
+    if shared.exists():
         if not registry.project_path(config.project_slug(base)):
-            raise SystemExit("Project not registered. Run: cav init")
+            raise SystemExit(
+                f"Shared repo exists but project not registered. Run: cav init")
         return
-    # Inside a cave the bare repo is on the host; check for the shared remote instead.
-    if config.inside_cave():
-        try:
-            git.git_output("remote", "get-url", config.CAVE_SHARED_REMOTE, cwd=base)
-            return
-        except Exception:
-            pass
+    # Inside a cave, the host's shared repo is at host-cave-shared.git
+    # (read-only). Our own cave-shared.git is created by cav init.
+    if config.inside_cave() and (config.cav_dir(base) / HOST_SHARED_REPO_DIR).exists():
+        return
     raise SystemExit("Coding Cave not initialized. Run: cav init")
 
 
@@ -149,7 +149,7 @@ def agent(continue_agent, resume_agent, extra_projects, host_ports, prompt):
 
     if resume_agent:
         aid = resume_agent.lstrip("@").split("@")[-1]
-        if config.AGENT_ID_RE.match(aid):
+        if AGENT_ID_RE.match(aid):
             agent_id, session_id, resuming = registry.resolve_continue(base, aid)
         else:
             # Try as a session UUID
@@ -202,8 +202,7 @@ def agent(continue_agent, resume_agent, extra_projects, host_ports, prompt):
 
     workspaces = []
     for project_base, slug in projects:
-        ws = create(project_base, agent_id)
-        shared = config.shared_repo_path(project_base)
+        ws, shared = create(project_base, agent_id)
         workspaces.append((ws, shared, slug))
 
     name = registry.display_name(base, agent_id)
@@ -274,9 +273,9 @@ def _auto_cleanup_if_clean(base, agent_id):
         if not config.shared_repo_path(proj_base).is_dir():
             continue  # shared repo gone, nothing to preserve
         try:
-            git.git("fetch", config.CAVE_SHARED_REMOTE, cwd=proj_base, echo=False,
+            git.git("fetch", CAVE_SHARED_REMOTE, cwd=proj_base, echo=False,
                     check=False, capture=True)
-            branches = git.remote_branches(config.CAVE_SHARED_REMOTE, cwd=proj_base)
+            branches = git.remote_branches(CAVE_SHARED_REMOTE, cwd=proj_base)
         except Exception as e:
             print(f"Warning: keeping {name}: "
                   f"git fetch failed for {slug}: {e}")
@@ -287,8 +286,8 @@ def _auto_cleanup_if_clean(base, agent_id):
                 continue
             all_agent_branches.append((proj_base, b))
             base_name = config.resolve_base(b)
-            remote_dev = f"{config.CAVE_SHARED_REMOTE}/{b}"
-            base_ref = f"{config.CAVE_SHARED_REMOTE}/{base_name}"
+            remote_dev = f"{CAVE_SHARED_REMOTE}/{b}"
+            base_ref = f"{CAVE_SHARED_REMOTE}/{base_name}"
             try:
                 if not git.has_merge_base(remote_dev, base_ref, cwd=proj_base):
                     print(f"Warning: keeping {name}: "
@@ -397,7 +396,7 @@ def remove_agent(agent_id):
     from .status import _remove_agent
 
     aid = agent_id.lstrip("@").split("@")[-1]
-    if not config.AGENT_ID_RE.match(aid):
+    if not AGENT_ID_RE.match(aid):
         raise SystemExit(f"Invalid agent ID '{agent_id}'. Use a number (e.g. 3).")
 
     if aid not in registry.all_agent_ids():
@@ -416,7 +415,7 @@ def remove_agent(agent_id):
         name = registry.display_name(base, aid)
         raise SystemExit(f"{name} is running. Stop it first.")
 
-    branches = git.remote_branches(config.CAVE_SHARED_REMOTE, cwd=base)
+    branches = git.remote_branches(CAVE_SHARED_REMOTE, cwd=base)
     agent_branches = [
         b for b in branches
         if (parsed := config.parse_dev_branch(b)) and parsed[1] == aid
@@ -427,8 +426,8 @@ def remove_agent(agent_id):
         if not parsed:
             continue
         base_name = parsed[0]
-        remote_dev = f"{config.CAVE_SHARED_REMOTE}/{b}"
-        base_ref = f"{config.CAVE_SHARED_REMOTE}/{base_name}"
+        remote_dev = f"{CAVE_SHARED_REMOTE}/{b}"
+        base_ref = f"{CAVE_SHARED_REMOTE}/{base_name}"
         try:
             if git.has_merge_base(remote_dev, base_ref, cwd=base):
                 commits = git.cherry_undelivered(base_ref, remote_dev, cwd=base)
@@ -462,7 +461,7 @@ def review(agent_id):
     base = find_repo_root()
     require_init(base)
     aid = agent_id.lstrip("@").split("@")[-1]
-    if not config.AGENT_ID_RE.match(aid):
+    if not AGENT_ID_RE.match(aid):
         raise SystemExit(f"Invalid agent ID '{agent_id}'. Use a number (e.g. 3).")
     from .review import review as _review
     _review(base, aid)
@@ -555,9 +554,9 @@ def version():
     if ts.isdigit():
         from datetime import datetime
         dt = datetime.fromtimestamp(int(ts))
-        print(f"cav {config.VERSION} ({dt:%Y-%m-%d %H:%M})")
+        print(f"cav {VERSION} ({dt:%Y-%m-%d %H:%M})")
     else:
-        print(f"cav {config.VERSION} ({ts})")
+        print(f"cav {VERSION} ({ts})")
 
 
 def main():

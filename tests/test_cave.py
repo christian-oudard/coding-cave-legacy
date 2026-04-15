@@ -162,6 +162,7 @@ class TestSubcaveLaunch(unittest.TestCase):
             'NIXHASH: nix-store --query --hash /nix/store/*-bash-5* 2>/dev/null | head -1\n'
             'PROJECT: ls /projects/coding-cave/CLAUDE.md 2>&1\n'
             'NIXDEV: nix develop /projects/coding-cave --command python3 -c "import click; print(click.__name__)" 2>&1 | tail -1\n'
+            'STORETYPE: stat -f -c %T /nix/store\n'
         )
 
     def _get(self, label):
@@ -197,6 +198,10 @@ class TestSubcaveLaunch(unittest.TestCase):
     def test_nix_develop(self):
         """Subcave can run nix develop and import devShell packages."""
         self.assertEqual(self._get("NIXDEV"), "click")
+
+    def test_overlay_stacked(self):
+        """Subcave /nix/store is an overlayfs (stacked on parent overlay)."""
+        self.assertEqual(self._get("STORETYPE"), "overlayfs")
 
 
 if __name__ == "__main__":

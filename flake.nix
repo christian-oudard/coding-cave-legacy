@@ -142,11 +142,12 @@
             # Shared repos (read-only for alternates object access).
             # Mount under /projects/<slug>/.coding-cave/ instead of at
             # the host-absolute path, to avoid leaking the host home dir.
+            # Must match config.HOST_SHARED_REPO_DIR.
             (add-runtime ''
               IFS=: read -ra _repos <<< "''${CODING_CAVE_SHARED_REPOS:-}"
               IFS=: read -ra _slugs <<< "''${CODING_CAVE_PROJECT_SLUGS:-}"
               for i in "''${!_repos[@]}"; do
-                RUNTIME_ARGS+=(--ro-bind "''${_repos[$i]}" "/projects/''${_slugs[$i]}/.coding-cave/cave-shared.git")
+                RUNTIME_ARGS+=(--ro-bind "''${_repos[$i]}" "/projects/''${_slugs[$i]}/.coding-cave/host-cave-shared.git")
               done
             '')
 
@@ -323,7 +324,7 @@
                 --replace-fail "#!/usr/bin/env python3" "#!${python}/bin/python3"
 
               # Embed version and sandbox binary path
-              substituteInPlace $out/lib/cav/config.py \
+              substituteInPlace $out/lib/cav/constants.py \
                 --replace-fail "@VERSION@" "${self.shortRev or "dev"}"
               substituteInPlace $out/lib/cav/cli.py \
                 --replace-fail "@VERSION_DATE@" "${toString (self.lastModified or 0)}"

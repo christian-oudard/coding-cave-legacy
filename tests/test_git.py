@@ -20,6 +20,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from cav import config, registry, workspace
+from cav.constants import CAVE_SHARED_REMOTE, HOST_SHARED_REMOTE, HOST_SHARED_REPO_DIR
 from tests import find_agent_by_session
 
 
@@ -114,7 +115,7 @@ class TestCAV(unittest.TestCase):
 
     def _create_agent(self, name):
         """Create agent workspace, configure git identity. Returns workspace path."""
-        ws = workspace.create(self.user_repo, name)
+        ws, _ = workspace.create(self.user_repo, name)
         git("config", "user.email", f"{name}@test.com", cwd=ws)
         git("config", "user.name", name, cwd=ws)
         return ws
@@ -254,7 +255,7 @@ class TestCAV(unittest.TestCase):
         """Launching from a dev branch targets the underlying base branch."""
         self._init()
         git("checkout", "-b", "agent-1/main", cwd=self.user_repo)
-        ws = workspace.create(self.user_repo, "2")
+        ws, _ = workspace.create(self.user_repo, "2")
         # Should create agent-2/main (not agent-2/agent-1/main)
         branch = git_out("rev-parse", "--abbrev-ref", "HEAD", cwd=ws)
         self.assertEqual(branch, "agent-2/main")
@@ -1643,7 +1644,7 @@ class TestCAV(unittest.TestCase):
         git("add", "work.txt", cwd=ws)
         git("commit", "-m", "agent work", cwd=ws)
         ab = config.dev_branch("main", aid)
-        git("push", config.HOST_SHARED_REMOTE, ab,
+        git("push", HOST_SHARED_REMOTE, ab,
             f"--push-option=agent={aid}", cwd=ws)
 
         # Agent exits
@@ -1652,7 +1653,7 @@ class TestCAV(unittest.TestCase):
         # User's project dir has NOT fetched. Verify it can't see the
         # dev branch locally.
         stale_branches = cavgit.remote_branches(
-            config.CAVE_SHARED_REMOTE, cwd=self.user_repo)
+            CAVE_SHARED_REMOTE, cwd=self.user_repo)
         agent_visible = any(
             config.parse_dev_branch(b) and
             config.parse_dev_branch(b)[1] == aid
@@ -1663,10 +1664,10 @@ class TestCAV(unittest.TestCase):
                          "before fetching")
 
         # After fetching, the dev branch becomes visible
-        cavgit.git("fetch", config.CAVE_SHARED_REMOTE, cwd=self.user_repo,
+        cavgit.git("fetch", CAVE_SHARED_REMOTE, cwd=self.user_repo,
                    echo=False, check=False, capture=True)
         fresh_branches = cavgit.remote_branches(
-            config.CAVE_SHARED_REMOTE, cwd=self.user_repo)
+            CAVE_SHARED_REMOTE, cwd=self.user_repo)
         agent_visible_after = any(
             config.parse_dev_branch(b) and
             config.parse_dev_branch(b)[1] == aid
@@ -1723,10 +1724,10 @@ class TestCAV(unittest.TestCase):
         content = alt.read_text().strip()
         self.assertFalse(content.startswith("/"),
                          f"alternates should be relative, got: {content}")
-        self.assertIn(".coding-cave/cave-shared.git/objects", content)
+        self.assertIn(f".coding-cave/{HOST_SHARED_REPO_DIR}/objects", content)
 
         # The mount-point directory should exist with symlink to real objects.
-        mount_point = ws / ".coding-cave" / "cave-shared.git"
+        mount_point = ws / ".coding-cave" / HOST_SHARED_REPO_DIR
         self.assertTrue(mount_point.is_dir())
         objects_link = mount_point / "objects"
         self.assertTrue(objects_link.is_symlink())
@@ -1761,7 +1762,7 @@ class TestGitWrapper(unittest.TestCase):
         config.DATA_DIR = self.data_dir
         from cav import init as cav_init
         cav_init.init(str(self.user_repo))
-        self.a1 = workspace.create(self.user_repo, "1")
+        self.a1, _ = workspace.create(self.user_repo, "1")
         git("config", "user.email", "1@test.com", cwd=self.a1)
         git("config", "user.name", "Agent 1", cwd=self.a1)
         self._install_wrapper()
@@ -2047,7 +2048,7 @@ class TestShallowClone(unittest.TestCase):
         init(str(self.user_repo))
 
     def _create_agent(self, name):
-        ws = workspace.create(self.user_repo, name)
+        ws, _ = workspace.create(self.user_repo, name)
         git("config", "user.email", f"{name}@test.com", cwd=ws)
         git("config", "user.name", name, cwd=ws)
         return ws

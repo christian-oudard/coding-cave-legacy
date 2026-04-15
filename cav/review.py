@@ -4,12 +4,13 @@ import subprocess
 from pathlib import Path
 
 from . import config, git
+from .constants import CAVE_SHARED_REMOTE
 
 
 def review(base: Path, agent_id: str):
-    git.git("fetch", "--prune", config.CAVE_SHARED_REMOTE, cwd=base, **config.v())
+    git.git("fetch", "--prune", CAVE_SHARED_REMOTE, cwd=base, **config.v())
 
-    branches = git.remote_branches(config.CAVE_SHARED_REMOTE, cwd=base)
+    branches = git.remote_branches(CAVE_SHARED_REMOTE, cwd=base)
     agent_branch = None
     for b in branches:
         parsed = config.parse_dev_branch(b)
@@ -20,9 +21,9 @@ def review(base: Path, agent_id: str):
     if not agent_branch:
         raise SystemExit(f"No agent branch found for agent {agent_id}.")
 
-    remote_ref = f"{config.CAVE_SHARED_REMOTE}/{agent_branch}"
+    remote_ref = f"{CAVE_SHARED_REMOTE}/{agent_branch}"
     target = config.resolve_base(agent_branch)
-    remote_target = f"{config.CAVE_SHARED_REMOTE}/{target}"
+    remote_target = f"{CAVE_SHARED_REMOTE}/{target}"
 
     current = git.current_branch(cwd=base)
     try:

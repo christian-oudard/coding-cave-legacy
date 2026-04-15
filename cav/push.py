@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 from . import config, git, registry
+from .constants import CAVE_SHARED_REMOTE, HOST_SHARED_REMOTE
 
 
 def push(base: Path, force: bool = False):
@@ -47,7 +48,7 @@ def push_base(base: Path, base_branch: str, refspec: str | None = None,
     """Push to a base branch on the shared remote and rebase dependent agents."""
     if refspec is None:
         refspec = base_branch
-    args = ["push", "--no-set-upstream", config.CAVE_SHARED_REMOTE, refspec]
+    args = ["push", "--no-set-upstream", CAVE_SHARED_REMOTE, refspec]
     if force:
         args.insert(1, "--force")
     r = git.git(*args, cwd=base, **config.v())
@@ -57,7 +58,7 @@ def push_base(base: Path, base_branch: str, refspec: str | None = None,
 
 def _push_dev(base: Path, branch: str, agent_id: str, force: bool):
     """Push a dev branch and sync the agent worktree."""
-    args = ["push", "--no-set-upstream", config.CAVE_SHARED_REMOTE, branch]
+    args = ["push", "--no-set-upstream", CAVE_SHARED_REMOTE, branch]
     if force:
         args.insert(1, "--force")
     r = git.git(*args, cwd=base, **config.v())
@@ -69,7 +70,7 @@ def _push_dev(base: Path, branch: str, agent_id: str, force: bool):
 
     shared = config.shared_repo_path(base)
     git.git("fetch", str(shared),
-            f"+refs/heads/{branch}:refs/remotes/{config.HOST_SHARED_REMOTE}/{branch}",
+            f"+refs/heads/{branch}:refs/remotes/{HOST_SHARED_REMOTE}/{branch}",
             cwd=ws, echo=False, check=False, capture=True)
 
     try:
@@ -91,7 +92,7 @@ def _sync_agent_worktree(ws: Path, branch: str, force: bool):
     Preserves uncommitted work via stash. If the stash pop conflicts,
     the conflict markers are left for the agent to resolve.
     """
-    remote_ref = f"{config.HOST_SHARED_REMOTE}/{branch}"
+    remote_ref = f"{HOST_SHARED_REMOTE}/{branch}"
     q = dict(echo=False, check=False, capture=True)
 
     # Stash uncommitted changes
@@ -146,10 +147,10 @@ def _rebase_agents(base: Path, base_branch: str):
             continue
 
         git.git("fetch", str(shared),
-                f"+refs/heads/{base_branch}:refs/remotes/{config.HOST_SHARED_REMOTE}/{base_branch}",
+                f"+refs/heads/{base_branch}:refs/remotes/{HOST_SHARED_REMOTE}/{base_branch}",
                 cwd=ws, echo=False, check=False, capture=True)
 
-        r = git.git("rebase", f"{config.HOST_SHARED_REMOTE}/{base_branch}",
+        r = git.git("rebase", f"{HOST_SHARED_REMOTE}/{base_branch}",
                     cwd=ws, check=False, capture=True, echo=False)
         if r.returncode != 0:
             git.git("rebase", "--abort", cwd=ws,

@@ -25,7 +25,8 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from cav import config, daemon, workspace
+from cav import config, constants, daemon, workspace
+from cav.constants import DAEMON_BASE_PORT, HOST_SHARED_REMOTE
 from cav.handler import parse_request, validate_service, resolve_repo
 
 TEST_DAEMON_BASE_PORT = 19500  # distinct from test_daemon's 19400
@@ -136,12 +137,12 @@ class DaemonSecurityBase(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls._orig_base_port = config.DAEMON_BASE_PORT
-        config.DAEMON_BASE_PORT = TEST_DAEMON_BASE_PORT
+        cls._orig_base_port = constants.DAEMON_BASE_PORT
+        constants.DAEMON_BASE_PORT = TEST_DAEMON_BASE_PORT
 
     @classmethod
     def tearDownClass(cls):
-        config.DAEMON_BASE_PORT = cls._orig_base_port
+        constants.DAEMON_BASE_PORT = cls._orig_base_port
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
@@ -175,11 +176,11 @@ class DaemonSecurityBase(unittest.TestCase):
 
     def _ws(self, agent_id="1"):
         """Create workspace with daemon remote."""
-        ws = workspace.create(self.user_repo, agent_id)
+        ws, _ = workspace.create(self.user_repo, agent_id)
         git("config", "user.email", f"{agent_id}@test.com", cwd=ws)
         git("config", "user.name", f"Agent {agent_id}", cwd=ws)
         url = daemon.remote_url(agent_id, self.slug)
-        git("remote", "set-url", config.HOST_SHARED_REMOTE, url, cwd=ws)
+        git("remote", "set-url", HOST_SHARED_REMOTE, url, cwd=ws)
         return ws
 
     def raw_pkt(self, data: bytes, port: int | None = None) -> int:

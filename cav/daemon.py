@@ -16,7 +16,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from . import config
+from . import config, constants
 
 
 def _find_bin(name: str) -> str:
@@ -83,7 +83,7 @@ def stop(proc: subprocess.Popen, base_dir: Path):
 
 def _agent_port(agent_id: str) -> int:
     """Port for an agent's git daemon."""
-    return config.DAEMON_BASE_PORT + int(agent_id)
+    return constants.DAEMON_BASE_PORT + int(agent_id)
 
 
 def remote_url(agent_id: str, slug: str, host: str = "127.0.0.1") -> str:

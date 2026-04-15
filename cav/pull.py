@@ -3,6 +3,7 @@
 from pathlib import Path
 
 from . import config, git
+from .constants import CAVE_SHARED_REMOTE
 
 
 def pull(base: Path, force: bool = False):
@@ -22,11 +23,11 @@ def pull(base: Path, force: bool = False):
     # Objects are shared via alternates; this is mostly a ref update.
     _sync_agent_to_shared(base, slug, local_branch, agent_id)
 
-    remote_dev = f"{config.CAVE_SHARED_REMOTE}/{local_branch}"
-    remote_base = f"{config.CAVE_SHARED_REMOTE}/{base_name}"
+    remote_dev = f"{CAVE_SHARED_REMOTE}/{local_branch}"
+    remote_base = f"{CAVE_SHARED_REMOTE}/{base_name}"
 
     # Step 2: Fetch from shared remote to host.
-    git.git("fetch", "--prune", config.CAVE_SHARED_REMOTE, cwd=base, **config.v())
+    git.git("fetch", "--prune", CAVE_SHARED_REMOTE, cwd=base, **config.v())
 
     try:
         git.git_output("rev-parse", remote_dev, cwd=base)

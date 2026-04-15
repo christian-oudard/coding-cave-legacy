@@ -1,20 +1,10 @@
-"""Constants and naming helpers for Coding Cave."""
+"""Configurable globals and helpers for Coding Cave."""
 
-import logging
 import os
 import re
 from pathlib import Path
 
-log = logging.getLogger("cav")
-
-VERSION = "@VERSION@"
-
-CAVE_SHARED_REMOTE = "cave"
-HOST_SHARED_REMOTE = "host-cave"
-AGENT_ID_RE = re.compile(r"^\d+$")
-# agent-<id>/<base>, e.g. agent-1/develop
-AGENT_BRANCH_RE = re.compile(r"^agent-(\d+)/(.+)$")
-DAEMON_BASE_PORT = 61000
+from .constants import AGENT_BRANCH_RE, SHARED_REPO_DIR
 
 DATA_DIR = Path(os.environ.get(
     "CODING_CAVE_DATA_DIR",
@@ -59,7 +49,7 @@ def cav_dir(base: Path) -> Path:
 
 
 def shared_repo_path(base: Path) -> Path:
-    return cav_dir(base) / "cave-shared.git"
+    return cav_dir(base) / SHARED_REPO_DIR
 
 
 # -- Data dir paths (global, ~/.local/share/coding-cave/) --

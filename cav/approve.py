@@ -3,17 +3,18 @@
 from pathlib import Path
 
 from . import config, git, push, registry
+from .constants import CAVE_SHARED_REMOTE
 
 
 def approve(base: Path, agent_id: str | None = None, yes: bool = False):
     slug = config.project_slug(base)
 
-    git.git("fetch", "--prune", config.CAVE_SHARED_REMOTE, cwd=base,
+    git.git("fetch", "--prune", CAVE_SHARED_REMOTE, cwd=base,
             **config.v())
 
     # Index all dev branches by agent.
     all_dev = {}  # agent_id -> [(branch, base_name)]
-    for branch in git.remote_branches(config.CAVE_SHARED_REMOTE, cwd=base):
+    for branch in git.remote_branches(CAVE_SHARED_REMOTE, cwd=base):
         parsed = config.parse_dev_branch(branch)
         if parsed:
             aid = parsed[1]
@@ -46,8 +47,8 @@ def approve(base: Path, agent_id: str | None = None, yes: bool = False):
             f"Check out the branch to approve and run: cav approve")
 
     branch, base_name = dev_branches[0]
-    remote_dev = f"{config.CAVE_SHARED_REMOTE}/{branch}"
-    remote_base = f"{config.CAVE_SHARED_REMOTE}/{base_name}"
+    remote_dev = f"{CAVE_SHARED_REMOTE}/{branch}"
+    remote_base = f"{CAVE_SHARED_REMOTE}/{base_name}"
 
     try:
         after_sha = git.git_output("rev-parse", remote_dev, cwd=base)
