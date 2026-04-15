@@ -1,5 +1,6 @@
 """Tests for nix DB seeding and cache pruning logic."""
 
+import os
 import sqlite3
 import sys
 import unittest
@@ -350,6 +351,26 @@ class TestIsolatedSubcaveHomes(unittest.TestCase):
         _, _, merged_a = _nix_overlay_dirs(home)
         _, _, merged_b = _nix_overlay_dirs(home)
         self.assertEqual(merged_a, merged_b)
+
+
+class TestRmtreeReadonly(unittest.TestCase):
+    """Test _rmtree_readonly handles read-only directory trees."""
+
+    def test_removes_nested_readonly_dirs(self):
+        """Deeply nested read-only dirs (like overlayfs work) are removed."""
+        import tempfile
+        from cav.sandbox import _rmtree_readonly
+        root = Path(tempfile.mkdtemp())
+        # Simulate overlayfs work dir: nested dirs with nix store perms.
+        deep = root / "work" / "a" / "b" / "c"
+        deep.mkdir(parents=True)
+        (deep / "file").touch()
+        # Make everything read-only (like nix store: r-xr-xr-x).
+        for dirpath, _dns, _fns in os.walk(root / "work", topdown=False):
+            os.chmod(dirpath, 0o555)
+        _rmtree_readonly(root / "work")
+        self.assertFalse((root / "work").exists())
+        root.rmdir()
 
 
 class TestPruneNixCaches(unittest.TestCase):

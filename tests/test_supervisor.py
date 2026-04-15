@@ -2,7 +2,6 @@
 
 import os
 import stat
-import subprocess
 import time
 import unittest
 from unittest.mock import MagicMock, patch
@@ -10,135 +9,57 @@ from unittest.mock import MagicMock, patch
 from cav import supervisor
 
 
-class TestIsMounted(unittest.TestCase):
-    @patch("subprocess.run")
-    def test_mounted(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=0)
-        self.assertTrue(supervisor._is_mounted("/bin/mountpoint", "/mnt"))
-        mock_run.assert_called_once_with(
-            ["/bin/mountpoint", "-q", "/mnt"], capture_output=True,
-        )
+class TestMountKernelOverlay(unittest.TestCase):
+    """Kernel overlayfs mount function."""
 
-    @patch("subprocess.run")
-    def test_not_mounted(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=1)
-        self.assertFalse(supervisor._is_mounted("/bin/mountpoint", "/mnt"))
+    @patch.object(supervisor._libc, 'mount', return_value=0)
+    def test_success_first_variant(self, mock_mount):
+        supervisor._mount_kernel_overlay("/merged", "/upper", "/work")
+        self.assertEqual(mock_mount.call_count, 1)
+        args = mock_mount.call_args[0]
+        self.assertIn(b"userxattr", args[4])
+        self.assertIn(b"uuid=off", args[4])
 
+    @patch.object(supervisor._libc, 'mount')
+    def test_fallback_to_second_variant(self, mock_mount):
+        # First call fails (uuid=off not supported), second succeeds.
+        mock_mount.side_effect = [-1, 0]
+        supervisor._mount_kernel_overlay("/merged", "/upper", "/work")
+        self.assertEqual(mock_mount.call_count, 2)
+        # Second call should not have uuid=off
+        second_opts = mock_mount.call_args_list[1][0][4]
+        self.assertNotIn(b"uuid=off", second_opts)
+        self.assertIn(b"userxattr", second_opts)
 
-class TestOverlayFunctional(unittest.TestCase):
-    @patch("os.unlink")
-    @patch("os.close")
-    @patch("os.open", return_value=3)
-    def test_functional(self, mock_open, mock_close, mock_unlink):
-        self.assertTrue(supervisor._overlay_functional("/mnt"))
-        mock_open.assert_called_once_with(
-            "/mnt/.overlay_probe", os.O_CREAT | os.O_WRONLY, 0o644,
-        )
-        mock_close.assert_called_once_with(3)
-        mock_unlink.assert_called_once_with("/mnt/.overlay_probe")
-
-    @patch("os.open", side_effect=OSError("Transport endpoint not connected"))
-    def test_dead_mount(self, _):
-        self.assertFalse(supervisor._overlay_functional("/mnt"))
-
-
-class TestUnmount(unittest.TestCase):
-    @patch("subprocess.run")
-    def test_unmount_calls_fusermount(self, mock_run):
-        mock_run.return_value = subprocess.CompletedProcess([], 0)
-        supervisor._unmount("/bin/fusermount3", "/mnt")
-        mock_run.assert_called_once_with(
-            ["/bin/fusermount3", "-u", "/mnt"], capture_output=True, text=True,
-        )
-
-    @patch("subprocess.run")
-    def test_unmount_noop_without_binary(self, mock_run):
-        supervisor._unmount(None, "/mnt")
-        mock_run.assert_not_called()
-
-
-class TestMountOverlay(unittest.TestCase):
-    def _env(self, **overrides):
-        base = {
-            "CODING_CAVE_NS_OVERLAY_MERGED": "/merged",
-            "CODING_CAVE_NS_OVERLAY_UPPER": "/upper",
-            "CODING_CAVE_NS_OVERLAY_WORK": "/work",
-            "CODING_CAVE_NS_FUSE_OVERLAYFS": "/bin/fuse-overlayfs",
-            "CODING_CAVE_NS_MOUNTPOINT": "/bin/mountpoint",
-            "CODING_CAVE_NS_FUSERMOUNT": "/bin/fusermount3",
-        }
-        base.update(overrides)
-        return base
-
-    def test_returns_none_without_merged(self):
-        env = self._env()
-        del env["CODING_CAVE_NS_OVERLAY_MERGED"]
-        self.assertIsNone(supervisor._mount_overlay(env))
-
-    def test_returns_none_without_fuse_bin(self):
-        env = self._env()
-        del env["CODING_CAVE_NS_FUSE_OVERLAYFS"]
-        self.assertIsNone(supervisor._mount_overlay(env))
-
-    @patch.object(supervisor, "_overlay_functional", return_value=True)
-    @patch.object(supervisor, "_is_mounted", return_value=True)
-    def test_skips_when_already_functional(self, mock_mounted, mock_func):
-        self.assertIsNone(supervisor._mount_overlay(self._env()))
-        mock_mounted.assert_called_once()
-        mock_func.assert_called_once()
-
-    @patch.object(supervisor, "_unmount")
-    @patch.object(supervisor, "_overlay_functional", return_value=False)
-    @patch.object(supervisor, "_is_mounted")
-    @patch("subprocess.Popen")
-    def test_remounts_stale_overlay(self, mock_popen, mock_mounted,
-                                    mock_func, mock_unmount):
-        # First call: is_mounted returns True (stale), triggers unmount.
-        # Second call (from poll loop): returns True (newly mounted).
-        mock_mounted.side_effect = [True, True]
-        proc = MagicMock()
-        proc.poll.return_value = None
-        mock_popen.return_value = proc
-
-        result = supervisor._mount_overlay(self._env())
-        self.assertIs(result, proc)
-        mock_unmount.assert_called_once_with("/bin/fusermount3", "/merged")
-
-    @patch.object(supervisor, "_is_mounted", return_value=False)
-    @patch("subprocess.Popen")
-    def test_detects_fuse_crash(self, mock_popen, mock_mounted):
-        proc = MagicMock()
-        proc.poll.side_effect = [None, 1]  # dies on second poll
-        proc.stderr.read.return_value = b"some error"
-        mock_popen.return_value = proc
-
+    @patch.object(supervisor._libc, 'mount', return_value=-1)
+    def test_all_variants_fail(self, mock_mount):
         with self.assertRaises(SystemExit):
-            supervisor._mount_overlay(self._env())
+            supervisor._mount_kernel_overlay("/merged", "/upper", "/work")
+        self.assertEqual(mock_mount.call_count, 2)
 
-    @patch.object(supervisor, "_is_mounted", return_value=False)
-    @patch("time.sleep")
-    @patch("subprocess.Popen")
-    def test_timeout(self, mock_popen, mock_sleep, mock_mounted):
-        proc = MagicMock()
-        proc.poll.return_value = None  # never dies, never mounts
-        mock_popen.return_value = proc
+    @patch.object(supervisor._libc, 'mount', return_value=0)
+    def test_mount_args(self, mock_mount):
+        supervisor._mount_kernel_overlay("/mnt/merged", "/mnt/upper", "/mnt/work")
+        args = mock_mount.call_args[0]
+        self.assertEqual(args[0], b"overlay")
+        self.assertEqual(args[1], b"/mnt/merged")
+        self.assertEqual(args[2], b"overlay")
+        self.assertIn(b"lowerdir=/nix/store", args[4])
+        self.assertIn(b"upperdir=/mnt/upper", args[4])
+        self.assertIn(b"workdir=/mnt/work", args[4])
 
-        with self.assertRaises(SystemExit):
-            supervisor._mount_overlay(self._env())
-        proc.terminate.assert_called_once()
 
-    @patch.object(supervisor, "_is_mounted")
-    @patch("subprocess.Popen")
-    def test_fuse_started_in_foreground_mode(self, mock_popen, mock_mounted):
-        mock_mounted.side_effect = [False, True]  # not mounted, then mounted
-        proc = MagicMock()
-        proc.poll.return_value = None
-        mock_popen.return_value = proc
+class TestUmountKernel(unittest.TestCase):
+    @patch.object(supervisor._libc, 'umount2', return_value=0)
+    def test_success(self, mock_umount):
+        supervisor._umount_kernel("/merged")
+        mock_umount.assert_called_once_with(b"/merged", 2)  # MNT_DETACH
 
-        supervisor._mount_overlay(self._env())
-        args = mock_popen.call_args[0][0]
-        self.assertEqual(args[0], "/bin/fuse-overlayfs")
-        self.assertIn("-f", args)
+    @patch.object(supervisor._libc, 'umount2', return_value=-1)
+    def test_failure_prints_warning(self, mock_umount):
+        # Should not raise, just print warning.
+        supervisor._umount_kernel("/merged")
+        mock_umount.assert_called_once()
 
 
 class TestIsNixLockFile(unittest.TestCase):
@@ -302,6 +223,52 @@ class TestLockWatcher(unittest.TestCase):
 
             self.assertFalse(os.path.exists(
                 os.path.join(upper, "abc.lock")))
+
+
+class TestMain(unittest.TestCase):
+    """Tests for main() overlay mount and cleanup."""
+
+    def _env(self, **overrides):
+        base = {
+            "CODING_CAVE_NS_SYNC_FD": "99",
+            "CODING_CAVE_NS_OVERLAY_MERGED": "/merged",
+            "CODING_CAVE_NS_OVERLAY_UPPER": "/upper",
+            "CODING_CAVE_NS_OVERLAY_WORK": "/work",
+            "CODING_CAVE_NS_MOUNTPOINT": "/bin/mountpoint",
+        }
+        base.update(overrides)
+        return base
+
+    @patch("subprocess.run", return_value=MagicMock(returncode=0))
+    @patch.object(supervisor, "start_lock_watcher", return_value=None)
+    @patch.object(supervisor, "_mount_kernel_overlay")
+    @patch.object(supervisor, "_umount_kernel")
+    @patch.object(supervisor, "_shadow_host_lock_files")
+    @patch.object(supervisor, "_signal_sync")
+    def test_kernel_overlay_mounted(self, _sync, _shadow, mock_umount_k,
+                                     mock_kernel, _watcher, _run):
+        with patch.dict(os.environ, self._env(), clear=True), \
+             self.assertRaises(SystemExit):
+            supervisor.main()
+        mock_kernel.assert_called_once_with("/merged", "/upper", "/work")
+        mock_umount_k.assert_called_once_with("/merged")
+
+    @patch("subprocess.run", return_value=MagicMock(returncode=0))
+    @patch.object(supervisor, "start_lock_watcher", return_value=None)
+    @patch.object(supervisor, "_mount_kernel_overlay")
+    @patch.object(supervisor, "_umount_kernel")
+    @patch.object(supervisor, "_shadow_host_lock_files")
+    @patch.object(supervisor, "_signal_sync")
+    def test_no_overlay_without_env(self, _sync, _shadow, mock_umount_k,
+                                    mock_kernel, _watcher, _run):
+        env = self._env()
+        del env["CODING_CAVE_NS_OVERLAY_MERGED"]
+        del env["CODING_CAVE_NS_OVERLAY_UPPER"]
+        with patch.dict(os.environ, env, clear=True), \
+             self.assertRaises(SystemExit):
+            supervisor.main()
+        mock_kernel.assert_not_called()
+        mock_umount_k.assert_not_called()
 
 
 class TestSignalSync(unittest.TestCase):

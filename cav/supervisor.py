@@ -1,19 +1,16 @@
-"""Namespace setup and fuse-overlayfs supervisor.
+"""Namespace setup and overlay supervisor.
 
 Runs inside a fresh user+mount+net namespace created by unshare(1).
 Signals the parent that the namespace is ready, mounts the nix store
-overlay if needed, then runs the bwrap sandbox wrapper as a child.
-Stays alive to own the fuse-overlayfs process and clean it up when
-bwrap exits.
+overlay, then runs the bwrap sandbox wrapper as a child. Stays alive
+to unmount the kernel overlay when bwrap exits.
 
 Environment variables (set by sandbox.py):
     CODING_CAVE_NS_SYNC_FD           - fd to write sync byte to
-    CODING_CAVE_NS_OVERLAY_MERGED    - fuse-overlayfs merged mountpoint
-    CODING_CAVE_NS_OVERLAY_UPPER     - fuse-overlayfs upper dir
-    CODING_CAVE_NS_OVERLAY_WORK      - fuse-overlayfs work dir
+    CODING_CAVE_NS_OVERLAY_MERGED    - overlay merged mountpoint
+    CODING_CAVE_NS_OVERLAY_UPPER     - overlay upper dir
+    CODING_CAVE_NS_OVERLAY_WORK      - overlay work dir
     CODING_CAVE_NS_MOUNTPOINT        - absolute path to mountpoint binary
-    CODING_CAVE_NS_FUSE_OVERLAYFS    - absolute path to fuse-overlayfs binary
-    CODING_CAVE_NS_FUSERMOUNT        - absolute path to fusermount/fusermount3
 """
 
 import ctypes
@@ -26,7 +23,6 @@ import struct
 import subprocess
 import sys
 import threading
-import time
 
 
 def _signal_sync(fd: int) -> None:
@@ -35,102 +31,47 @@ def _signal_sync(fd: int) -> None:
     os.close(fd)
 
 
-def _is_mounted(mountpoint_bin: str, path: str) -> bool:
-    return subprocess.run(
-        [mountpoint_bin, "-q", path],
-        capture_output=True,
-    ).returncode == 0
+# -- kernel overlayfs --
+# Mounted directly via mount() syscall. Requires kernel 5.11+ with
+# CONFIG_OVERLAY_FS enabled.
+
+_MNT_DETACH = 2
+
+_libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
 
 
-def _overlay_functional(merged: str) -> bool:
-    """Check if an existing overlay mount is functional via write probe."""
-    probe = os.path.join(merged, ".overlay_probe")
-    try:
-        fd = os.open(probe, os.O_CREAT | os.O_WRONLY, 0o644)
-        os.close(fd)
-        os.unlink(probe)
-        return True
-    except OSError:
-        return False
+def _mount_kernel_overlay(merged: str, upper: str, work: str) -> None:
+    """Mount kernel overlayfs in the user namespace.
 
-
-def _unmount(fusermount_bin: str | None, path: str) -> None:
-    if not fusermount_bin:
-        print(f"supervisor: cannot unmount {path}: no fusermount binary",
-              file=sys.stderr)
-        return
-    r = subprocess.run(
-        [fusermount_bin, "-u", path],
-        capture_output=True, text=True,
-    )
-    if r.returncode != 0:
-        print(f"supervisor: unmount {path} failed: {r.stderr.strip()}",
-              file=sys.stderr)
-
-
-def _mount_overlay(env: dict) -> subprocess.Popen | None:
-    """Mount fuse-overlayfs if needed. Returns the daemon Popen or None."""
-    merged = env.get("CODING_CAVE_NS_OVERLAY_MERGED")
-    fuse_bin = env.get("CODING_CAVE_NS_FUSE_OVERLAYFS")
-    if not merged or not fuse_bin:
-        return None
-
-    mountpoint_bin = env.get("CODING_CAVE_NS_MOUNTPOINT")
-    fusermount_bin = env.get("CODING_CAVE_NS_FUSERMOUNT")
-    upper = env["CODING_CAVE_NS_OVERLAY_UPPER"]
-    work = env["CODING_CAVE_NS_OVERLAY_WORK"]
-
-    # Check if already mounted and functional.
-    if mountpoint_bin:
-        if _is_mounted(mountpoint_bin, merged):
-            if _overlay_functional(merged):
-                return None
-            # Stale mount.
-            _unmount(fusermount_bin, merged)
-    # No mountpoint binary: assume we need to mount.
-
-    # fusermount must be on PATH for fuse-overlayfs to work.
-    if fusermount_bin:
-        os.environ["PATH"] = (
-            os.path.dirname(fusermount_bin)
-            + ":" + os.environ.get("PATH", "")
-        )
-
-    # squash_to_uid must match the namespace uid, not the parent's.
-    # unshare --map-user=0 remaps the parent uid to 0 here.
-    opts = (
+    The CVE-2023-0386 check only blocks copy-up (writes that promote
+    lower-layer content to upper), not reads. With shadow files preventing
+    lock file copy-up and DB seeding preventing all other copy-up, unmapped
+    lower-layer uids are never an issue.
+    """
+    variants = [
         f"lowerdir=/nix/store,upperdir={upper},workdir={work}"
-        f",squash_to_uid=0,squash_to_gid=0"
-    )
+        f",userxattr,uuid=off",
+        f"lowerdir=/nix/store,upperdir={upper},workdir={work}"
+        f",userxattr",
+    ]
+    for opts in variants:
+        ret = _libc.mount(b"overlay", merged.encode(), b"overlay",
+                          ctypes.c_ulong(0), opts.encode())
+        if ret == 0:
+            return
+    err = ctypes.get_errno()
+    print(f"supervisor: kernel overlayfs mount failed: {os.strerror(err)}",
+          file=sys.stderr)
+    sys.exit(1)
 
-    # Foreground mode: fuse-overlayfs stays as our direct child.
-    # PID is trivially known (no /proc scanning, no race conditions).
-    proc = subprocess.Popen(
-        [fuse_bin, "-f", "-o", opts, merged],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-    )
 
-    # Wait for mount to appear. Poll with short sleeps rather than
-    # busy-looping.
-    if mountpoint_bin:
-        for _ in range(200):  # 10s max
-            if _is_mounted(mountpoint_bin, merged):
-                break
-            if proc.poll() is not None:
-                stderr = proc.stderr.read().decode(errors="replace").strip()
-                print(
-                    f"supervisor: fuse-overlayfs died during mount: {stderr}",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-            time.sleep(0.05)
-        else:
-            proc.terminate()
-            print("supervisor: fuse-overlayfs mount timed out", file=sys.stderr)
-            sys.exit(1)
-
-    return proc
+def _umount_kernel(path: str) -> None:
+    """Unmount a kernel overlay."""
+    ret = _libc.umount2(path.encode(), _MNT_DETACH)
+    if ret < 0:
+        err = ctypes.get_errno()
+        print(f"supervisor: umount2 {path}: {os.strerror(err)}",
+              file=sys.stderr)
 
 
 def _is_nix_lock_file(path: str) -> bool:
@@ -149,17 +90,14 @@ def _is_nix_lock_file(path: str) -> bool:
 def _shadow_host_lock_files(upper: str) -> None:
     """Pre-populate upper layer with empty files that shadow host lock files.
 
-    The fuse-overlayfs daemon runs as host uid 1000 (mapped to namespace
-    uid 0) and cannot read host-root-owned lock files (mode 600). When
-    nix tries to open one, the daemon's copy-up fails with EPERM.
-
-    Creating empty files with the same names in the upper directory
-    before the daemon starts makes the overlay prefer the writable
+    Host lock files are owned by root (mode 600), unmapped in the cave's
+    user namespace. Creating empty files with the same names in the upper
+    directory before mounting makes the overlay prefer the writable
     upper-layer copies. The cave's nix then creates, locks, and
     unlinks its own independent lock files.
 
-    Must run BEFORE fuse-overlayfs starts so the daemon sees the
-    upper-layer files on its initial directory scan.
+    Must run BEFORE the overlay mount so it sees the upper-layer files
+    on its initial directory scan.
     """
     for path in glob.glob("/nix/store/*.lock"):
         if not _is_nix_lock_file(path):
@@ -178,9 +116,7 @@ def _shadow_host_lock_files(upper: str) -> None:
 # -- inotify lock file watcher --
 # Watches /nix/store for new *.lock files and creates shadows in the
 # upper directory at runtime. Complements the startup shadow pass
-# which only covers lock files that exist before fuse-overlayfs starts.
-
-_libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+# which only covers lock files that exist before the overlay mount.
 
 # inotify constants
 _IN_CREATE = 0x00000100
@@ -236,8 +172,8 @@ def start_lock_watcher(store: str, upper: str):
 
     Watches `store` (the host's /nix/store, visible from the supervisor
     namespace) for IN_CREATE and IN_MOVED_TO events. When a *.lock file
-    appears, creates an empty shadow in `upper` so fuse-overlayfs
-    prefers the writable copy over the unreadable host original.
+    appears, creates an empty shadow in `upper` so the overlay prefers
+    the writable copy over the unreadable host original.
 
     Returns a callable that stops the watcher, or None if inotify
     setup fails.
@@ -282,35 +218,35 @@ def main() -> None:
     _signal_sync(sync_fd)
 
     # Shadow host lock files before mounting overlay. Empty files in
-    # the upper dir must exist before fuse-overlayfs starts so the
-    # daemon prefers the writable copies over the inaccessible host ones.
+    # the upper dir must exist before the overlay mount so it prefers
+    # the writable copies over the inaccessible host originals.
     upper = env.get("CODING_CAVE_NS_OVERLAY_UPPER")
     if upper:
         _shadow_host_lock_files(upper)
 
-    # Mount overlay if needed.
-    fuse_proc = _mount_overlay(env)
+    # Mount kernel overlayfs.
+    merged = env.get("CODING_CAVE_NS_OVERLAY_MERGED")
+    if merged and upper:
+        _mount_kernel_overlay(
+            merged, upper, env["CODING_CAVE_NS_OVERLAY_WORK"])
 
     # Watch for new lock files at runtime. /nix/store from the
-    # supervisor's namespace is the host's actual store (the lower
-    # layer), since fuse-overlayfs mounts at $OVERLAY_MERGED.
+    # supervisor's namespace is the parent's store: the host's real
+    # store at depth 1, or the parent cave's merged overlay view at
+    # depth > 1 (bind-mounted by bwrap). The overlay mounts at
+    # $OVERLAY_MERGED, not at /nix/store.
     stop_watcher = None
     if upper:
         stop_watcher = start_lock_watcher("/nix/store", upper)
 
-    # Run bwrap as a child (not exec) so we stay alive to clean up fuse.
+    # Run bwrap as a child (not exec) so we stay alive to clean up.
     try:
         result = subprocess.run(sys.argv[1:])
     finally:
         if stop_watcher:
             stop_watcher()
-        if fuse_proc:
-            _unmount(env.get("CODING_CAVE_NS_FUSERMOUNT"), env["CODING_CAVE_NS_OVERLAY_MERGED"])
-            fuse_proc.terminate()
-            try:
-                fuse_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                fuse_proc.kill()
+        if merged and upper:
+            _umount_kernel(merged)
 
     sys.exit(result.returncode)
 

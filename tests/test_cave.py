@@ -76,10 +76,10 @@ class TestGPGRestriction(unittest.TestCase):
 class TestNixStore(unittest.TestCase):
     """Verify nix operations work inside the cave.
 
-    The cave mounts a fuse-overlayfs on /nix/store and seeds the nix DB
+    The cave mounts a kernel overlayfs on /nix/store and seeds the nix DB
     from the host so nix knows about existing store paths. Without DB
     seeding, nix tries to re-download and chmod host store paths, which
-    fails because they're owned by uid 65534 (nix daemon).
+    fails because they're owned by uid 65534 (unmapped root).
     """
 
     def test_nix_develop(self):
@@ -134,10 +134,6 @@ def _subcave(prompt, timeout=120):
 class TestSubcaveReadiness(unittest.TestCase):
     """Verify the cave environment supports launching subcaves."""
 
-    def test_fuse_device_available(self):
-        """/dev/fuse is required for nested nix store overlays."""
-        self.assertTrue(Path("/dev/fuse").exists())
-
     def test_tun_device_available(self):
         """/dev/net/tun is required for subcave network isolation."""
         self.assertTrue(Path("/dev/net/tun").exists())
@@ -150,7 +146,7 @@ class TestSubcaveReadiness(unittest.TestCase):
 class TestSubcaveLaunch(unittest.TestCase):
     """Integration tests that launch a real subcave via --prompt.
 
-    A single subcave launch (bwrap + slirp4netns + fuse-overlayfs + claude)
+    A single subcave launch (bwrap + slirp4netns + overlay + claude)
     runs all checks at once to avoid the ~30s startup cost per test.
     """
 

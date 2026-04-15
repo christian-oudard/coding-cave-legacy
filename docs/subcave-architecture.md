@@ -6,11 +6,11 @@ Allow a cave to launch child caves. The primary use case is self-testing: Coding
 
 ## How it works
 
-All caves are recursive by default. `/dev/fuse` and `/dev/net/tun` are always bind-mounted if available.
+All caves are recursive by default. `/dev/net/tun` is always bind-mounted if available.
 
 ### Nix store
 
-Each nesting level gets a fuse-overlayfs on `/nix/store`:
+Each nesting level gets a kernel overlayfs on `/nix/store`:
 - Lower layer: parent's store (read-only)
 - Upper layer: per-cave writable dir
 

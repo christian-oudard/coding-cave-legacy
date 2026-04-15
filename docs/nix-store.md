@@ -1,12 +1,85 @@
 # Nix Store Inside the Cave
 
 Agents can install packages with `nix shell`, `nix develop`, etc. This
-document explains how the nix store is structured inside the cave and
-how to manage it.
+document specifies what the nix store system must do and explains how
+it works.
+
+## Requirements
+
+### Visibility
+
+All host store paths must be readable inside the cave. Host paths are
+owned by root (uid 0, gid 0) with mode 555 (dirs) and 444 (files).
+Inside the cave's user namespace, host uid 0 is unmapped (appears as
+65534/nobody). Kernel overlayfs reads these paths without issue since
+the CVE-2023-0386 check only triggers on copy-up, not reads.
+
+Sibling agents at the same nesting level share installed packages. A
+package installed by one agent is immediately visible to all siblings.
+Ancestor store paths are readable by descendants without duplication.
+
+### Writes
+
+New packages land in a cave-local writable layer, never in the host
+store. Nix's path registration sequence (NAR extract, chmod 0444/0555,
+chown 0:0, SQLite insert) must complete without errors. Metadata
+canonicalization (chmod, chown, mtime) only runs on paths the cave
+just created, which are already in the upper layer. No copy-up of
+host content is ever triggered.
+
+This is the central invariant: **the cave never modifies host store
+paths.** The only overlay operations on host content are reads (stat,
+readdir, readlink, open O_RDONLY). With correct DB seeding, nix treats
+host paths as already registered and never re-downloads or re-registers
+them.
+
+### Lock file isolation
+
+Nix lock files are always at `/nix/store/{hash}-{name}.lock`, owned by
+root, mode 0600, empty, coordinated via `flock()`. They are transient,
+created and deleted within a single build. Host lock files coordinate
+host builds, not cave builds. The cave does not want them.
+
+Host lock files must not cause EPERM or EACCES errors inside the cave.
+Cave lock files must work independently. No copy-up of host lock file
+content may ever be triggered.
+
+### DB management
+
+The cave's nix DB must include all host store paths so nix does not
+re-register or re-download them. Cave-only paths from previous sessions
+must be preserved if their files still exist. Stale entries (host-GC'd
+paths) must be cleaned on launch.
+
+The DB must support concurrent access from multiple sibling agents.
+SQLite WAL mode is required. The DB file must reside on the native
+filesystem, not under a FUSE mount, to ensure correct file locking.
+
+The DerivationOutputs table must be correctly populated for
+overlay-built paths (nix does not populate this for builds that land
+in the upper layer). Nix caches (fetcher cache, eval cache) must be
+pruned of stale entries on launch.
+
+### Agent sharing
+
+All agents at the same nesting level share one overlay upper layer
+and one DB. Concurrent nix operations from multiple agents are safe
+because nix coordinates builds via its own `flock()` mechanism.
+
+### Nesting
+
+Cave-in-cave works. Each nesting level gets its own persistent home,
+overlay directories (upper, work, merged), and DB.
+
+### No host configuration
+
+The system works with a stock NixOS kernel. No capabilities
+(CAP_DAC_READ_SEARCH, CAP_SYS_ADMIN), no setuid helpers, no systemd
+units, no special host-side changes.
 
 ## Architecture
 
-Each nesting level gets its own fuse-overlayfs mount for `/nix/store`,
+Each nesting level gets its own kernel overlayfs mount for `/nix/store`,
 stacked on top of its parent's merged view. All agents at the same level
 share that level's overlay:
 
@@ -17,18 +90,35 @@ merged: bind-mounted into each agent's bwrap namespace
 ```
 
 At the host level, the lower layer is the real host `/nix/store`. At a
-nested level, the lower layer is *the parent cave's merged view*, which
+nested level, the lower layer is the parent cave's merged view, which
 transparently stacks all ancestor upper layers. Reads fall through to
-whichever ancestor first has the path; writes land in this level's own
+whichever ancestor first has the path. Writes land in this level's own
 upper.
 
-The overlay is mounted with `squash_to_uid` / `squash_to_gid` set to
-the cave user. This makes all lower-layer paths appear as owned by the
-cave user, allowing nix to `chmod` them during store path registration
-(fuse-overlayfs performs a copy-up to the upper layer transparently).
+### Why kernel overlayfs, not fuse-overlayfs
+
+Kernel overlayfs is mounted directly via `mount()` with options
+`userxattr,uuid=off`. Requires kernel 5.11+ (unprivileged overlayfs
+in user namespaces) and `CONFIG_OVERLAY_FS`. Tested on kernel 6.18,
+ext4, NixOS.
+
+Host store paths are owned by root (uid 0), which is unmapped in the
+cave's user namespace (appears as uid 65534). Kernel overlayfs reads
+these paths without issue. The CVE-2023-0386 check only triggers on
+copy-up (writes that promote lower-layer content to the upper layer),
+not on reads. With correct DB seeding and lock file shadowing, copy-up
+of host content never happens.
+
+fuse-overlayfs was the previous approach but had multiple problems:
+FUSE daemon lifecycle management, O(N) FUSE overhead at nesting
+depth N, stale dentry cache (billion-second ENTRY_TIMEOUT causing
+invisible new packages), and the daemon's inability to read root-owned
+mode-600 lock files (triggering copy-up failures).
+
+### Components
 
 - **Parent store** (`/nix/store` as seen from this level). Read-only
-  lower layer. At host level this is the real host store; at a nested
+  lower layer. At host level this is the real host store. At a nested
   level it's the parent cave's merged overlay. Agents can use every
   package their ancestors have, without duplication.
 
@@ -42,7 +132,7 @@ cave user, allowing nix to `chmod` them during store path registration
   re-downloading.
 
 - **Per-level DB** (`shared/db/`). The nix SQLite database for each
-  level lives on the native filesystem, NOT under the FUSE mount.
+  level lives on the native filesystem, not under the overlay mount.
   This is required for correct SQLite WAL locking with concurrent
   multi-agent access. A level's DB is seeded from its parent's DB at
   launch time, so nix treats already-built packages as registered and
@@ -53,41 +143,51 @@ agent exits.
 
 ## Lock file isolation
 
-The host nix daemon creates lock files in `/nix/store/` (e.g.
-`<hash>-foo.lock`) to coordinate concurrent builds. These are empty
-files with mode 600 owned by root, used solely for `flock()`.
+### The problem
 
-The fuse-overlayfs daemon runs as host uid 1000 (mapped to namespace
-uid 0) and cannot read these root-owned mode-600 files. When the
-cave's nix tries to open one, the daemon's copy-up from the lower
-layer fails with `EPERM`.
+Host nix lock files are owned by root (uid 0) with mode 0600. Inside
+the cave's user namespace, host root is unmapped (appears as uid
+65534). When a cave nix operation references a path whose lock file
+exists on the host, overlayfs attempts copy-up: it tries to preserve
+the file's ownership, but the uid is unmapped, so the operation fails
+with EPERM.
 
-The fix has two parts. At startup, the supervisor creates empty
-shadow files in the upper directory for any existing lock files
-(detected via `glob("/nix/store/*.lock")` filtered by zero size).
-At runtime, an inotify watcher on `/nix/store` (the host's real
-store, visible from the supervisor namespace) detects new `*.lock`
-files and creates shadows immediately. The overlay prefers
-upper-layer files, so the cave gets writable copies it can lock
-independently.
+### Why shadow files
 
-This is a workaround for a missing feature in fuse-overlayfs:
-its copy-up unconditionally reads the lower file's contents, even
-when the file is empty and there is nothing to copy. Kernel
-overlayfs does not have this problem (copy-up runs in kernel
-space), but cannot be used here because it lacks `squash_to_uid`
-and cannot preserve ownership for unmapped uids in user namespaces.
+Nix hardcodes the lock path as `storePath + ".lock"` in
+`pathlocks.cc`. No configuration option exists to redirect lock files
+elsewhere. Whiteout entries require `CAP_MKNOD` (char device 0/0) or
+`trusted.overlay.*` xattrs, neither of which is available in user
+namespaces.
 
-## Isolation properties
+Shadow files are the viable mechanism: create empty files with the same
+names in the upper directory before mounting the overlay. The overlay
+prefers upper-layer entries, so copy-up of the unreadable host
+originals never happens. The cave's nix then creates, flocks, and
+unlinks its own independent lock files in the upper layer.
 
-- A level can read every package in any ancestor level (multi-level
-  cache).
-- A level can only write to its own upper / db. Descendants cannot
-  modify their ancestors.
-- Siblings at the same level share one overlay (writes by one are
-  visible to the others).
-- Packages that already exist in an ancestor are never duplicated.
-  Subcaves only write their own new installs.
+### Startup shadow pass
+
+Before mounting the overlay, the supervisor globs `/nix/store/*.lock`
+and creates empty shadow files in the upper directory for each file
+that is a transient nix lock file (regular file, zero bytes). Source
+derivations ending in `.lock` (e.g. Cargo.lock, which have non-zero
+size) are skipped.
+
+### Runtime inotify watcher
+
+After mounting, a background thread watches `/nix/store` for
+`IN_CREATE` and `IN_MOVED_TO` events. When a new `.lock` file
+appears, the watcher immediately creates an empty shadow in the upper
+directory.
+
+### Race window
+
+There is a window between the startup glob and the inotify watch
+becoming active. A host lock file created during this window is not
+shadowed. This is benign: the cave's nix only accesses lock files for
+paths it is building. With correct DB seeding, it never re-registers
+host paths, so it never opens host lock files.
 
 ## Nix DB Seeding
 
@@ -102,6 +202,14 @@ The "backup + merge-back + stale cleanup" approach is self-cleaning:
 paths the parent has GC'd are dropped, and level-only paths are only
 preserved if their files still exist on the overlay.
 
+### DerivationOutputs repair
+
+Nix does not populate the DerivationOutputs table for paths built
+through the overlay (the table maps derivation hashes to output store
+paths). Missing entries cause `nix-store --realise` to fail with
+"map::at". The seeder parses `.drv` files to extract output mappings
+and inserts missing entries.
+
 ### Cache pruning
 
 The DB seed also prunes stale entries from two nix caches in the
@@ -115,18 +223,28 @@ persistent home (`~/.cache/nix/`):
   to derivation paths. Each file is one flake evaluation. If any
   sampled path is missing, the whole file is removed.
 
+## Isolation properties
+
+- A level can read every package in any ancestor level (multi-level
+  cache).
+- A level can only write to its own upper / db. Descendants cannot
+  modify their ancestors.
+- Siblings at the same level share one overlay (writes by one are
+  visible to the others).
+- Packages that already exist in an ancestor are never duplicated.
+  Subcaves only write their own new installs.
+
 ## Garbage Collection
 
 A level's overlay upper can be cleaned up manually. For the host level:
 
 ```
-$ fusermount3 -uz ~/.local/share/coding-cave/nix-overlay/shared/merged
 $ rm -rf ~/.local/share/coding-cave/nix-overlay/shared/{upper,work,db}
 ```
 
 For a subcave level, replace `shared` with
 `subcaves/<parent-lineage>`. This removes all packages installed at
-that level (and inherited by its descendants); they will be
+that level (and inherited by its descendants). They will be
 re-downloaded on next use. Ancestor levels are unaffected.
 
 ## Promoting Packages to Host

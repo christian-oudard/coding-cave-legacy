@@ -101,9 +101,8 @@
               fi
             '')
 
-            # Subcave support: /dev/fuse for nix store overlay, /dev/net/tun for slirp4netns
+            # Subcave support: /dev/net/tun for slirp4netns
             (add-runtime ''
-              [ -e /dev/fuse ] && RUNTIME_ARGS+=(--dev-bind /dev/fuse /dev/fuse)
               [ -e /dev/net/tun ] && RUNTIME_ARGS+=(--dev-bind /dev/net/tun /dev/net/tun)
             '')
 
@@ -229,8 +228,6 @@
             (try-fwd-env "CODING_CAVE_USER_ENV")
             (try-fwd-env "CODING_CAVE_BIN")
             # Subcave overlay: binary paths inherited from parent
-            (try-fwd-env "CODING_CAVE_NS_FUSE_OVERLAYFS")
-            (try-fwd-env "CODING_CAVE_NS_FUSERMOUNT")
             (try-fwd-env "CODING_CAVE_NS_MOUNTPOINT")
             # Dummy token so Claude Code considers itself logged in.
             # Crinj replaces the Authorization header with real credentials.
@@ -311,7 +308,7 @@
             nativeBuildInputs = [ pkgs.makeWrapper ];
             buildInputs = [ python ];
             propagatedBuildInputs = with pkgs; [
-              fuse-overlayfs git socat slirp4netns iptables
+              git socat slirp4netns iptables
               util-linux  # unshare + nsenter (>= 2.39 for --map-user)
             ];
 
@@ -353,7 +350,6 @@
               # Wrap with runtime dependencies on PATH
               wrapProgram $out/bin/cav \
                 --prefix PATH : ${pkgs.lib.makeBinPath [
-                  pkgs.fuse-overlayfs pkgs.fuse3.bin
                   pkgs.git pkgs.gnupg pkgs.socat pkgs.slirp4netns pkgs.iptables
                   pkgs.util-linux
                   crinj.packages.${pkgs.stdenv.hostPlatform.system}.default
