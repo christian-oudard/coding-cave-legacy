@@ -78,17 +78,38 @@ def find_repo_root() -> Path:
 
 
 def require_init(base: Path):
-    shared = config.shared_repo_path(base)
-    if shared.exists():
-        if not registry.project_path(config.project_slug(base)):
-            raise SystemExit(
-                f"Shared repo exists but project not registered. Run: cav init")
+    # Inside a cave, the parent's shared repo is bind-mounted at
+    # host-cave-shared.git. A local cave-shared.git is only for subcaves.
+    # On the host, cave-shared.git is the authoritative shared repo.
+    if config.inside_cave():
+        required = config.cav_dir(base) / HOST_SHARED_REPO_DIR
+    else:
+        required = config.shared_repo_path(base)
+    if not required.exists():
+        raise SystemExit("Coding Cave not initialized. Run: cav init")
+    if not registry.project_path(config.project_slug(base)):
+        raise SystemExit(
+            f"Shared repo exists but project not registered. Run: cav init")
+    _check_workspace_consistent(base)
+
+
+def _check_workspace_consistent(base: Path):
+    """Validate .git/objects/info/alternates matches the current layout.
+
+    Old pre-split workspaces point alternates at cave-shared.git/objects;
+    the new layout expects host-cave-shared.git/objects. If stale, refuse
+    so the user runs `cav init` to migrate.
+    """
+    alt = base / ".git" / "objects" / "info" / "alternates"
+    if not alt.exists():
+        return  # full clone, no alternates
+    expected = f"../../.coding-cave/{HOST_SHARED_REPO_DIR}/objects"
+    if alt.read_text().strip() == expected:
         return
-    # Inside a cave, the host's shared repo is at host-cave-shared.git
-    # (read-only). Our own cave-shared.git is created by cav init.
-    if config.inside_cave() and (config.cav_dir(base) / HOST_SHARED_REPO_DIR).exists():
-        return
-    raise SystemExit("Coding Cave not initialized. Run: cav init")
+    raise SystemExit(
+        f"Inconsistent workspace: {alt} does not match current layout.\n"
+        f"Run: cav init"
+    )
 
 
 def resolve_project(path: str) -> Path:

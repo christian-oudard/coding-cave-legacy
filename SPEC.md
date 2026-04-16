@@ -48,6 +48,9 @@ Each agent session is launched in the context of a project directory. This is th
 ## Multi-project
 `cav agent -p otherproject` allows agents to access multiple projects. They have one dev branch per project, with its associated worktree.
 
+## Nested Caves
+Agents can launch their own agents, creating a subcave one level deeper. Each level has its own shared remote, so the same approve/review/push/pull workflow applies at every depth. A subcave sees its parent's shared remote read-only as `host-cave` (the up-link) and coordinates its own subagents through its local shared remote as `cave` (the down-link). Commits flow upward one level at a time through approval: a subagent's work is approved into the dev branch it shares with its parent agent, which in turn pushes that for approval at the next level up.
+
 ## Sandbox
 
 Each agent runs in bubblewrap sandbox.

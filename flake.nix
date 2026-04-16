@@ -142,7 +142,7 @@
             # Shared repos (read-only for alternates object access).
             # Mount under /projects/<slug>/.coding-cave/ instead of at
             # the host-absolute path, to avoid leaking the host home dir.
-            # Must match config.HOST_SHARED_REPO_DIR.
+            # The path must match constants.HOST_SHARED_REPO_DIR.
             (add-runtime ''
               IFS=: read -ra _repos <<< "''${CODING_CAVE_SHARED_REPOS:-}"
               IFS=: read -ra _slugs <<< "''${CODING_CAVE_PROJECT_SLUGS:-}"
