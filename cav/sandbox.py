@@ -24,10 +24,14 @@ log = logging.getLogger("cav")
 
 GIT_WRAPPER = """\
 #!/bin/sh
-# Git wrapper: syncs dev branches to shared remote after state changes.
-# Installed at $HOME/bin/git inside the cave, shadowing the real git.
-# This replaces per-repo post-commit hooks, leaving .git/hooks/ free
+# Git wrapper: syncs the cave's work to the parent's shared remote after
+# state changes. Installed at $HOME/bin/git inside the cave, shadowing the
+# real git. Replaces per-repo post-commit hooks so .git/hooks/ is free
 # for project use.
+#
+# Inside a cave, the local branch is the base branch (e.g. 'main'). We
+# publish commits upstream as agent-<id>/<base>, where <id> is the cave's
+# slot in the parent's registry (carried in via CODING_CAVE_AGENT_NAME).
 
 # Prevent recursive sync (our own git calls shouldn't trigger again).
 if [ -n "$_CAV_GIT_SYNC" ]; then
@@ -56,9 +60,11 @@ if [ -z "$_branch" ] && [ -f .git/rebase-merge/head-name ]; then
 elif [ -z "$_branch" ] && [ -f .git/rebase-apply/head-name ]; then
   _branch=$(sed 's|^refs/heads/||' .git/rebase-apply/head-name)
 fi
+[ -z "$_branch" ] && exit $_rc
 
-# Only sync dev branches.
-case "$_branch" in agent-[0-9]*/*) ;; *) exit $_rc ;; esac
+# Skip review branches: agent-<k>/... is a subcave's published ref the
+# agent may have checked out for review, not our own work.
+case "$_branch" in agent-[0-9]*/*) exit $_rc ;; esac
 
 # Trap: refuse to push a branch with HEAD in the name.
 case "$_branch" in *HEAD*)
@@ -68,29 +74,56 @@ case "$_branch" in *HEAD*)
   ;;
 esac
 
+# Our agent id in the parent's registry comes from the cave env.
+_agentid=${CODING_CAVE_AGENT_NAME##*@}
+case "$_agentid" in ''|*[!0-9]*) exit $_rc ;; esac
+_remote_branch="agent-$_agentid/$_branch"
+
 export _CAV_GIT_SYNC=1
+
+# Silent on success, one-line warning with captured output on failure.
+# The user's git command already succeeded; we don't want sync noise
+# on the happy path, but swallowing errors leaves commits stranded.
+_cav_push() {
+  _out=$("$_CAV_REAL_GIT" push --force host-cave "HEAD:refs/heads/$_remote_branch" 2>&1)
+  _prc=$?
+  if [ $_prc -ne 0 ]; then
+    echo "cav-sync: push $_branch -> host-cave/$_remote_branch failed (rc=$_prc):" >&2
+    echo "$_out" | sed 's/^/  /' >&2
+  fi
+  return $_prc
+}
+
+_cav_fetch() {
+  _out=$("$_CAV_REAL_GIT" fetch host-cave 2>&1)
+  _frc=$?
+  if [ $_frc -ne 0 ]; then
+    echo "cav-sync: fetch host-cave failed (rc=$_frc):" >&2
+    echo "$_out" | sed 's/^/  /' >&2
+  fi
+  return $_frc
+}
 
 case "$_cmd" in
   commit|cherry-pick|revert|am)
     # Full sync: fetch, auto-rebase onto base, push.
     # During a rebase, just push (don't start a nested rebase).
     if [ -d .git/rebase-merge ] || [ -d .git/rebase-apply ]; then
-      "$_CAV_REAL_GIT" push --force host-cave "HEAD:refs/heads/$_branch" >/dev/null 2>&1 || true
+      _cav_push
       exit $_rc
     fi
-    "$_CAV_REAL_GIT" fetch host-cave >/dev/null 2>&1 || true
-    _base=$(echo "$_branch" | sed 's|^agent-[0-9]*/||')
-    if [ -n "$_base" ] && "$_CAV_REAL_GIT" rev-parse "host-cave/$_base" >/dev/null 2>&1; then
-      if ! "$_CAV_REAL_GIT" rebase "host-cave/$_base" >/dev/null 2>&1; then
+    _cav_fetch
+    if "$_CAV_REAL_GIT" rev-parse "host-cave/$_branch" >/dev/null 2>&1; then
+      if ! "$_CAV_REAL_GIT" rebase "host-cave/$_branch" >/dev/null 2>&1; then
         "$_CAV_REAL_GIT" rebase --abort >/dev/null 2>&1
-        echo "WARNING: rebase onto host-cave/$_base failed (conflicts). Run: git fetch host-cave && git rebase host-cave/$_base" >&2
+        echo "WARNING: rebase onto host-cave/$_branch failed (conflicts). Run: git fetch host-cave && git rebase host-cave/$_branch" >&2
       fi
     fi
-    "$_CAV_REAL_GIT" push --force host-cave "HEAD:refs/heads/$_branch" >/dev/null 2>&1 || true
+    _cav_push
     ;;
   reset|checkout|switch|merge|rebase)
     # Light sync: just push current state.
-    "$_CAV_REAL_GIT" push --force host-cave "HEAD:refs/heads/$_branch" >/dev/null 2>&1 || true
+    _cav_push
     ;;
 esac
 
@@ -161,11 +194,13 @@ def _gpg_homedir() -> Path | None:
 
 
 def _gpg_socket() -> str | None:
-    """Find the restricted GPG agent extra socket.
+    """Find the restricted GPG agent socket to forward into the cave.
 
-    The extra socket (S.gpg-agent.extra) runs in restricted mode, which
-    blocks secret key export, key generation, key deletion, and other
-    dangerous operations while still allowing signing (for git commits).
+    Outside a cave this is gpg-agent's 'extra' socket (restricted mode):
+    signing works, secret-key export is blocked. Inside a cave, the
+    parent bind-mounts its extra socket at the homedir's plain
+    S.gpg-agent (no .extra suffix), so gpgconf's answer doesn't resolve;
+    fall back to that bind-mount path.
     """
     try:
         sock = subprocess.run(
@@ -173,12 +208,21 @@ def _gpg_socket() -> str | None:
             capture_output=True, text=True, check=True,
         ).stdout.strip()
     except (FileNotFoundError, subprocess.CalledProcessError):
-        return None
-    if not sock or not Path(sock).exists():
-        # Auto-launch gpg-agent (creates extra socket by default)
+        sock = ""
+    if sock and Path(sock).exists():
+        return sock
+    if not config.inside_cave():
+        # Host: auto-launch gpg-agent (creates the extra socket).
         subprocess.run(["gpgconf", "--launch", "gpg-agent"],
                        capture_output=True, check=False)
-    return sock if sock and Path(sock).exists() else None
+        return sock if sock and Path(sock).exists() else None
+    # Cave: the parent's restricted socket is bind-mounted here.
+    homedir = _gpg_homedir()
+    if homedir:
+        bound = homedir / "S.gpg-agent"
+        if bound.exists():
+            return str(bound)
+    return None
 
 
 CRINJ_PORT = 10255
@@ -451,7 +495,8 @@ def _repair_derivation_outputs(db: "sqlite3.Connection", store_root: Path):
         db.commit()
 
 
-def _seed_nix_db(home: Path, merged_path: str = "") -> Path | None:
+def _seed_nix_db(home: Path, agent_id: str,
+                 merged_path: str = "") -> Path | None:
     """Backup parent nix DB, preserving cave-installed package registrations.
 
     Always starts from a fresh backup of whatever nix DB is visible at
@@ -461,8 +506,9 @@ def _seed_nix_db(home: Path, merged_path: str = "") -> Path | None:
     removes stale entries for paths the parent GC'd after the snapshot.
 
     Args:
-        home: The child's persistent home directory. DB is stored under
-            its data dir so each nesting level has its own DB.
+        home: The child's persistent home directory.
+        agent_id: Numeric agent id, used to scope the DB to this agent
+            (matches the per-agent overlay layout).
         merged_path: The overlay merged directory. When provided, stale
             DB entries are validated against this path (which reflects the
             parent store plus this level's upper layer).
@@ -473,7 +519,8 @@ def _seed_nix_db(home: Path, merged_path: str = "") -> Path | None:
     if not parent_db.exists():
         return None
 
-    db_dir = home / ".local" / "share" / "coding-cave" / "nix-overlay" / "shared" / "db"
+    db_dir = (home / ".local" / "share" / "coding-cave"
+              / "nix-overlay" / f"agent-{agent_id}" / "db")
     db_dir.mkdir(parents=True, exist_ok=True)
     cave_db = db_dir / "db.sqlite"
 
@@ -574,7 +621,7 @@ def _seed_nix_db(home: Path, merged_path: str = "") -> Path | None:
         # Clean the overlay upper layer: remove orphaned store paths
         # not in the DB (leftover build artifacts whose DB entries were
         # lost during re-seeding). Lock file shadows are cleaned by
-        # _setup_shared_nix_overlay, not here.
+        # _setup_nix_overlay, not here.
         if merged_path:
             upper = Path(merged_path).parent / "upper"
             if upper.is_dir():
@@ -585,7 +632,7 @@ def _seed_nix_db(home: Path, merged_path: str = "") -> Path | None:
                         continue
                     if entry.name.endswith(".lock"):
                         # Skip lock file shadows. These are managed by
-                        # _setup_shared_nix_overlay and supervisor.py.
+                        # _setup_nix_overlay and supervisor.py.
                         continue
                     if entry.name not in db_paths:
                         _rm_store_path(entry)
@@ -600,16 +647,21 @@ def _seed_nix_db(home: Path, merged_path: str = "") -> Path | None:
     return db_dir
 
 
-def _nix_overlay_dirs(home: Path) -> tuple[Path, Path, Path]:
+def _nix_overlay_dirs(home: Path, agent_id: str) -> tuple[Path, Path, Path]:
     """Return (upper, work, merged) for the nix store overlay.
 
-    Each nesting level gets its own home directory, so the "shared/"
-    overlay is naturally distinct per level without needing lineage.
+    Each agent gets its own upper/work/merged. Kernel overlayfs
+    requires unique upperdir/workdir per mount: sharing them across
+    mounts is undefined behavior and produces orphan inodes, ESTALE
+    errors, and failed unlinks. Each nesting level also gets its own
+    home, so host-level and subcave agents alike land under
+    <home>/.local/share/coding-cave/nix-overlay/agent-<id>/.
     """
-    shared = home / ".local" / "share" / "coding-cave" / "nix-overlay" / "shared"
-    upper = shared / "upper"
-    work = shared / "work"
-    merged = shared / "merged"
+    agent_dir = (home / ".local" / "share" / "coding-cave"
+                 / "nix-overlay" / f"agent-{agent_id}")
+    upper = agent_dir / "upper"
+    work = agent_dir / "work"
+    merged = agent_dir / "merged"
     for d in (upper, work, merged):
         d.mkdir(parents=True, exist_ok=True)
     return upper, work, merged
@@ -641,13 +693,30 @@ def _rmtree_readonly(path: Path):
     shutil.rmtree(path)
 
 
-def _setup_shared_nix_overlay(home: Path) -> str:
+def _migrate_shared_overlay(home: Path, agent_id: str) -> None:
+    """One-shot rename of legacy shared/ to agent-<id>/.
+
+    Pre-#32 the overlay lived at nix-overlay/shared/ and was reused
+    across every agent sharing a home. Kernel overlayfs forbids that
+    (undefined behavior on shared upperdir), so each agent now gets its
+    own agent-<id>/. Rename lets the first agent to launch inherit the
+    old upper's packages; subsequent agents start empty.
+    """
+    root = home / ".local" / "share" / "coding-cave" / "nix-overlay"
+    legacy = root / "shared"
+    target = root / f"agent-{agent_id}"
+    if legacy.is_dir() and not target.exists():
+        legacy.rename(target)
+
+
+def _setup_nix_overlay(home: Path, agent_id: str) -> str:
     """Prepare the nix store overlay directories. Returns merged path.
 
     Does not mount. The kernel overlayfs mount happens inside the user
     namespace via supervisor.py.
     """
-    upper, work, merged = _nix_overlay_dirs(home)
+    _migrate_shared_overlay(home, agent_id)
+    upper, work, merged = _nix_overlay_dirs(home, agent_id)
 
     # Clean the upper layer of stale entries.
     host_store = Path("/nix/store")
@@ -783,6 +852,25 @@ def _seed_claude_config(home: Path, project_slug: str):
         claude_json.write_text(json.dumps(cfg))
 
 
+def _build_claude_cmd(session_id: str | None, resuming: bool,
+                      prompt: str | None) -> list[str]:
+    """Assemble the claude argv inside the sandbox.
+
+    --session-id / --resume compose with --print, so iterative probing
+    via 'cav agent -c --prompt ...' resumes the same Claude session
+    instead of starting a fresh one each call.
+    """
+    cmd = [SANDBOX_BIN, "claude", "--dangerously-skip-permissions"]
+    if session_id:
+        if resuming:
+            cmd += ["--resume", session_id]
+        else:
+            cmd += ["--session-id", session_id]
+    if prompt:
+        cmd += ["--print", prompt]
+    return cmd
+
+
 def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
            project_slug: str = "project",
            session_id: str | None = None, resuming: bool = False,
@@ -793,12 +881,7 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
     workspaces: list of (workspace_path, shared_repo, slug) tuples.
     project_slug: slug of the primary project (for cd on entry).
     """
-    if config.inside_cave():
-        # Subcave: isolated home so nix overlay dirs don't collide
-        # with the parent's. Keyed by agent name (unique per project).
-        home = config.DATA_DIR / "subcave-homes" / agent_name
-    else:
-        home = config.persistent_home()
+    home = config.launch_home(agent_name)
     home.mkdir(parents=True, exist_ok=True)
     for _, _, slug in workspaces:
         _seed_claude_config(home, slug)
@@ -835,6 +918,13 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
             git.git("remote", "rename", CAVE_SHARED_REMOTE, HOST_SHARED_REMOTE,
                     cwd=ws, echo=False, check=False, capture=True)
 
+    # Verify local branch name and push refspec match the current scheme.
+    # Migrates any pre-rename workspace that still has agent-<id>/<base>
+    # checked out locally. Idempotent.
+    from . import workspace
+    for ws, _, _ in workspaces:
+        workspace.verify_layout(ws, agent_id)
+
     # Update workspace remotes to use git:// via daemon (localhost for
     # host-side sync, then switch to slirp address for inside the namespace)
     for ws, _, slug in workspaces:
@@ -867,8 +957,8 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
     user_env_path = user_env.build()
 
     log.info("setting up nix overlay...")
-    nix_merged = _setup_shared_nix_overlay(home)
-    nix_db_dir = _seed_nix_db(home, nix_merged)
+    nix_merged = _setup_nix_overlay(home, agent_id)
+    nix_db_dir = _seed_nix_db(home, agent_id, nix_merged)
     log.info("nix overlay ready")
 
     # Encode multiple workspaces as colon-separated lists
@@ -964,14 +1054,7 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
     )
 
     try:
-        claude_cmd = [SANDBOX_BIN, "claude", "--dangerously-skip-permissions"]
-        if prompt:
-            claude_cmd += ["--print", prompt]
-        elif session_id:
-            if resuming:
-                claude_cmd += ["--resume", session_id]
-            else:
-                claude_cmd += ["--session-id", session_id]
+        claude_cmd = _build_claude_cmd(session_id, resuming, prompt)
         daemon_port = daemon._agent_port(agent_id)
 
         # One-directional sync pipe: supervisor.py writes a byte after
@@ -984,7 +1067,7 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
         os.set_inheritable(sync_w, True)
 
         # Nix overlay env vars for supervisor.py.
-        upper, work, merged = _nix_overlay_dirs(home)
+        upper, work, merged = _nix_overlay_dirs(home, agent_id)
         env["CODING_CAVE_NS_SYNC_FD"] = str(sync_w)
         env["CODING_CAVE_NS_OVERLAY_MERGED"] = str(merged)
         env["CODING_CAVE_NS_OVERLAY_UPPER"] = str(upper)

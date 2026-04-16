@@ -74,6 +74,24 @@ def display_name(base: Path, agent_id: str) -> str:
     return f"{slug}@{agent_id}"
 
 
+def launch_name(base: Path, agent_id: str) -> str:
+    """Agent name used as the sandbox home-dir key.
+
+    Mirrors cli.agent: display_name with the parent's lineage appended,
+    so subcave-homes/ and session_file_exists lookups agree.
+    """
+    name = display_name(base, agent_id)
+    lineage = os.environ.get("CODING_CAVE_LINEAGE", "")
+    if lineage:
+        name += f" (parent {lineage})"
+    return name
+
+
+def agent_launch_home(base: Path, agent_id: str) -> Path:
+    """Home dir where agent_id's Claude sessions live on disk."""
+    return config.launch_home(launch_name(base, agent_id))
+
+
 # -- Session management --
 
 def write_session_id(agent_id: str, session_id: str) -> None:
@@ -286,7 +304,7 @@ def continue_agent_id(base: Path, agent_id: str | None = None) -> str | None:
             db.commit()
             return agent_id
 
-        # Find most recently exited agent for this project
+        # Find most recently exited agent for this project.
         row = db.execute(
             "SELECT agent_id FROM agents "
             "WHERE project = ? AND exited_at IS NOT NULL "
@@ -333,6 +351,10 @@ def resolve_continue(base: Path, agent_id_hint: str | None = None):
     if agent_id is None:
         # Nothing in the registry. Check for a session file on disk
         # (e.g. a zero-commit agent that was cleaned up on exit).
+        # Use the caller's own launch home: if inside a cave, session
+        # files land under subcave-homes/<name>/, not persistent_home.
+        # We don't yet have an agent_id so use the name the next
+        # acquire_agent_id would assign.
         found = config.latest_session_file(slug)
         if found:
             agent_id = acquire_agent_id(base)
@@ -347,14 +369,15 @@ def resolve_continue(base: Path, agent_id_hint: str | None = None):
             f"Start a new session with: cav agent"
         )
 
+    home = agent_launch_home(base, agent_id)
     session_id = read_session_id(agent_id)
-    if session_id and config.session_file_exists(slug, session_id):
+    if session_id and config.session_file_exists(slug, session_id, home):
         _vprint(f"continue: resuming agent {agent_id}, "
                 f"session {session_id}")
         return agent_id, session_id, True
 
     # Session file gone or never created; start fresh in same agent slot.
-    d = config._claude_project_dir(slug)
+    d = config._claude_project_dir(slug, home)
     if session_id:
         f = d / f"{session_id}.jsonl"
         print(f"Warning: session file missing ({f}), "

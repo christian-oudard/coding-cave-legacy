@@ -9,6 +9,6 @@
 
 ## Git
 
-Work on your dev branch, named `agent-<n>/<branch>`, where `<n>` is your agent number, and `<branch>` is the base branch. You cannot push to base branches (main etc.). The user reviews your work and approves it to merge to the base branch. Your commits are automatically pushed to the shared remote at `host-cave`. Commits from the user and other coding cave agent sessions come in on `host-cave/<branch>`. To sync with the base branch, run `git fetch host-cave && git rebase host-cave/<branch>`
+You work on the base branch (e.g. `main`). Your commits are automatically pushed to the shared remote at `host-cave`, where they appear under your dev branch name (managed by the cave, invisible to you). Commits from the user and other agents come in on `host-cave/<branch>`. To sync, run `git fetch host-cave && git rebase host-cave/<branch>`. You cannot overwrite the base branch on the remote. The user reviews your work and approves it to merge.
 
 You are responsible for a clean git history. Organize work-in-progress into focused commits. You can freely amend, and squash commits on your dev branch. To undo commits, use `git reset`; do not use `git revert`.

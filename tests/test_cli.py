@@ -127,10 +127,14 @@ class TestRequireInitInsideCave(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("not initialized", result.stderr)
 
-    def test_checkout_blocked_inside_cave(self):
+    def test_checkout_inside_cave_needs_agent_name(self):
+        """Inside a cave, checkout self-retargets via host-cave and does
+        not need cav init. It does need CODING_CAVE_AGENT_NAME to know
+        the agent's own id in the parent's registry.
+        """
         result = cav_cli("checkout", "main", cwd=self.repo, check=False)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("not initialized", result.stderr)
+        self.assertIn("agent id", result.stderr)
 
     def test_version_still_works_inside_cave(self):
         """version does not need init and must always work."""
@@ -339,9 +343,12 @@ class TestInitNewProject(unittest.TestCase):
         (ws / "README.md").write_text("# Hello\n")
         git("add", "README.md", cwd=ws)
         git("commit", "-m", "add readme", cwd=ws)
-        # Push dev branch to shared remote (simulating post-commit hook)
+        # Push dev branch to shared remote (simulating post-commit hook).
+        # The workspace's local branch is the base ('main'); the
+        # asymmetric refspec maps it to agent-1/main upstream.
         shared = config.shared_repo_path(project)
-        git("push", str(shared), "agent-1/main", cwd=ws)
+        git("push", str(shared), "refs/heads/main:refs/heads/agent-1/main",
+            cwd=ws)
         # Fetch so user repo sees the dev branch
         git("fetch", "cave", cwd=project)
         # Approve
@@ -535,6 +542,71 @@ class TestSessionResume(unittest.TestCase):
         self._make_session_file(slug, sid)
         self.assertTrue(config.session_file_exists(slug, sid))
         self.assertFalse(config.session_file_exists(slug, "nonexistent"))
+
+    def test_session_file_exists_with_subcave_home(self):
+        """When inside a cave, session files live under subcave-homes/<name>/.
+
+        Before this fix, session_file_exists only looked at persistent_home
+        and always missed subcave sessions, so -c --prompt couldn't resume.
+        """
+        from cav import config
+        slug = "myproj"
+        sid = "bbbbbbbb-0000-0000-0000-000000000002"
+        sub_home = config.DATA_DIR / "subcave-homes" / "myproj@1"
+        d = config._claude_project_dir(slug, sub_home)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"{sid}.jsonl").write_text("{}\n")
+
+        # Default (persistent_home) doesn't see it.
+        self.assertFalse(config.session_file_exists(slug, sid))
+        # Explicit subcave home does.
+        self.assertTrue(config.session_file_exists(slug, sid, sub_home))
+
+    def test_prompt_with_continue_passes_resume(self):
+        """cav agent -c --prompt must pass --resume so Claude picks up context."""
+        from cav.sandbox import _build_claude_cmd
+        cmd = _build_claude_cmd(
+            session_id="aaaa-bbbb", resuming=True, prompt="hi")
+        # Session arg comes first so --print still wins as the prompt.
+        self.assertIn("--resume", cmd)
+        self.assertIn("aaaa-bbbb", cmd)
+        self.assertIn("--print", cmd)
+        self.assertIn("hi", cmd)
+
+    def test_prompt_with_new_session_uses_session_id(self):
+        """Fresh agent + --prompt pre-assigns a --session-id so -c later can find it."""
+        from cav.sandbox import _build_claude_cmd
+        cmd = _build_claude_cmd(
+            session_id="new-uuid", resuming=False, prompt="hi")
+        self.assertIn("--session-id", cmd)
+        self.assertIn("new-uuid", cmd)
+        self.assertNotIn("--resume", cmd)
+
+    def test_prompt_without_session_has_no_session_args(self):
+        """--prompt with no known session should just pass through to --print."""
+        from cav.sandbox import _build_claude_cmd
+        cmd = _build_claude_cmd(
+            session_id=None, resuming=False, prompt="hi")
+        self.assertNotIn("--resume", cmd)
+        self.assertNotIn("--session-id", cmd)
+        self.assertIn("--print", cmd)
+
+    def test_launch_home_host_vs_cave(self):
+        """launch_home picks persistent_home on host, subcave-homes/ in a cave."""
+        from cav import config
+        saved = os.environ.pop("CODING_CAVE_VERSION", None)
+        try:
+            self.assertEqual(
+                config.launch_home("proj@1"), config.persistent_home())
+            os.environ["CODING_CAVE_VERSION"] = "test"
+            self.assertEqual(
+                config.launch_home("proj@1"),
+                config.DATA_DIR / "subcave-homes" / "proj@1")
+        finally:
+            if saved is None:
+                os.environ.pop("CODING_CAVE_VERSION", None)
+            else:
+                os.environ["CODING_CAVE_VERSION"] = saved
 
     def test_find_agent_by_session_unknown_returns_none(self):
         from tests import find_agent_by_session

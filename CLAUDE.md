@@ -18,6 +18,8 @@ Three test tiers, separated by what they require:
 
 Run fast + git tests before committing changes to core modules. Run cave tests when changing sandbox or environment setup.
 
+Always run the git and cave tiers in the background (the `run_in_background` option on Bash) so you aren't blocked on them. The fast tier is quick enough to run in the foreground.
+
 ## Build
 
 Nix-only. `nix build` produces the `cav` binary. Build-time placeholders (`@VERSION@`, `@VERSION_DATE@`, `@SANDBOX_BIN@`, `@CAV_BIN@`, `@NIXPKGS_URL@`, `@CLAUDE_CODE_NIX_URL@`, `@NIX_CLAUDE_URL@`, `@MKCAVEENV_PATH@`, `@SYSTEM_CLAUDE_MD_PATH@`, `@DEFAULT_STATUSLINE_PATH@`) in cli.py, sandbox.py, and user_env.py are substituted by the Nix derivation. Running from source via `nix develop` works for tests and most CLI commands, but `cav version` and `cav agent` require a full `nix build` since they depend on substituted values.

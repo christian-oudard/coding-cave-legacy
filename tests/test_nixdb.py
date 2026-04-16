@@ -315,7 +315,7 @@ class TestSeedNixDb(unittest.TestCase):
         """DB directory is a sibling of merged, not under it."""
         from cav.sandbox import _nix_overlay_dirs
         home = config.persistent_home()
-        _, _, merged = _nix_overlay_dirs(home)
+        _, _, merged = _nix_overlay_dirs(home, "1")
         db_dir = merged.parent / "db"
         self.assertFalse(
             str(db_dir).startswith(str(merged) + "/"),
@@ -323,34 +323,73 @@ class TestSeedNixDb(unittest.TestCase):
         )
 
 
-class TestIsolatedSubcaveHomes(unittest.TestCase):
-    """Subcaves get isolated homes so overlay dirs are naturally distinct.
+class TestPerAgentOverlay(unittest.TestCase):
+    """Each agent gets its own upper/work/merged.
 
-    Each nesting level uses "shared/" under its own home. Since homes
-    are distinct, the overlay paths never collide and no lineage
-    tracking is needed.
+    Kernel overlayfs rejects shared upperdir/workdir across mounts as
+    undefined behavior. A single home shared across sibling agents
+    must still yield disjoint overlay paths.
     """
 
-    def test_different_homes_yield_different_overlay_dirs(self):
-        """Two homes produce non-overlapping overlay paths."""
-        import tempfile
-        from cav.sandbox import _nix_overlay_dirs
-        a = Path(tempfile.mkdtemp())
-        b = Path(tempfile.mkdtemp())
-        _, _, merged_a = _nix_overlay_dirs(a)
-        _, _, merged_b = _nix_overlay_dirs(b)
-        self.assertNotEqual(merged_a, merged_b)
-        self.assertFalse(str(merged_a).startswith(str(merged_b) + "/"))
-        self.assertFalse(str(merged_b).startswith(str(merged_a) + "/"))
-
-    def test_same_home_yields_same_overlay_dirs(self):
-        """Siblings sharing a home share the overlay (by design)."""
+    def test_same_home_different_agents_yield_distinct_dirs(self):
+        """Siblings on the same home must not share upper/work/merged."""
         import tempfile
         from cav.sandbox import _nix_overlay_dirs
         home = Path(tempfile.mkdtemp())
-        _, _, merged_a = _nix_overlay_dirs(home)
-        _, _, merged_b = _nix_overlay_dirs(home)
-        self.assertEqual(merged_a, merged_b)
+        upper_a, work_a, merged_a = _nix_overlay_dirs(home, "1")
+        upper_b, work_b, merged_b = _nix_overlay_dirs(home, "2")
+        self.assertNotEqual(upper_a, upper_b)
+        self.assertNotEqual(work_a, work_b)
+        self.assertNotEqual(merged_a, merged_b)
+
+    def test_same_agent_twice_returns_same_dirs(self):
+        """Idempotent: calling twice with same agent yields same paths."""
+        import tempfile
+        from cav.sandbox import _nix_overlay_dirs
+        home = Path(tempfile.mkdtemp())
+        a1 = _nix_overlay_dirs(home, "1")
+        a2 = _nix_overlay_dirs(home, "1")
+        self.assertEqual(a1, a2)
+
+    def test_agent_dir_includes_agent_id(self):
+        """Overlay path must scope by agent id under the per-home dir."""
+        import tempfile
+        from cav.sandbox import _nix_overlay_dirs
+        home = Path(tempfile.mkdtemp())
+        upper, _, _ = _nix_overlay_dirs(home, "7")
+        self.assertIn("agent-7", str(upper))
+
+    def test_migrate_shared_renames_to_agent_dir(self):
+        """Legacy shared/ is renamed into agent-<id>/ on first launch."""
+        import tempfile
+        from cav.sandbox import _migrate_shared_overlay
+        home = Path(tempfile.mkdtemp())
+        legacy = (home / ".local" / "share" / "coding-cave"
+                  / "nix-overlay" / "shared")
+        (legacy / "upper").mkdir(parents=True)
+        (legacy / "upper" / "marker").write_text("legacy")
+        _migrate_shared_overlay(home, "3")
+        self.assertFalse(legacy.exists(),
+                         "legacy shared/ should have been renamed away")
+        target = (home / ".local" / "share" / "coding-cave"
+                  / "nix-overlay" / "agent-3" / "upper" / "marker")
+        self.assertEqual(target.read_text(), "legacy",
+                         "contents must be preserved under agent-3/")
+
+    def test_migrate_skipped_when_target_exists(self):
+        """A second agent launching after migration keeps its own dir."""
+        import tempfile
+        from cav.sandbox import _migrate_shared_overlay
+        home = Path(tempfile.mkdtemp())
+        root = home / ".local" / "share" / "coding-cave" / "nix-overlay"
+        (root / "shared" / "upper").mkdir(parents=True)
+        (root / "shared" / "upper" / "from-shared").touch()
+        (root / "agent-5" / "upper").mkdir(parents=True)
+        (root / "agent-5" / "upper" / "from-agent").touch()
+        _migrate_shared_overlay(home, "5")
+        # agent-5/ content preserved, shared/ left alone (not clobbered).
+        self.assertTrue((root / "agent-5" / "upper" / "from-agent").exists())
+        self.assertTrue((root / "shared" / "upper" / "from-shared").exists())
 
 
 class TestRmtreeReadonly(unittest.TestCase):

@@ -90,28 +90,29 @@ class TestDaemon(unittest.TestCase):
         (ws / "new.txt").write_text("new\n")
         git("add", "new.txt", cwd=ws)
         git("commit", "-m", "agent work", cwd=ws)
-        result = git("push", "host-cave", "agent-1/main", cwd=ws)
+        # Workspace local branch is main; push refspec maps to agent-1/main.
+        result = git("push", "host-cave", cwd=ws)
         self.assertEqual(result.returncode, 0)
 
     def test_ff_push_shared_rejected_via_daemon(self):
         """Agent cannot ff-push to base branch through daemon."""
         ws = self._ws_with_daemon_remote("1")
-        git("checkout", "main", cwd=ws)
         (ws / "fix.txt").write_text("fix\n")
         git("add", "fix.txt", cwd=ws)
         git("commit", "-m", "fix", cwd=ws)
-        result = git("push", "host-cave", "main", cwd=ws, check=False)
+        # Explicit refspec bypasses the workspace's push mapping.
+        result = git("push", "host-cave", "main:main", cwd=ws, check=False)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("REJECTED", result.stderr)
 
     def test_non_ff_push_rejected_via_daemon(self):
         """Agent non-ff push rejected by hook running through daemon."""
         ws = self._ws_with_daemon_remote("1")
-        git("checkout", "main", cwd=ws)
         (ws / "bad.txt").write_text("bad\n")
         git("add", "bad.txt", cwd=ws)
         git("commit", "--amend", "-m", "rewritten", cwd=ws)
-        result = git("push", "--force", "host-cave", "main", cwd=ws, check=False)
+        result = git("push", "--force", "host-cave", "main:main", cwd=ws,
+                     check=False)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("REJECTED", result.stderr)
 

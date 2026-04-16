@@ -13,25 +13,23 @@ Locations:
 
 The agent cave refers to the shared remote as `host-cave`, but the host refers to it as `cave`. The host will generally also have a separate `origin` remote for publishing to GitHub.
 
-There are two kinds of branches:
-- **Base branches** (`main`, `develop`, `issue/123`, etc.) are the project's normal branches. Agents cannot access them directly. Only the user modifies base branches, via `cav approve` and normal manual development.
-- **Dev branches** are named `agent-<n>/<base>` (e.g. `agent-1/main`, `agent-2/develop`). These are the working branches for incomplete work to be reviewed and tested.
+Each agent works on its own copy of a base branch (`main`, `develop`, `issue/123`, etc.) in its sandbox workspace. The agent sees its copy by the base branch name: inside the cave, the local branch is simply `main`. On the shared remote and the host repo, agent copies are namespaced under `agent-<n>/<base>` (e.g. `agent-1/main`) so they don't collide with the canonical base branch or with other agents' copies.
 
 Here is how code moves through the system:
 
-**Development** The agent commits work to its sandboxed worktree on the dev branch (`agent-N/main`). These commits are automatically synced to the shared remote. The user runs `cav pull` to pull new or rewritten commits to their own repository's dev branch. If the user has made manual edits, they run `cav push` to push their commits the shared remote, which is automatically synced to the agent worktree.
+**Development** The agent commits work to its sandboxed worktree. Each commit is automatically published to the shared remote as `agent-<n>/<base>`. The user runs `cav pull` to bring those commits into their host-side view of the agent's branch. If the user makes manual edits, they run `cav push` to send them through the shared remote, where they are picked up by the agent's worktree.
 
-**Approval** When the user is satisfied with the state of the dev branch, they run `cav approve`, which merges the pending commits into the base branch (`main` and `cave/main`). Also, agent worktrees are rebased on the newly updated `cave/main`. This is always a clean fast-forward, never a merge commit.
+**Approval** When the user is satisfied with the agent's work, they run `cav approve`, which fast-forwards the canonical base branch (`main` and `cave/main`) to the tip of the agent's branch. Other agent worktrees are rebased on the newly updated `cave/main`. This is always a clean fast-forward, never a merge commit.
 
 **Publication** The host pushes the main branch to the GitHub origin, like normal. The agent never has GitHub credentials, and this local review process does not use the GitHub pull request system.
 
-**Rebase** Any time `cave/main` receives new commits, an attempt is made to rebase agent dev branches on the new `cave/main`. New commits on `main` can be pushed to the `cave/main` remote branch with `cav push` or `cav push --force` if they rewrite history. `cav push` commands trigger rebase for agent dev branches.
+**Rebase** Any time `cave/main` receives new commits, an attempt is made to rebase each agent's branch on the new base. New commits on `main` can be pushed to the `cave/main` remote branch with `cav push` or `cav push --force` if they rewrite history. `cav push` commands trigger rebase for agent branches.
 
 **History rewrites**
-When agents amend or squash commits, the user can run `cav pull`  to pull history-rewriting updates. If these updates would clobber user commits, `cav pull --force` is required to authorize this.
+When agents amend or squash commits, the user can run `cav pull` to pull history-rewriting updates. If these updates would clobber user commits, `cav pull --force` is required to authorize this.
 
-**Illegal Actions** 
-Git hooks enforce that git commands run by agents are topologically correct. Agents cannot push to cave/main, or to dev branches that do not belong to them.
+**Illegal Actions**
+Git hooks enforce that git commands run by agents are topologically correct. Agents cannot publish to canonical base branches (e.g. `main`), or to another agent's branch.
 
 ## Projects
 
@@ -90,23 +88,23 @@ All caves are recursive. Agents can launch sub-caves for testing coding-cave fea
 
 ### `cav approve [agent-id]`
 
-Approves a dev branch's work, and merges it into the base branch. Specify which agent ID number to approve, or the agent ID is inferred from the current dev branch if one is checked out. Approval errors out if the dev branch is not possible to fast-forward merge to the base branch (the agent must rebase first). To process an approval, the command pushes the dev branch tip to the base branch, on both the cave remote and host repo.
+Approves an agent's work and fast-forwards the canonical base branch to the tip of the agent's branch. Specify which agent ID number to approve, or the agent ID is inferred from the currently checked-out agent branch. Approval errors out if the merge is not a fast-forward (the agent must rebase first). To process an approval, the command advances the base branch on both the cave remote and the host repo.
 
 ### `cav reject [agent-id]`
 
-Rejects the tip commit of the current base branch. Must be run from a base branch. This means to undo the approval that got it into the base branch in the first place. this means running `git reset --hard` on the host repo base branch to remove the commit, and ensuring that it exists as the tip of the dev branch, for both host and agent. If the agent has exited and their dev branch is gone, a running agent with no unmerged commits is required to give the rejected commits a place to go.
+Rejects the tip commit of the current base branch. Must be run from a base branch. This means undoing the approval that got it into the base branch in the first place: running `git reset --hard` on the host repo base branch to remove the commit, and ensuring that it exists as the tip of the agent's branch, for both host and agent. If the agent has exited and their branch is gone, a running agent with no unmerged commits is required to give the rejected commits a place to go.
 
 ### `cav pull [--force]`
 
-Moves work from the agent dev branch to the host dev branch. One push from agent to shared, and one pull from shared to host. This is only valid on dev branches, not on base branches. The pull command is idempotent, multiple calls are the same as one call.
+Moves work from the agent's branch to the host's view of it. One push from agent to shared, and one pull from shared to host. This is only valid on agent branches, not on canonical base branches. The pull command is idempotent, multiple calls are the same as one call.
 
 ### `cav push [--force]`
 
-Pushes the current branch to the shared remote. With `--force`, force-pushes (for rollback or history rewriting). Valid on both base branches and dev branches. If we push to a dev branch, the agent dev branch is automatically updated. The push command is idempotent, multiple calls are the same as one call.
+Pushes the current branch to the shared remote. With `--force`, force-pushes (for rollback or history rewriting). Valid on both base branches and agent branches. If we push to an agent branch, the agent's workspace is automatically updated. The push command is idempotent, multiple calls are the same as one call.
 
 ### `cav checkout <branch> [agent-id]`
 
-Changes the current base branch to `<branch>`. The host repo runs `git checkout <branch>`. The agent creates a new branch `agent-<n>/<branch>`. Unmerged work from the previous agent dev branch is rebased on the new shared base branch. Agent ID is inferred from the current branch if on a dev branch, otherwise agent ID must specified.
+Retargets an agent to a different base branch. The agent's workspace is switched to the new base, and its unmerged work is rebased onto it. Agent ID is inferred from the currently checked-out agent branch if present, otherwise it must be specified.
 
 ### `cav status [-a,--all]`
 
@@ -114,7 +112,7 @@ Shows the current list of agents and unmerged commits for the current project, o
 
 ### `cav remove-agent <n>`
 
-Removes a paused agent by agent ID. Deletes its session from the database, and deletes its work tree, and deletes its remote dev branch, and deletes the host dev branch checkout. Warns about unapproved commits being discarded, giving commit hashes. Refuses to remove a running agent.
+Removes a paused agent by agent ID. Deletes its session from the database, deletes its worktree, deletes its remote agent branch, and deletes the corresponding host-side checkout. Warns about unapproved commits being discarded, giving commit hashes. Refuses to remove a running agent.
 
 ### `cav env build`
 

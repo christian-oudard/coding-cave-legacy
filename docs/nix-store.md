@@ -14,9 +14,10 @@ Inside the cave's user namespace, host uid 0 is unmapped (appears as
 65534/nobody). Kernel overlayfs reads these paths without issue since
 the CVE-2023-0386 check only triggers on copy-up, not reads.
 
-Sibling agents at the same nesting level share installed packages. A
-package installed by one agent is immediately visible to all siblings.
 Ancestor store paths are readable by descendants without duplication.
+Sibling agents at the same nesting level do NOT share installed packages
+(see "Per-agent overlay" below): a package installed by one agent is
+private to that agent until it is moved into an ancestor layer.
 
 ### Writes
 
@@ -60,11 +61,19 @@ overlay-built paths (nix does not populate this for builds that land
 in the upper layer). Nix caches (fetcher cache, eval cache) must be
 pruned of stale entries on launch.
 
-### Agent sharing
+### Per-agent overlay
 
-All agents at the same nesting level share one overlay upper layer
-and one DB. Concurrent nix operations from multiple agents are safe
-because nix coordinates builds via its own `flock()` mechanism.
+Each agent gets its own upper, work, and merged directories plus its
+own DB. Kernel overlayfs treats shared upperdir/workdir across mounts
+as undefined behavior: orphan inodes, ESTALE errors, and failed
+unlinks. Per-agent dirs are the only safe configuration when the
+same kernel overlay is simultaneously active in multiple mount
+namespaces (one per agent).
+
+The tradeoff is that a package installed by one agent is not visible
+to its siblings. Promoting packages to an ancestor layer (where all
+descendants share them) is the intended mechanism for sharing, not
+a shared upper at the same level.
 
 ### Nesting
 
@@ -79,20 +88,19 @@ units, no special host-side changes.
 
 ## Architecture
 
-Each nesting level gets its own kernel overlayfs mount for `/nix/store`,
-stacked on top of its parent's merged view. All agents at the same level
-share that level's overlay:
+Each agent gets its own kernel overlayfs mount for `/nix/store`,
+stacked on top of its parent level's merged view:
 
 ```
-upper:  this level's writable layer (persists across sessions)
-lower:  parent level's /nix/store (read-only from this level's view)
-merged: bind-mounted into each agent's bwrap namespace
+upper:  this agent's writable layer (persists across sessions)
+lower:  parent level's /nix/store (read-only from this agent's view)
+merged: bind-mounted into this agent's bwrap namespace
 ```
 
 At the host level, the lower layer is the real host `/nix/store`. At a
 nested level, the lower layer is the parent cave's merged view, which
 transparently stacks all ancestor upper layers. Reads fall through to
-whichever ancestor first has the path. Writes land in this level's own
+whichever ancestor first has the path. Writes land in this agent's own
 upper.
 
 ### Why kernel overlayfs, not fuse-overlayfs
@@ -122,21 +130,19 @@ mode-600 lock files (triggering copy-up failures).
   level it's the parent cave's merged overlay. Agents can use every
   package their ancestors have, without duplication.
 
-- **Per-level overlay**
-  (`~/.local/share/coding-cave/nix-overlay/shared/`). Each nesting
-  level gets its own persistent home, so every level uses the same
-  relative path (`shared/`) but it resolves to a distinct location on
-  disk. Holds packages installed by any agent at this level via
-  `nix shell` etc. Shared across siblings so a package installed by
-  one agent is immediately available to all others without
-  re-downloading.
+- **Per-agent overlay**
+  (`~/.local/share/coding-cave/nix-overlay/agent-<id>/`). Each agent
+  at each level gets its own directory. Host agents sharing the
+  persistent home, and siblings at the same nesting level, both scope
+  by agent id rather than colliding on a single `shared/` path. Holds
+  packages that agent installed via `nix shell` etc.
 
-- **Per-level DB** (`shared/db/`). The nix SQLite database for each
-  level lives on the native filesystem, not under the overlay mount.
-  This is required for correct SQLite WAL locking with concurrent
-  multi-agent access. A level's DB is seeded from its parent's DB at
-  launch time, so nix treats already-built packages as registered and
-  skips the `chmod` dance that would otherwise trigger a copy-up.
+- **Per-agent DB** (`agent-<id>/db/`). The nix SQLite database for
+  each agent lives on the native filesystem, not under the overlay
+  mount. (Required for correct SQLite WAL locking, even though each
+  agent's DB is now single-writer.) Seeded from the parent level's DB
+  at launch time so nix treats already-built packages as registered
+  and skips the `chmod` dance that would otherwise trigger a copy-up.
 
 The overlay persists across agent launches. It is not torn down when an
 agent exits.
@@ -225,37 +231,40 @@ persistent home (`~/.cache/nix/`):
 
 ## Isolation properties
 
-- A level can read every package in any ancestor level (multi-level
+- An agent can read every package in any ancestor level (multi-level
   cache).
-- A level can only write to its own upper / db. Descendants cannot
-  modify their ancestors.
-- Siblings at the same level share one overlay (writes by one are
-  visible to the others).
+- An agent can only write to its own upper / db. Siblings and
+  descendants cannot modify its layer, and it cannot modify theirs.
+- Siblings at the same level do NOT share an overlay. Installs are
+  private per agent until promoted into an ancestor layer.
 - Packages that already exist in an ancestor are never duplicated.
-  Subcaves only write their own new installs.
+  Agents only write their own new installs.
 
 ## Garbage Collection
 
-A level's overlay upper can be cleaned up manually. For the host level:
+An agent's overlay upper can be cleaned up manually:
 
 ```
-$ rm -rf ~/.local/share/coding-cave/nix-overlay/shared/{upper,work,db}
+$ rm -rf ~/.local/share/coding-cave/nix-overlay/agent-<id>
 ```
 
-For a subcave level, replace `shared` with
-`subcaves/<parent-lineage>`. This removes all packages installed at
-that level (and inherited by its descendants). They will be
-re-downloaded on next use. Ancestor levels are unaffected.
+For a subcave, the same path resolves under that cave's subcave-home
+(`~/.local/share/coding-cave/subcave-homes/<agent-name>/.local/...`).
+Removing an agent's directory drops every package that agent installed.
+They will be re-downloaded on next use. Sibling agents, ancestors,
+and descendants are unaffected.
 
 ## Promoting Packages to Host
 
 To permanently keep a cave-installed package on the host, copy it from
-the level's upper layer:
+the agent's upper layer:
 
 ```
-$ cp -a ~/.local/share/coding-cave/nix-overlay/shared/upper/<hash>-<name> /nix/store/
+$ cp -a ~/.local/share/coding-cave/nix-overlay/agent-<id>/upper/<hash>-<name> \
+    /nix/store/
 $ nix-store --register-validity <<< "<path> <hash> <narSize> <deriver> 0"
 ```
 
 The package then becomes a first-class host store path, survives host
-`nix-store --gc`, and appears in the lower layer for all future caves.
+`nix-store --gc`, and appears in the lower layer for every future cave
+and agent.

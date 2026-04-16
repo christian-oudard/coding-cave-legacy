@@ -54,8 +54,17 @@ def git(*args, cwd=None, check=True, env=None):
 
 
 def agent_env(agent_id):
-    """Env dict that identifies pushes as coming from an agent."""
-    return {"CODING_CAVE_AGENT_ID": agent_id}
+    """Env dict that identifies pushes as coming from an agent.
+
+    CODING_CAVE_AGENT_ID is read by the pre-receive hook (server side)
+    to enforce per-agent branch ownership. CODING_CAVE_AGENT_NAME is
+    read by the cave's git wrapper (client side) to know which
+    agent-<id>/<base> ref to publish to upstream.
+    """
+    return {
+        "CODING_CAVE_AGENT_ID": agent_id,
+        "CODING_CAVE_AGENT_NAME": f"coding-cave@{agent_id}",
+    }
 
 
 def git_out(*args, cwd=None):
@@ -140,7 +149,7 @@ class TestCAV(unittest.TestCase):
         self.assertIn("cave", remotes)
 
     def test_init_idempotent(self):
-        """cav init on an existing project updates hooks."""
+        """Plain cav init on an already-init'd project is a no-op."""
         cav_cli("init", str(self.user_repo), cwd=self.user_repo)
         shared = self.user_repo / ".coding-cave" / "cave-shared.git"
 
@@ -148,9 +157,22 @@ class TestCAV(unittest.TestCase):
         (shared / "hooks" / "post-receive").unlink()
         self.assertFalse((shared / "hooks" / "post-receive").exists())
 
-        # Re-init should update hooks, not error
+        # Plain re-init does nothing: hooks are not touched.
         result = cav_cli("init", str(self.user_repo), cwd=self.user_repo)
-        self.assertIn("Coding Cave initialized", result.stdout)
+        self.assertIn("already initialized", result.stdout)
+        self.assertFalse((shared / "hooks" / "post-receive").exists())
+
+    def test_init_reinitialize_updates_hooks(self):
+        """cav init --reinitialize refreshes hooks on an existing project."""
+        cav_cli("init", str(self.user_repo), cwd=self.user_repo)
+        shared = self.user_repo / ".coding-cave" / "cave-shared.git"
+
+        (shared / "hooks" / "post-receive").unlink()
+        self.assertFalse((shared / "hooks" / "post-receive").exists())
+
+        result = cav_cli("init", "--reinitialize", str(self.user_repo),
+                         cwd=self.user_repo)
+        self.assertIn("reinitialized", result.stdout)
         self.assertTrue((shared / "hooks" / "post-receive").exists())
 
     # -- workspace creation --
@@ -166,7 +188,9 @@ class TestCAV(unittest.TestCase):
             self.assertIn("host-cave", remotes)
 
             branch = git_out("rev-parse", "--abbrev-ref", "HEAD", cwd=ws)
-            self.assertEqual(branch, f"agent-{name}/main")
+            # Inside the workspace, the local branch is the base name;
+            # agent-<id>/<base> is the upstream name (set via push refspec).
+            self.assertEqual(branch, "main")
 
     def test_workspace_rejects_detached_head(self):
         """New workspace from detached HEAD must fail, not create agent-N/HEAD."""
@@ -225,7 +249,12 @@ class TestCAV(unittest.TestCase):
         wrapper = bin_dir / "git"
         wrapper.write_text(GIT_WRAPPER)
         wrapper.chmod(0o755)
-        env = {"PATH": f"{bin_dir}:{_clean_env()['PATH']}"}
+        # Wrapper reads CODING_CAVE_AGENT_NAME to know the agent-<id>/<base>
+        # ref to publish to upstream.
+        env = {
+            "PATH": f"{bin_dir}:{_clean_env()['PATH']}",
+            "CODING_CAVE_AGENT_NAME": "coding-cave@1",
+        }
 
         # Make 2 commits and push
         (ws / "a.py").write_text("a\n")
@@ -256,9 +285,10 @@ class TestCAV(unittest.TestCase):
         self._init()
         git("checkout", "-b", "agent-1/main", cwd=self.user_repo)
         ws, _ = workspace.create(self.user_repo, "2")
-        # Should create agent-2/main (not agent-2/agent-1/main)
+        # Local branch in the workspace is the resolved base (main),
+        # not the host's agent-1/main nor an agent-2/ prefixed name.
         branch = git_out("rev-parse", "--abbrev-ref", "HEAD", cwd=ws)
-        self.assertEqual(branch, "agent-2/main")
+        self.assertEqual(branch, "main")
 
     def test_auto_agent_id(self):
         """acquire_agent_id auto-assigns 1, 2, 3 when all are running."""
@@ -327,8 +357,8 @@ class TestCAV(unittest.TestCase):
         git("commit", "-m", "Update feature", cwd=ws)
 
         # Push dev branch, then approve as user
-        git("push", "host-cave", "agent-1/main", cwd=ws, env=agent_env("1"))
-        git("push", "host-cave", "agent-1/main:main", cwd=ws)
+        git("push", "host-cave", "main:agent-1/main", cwd=ws, env=agent_env("1"))
+        git("push", "host-cave", "main:main", cwd=ws)
 
         git("fetch", "cave", cwd=self.user_repo)
         git("merge", "--ff-only", "cave/main", cwd=self.user_repo)
@@ -346,10 +376,10 @@ class TestCAV(unittest.TestCase):
         git("commit", "-m", "Add feature", cwd=ws)
 
         # Push to dev branch
-        git("push", "host-cave", "agent-1/main", cwd=ws, env=agent_env("1"))
+        git("push", "host-cave", "main:agent-1/main", cwd=ws, env=agent_env("1"))
 
         # Approve as user
-        git("push", "host-cave", "agent-1/main:main", cwd=ws)
+        git("push", "host-cave", "main:main", cwd=ws)
 
         # Agent branch should still exist on remote
         git("fetch", "--prune", "cave", cwd=self.user_repo)
@@ -365,7 +395,7 @@ class TestCAV(unittest.TestCase):
         (ws / "wip.py").write_text("# v1\n")
         git("add", "wip.py", cwd=ws)
         git("commit", "-m", "WIP v1", cwd=ws)
-        git("push", "host-cave", "agent-1/main", cwd=ws, env=agent_env("1"))
+        git("push", "host-cave", "main:agent-1/main", cwd=ws, env=agent_env("1"))
 
         # User checks out the dev branch
         git("fetch", "cave", cwd=self.user_repo)
@@ -380,7 +410,7 @@ class TestCAV(unittest.TestCase):
         (ws / "wip.py").write_text("# v2\n")
         git("add", "wip.py", cwd=ws)
         git("commit", "--amend", "-m", "WIP v2", cwd=ws)
-        git("push", "--force", "host-cave", "agent-1/main", cwd=ws, env=agent_env("1"))
+        git("push", "--force", "host-cave", "main:agent-1/main", cwd=ws, env=agent_env("1"))
 
         # cav pull without --force should refuse
         r = cav_cli("pull", cwd=self.user_repo, check=False)
@@ -413,7 +443,7 @@ class TestCAV(unittest.TestCase):
         (ws / "wip.py").write_text("# v1\n")
         git("add", "wip.py", cwd=ws)
         git("commit", "-m", "WIP v1", cwd=ws)
-        git("push", "host-cave", "agent-1/main", cwd=ws, env=agent_env("1"))
+        git("push", "host-cave", "main:agent-1/main", cwd=ws, env=agent_env("1"))
 
         # User pulls
         git("fetch", "cave", cwd=self.user_repo)
@@ -424,7 +454,7 @@ class TestCAV(unittest.TestCase):
         (ws / "wip.py").write_text("# v2\n")
         git("add", "wip.py", cwd=ws)
         git("commit", "--amend", "-m", "WIP v2", cwd=ws)
-        git("push", "--force", "host-cave", "agent-1/main",
+        git("push", "--force", "host-cave", "main:agent-1/main",
             cwd=ws, env=agent_env("1"))
 
         # cav pull should succeed without --force
@@ -446,7 +476,7 @@ class TestCAV(unittest.TestCase):
         (ws / "wip.py").write_text("# v1\n")
         git("add", "wip.py", cwd=ws)
         git("commit", "-m", "WIP v1", cwd=ws)
-        git("push", "host-cave", "agent-1/main", cwd=ws, env=agent_env("1"))
+        git("push", "host-cave", "main:agent-1/main", cwd=ws, env=agent_env("1"))
 
         # User adds a commit on the agent branch and pushes to shared remote
         git("fetch", "cave", cwd=self.user_repo)
@@ -461,7 +491,7 @@ class TestCAV(unittest.TestCase):
         (ws / "wip.py").write_text("# v2\n")
         git("add", "wip.py", cwd=ws)
         git("commit", "--amend", "-m", "WIP v2", cwd=ws)
-        r = git("push", "--force", "host-cave", "agent-1/main",
+        r = git("push", "--force", "host-cave", "main:agent-1/main",
                 cwd=ws, env=agent_env("1"), check=False)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("REJECTED", r.stderr)
@@ -475,7 +505,7 @@ class TestCAV(unittest.TestCase):
         (ws / "wip.py").write_text("# v1\n")
         git("add", "wip.py", cwd=ws)
         git("commit", "-m", "WIP v1", cwd=ws)
-        git("push", "host-cave", "agent-1/main", cwd=ws, env=agent_env("1"))
+        git("push", "host-cave", "main:agent-1/main", cwd=ws, env=agent_env("1"))
 
         # User pushes to the dev branch (resets agent worktree)
         git("fetch", "cave", cwd=self.user_repo)
@@ -490,7 +520,7 @@ class TestCAV(unittest.TestCase):
         (ws / "fix.py").write_text("# improved fix\n")
         git("add", "fix.py", cwd=ws)
         git("commit", "--amend", "-m", "Improved fix", cwd=ws)
-        r = git("push", "--force", "host-cave", "agent-1/main",
+        r = git("push", "--force", "host-cave", "main:agent-1/main",
                 cwd=ws, env=agent_env("1"), check=False)
         self.assertEqual(r.returncode, 0)
 
@@ -503,7 +533,7 @@ class TestCAV(unittest.TestCase):
         (ws / "feature.py").write_text("# v1\n")
         git("add", "feature.py", cwd=ws)
         git("commit", "-m", "Initial feature", cwd=ws)
-        git("push", "host-cave", "agent-1/main", cwd=ws, env=agent_env("1"))
+        git("push", "host-cave", "main:agent-1/main", cwd=ws, env=agent_env("1"))
 
         # Agent starts working on something (uncommitted)
         (ws / "wip.py").write_text("# work in progress\n")
@@ -542,7 +572,7 @@ class TestCAV(unittest.TestCase):
         (ws / "feature.py").write_text("# new\n")
         git("add", "feature.py", cwd=ws)
         git("commit", "-m", "Agent work", cwd=ws)
-        git("push", "host-cave", "agent-1/main", cwd=ws, env=agent_env("1"))
+        git("push", "host-cave", "main:agent-1/main", cwd=ws, env=agent_env("1"))
 
         # User checks out dev branch and pulls
         git("fetch", "cave", cwd=self.user_repo)
@@ -566,7 +596,7 @@ class TestCAV(unittest.TestCase):
         (ws1 / "a1.py").write_text("# a1\n")
         git("add", "a1.py", cwd=ws1)
         git("commit", "-m", "Agent 1 work", cwd=ws1)
-        git("push", "host-cave", "agent-1/main", cwd=ws1, env=agent_env("1"))
+        git("push", "host-cave", "main:agent-1/main", cwd=ws1, env=agent_env("1"))
 
         # Agent 2 creates a nested branch (as if spawned inside agent 1's workspace)
         ws2 = agents["2"]
@@ -577,7 +607,7 @@ class TestCAV(unittest.TestCase):
         git("push", "host-cave", "agent-2/agent-1/main", cwd=ws2, env=agent_env("2"))
 
         # Also approve agent 1's work to main so we can test the delta
-        git("push", "host-cave", "agent-1/main:main", cwd=ws1)
+        git("push", "host-cave", "main:main", cwd=ws1)
 
         # Status should compare agent-2's branch against main (not agent-1/main)
         result = cav_cli("status", cwd=self.user_repo)
@@ -608,8 +638,8 @@ class TestCAV(unittest.TestCase):
         self.assertIn("agent-1/main", refs_before)
 
         # Approve as user
-        git("push", "host-cave", "agent-1/main", cwd=ws, env=agent_env("1"))
-        git("push", "host-cave", "agent-1/main:main", cwd=ws)
+        git("push", "host-cave", "main:agent-1/main", cwd=ws, env=agent_env("1"))
+        git("push", "host-cave", "main:main", cwd=ws)
 
         # Agent branch should still exist after approval
         refs_after = git_out("branch", cwd=shared)
@@ -630,8 +660,8 @@ class TestCAV(unittest.TestCase):
         (ws / "feature.py").write_text("print('hello')\n")
         git("add", "feature.py", cwd=ws)
         git("commit", "-m", "Add feature", cwd=ws)
-        git("push", "host-cave", "agent-1/main", cwd=ws, env=agent_env("1"))
-        git("push", "host-cave", "agent-1/main:main", cwd=ws)
+        git("push", "host-cave", "main:agent-1/main", cwd=ws, env=agent_env("1"))
+        git("push", "host-cave", "main:main", cwd=ws)
 
         git("fetch", "cave", cwd=self.user_repo)
         git("merge", "--ff-only", "cave/main", cwd=self.user_repo)
@@ -646,12 +676,14 @@ class TestCAV(unittest.TestCase):
         agents = self._init_and_agents("1")
         ws = agents["1"]
 
-        git("checkout", "main", cwd=ws)
         (ws / "fix.py").write_text("# fix\n")
         git("add", "fix.py", cwd=ws)
         git("commit", "-m", "Quick fix", cwd=ws)
 
-        result = git("push", "host-cave", "main", cwd=ws, check=False, env=agent_env("1"))
+        # Explicit refspec bypasses the workspace's push refspec mapping,
+        # exercising the pre-receive hook directly.
+        result = git("push", "host-cave", "main:main", cwd=ws,
+                     check=False, env=agent_env("1"))
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("REJECTED", result.stderr)
         self.assertIn("cannot push", result.stderr)
@@ -661,12 +693,12 @@ class TestCAV(unittest.TestCase):
         agents = self._init_and_agents("1")
         ws = agents["1"]
 
-        git("checkout", "main", cwd=ws)
         (ws / "bad.py").write_text("# bad\n")
         git("add", "bad.py", cwd=ws)
         git("commit", "--amend", "-m", "Rewritten commit", cwd=ws)
 
-        result = git("push", "--force", "host-cave", "main", cwd=ws, check=False, env=agent_env("1"))
+        result = git("push", "--force", "host-cave", "main:main", cwd=ws,
+                     check=False, env=agent_env("1"))
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("REJECTED", result.stderr)
         self.assertIn("cannot push", result.stderr)
@@ -706,13 +738,13 @@ class TestCAV(unittest.TestCase):
         (ws / "wip.py").write_text("# wip\n")
         git("add", "wip.py", cwd=ws)
         git("commit", "-m", "WIP", cwd=ws)
-        result = git("push", "host-cave", "agent-1/main", cwd=ws, env=agent_env("1"))
+        result = git("push", "host-cave", "main:agent-1/main", cwd=ws, env=agent_env("1"))
         self.assertEqual(result.returncode, 0)
 
         (ws / "wip.py").write_text("# wip v2\n")
         git("add", "wip.py", cwd=ws)
         git("commit", "--amend", "-m", "WIP v2", cwd=ws)
-        result = git("push", "--force", "host-cave", "agent-1/main", cwd=ws, env=agent_env("1"))
+        result = git("push", "--force", "host-cave", "main:agent-1/main", cwd=ws, env=agent_env("1"))
         self.assertEqual(result.returncode, 0)
 
     # -- multi-agent --
@@ -726,10 +758,10 @@ class TestCAV(unittest.TestCase):
         (a1 / "a1.py").write_text("# a1\n")
         git("add", "a1.py", cwd=a1)
         git("commit", "-m", "Agent 1 work", cwd=a1)
-        git("push", "host-cave", "agent-1/main", cwd=a1, env=agent_env("1"))
+        git("push", "host-cave", "main:agent-1/main", cwd=a1, env=agent_env("1"))
 
         # Approve agent 1 as user
-        git("push", "host-cave", "agent-1/main:main", cwd=a1)
+        git("push", "host-cave", "main:main", cwd=a1)
 
         # Agent 2 rebases on new main and pushes
         a2 = agents["2"]
@@ -737,11 +769,11 @@ class TestCAV(unittest.TestCase):
         git("add", "a2.py", cwd=a2)
         git("commit", "-m", "Agent 2 work", cwd=a2)
         git("fetch", "host-cave", cwd=a2)
-        git("rebase", "host-cave/main", "agent-2/main", cwd=a2)
-        git("push", "--force", "host-cave", "agent-2/main", cwd=a2, env=agent_env("2"))
+        git("rebase", "host-cave/main", cwd=a2)
+        git("push", "--force", "host-cave", "main:agent-2/main", cwd=a2, env=agent_env("2"))
 
         # Approve agent 2 as user
-        git("push", "host-cave", "agent-2/main:main", cwd=a2)
+        git("push", "host-cave", "main:main", cwd=a2)
 
         git("fetch", "cave", cwd=self.user_repo)
         git("merge", "--ff-only", "cave/main", cwd=self.user_repo)
@@ -757,13 +789,13 @@ class TestCAV(unittest.TestCase):
         (a1 / "a1.py").write_text("# a1\n")
         git("add", "a1.py", cwd=a1)
         git("commit", "-m", "Agent 1 work", cwd=a1)
-        git("push", "host-cave", "agent-1/main", cwd=a1, env=agent_env("1"))
+        git("push", "host-cave", "main:agent-1/main", cwd=a1, env=agent_env("1"))
 
         a2 = agents["2"]
         (a2 / "a2.py").write_text("# a2\n")
         git("add", "a2.py", cwd=a2)
         git("commit", "-m", "Agent 2 work", cwd=a2)
-        git("push", "host-cave", "agent-2/main", cwd=a2, env=agent_env("2"))
+        git("push", "host-cave", "main:agent-2/main", cwd=a2, env=agent_env("2"))
 
         # Approve agent 1 via cav approve
         git("fetch", "cave", cwd=self.user_repo)
@@ -780,7 +812,7 @@ class TestCAV(unittest.TestCase):
         # Agent 2 rebases on new main
         git("fetch", "host-cave", cwd=a2)
         git("rebase", "host-cave/main", cwd=a2)
-        git("push", "--force", "host-cave", "agent-2/main", cwd=a2, env=agent_env("2"))
+        git("push", "--force", "host-cave", "main:agent-2/main", cwd=a2, env=agent_env("2"))
 
         # Retry approve
         git("checkout", "main", cwd=self.user_repo)
@@ -803,7 +835,7 @@ class TestCAV(unittest.TestCase):
         (ws / "feature.py").write_text("# feature\n")
         git("add", "feature.py", cwd=ws)
         git("commit", "-m", "Agent 1 feature", cwd=ws)
-        git("push", "host-cave", "agent-1/main", cwd=ws, env=agent_env("1"))
+        git("push", "host-cave", "main:agent-1/main", cwd=ws, env=agent_env("1"))
 
         # Approve from main by agent ID (no checkout needed)
         git("fetch", "cave", cwd=self.user_repo)
@@ -828,13 +860,13 @@ class TestCAV(unittest.TestCase):
         (a1 / "a1.py").write_text("# a1\n")
         git("add", "a1.py", cwd=a1)
         git("commit", "-m", "Agent 1 work", cwd=a1)
-        git("push", "host-cave", "agent-1/main", cwd=a1, env=agent_env("1"))
+        git("push", "host-cave", "main:agent-1/main", cwd=a1, env=agent_env("1"))
 
         a2 = agents["2"]
         (a2 / "a2.py").write_text("# a2\n")
         git("add", "a2.py", cwd=a2)
         git("commit", "-m", "Agent 2 work", cwd=a2)
-        git("push", "host-cave", "agent-2/main", cwd=a2, env=agent_env("2"))
+        git("push", "host-cave", "main:agent-2/main", cwd=a2, env=agent_env("2"))
 
         # Approve agent 1 from main by ID
         cav_cli("approve", "1", "--yes", cwd=self.user_repo)
@@ -846,8 +878,8 @@ class TestCAV(unittest.TestCase):
 
         # Agent 2 rebases and retries
         git("fetch", "host-cave", cwd=a2)
-        git("rebase", "host-cave/main", "agent-2/main", cwd=a2)
-        git("push", "--force", "host-cave", "agent-2/main", cwd=a2, env=agent_env("2"))
+        git("rebase", "host-cave/main", cwd=a2)
+        git("push", "--force", "host-cave", "main:agent-2/main", cwd=a2, env=agent_env("2"))
 
         cav_cli("approve", "2", "--yes", cwd=self.user_repo)
 
@@ -878,7 +910,7 @@ class TestCAV(unittest.TestCase):
         (ws / "feature.py").write_text("# feature\n")
         git("add", "feature.py", cwd=ws)
         git("commit", "-m", "Agent 1 feature", cwd=ws)
-        git("push", "host-cave", "agent-1/main", cwd=ws, env=agent_env("1"))
+        git("push", "host-cave", "main:agent-1/main", cwd=ws, env=agent_env("1"))
 
         # User makes a local-only commit on main (ahead of cave)
         (self.user_repo / "local.py").write_text("# local\n")
@@ -904,7 +936,7 @@ class TestCAV(unittest.TestCase):
         (a1 / "a1.py").write_text("# a1\n")
         git("add", "a1.py", cwd=a1)
         git("commit", "-m", "Agent 1 work", cwd=a1)
-        git("push", "host-cave", "agent-1/main", cwd=a1, env=agent_env("1"))
+        git("push", "host-cave", "main:agent-1/main", cwd=a1, env=agent_env("1"))
         cav_cli("approve", "1", "--yes", cwd=self.user_repo)
 
         # Reset local main behind cave/main (simulate not having pulled)
@@ -916,8 +948,8 @@ class TestCAV(unittest.TestCase):
         git("add", "a2.py", cwd=a2)
         git("commit", "-m", "Agent 2 work", cwd=a2)
         git("fetch", "host-cave", cwd=a2)
-        git("rebase", "host-cave/main", "agent-2/main", cwd=a2)
-        git("push", "--force", "host-cave", "agent-2/main", cwd=a2, env=agent_env("2"))
+        git("rebase", "host-cave/main", cwd=a2)
+        git("push", "--force", "host-cave", "main:agent-2/main", cwd=a2, env=agent_env("2"))
 
         # Approve agent 2 from local main (which is behind cave/main)
         result = cav_cli("approve", "2", "--yes", cwd=self.user_repo)
@@ -937,7 +969,7 @@ class TestCAV(unittest.TestCase):
         (a1 / "feature.py").write_text("# feature\n")
         git("add", "feature.py", cwd=a1)
         git("commit", "-m", "Agent 1 feature", cwd=a1)
-        git("push", "host-cave", "agent-1/main", cwd=a1, env=agent_env("1"))
+        git("push", "host-cave", "main:agent-1/main", cwd=a1, env=agent_env("1"))
 
         # Create a dirty worktree conflict on the base branch
         (self.user_repo / "feature.py").write_text("# conflict\n")
@@ -963,8 +995,8 @@ class TestCAV(unittest.TestCase):
             (a1 / f"w{i}.py").write_text(f"# {i}\n")
             git("add", f"w{i}.py", cwd=a1)
             git("commit", "-m", f"agent 1 commit {i}", cwd=a1)
-        git("push", "host-cave", "agent-1/main", cwd=a1, env=agent_env("1"))
-        git("push", "host-cave", "agent-1/main:main", cwd=a1)
+        git("push", "host-cave", "main:agent-1/main", cwd=a1, env=agent_env("1"))
+        git("push", "host-cave", "main:main", cwd=a1)
 
         # Approve agent 2's commit
         a2 = agents["2"]
@@ -972,9 +1004,9 @@ class TestCAV(unittest.TestCase):
         git("add", "api.py", cwd=a2)
         git("commit", "-m", "agent 2 commit", cwd=a2)
         git("fetch", "host-cave", cwd=a2)
-        git("rebase", "host-cave/main", "agent-2/main", cwd=a2)
-        git("push", "--force", "host-cave", "agent-2/main", cwd=a2, env=agent_env("2"))
-        git("push", "host-cave", "agent-2/main:main", cwd=a2)
+        git("rebase", "host-cave/main", cwd=a2)
+        git("push", "--force", "host-cave", "main:agent-2/main", cwd=a2, env=agent_env("2"))
+        git("push", "host-cave", "main:main", cwd=a2)
 
         git("fetch", "cave", cwd=self.user_repo)
 
@@ -992,12 +1024,14 @@ class TestCAV(unittest.TestCase):
         (a1 / "work.py").write_text("# work\n")
         git("add", "work.py", cwd=a1)
         git("commit", "-m", "agent 1 work", cwd=a1)
-        git("push", "host-cave", "HEAD", cwd=a1, env=agent_env("1"))
+        git("push", "host-cave", "main:agent-1/main", cwd=a1, env=agent_env("1"))
 
-        # Agent 1 also has a second branch (e.g. from red team or experimental)
-        git("checkout", "-b", "agent-1/experiment", cwd=a1)
-        git("push", "host-cave", "HEAD", cwd=a1, env=agent_env("1"))
-        git("checkout", "agent-1/main", cwd=a1)
+        # Agent 1 also has a second branch (e.g. from red team or experimental).
+        # On the wire it lives under their agent-1/ prefix.
+        git("checkout", "-b", "experiment", cwd=a1)
+        git("push", "host-cave", "experiment:agent-1/experiment",
+            cwd=a1, env=agent_env("1"))
+        git("checkout", "main", cwd=a1)
 
         # Fetch so status can see both branches
         git("fetch", "cave", cwd=self.user_repo)
@@ -1018,7 +1052,7 @@ class TestCAV(unittest.TestCase):
         (ws / "wip.py").write_text("work in progress\n")
         git("add", "wip.py", cwd=ws)
         git("commit", "-m", "WIP", cwd=ws)
-        git("push", "host-cave", "HEAD", cwd=ws, env=agent_env("1"))
+        git("push", "host-cave", "main:agent-1/main", cwd=ws, env=agent_env("1"))
 
         # Agent 1 acquires and exits
         id1 = registry.acquire_agent_id(self.user_repo)
@@ -1370,7 +1404,7 @@ class TestCAV(unittest.TestCase):
         (ws / "feature.py").write_text("# v1\n")
         git("add", "feature.py", cwd=ws)
         git("commit", "-m", "Feature v1", cwd=ws)
-        git("push", "host-cave", "agent-1/main", cwd=ws, env=agent_env("1"))
+        git("push", "host-cave", "main:agent-1/main", cwd=ws, env=agent_env("1"))
 
         # User approves via cav approve (agent is "running" since PID is alive)
         git("fetch", "cave", cwd=self.user_repo)
@@ -1413,7 +1447,7 @@ class TestCAV(unittest.TestCase):
             (ws1 / f"f{i}.py").write_text(f"# v{i}\n")
             git("add", f"f{i}.py", cwd=ws1)
             git("commit", "-m", f"Commit {i}", cwd=ws1)
-        git("push", "host-cave", "agent-1/main", cwd=ws1, env=agent_env("1"))
+        git("push", "host-cave", "main:agent-1/main", cwd=ws1, env=agent_env("1"))
 
         # User approves all 3
         git("fetch", "cave", cwd=self.user_repo)
@@ -1461,10 +1495,10 @@ class TestCAV(unittest.TestCase):
         (ws / "oops.py").write_text("# oops\n")
         git("add", "oops.py", cwd=ws)
         git("commit", "-m", "Bad commit", cwd=ws)
-        git("push", "host-cave", "agent-1/main", cwd=ws, env=agent_env("1"))
+        git("push", "host-cave", "main:agent-1/main", cwd=ws, env=agent_env("1"))
 
         # Approve the bad work as user
-        git("push", "host-cave", "agent-1/main:main", cwd=ws)
+        git("push", "host-cave", "main:main", cwd=ws)
         git("fetch", "cave", cwd=self.user_repo)
         git("merge", "--ff-only", "cave/main", cwd=self.user_repo)
         self.assertIn("Bad commit", git_out("log", "--oneline", cwd=self.user_repo))
@@ -1488,7 +1522,7 @@ class TestCAV(unittest.TestCase):
         (ws / "bad.py").write_text("# bad\n")
         git("add", "bad.py", cwd=ws)
         git("commit", "-m", "Bad agent work", cwd=ws)
-        git("push", "host-cave", "agent-1/main", cwd=ws, env=agent_env("1"))
+        git("push", "host-cave", "main:agent-1/main", cwd=ws, env=agent_env("1"))
 
         # User rolls back dev branch to main
         git("fetch", "cave", cwd=self.user_repo)
@@ -1518,14 +1552,19 @@ class TestCAV(unittest.TestCase):
         (ws / "work.py").write_text("# work\n")
         git("add", "work.py", cwd=ws)
         git("commit", "-m", "Agent work", cwd=ws)
-        git("push", "host-cave", "agent-1/main", cwd=ws, env=agent_env("1"))
+        git("push", "host-cave", "main:agent-1/main", cwd=ws, env=agent_env("1"))
 
-        # Agent retargets (auto-creates standalone from main)
-        _checkout(ws, "standalone")
+        # Agent retargets (auto-creates standalone from main).
+        # Simulate running inside the cave: set CODING_CAVE_* env vars.
+        with unittest.mock.patch.dict(os.environ, {
+            "CODING_CAVE_VERSION": "test",
+            "CODING_CAVE_AGENT_NAME": "coding-cave@1",
+        }):
+            _checkout(ws, "standalone")
 
-        # Branch renamed
+        # Inside the cave the local branch is the base name.
         current = git_out("branch", "--show-current", cwd=ws)
-        self.assertEqual(current, "agent-1/standalone")
+        self.assertEqual(current, "standalone")
 
         # Remote has new branch and base, old dev branch gone
         git("fetch", "cave", "--prune", cwd=self.user_repo)
@@ -1548,7 +1587,7 @@ class TestCAV(unittest.TestCase):
         (ws / "work.py").write_text("# work\n")
         git("add", "work.py", cwd=ws)
         git("commit", "-m", "Agent work", cwd=ws)
-        git("push", "host-cave", "agent-1/main", cwd=ws, env=agent_env("1"))
+        git("push", "host-cave", "main:agent-1/main", cwd=ws, env=agent_env("1"))
 
         # Host retargets agent 1 from main
         cav_cli("checkout", "standalone", "1", cwd=self.user_repo)
@@ -1561,9 +1600,9 @@ class TestCAV(unittest.TestCase):
         # Target branch was auto-created
         self.assertIn("standalone", bare_branches)
 
-        # Workspace branch also renamed
+        # Workspace branch also renamed (uses base name inside cave).
         ws_branch = git_out("branch", "--show-current", cwd=ws)
-        self.assertEqual(ws_branch, "agent-1/standalone")
+        self.assertEqual(ws_branch, "standalone")
 
     def test_checkout_creates_base_branch(self):
         """cav checkout auto-creates the base branch if it doesn't exist."""
@@ -1575,10 +1614,14 @@ class TestCAV(unittest.TestCase):
         (ws / "work.py").write_text("# work\n")
         git("add", "work.py", cwd=ws)
         git("commit", "-m", "Agent work", cwd=ws)
-        git("push", "host-cave", "agent-1/main", cwd=ws, env=agent_env("1"))
+        git("push", "host-cave", "main:agent-1/main", cwd=ws, env=agent_env("1"))
 
-        # Target doesn't exist yet
-        _checkout(ws, "new-feature")
+        # Target doesn't exist yet. Simulate running inside the cave.
+        with unittest.mock.patch.dict(os.environ, {
+            "CODING_CAVE_VERSION": "test",
+            "CODING_CAVE_AGENT_NAME": "coding-cave@1",
+        }):
+            _checkout(ws, "new-feature")
 
         # Target was created from main
         git("fetch", "cave", cwd=self.user_repo)
@@ -1644,8 +1687,8 @@ class TestCAV(unittest.TestCase):
         git("add", "work.txt", cwd=ws)
         git("commit", "-m", "agent work", cwd=ws)
         ab = config.dev_branch("main", aid)
-        git("push", HOST_SHARED_REMOTE, ab,
-            f"--push-option=agent={aid}", cwd=ws)
+        git("push", HOST_SHARED_REMOTE, f"main:{ab}",
+            f"--push-option=agent={aid}", cwd=ws, env=agent_env(aid))
 
         # Agent exits
         registry.mark_agent_exited(aid)
@@ -1780,8 +1823,15 @@ class TestGitWrapper(unittest.TestCase):
         self._wrapper_bin = str(bin_dir)
 
     def _env(self):
-        """Return env with the git wrapper on PATH."""
-        return {"PATH": f"{self._wrapper_bin}:{_clean_env()['PATH']}"}
+        """Return env with the git wrapper on PATH and agent identity set.
+
+        The wrapper reads CODING_CAVE_AGENT_NAME to know which
+        agent-<id>/<base> ref to publish to upstream.
+        """
+        return {
+            "PATH": f"{self._wrapper_bin}:{_clean_env()['PATH']}",
+            "CODING_CAVE_AGENT_NAME": "coding-cave@1",
+        }
 
     def test_auto_rebase_on_commit(self):
         """Git wrapper rebases dev branch onto updated main after commit."""
@@ -1841,6 +1891,22 @@ class TestGitWrapper(unittest.TestCase):
         git("fetch", "cave", cwd=self.user_repo)
         log = git_out("log", "--oneline", "cave/agent-1/main", cwd=self.user_repo)
         self.assertIn("simple commit", log)
+
+    def test_failed_push_warns(self):
+        """A failed auto-push must surface via stderr, not be swallowed."""
+        # Point host-cave at a non-existent repo so push fails.
+        git("remote", "set-url", "host-cave",
+            str(Path(self.tmpdir) / "nope.git"), cwd=self.a1)
+
+        (self.a1 / "work.py").write_text("# work\n")
+        git("add", "work.py", cwd=self.a1)
+        result = git("commit", "-m", "commit without a reachable remote",
+                     cwd=self.a1, env=self._env(), check=False)
+
+        # Commit itself must succeed - the sync failure is secondary.
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("cav-sync", result.stderr)
+        self.assertIn("agent-1/main", result.stderr)
 
     def test_manual_rebase_pushes_to_remote(self):
         """Wrapper must push the rebased branch after a manual rebase.
@@ -1942,7 +2008,7 @@ class TestReview(TestCAV):
         (ws / "feature.py").write_text("print('hello')\n")
         git("add", "feature.py", cwd=ws)
         git("commit", "-m", "Add feature", cwd=ws)
-        git("push", "host-cave", "agent-1/main", cwd=ws, env=agent_env("1"))
+        git("push", "host-cave", "main:agent-1/main", cwd=ws, env=agent_env("1"))
 
         # Review from main
         from cav.review import review
@@ -1961,7 +2027,7 @@ class TestReview(TestCAV):
         (ws / "v1.py").write_text("v1\n")
         git("add", "v1.py", cwd=ws)
         git("commit", "-m", "v1", cwd=ws)
-        git("push", "host-cave", "agent-1/main", cwd=ws, env=agent_env("1"))
+        git("push", "host-cave", "main:agent-1/main", cwd=ws, env=agent_env("1"))
 
         from cav.review import review
         review(self.user_repo, "1")
@@ -1970,7 +2036,7 @@ class TestReview(TestCAV):
         (ws / "v2.py").write_text("v2\n")
         git("add", "v2.py", cwd=ws)
         git("commit", "-m", "v2", cwd=ws)
-        git("push", "host-cave", "agent-1/main", cwd=ws, env=agent_env("1"))
+        git("push", "host-cave", "main:agent-1/main", cwd=ws, env=agent_env("1"))
 
         # Review again while already on the branch
         review(self.user_repo, "1")
@@ -1996,7 +2062,7 @@ class TestReview(TestCAV):
         (ws / "b.py").write_text("b\n")
         git("add", "b.py", cwd=ws)
         git("commit", "-m", "second", cwd=ws)
-        git("push", "host-cave", "agent-1/main", cwd=ws, env=agent_env("1"))
+        git("push", "host-cave", "main:agent-1/main", cwd=ws, env=agent_env("1"))
 
         import io
         from cav.review import review
@@ -2067,7 +2133,9 @@ class TestShallowClone(unittest.TestCase):
         ws = self._create_agent("1")
         self.assertTrue(ws.exists())
         branch = git_out("rev-parse", "--abbrev-ref", "HEAD", cwd=ws)
-        self.assertEqual(branch, "agent-1/main")
+        # Inside the cave, local branch is the base name. Push refspec
+        # maps it to agent-1/main upstream.
+        self.assertEqual(branch, "main")
 
     def test_agent_push_and_approve(self):
         """Agent can push work and user can approve on a shallow clone."""
@@ -2079,7 +2147,7 @@ class TestShallowClone(unittest.TestCase):
         git("add", "feature.py", cwd=ws)
         git("commit", "-m", "Add feature", cwd=ws)
 
-        git("push", "host-cave", "agent-1/main", cwd=ws, env=agent_env("1"))
+        git("push", "host-cave", "main:agent-1/main", cwd=ws, env=agent_env("1"))
 
         approve(self.user_repo, agent_id="1", yes=True)
 
@@ -2096,8 +2164,8 @@ class TestShallowClone(unittest.TestCase):
         (ws1 / "a1.py").write_text("# a1\n")
         git("add", "a1.py", cwd=ws1)
         git("commit", "-m", "Agent 1 work", cwd=ws1)
-        git("push", "host-cave", "agent-1/main", cwd=ws1, env=agent_env("1"))
-        git("push", "host-cave", "agent-1/main:main", cwd=ws1)
+        git("push", "host-cave", "main:agent-1/main", cwd=ws1, env=agent_env("1"))
+        git("push", "host-cave", "main:main", cwd=ws1)
 
         # Agent 2 fetches and rebases on updated main
         (ws2 / "a2.py").write_text("# a2\n")
@@ -2120,7 +2188,7 @@ class TestShallowClone(unittest.TestCase):
         (ws / "feature.py").write_text("# feature\n")
         git("add", "feature.py", cwd=ws)
         git("commit", "-m", "Shallow feature", cwd=ws)
-        git("push", "host-cave", "agent-1/main", cwd=ws, env=agent_env("1"))
+        git("push", "host-cave", "main:agent-1/main", cwd=ws, env=agent_env("1"))
 
         import io
         captured = io.StringIO()
@@ -2143,7 +2211,7 @@ class TestShallowClone(unittest.TestCase):
         (ws / "v1.py").write_text("# v1\n")
         git("add", "v1.py", cwd=ws)
         git("commit", "-m", "Version 1", cwd=ws)
-        git("push", "host-cave", "agent-1/main", cwd=ws, env=agent_env("1"))
+        git("push", "host-cave", "main:agent-1/main", cwd=ws, env=agent_env("1"))
 
         # User checks out the dev branch
         git("fetch", "cave", cwd=self.user_repo)
@@ -2154,7 +2222,7 @@ class TestShallowClone(unittest.TestCase):
         (ws / "v2.py").write_text("# v2\n")
         git("add", "v2.py", cwd=ws)
         git("commit", "-m", "Version 2", cwd=ws)
-        git("push", "host-cave", "agent-1/main", cwd=ws, env=agent_env("1"))
+        git("push", "host-cave", "main:agent-1/main", cwd=ws, env=agent_env("1"))
 
         # pull picks up the new work
         pull(self.user_repo)
@@ -2162,13 +2230,13 @@ class TestShallowClone(unittest.TestCase):
         self.assertIn("Version 2", log)
 
     def test_reinit_enables_shallow_update(self):
-        """Re-running cav init on an existing shallow project sets shallowUpdate."""
+        """cav init --reinitialize sets shallowUpdate on an existing project."""
         from cav.init import init
         self._init()
         shared = config.shared_repo_path(self.user_repo)
         # Clear it, then re-init
         git("config", "--unset", "receive.shallowUpdate", cwd=shared)
-        init(str(self.user_repo))
+        init(str(self.user_repo), reinitialize=True)
         val = git_out("config", "receive.shallowUpdate", cwd=shared)
         self.assertEqual(val, "true")
 

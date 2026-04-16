@@ -178,41 +178,41 @@ class TestClaudeCommandConstruction(unittest.TestCase):
     a pre-generated UUID that never matched any session file on disk.
     """
 
-    def _get_launch_source(self) -> str:
+    def _get_build_claude_cmd_source(self) -> str:
         sandbox = CAV_DIR / "sandbox.py"
         src = sandbox.read_text()
-        # Extract just the launch() function body
         tree = ast.parse(src)
         for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and node.name == "launch":
+            if (isinstance(node, ast.FunctionDef)
+                    and node.name == "_build_claude_cmd"):
                 lines = src.splitlines()
                 return "\n".join(lines[node.lineno - 1:node.end_lineno])
-        self.fail("launch() function not found in sandbox.py")
+        self.fail("_build_claude_cmd() function not found in sandbox.py")
 
-    def test_launch_has_resuming_parameter(self):
-        """launch() must accept a 'resuming' parameter to distinguish new vs continue."""
-        src = self._get_launch_source()
+    def test_build_claude_cmd_has_resuming_parameter(self):
+        """_build_claude_cmd() must accept 'resuming' to distinguish new vs continue."""
+        src = self._get_build_claude_cmd_source()
         self.assertIn("resuming", src,
-                      "launch() missing 'resuming' parameter — cannot distinguish "
-                      "--session-id (new) from --resume (continue)")
+                      "_build_claude_cmd() missing 'resuming' parameter — cannot "
+                      "distinguish --session-id (new) from --resume (continue)")
 
-    def test_launch_uses_session_id_for_new_sessions(self):
-        """launch() must pass --session-id when starting a new session."""
-        src = self._get_launch_source()
+    def test_build_claude_cmd_uses_session_id_for_new_sessions(self):
+        """_build_claude_cmd() must pass --session-id when starting a new session."""
+        src = self._get_build_claude_cmd_source()
         self.assertIn("--session-id", src,
-                      "launch() does not pass --session-id for new sessions. "
-                      "Without this, claude ignores the pre-generated UUID and "
-                      "the DB entry never matches the session file on disk.")
+                      "_build_claude_cmd() does not pass --session-id for new "
+                      "sessions. Without this, claude ignores the pre-generated "
+                      "UUID and the DB entry never matches the session file on disk.")
 
-    def test_launch_uses_resume_for_continuing(self):
-        """launch() must pass --resume when continuing an existing session."""
-        src = self._get_launch_source()
+    def test_build_claude_cmd_uses_resume_for_continuing(self):
+        """_build_claude_cmd() must pass --resume when continuing an existing session."""
+        src = self._get_build_claude_cmd_source()
         self.assertIn("--resume", src,
-                      "launch() does not pass --resume for continued sessions.")
+                      "_build_claude_cmd() does not pass --resume for continued sessions.")
 
     def test_session_id_and_resume_are_conditional(self):
         """--session-id and --resume must be under the resuming conditional, not both always."""
-        src = self._get_launch_source()
+        src = self._get_build_claude_cmd_source()
         # Both flags present but mutually exclusive: resuming guards which is used
         self.assertIn("resuming", src)
         self.assertIn("--session-id", src)

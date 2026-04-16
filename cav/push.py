@@ -24,7 +24,16 @@ def push(base: Path, force: bool = False):
 
     parsed = config.parse_dev_branch(branch)
     try:
-        if parsed:
+        if config.inside_cave():
+            # Inside a cave, the local branch is the cave's own base; we
+            # publish it upstream as agent-<id>/<base>.
+            aid = config.self_agent_id()
+            if aid is None:
+                raise SystemExit(
+                    "Cannot determine this cave's agent id "
+                    "(CODING_CAVE_AGENT_NAME not set).")
+            r = _push_cave_self(base, branch, aid, force)
+        elif parsed:
             r = _push_dev(base, branch, parsed[1], force)
         else:
             r = push_base(base, branch, force=force)
@@ -43,6 +52,22 @@ def push(base: Path, force: bool = False):
             print(f"Pushed {branch} to shared remote.")
 
 
+def _push_cave_self(base: Path, local_branch: str, agent_id: str, force: bool):
+    """Publish the cave's local <base> upstream as agent-<id>/<base>.
+
+    Used from inside a cave via `cav push`. The cave's sandbox git wrapper
+    already auto-pushes on commit/rebase; this path supports explicit
+    pushes and forces. The host-cave remote URL points at the parent's
+    bare repo (via the per-agent daemon).
+    """
+    remote_branch = config.dev_branch(local_branch, agent_id)
+    refspec = f"refs/heads/{local_branch}:refs/heads/{remote_branch}"
+    args = ["push", HOST_SHARED_REMOTE, refspec]
+    if force:
+        args.insert(1, "--force")
+    return git.git(*args, cwd=base, **config.v())
+
+
 def push_base(base: Path, base_branch: str, refspec: str | None = None,
               force: bool = False):
     """Push to a base branch on the shared remote and rebase dependent agents."""
@@ -57,7 +82,12 @@ def push_base(base: Path, base_branch: str, refspec: str | None = None,
 
 
 def _push_dev(base: Path, branch: str, agent_id: str, force: bool):
-    """Push a dev branch and sync the agent worktree."""
+    """Push a dev branch and sync the agent worktree.
+
+    The host-side branch is `agent-<id>/<base>`. Inside the agent's
+    worktree the corresponding local branch is just `<base>` (see
+    workspace.verify_layout).
+    """
     args = ["push", "--no-set-upstream", CAVE_SHARED_REMOTE, branch]
     if force:
         args.insert(1, "--force")
@@ -69,15 +99,17 @@ def _push_dev(base: Path, branch: str, agent_id: str, force: bool):
         return r
 
     shared = config.shared_repo_path(base)
+    # Fetch the host-side dev branch into the ws's remote-tracking ref.
     git.git("fetch", str(shared),
             f"+refs/heads/{branch}:refs/remotes/{HOST_SHARED_REMOTE}/{branch}",
             cwd=ws, echo=False, check=False, capture=True)
 
+    ws_branch = config.resolve_base(branch)
     try:
         current = git.current_branch(cwd=ws)
     except Exception:
         return r
-    if current == branch:
+    if current == ws_branch:
         _sync_agent_worktree(ws, branch, force)
 
     # Agent worktree now has the pushed state, so update agent-tip

@@ -78,15 +78,14 @@ def find_repo_root() -> Path:
 
 
 def require_init(base: Path):
-    # Inside a cave, the parent's shared repo is bind-mounted at
-    # host-cave-shared.git. A local cave-shared.git is only for subcaves.
-    # On the host, cave-shared.git is the authoritative shared repo.
-    if config.inside_cave():
-        required = config.cav_dir(base) / HOST_SHARED_REPO_DIR
-    else:
-        required = config.shared_repo_path(base)
-    if not required.exists():
+    if not config.shared_repo_path(base).exists():
         raise SystemExit("Coding Cave not initialized. Run: cav init")
+    # Inside a cave, the parent's shared repo is bind-mounted at
+    # host-cave-shared.git; its absence means the workspace was launched
+    # without the expected bwrap mounts.
+    if config.inside_cave():
+        if not (config.cav_dir(base) / HOST_SHARED_REPO_DIR).exists():
+            raise SystemExit("Coding Cave not initialized. Run: cav init")
     if not registry.project_path(config.project_slug(base)):
         raise SystemExit(
             f"Shared repo exists but project not registered. Run: cav init")
@@ -94,13 +93,31 @@ def require_init(base: Path):
 
 
 def _check_workspace_consistent(base: Path):
-    """Validate .git/objects/info/alternates matches the current layout.
+    """Validate workspace alternates match the current layout.
 
     Old pre-split workspaces point alternates at cave-shared.git/objects;
     the new layout expects host-cave-shared.git/objects. If stale, refuse
     so the user runs `cav init` to migrate.
+
+    Inside a cave, `base` is the mounted workspace itself. On the host,
+    `base` is the user repo (a full clone with no alternates), so the
+    real workspaces live under DATA_DIR/worktrees/<slug>/ and must be
+    checked explicitly.
     """
-    alt = base / ".git" / "objects" / "info" / "alternates"
+    if config.inside_cave():
+        _check_alternates(base)
+        return
+    slug = config.project_slug(base)
+    worktrees = config.DATA_DIR / "worktrees" / slug
+    if not worktrees.is_dir():
+        return
+    for ws in worktrees.iterdir():
+        if ws.is_dir():
+            _check_alternates(ws)
+
+
+def _check_alternates(ws: Path):
+    alt = ws / ".git" / "objects" / "info" / "alternates"
     if not alt.exists():
         return  # full clone, no alternates
     expected = f"../../.coding-cave/{HOST_SHARED_REPO_DIR}/objects"
@@ -108,7 +125,7 @@ def _check_workspace_consistent(base: Path):
         return
     raise SystemExit(
         f"Inconsistent workspace: {alt} does not match current layout.\n"
-        f"Run: cav init"
+        f"Run: cav init --reinitialize"
     )
 
 
@@ -140,10 +157,13 @@ def cli():
 
 @cli.command()
 @click.argument("path", default=".")
-def init(path):
+@click.option("--reinitialize", is_flag=True,
+              help="Reconfigure an already-initialized project and "
+                   "migrate its workspaces to the current layout.")
+def init(path, reinitialize):
     """Initialize Coding Cave in a project."""
     from .init import init as _init
-    _init(path)
+    _init(path, reinitialize=reinitialize)
 
 
 @cli.command()
@@ -191,6 +211,9 @@ def agent(continue_agent, resume_agent, extra_projects, host_ports, prompt):
     else:
         _try_reclaim_one(base)
         agent_id = registry.acquire_agent_id(base)
+        # acquire_agent_id pre-generates a UUID; pass it through as
+        # --session-id so subsequent `cav agent -c` can --resume the
+        # same Claude session.
         session_id = registry.read_session_id(agent_id)
         resuming = False
 
@@ -236,7 +259,9 @@ def agent(continue_agent, resume_agent, extra_projects, host_ports, prompt):
                     prompt=prompt,
                     host_ports=list(host_ports) if host_ports else [])
     finally:
-        if session_id and not config.session_file_exists(projects[0][1], session_id):
+        home = config.launch_home(name)
+        if session_id and not config.session_file_exists(
+                projects[0][1], session_id, home):
             registry.clear_session_id(agent_id)
         registry.mark_agent_exited(agent_id)
     sys.exit(rc)
@@ -383,6 +408,16 @@ def push(force):
 def status(args, all_projects):
     """Show agent and dev branch status."""
     from .status import status as _status
+    # Without explicit args, fall back to all-projects view when the
+    # cwd isn't inside any registered project (e.g. user ran cav status
+    # from their home dir). Saves a confusing "not a git repo" error
+    # when the registry already knows where to look.
+    if not args and not all_projects:
+        r = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True)
+        if r.returncode != 0:
+            all_projects = True
     if all_projects:
         import io, contextlib
         from .status import format_all
@@ -494,10 +529,9 @@ def review(agent_id):
 def checkout(branch, agent_id):
     """Retarget an agent to deliver to a different branch."""
     base = find_repo_root()
-    # Self-retarget (on a dev branch) uses host-cave, not cave,
-    # so it works inside a cave without cav init.
-    current = git.current_branch(cwd=base)
-    if not config.parse_dev_branch(current):
+    # Self-retarget from inside a cave uses host-cave (parent's shared
+    # repo), so it works without cav init in the cave's filesystem.
+    if not config.inside_cave():
         require_init(base)
     from .checkout import checkout as _checkout
     _checkout(base, branch, agent_id=agent_id)
