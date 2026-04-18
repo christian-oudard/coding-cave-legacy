@@ -976,6 +976,11 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
     for var in ("HOME", "TERM", "COLORTERM", "TZ"):
         if var in os.environ:
             env[var] = os.environ[var]
+    # The sandbox binary calls nix-store (via jail.nix's
+    # bindNixStoreClosure) inside a user namespace mapped to uid 0.
+    # As "root", nix defaults build-users-group to "nixbld", which
+    # doesn't exist in the cave.
+    env["NIX_CONFIG"] = "build-users-group ="
     env.update({
         "CODING_CAVE_VERSION": VERSION,
         "CODING_CAVE_NIX_MERGED": nix_merged,
