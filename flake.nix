@@ -6,7 +6,7 @@
       url = "github:christian-oudard/crinj";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    claude-code-nix = {
+    claude-code = {
       url = "github:sadjow/claude-code-nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
@@ -16,7 +16,7 @@
     };
   };
 
-  outputs = { self, nixpkgs, jail-nix, crinj, claude-code-nix, home-manager }:
+  outputs = { self, nixpkgs, jail-nix, crinj, claude-code, home-manager }:
     let
       systems = [ "x86_64-linux" ];
       eachSystem = f: nixpkgs.lib.genAttrs systems (system: f (import nixpkgs {
@@ -334,7 +334,7 @@
                 --replace-fail "@SUPERVISOR_PY@" "$out/lib/cav/supervisor.py"
               substituteInPlace $out/lib/cav/user_env.py \
                 --replace-fail "@NIXPKGS_URL@" "path:${nixpkgs}" \
-                --replace-fail "@CLAUDE_CODE_NIX_URL@" "path:${claude-code-nix}" \
+                --replace-fail "@CLAUDE_CODE_NIX_URL@" "path:${claude-code}" \
                 --replace-fail "@HOME_MANAGER_URL@" "path:${home-manager}" \
                 --replace-fail "@CODING_CAVE_URL@" "path:${self}"
 

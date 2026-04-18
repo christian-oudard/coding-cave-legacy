@@ -39,7 +39,7 @@ def cave_env_expr(user_module_body):
 let
   flake = builtins.getFlake "path:{FLAKE_PATH}";
   caveEnv = flake.lib.mkCaveEnv {{
-    claude-code = flake.inputs.claude-code-nix;
+    claude-code = flake.inputs.claude-code;
     userModule = {{ pkgs, ... }}: {user_module_body};
   }};
 in caveEnv.packages.x86_64-linux.default
