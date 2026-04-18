@@ -470,21 +470,24 @@ def status(args, all_projects):
         if not projects:
             raise SystemExit("No registered projects. Run: cav init")
         entries = []
-        missing = []
+        problems = []
         for slug, path in projects:
             if not Path(path).is_dir():
-                missing.append((slug, path))
+                problems.append((slug,
+                    f"registered at {path} but the directory is missing."
+                    f" Remove with: cav remove-project {slug}"))
+                continue
+            shared = config.shared_repo_path(Path(path))
+            if not shared.exists():
+                problems.append((slug,
+                    f"registered at {path} but {shared} is missing."
+                    f" Restore with: cav init {path}"))
                 continue
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
                 last_activity = _status(Path(path), scoped=False)
             entries.append((last_activity, slug, buf.getvalue()))
-        print(format_all(entries))
-        for slug, path in missing:
-            click.echo(
-                f"\"{slug}\" is registered but {path} is missing."
-                f" Restore directory or remove with: cav remove-project {slug}",
-                err=True)
+        print(format_all(entries, problems))
         return
     base, agent_id = resolve_target(args, infer_agent=True)
     _status(base, agent_filter=agent_id)

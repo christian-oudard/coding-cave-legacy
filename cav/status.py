@@ -8,16 +8,26 @@ from . import config, git, registry
 from .constants import CAVE_SHARED_REMOTE
 
 
-def format_all(entries: list[tuple[float, str, str]]) -> str:
-    """Format multi-project status from (last_activity, slug, output) tuples."""
+def format_all(
+    entries: list[tuple[float, str, str]],
+    problems: list[tuple[str, str]] | None = None,
+) -> str:
+    """Format multi-project status from (last_activity, slug, output) tuples.
+
+    problems is a list of (slug, message) for projects that can't be queried
+    (e.g. missing shared repo); each gets its own header.
+    """
     active = [(ts, s, o) for ts, s, o in entries if ts]
     inactive = sorted(s for ts, s, _ in entries if not ts)
-    if not active:
+    problems = problems or []
+    if not active and not problems:
         return "No running agents in any project."
-    active.sort(key=lambda a: a[0], reverse=True)
     parts = []
+    active.sort(key=lambda a: a[0], reverse=True)
     for _, slug, output in active:
         parts.append(f"=== {slug} ===\n{output}")
+    for slug, message in problems:
+        parts.append(f"=== {slug} ===\n{message}")
     if inactive:
         parts.append(f"No running agents in: {', '.join(inactive)}")
     return "\n".join(parts)
