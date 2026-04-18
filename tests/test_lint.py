@@ -237,17 +237,17 @@ class TestGitWrapperGuard(unittest.TestCase):
     """
 
     def test_wrapper_skips_rebase_when_rebase_in_progress(self):
-        """GIT_WRAPPER must check for .git/rebase-merge or rebase-apply."""
+        """GIT_WRAPPER must check for rebase-merge or rebase-apply."""
         from cav.sandbox import GIT_WRAPPER
         self.assertIn("rebase-merge", GIT_WRAPPER,
-                      "Wrapper must check for .git/rebase-merge to avoid "
+                      "Wrapper must check for rebase-merge to avoid "
                       "nested rebase aborting the outer rebase")
         self.assertIn("rebase-apply", GIT_WRAPPER,
-                      "Wrapper must check for .git/rebase-apply to avoid "
+                      "Wrapper must check for rebase-apply to avoid "
                       "nested rebase aborting the outer rebase")
         # The guard must appear before the rebase command
         guard_pos = GIT_WRAPPER.index("rebase-merge")
-        rebase_pos = GIT_WRAPPER.index("$_CAV_REAL_GIT\" rebase")
+        rebase_pos = GIT_WRAPPER.index('"rebase"')
         self.assertLess(guard_pos, rebase_pos,
                         "rebase-merge guard must come before git rebase command")
 

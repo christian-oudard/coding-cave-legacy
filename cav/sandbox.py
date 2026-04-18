@@ -22,113 +22,7 @@ from .constants import CAVE_SHARED_REMOTE, HOST_SHARED_REMOTE, VERSION
 
 log = logging.getLogger("cav")
 
-GIT_WRAPPER = """\
-#!/bin/sh
-# Git wrapper: syncs the cave's work to the parent's shared remote after
-# state changes. Installed at $HOME/bin/git inside the cave, shadowing the
-# real git. Replaces per-repo post-commit hooks so .git/hooks/ is free
-# for project use.
-#
-# Inside a cave, the local branch is the base branch (e.g. 'main'). We
-# publish commits upstream as agent-<id>/<base>, where <id> is the cave's
-# slot in the parent's registry (carried in via CODING_CAVE_AGENT_NAME).
-
-# Prevent recursive sync (our own git calls shouldn't trigger again).
-if [ -n "$_CAV_GIT_SYNC" ]; then
-  exec "$_CAV_REAL_GIT" "$@"
-fi
-
-# Find the real git by searching PATH with our wrapper dir removed.
-_wrapper_dir="$(dirname "$(readlink -f "$0")")"
-_opath="$PATH"
-PATH=$(printf '%s' "$_opath" | tr ':' '\\n' | grep -v "^${_wrapper_dir}$" | paste -sd:)
-_CAV_REAL_GIT=$(command -v git)
-PATH="$_opath"
-export _CAV_REAL_GIT
-
-"$_CAV_REAL_GIT" "$@"
-_rc=$?
-[ $_rc -ne 0 ] && exit $_rc
-
-_cmd="$1"
-
-# Resolve branch name. During a rebase HEAD is detached, so read
-# the original branch from the rebase state directory.
-_branch=$("$_CAV_REAL_GIT" symbolic-ref --short HEAD 2>/dev/null)
-if [ -z "$_branch" ] && [ -f .git/rebase-merge/head-name ]; then
-  _branch=$(sed 's|^refs/heads/||' .git/rebase-merge/head-name)
-elif [ -z "$_branch" ] && [ -f .git/rebase-apply/head-name ]; then
-  _branch=$(sed 's|^refs/heads/||' .git/rebase-apply/head-name)
-fi
-[ -z "$_branch" ] && exit $_rc
-
-# Skip review branches: agent-<k>/... is a subcave's published ref the
-# agent may have checked out for review, not our own work.
-case "$_branch" in agent-[0-9]*/*) exit $_rc ;; esac
-
-# Trap: refuse to push a branch with HEAD in the name.
-case "$_branch" in *HEAD*)
-  echo "BUG: git wrapper about to push HEAD branch" >&2
-  echo "  branch=[$_branch] HEAD=$("$_CAV_REAL_GIT" rev-parse --short HEAD)" >&2
-  exit $_rc
-  ;;
-esac
-
-# Our agent id in the parent's registry comes from the cave env.
-_agentid=${CODING_CAVE_AGENT_NAME##*@}
-case "$_agentid" in ''|*[!0-9]*) exit $_rc ;; esac
-_remote_branch="agent-$_agentid/$_branch"
-
-export _CAV_GIT_SYNC=1
-
-# Silent on success, one-line warning with captured output on failure.
-# The user's git command already succeeded; we don't want sync noise
-# on the happy path, but swallowing errors leaves commits stranded.
-_cav_push() {
-  _out=$("$_CAV_REAL_GIT" push --force host-cave "HEAD:refs/heads/$_remote_branch" 2>&1)
-  _prc=$?
-  if [ $_prc -ne 0 ]; then
-    echo "cav-sync: push $_branch -> host-cave/$_remote_branch failed (rc=$_prc):" >&2
-    echo "$_out" | sed 's/^/  /' >&2
-  fi
-  return $_prc
-}
-
-_cav_fetch() {
-  _out=$("$_CAV_REAL_GIT" fetch host-cave 2>&1)
-  _frc=$?
-  if [ $_frc -ne 0 ]; then
-    echo "cav-sync: fetch host-cave failed (rc=$_frc):" >&2
-    echo "$_out" | sed 's/^/  /' >&2
-  fi
-  return $_frc
-}
-
-case "$_cmd" in
-  commit|cherry-pick|revert|am)
-    # Full sync: fetch, auto-rebase onto base, push.
-    # During a rebase, just push (don't start a nested rebase).
-    if [ -d .git/rebase-merge ] || [ -d .git/rebase-apply ]; then
-      _cav_push
-      exit $_rc
-    fi
-    _cav_fetch
-    if "$_CAV_REAL_GIT" rev-parse "host-cave/$_branch" >/dev/null 2>&1; then
-      if ! "$_CAV_REAL_GIT" rebase "host-cave/$_branch" >/dev/null 2>&1; then
-        "$_CAV_REAL_GIT" rebase --abort >/dev/null 2>&1
-        echo "WARNING: rebase onto host-cave/$_branch failed (conflicts). Run: git fetch host-cave && git rebase host-cave/$_branch" >&2
-      fi
-    fi
-    _cav_push
-    ;;
-  reset|checkout|switch|merge|rebase)
-    # Light sync: just push current state.
-    _cav_push
-    ;;
-esac
-
-exit $_rc
-"""
+GIT_WRAPPER = (Path(__file__).parent / "git_wrapper.py").read_text()
 
 # Substituted at nix build time with the jail.nix sandbox binary path.
 SANDBOX_BIN = "@SANDBOX_BIN@"
@@ -903,6 +797,7 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
     if not wrapper.exists() or wrapper.read_text() != GIT_WRAPPER:
         wrapper.write_text(GIT_WRAPPER)
         wrapper.chmod(0o755)
+
 
     # Network isolation: every nesting level gets its own network
     # namespace via slirp4netns. Only the agent's daemon port and crinj

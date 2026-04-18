@@ -1,5 +1,6 @@
 """Thin wrappers around git subprocess calls."""
 
+import os
 import shlex
 import subprocess
 import sys
@@ -31,12 +32,63 @@ def git_output(*args, cwd=None) -> str:
 
 
 def current_branch(cwd=None) -> str:
-    """Return current branch name. Works on orphan branches (no commits yet)."""
+    """Return current branch name. Works on orphan branches (no commits yet).
+
+    When HEAD is detached at or just above a unique branch tip (e.g.
+    jujutsu's working-copy commit), resolves the branch name from
+    git refs.
+    """
     try:
-        return git_output("rev-parse", "--abbrev-ref", "HEAD", cwd=cwd)
+        branch = git_output("rev-parse", "--abbrev-ref", "HEAD", cwd=cwd)
     except subprocess.CalledProcessError:
         # Orphan branch: HEAD is a symbolic ref but has no commit yet
         return git_output("symbolic-ref", "--short", "HEAD", cwd=cwd)
+    if branch != "HEAD":
+        return branch
+    # Detached HEAD: check if sitting on (or just above) a branch tip.
+    return _detached_branch(cwd) or branch
+
+
+def _git_operation_in_progress(cwd=None) -> bool:
+    """True if a git operation is actively manipulating HEAD.
+
+    During rebase, bisect, or cherry-pick, HEAD is transiently detached
+    and HEAD^ landing on a branch tip is coincidental, not meaningful.
+    """
+    try:
+        git_dir = git_output("rev-parse", "--git-dir", cwd=cwd)
+    except subprocess.CalledProcessError:
+        return False
+    d = git_dir if os.path.isabs(git_dir) else os.path.join(cwd or ".", git_dir)
+    sentinel = ("rebase-merge", "rebase-apply", "BISECT_LOG", "CHERRY_PICK_HEAD")
+    return any(os.path.exists(os.path.join(d, s)) for s in sentinel)
+
+
+def _detached_branch(cwd=None) -> str | None:
+    """Resolve a detached HEAD to a branch name when possible.
+
+    Checks HEAD and HEAD^ for a unique matching branch. Handles VCS
+    tools that keep HEAD detached one commit above the branch tip
+    (e.g. jujutsu's working-copy commit, which may or may not be empty).
+
+    Bails out if a git operation (rebase, bisect, cherry-pick) is in
+    progress, since detached HEAD is transient in those cases.
+    """
+    if _git_operation_in_progress(cwd):
+        return None
+    for ref in ("HEAD", "HEAD^"):
+        try:
+            out = git_output(
+                "for-each-ref", "--points-at", ref,
+                "refs/heads/", "--format=%(refname:short)", cwd=cwd)
+        except subprocess.CalledProcessError:
+            continue
+        if not out:
+            continue
+        candidates = out.splitlines()
+        if len(candidates) == 1:
+            return candidates[0]
+    return None
 
 
 def repo_root(cwd=None) -> str:

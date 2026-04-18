@@ -447,6 +447,103 @@ class TestPushForceAllowed(unittest.TestCase):
         self.assertNotIn("dev branch", result.stderr.lower())
 
 
+class TestDetachedBranch(unittest.TestCase):
+    """current_branch() resolves detached HEAD to a branch when possible."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.repo = Path(self.tmpdir) / "project"
+        self.repo.mkdir()
+        git("init", "-b", "main", cwd=self.repo)
+        git("config", "user.email", "test@test.com", cwd=self.repo)
+        git("config", "user.name", "Test", cwd=self.repo)
+        (self.repo / "file.txt").write_text("content\n")
+        git("add", "file.txt", cwd=self.repo)
+        git("commit", "-m", "init", cwd=self.repo)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir)
+
+    def test_detached_at_branch_tip(self):
+        """Detached HEAD at a unique branch tip resolves to that branch."""
+        from cav.git import current_branch
+        git("checkout", "--detach", cwd=self.repo)
+        self.assertEqual(current_branch(cwd=self.repo), "main")
+
+    def test_detached_above_branch_tip(self):
+        """Detached HEAD one commit above a branch tip resolves via HEAD^."""
+        from cav.git import current_branch
+        git("checkout", "--detach", cwd=self.repo)
+        git("commit", "--allow-empty", "-m", "wc", cwd=self.repo)
+        self.assertEqual(current_branch(cwd=self.repo), "main")
+
+    def test_detached_above_branch_with_changes(self):
+        """Detached HEAD with tree changes still resolves via HEAD^."""
+        from cav.git import current_branch
+        git("checkout", "--detach", cwd=self.repo)
+        (self.repo / "new.txt").write_text("new\n")
+        git("add", "new.txt", cwd=self.repo)
+        git("commit", "-m", "wc with changes", cwd=self.repo)
+        self.assertEqual(current_branch(cwd=self.repo), "main")
+
+    def test_ambiguous_returns_head(self):
+        """Multiple branches at HEAD^ falls back to 'HEAD'."""
+        from cav.git import current_branch
+        git("branch", "other", cwd=self.repo)
+        git("checkout", "--detach", cwd=self.repo)
+        git("commit", "--allow-empty", "-m", "wc", cwd=self.repo)
+        # Both main and other point to HEAD^, so ambiguous
+        self.assertEqual(current_branch(cwd=self.repo), "HEAD")
+
+    def test_no_branch_returns_head(self):
+        """Detached HEAD far from any branch returns 'HEAD'."""
+        from cav.git import current_branch
+        git("checkout", "--detach", cwd=self.repo)
+        git("commit", "--allow-empty", "-m", "a", cwd=self.repo)
+        git("commit", "--allow-empty", "-m", "b", cwd=self.repo)
+        self.assertEqual(current_branch(cwd=self.repo), "HEAD")
+
+    def test_detached_during_bisect_returns_head(self):
+        """During git bisect, detached HEAD must not resolve to a branch."""
+        from cav.git import current_branch
+        # Need enough commits so bisect picks a midpoint and leaves HEAD detached.
+        good_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=self.repo,
+            capture_output=True, text=True).stdout.strip()
+        for i in range(4):
+            (self.repo / f"f{i}.txt").write_text(f"v{i}\n")
+            git("add", f"f{i}.txt", cwd=self.repo)
+            git("commit", "-m", f"commit {i}", cwd=self.repo)
+        git("bisect", "start", cwd=self.repo)
+        git("bisect", "bad", cwd=self.repo)
+        git("bisect", "good", good_sha, cwd=self.repo)
+        # HEAD is now detached at a bisect midpoint
+        try:
+            self.assertEqual(current_branch(cwd=self.repo), "HEAD")
+        finally:
+            git("bisect", "reset", cwd=self.repo)
+
+    def test_detached_during_rebase_returns_head(self):
+        """During git rebase, detached HEAD must not resolve to a branch."""
+        from cav.git import current_branch
+        git("checkout", "-b", "feature", cwd=self.repo)
+        (self.repo / "feat.txt").write_text("feat\n")
+        git("add", "feat.txt", cwd=self.repo)
+        git("commit", "-m", "feature commit", cwd=self.repo)
+        git("checkout", "main", cwd=self.repo)
+        (self.repo / "file.txt").write_text("conflict\n")
+        git("add", "file.txt", cwd=self.repo)
+        git("commit", "-m", "main diverge", cwd=self.repo)
+        git("checkout", "feature", cwd=self.repo)
+        # Rebase will conflict, leaving HEAD detached
+        r = subprocess.run(
+            ["git", "rebase", "main"], cwd=self.repo,
+            capture_output=True, text=True)
+        if r.returncode != 0:
+            self.assertEqual(current_branch(cwd=self.repo), "HEAD")
+            git("rebase", "--abort", cwd=self.repo)
+
+
 class TestUnknownCommand(unittest.TestCase):
     """Misspelled subcommands produce a clear error, not agent launch."""
 

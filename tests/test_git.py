@@ -192,14 +192,25 @@ class TestCAV(unittest.TestCase):
             # agent-<id>/<base> is the upstream name (set via push refspec).
             self.assertEqual(branch, "main")
 
-    def test_workspace_rejects_detached_head(self):
-        """New workspace from detached HEAD must fail, not create agent-N/HEAD."""
+    def test_workspace_from_detached_at_branch_tip(self):
+        """Workspace creation works when detached at a unique branch tip."""
         from cav.init import init
         init(str(self.user_repo))
 
-        # Detach HEAD
         head = git_out("rev-parse", "HEAD", cwd=self.user_repo)
         git("checkout", head, cwd=self.user_repo)
+
+        ws, _ = workspace.create(self.user_repo, "1")
+        self.assertTrue(ws.exists())
+
+    def test_workspace_rejects_unresolvable_detached_head(self):
+        """Workspace from detached HEAD far from any branch must fail."""
+        from cav.init import init
+        init(str(self.user_repo))
+
+        git("checkout", "--detach", cwd=self.user_repo)
+        git("commit", "--allow-empty", "-m", "a", cwd=self.user_repo)
+        git("commit", "--allow-empty", "-m", "b", cwd=self.user_repo)
 
         with self.assertRaises(SystemExit):
             workspace.create(self.user_repo, "1")
@@ -249,8 +260,6 @@ class TestCAV(unittest.TestCase):
         wrapper = bin_dir / "git"
         wrapper.write_text(GIT_WRAPPER)
         wrapper.chmod(0o755)
-        # Wrapper reads CODING_CAVE_AGENT_NAME to know the agent-<id>/<base>
-        # ref to publish to upstream.
         env = {
             "PATH": f"{bin_dir}:{_clean_env()['PATH']}",
             "CODING_CAVE_AGENT_NAME": "coding-cave@1",
@@ -1823,11 +1832,7 @@ class TestGitWrapper(unittest.TestCase):
         self._wrapper_bin = str(bin_dir)
 
     def _env(self):
-        """Return env with the git wrapper on PATH and agent identity set.
-
-        The wrapper reads CODING_CAVE_AGENT_NAME to know which
-        agent-<id>/<base> ref to publish to upstream.
-        """
+        """Return env with the git wrapper on PATH and agent identity set."""
         return {
             "PATH": f"{self._wrapper_bin}:{_clean_env()['PATH']}",
             "CODING_CAVE_AGENT_NAME": "coding-cave@1",
@@ -1995,6 +2000,20 @@ class TestGitWrapper(unittest.TestCase):
                              cwd=self.user_repo)
         self.assertEqual(local_sha, remote_sha,
                          "reset was not synced to remote")
+
+
+    def test_commit_with_dash_C_syncs(self):
+        """git -C <dir> commit must trigger auto-push (not skip it)."""
+        (self.a1 / "work.py").write_text("# work\n")
+        git("add", "work.py", cwd=self.a1)
+        # Commit via -C flag from a different directory
+        git("-C", str(self.a1), "commit", "-m", "via -C",
+            cwd=self.tmpdir, env=self._env())
+
+        git("fetch", "cave", cwd=self.user_repo)
+        log = git_out("log", "--oneline", "cave/agent-1/main",
+                      cwd=self.user_repo)
+        self.assertIn("via -C", log)
 
 
 class TestReview(TestCAV):
