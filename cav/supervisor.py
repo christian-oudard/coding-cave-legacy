@@ -22,6 +22,7 @@ import stat
 import struct
 import subprocess
 import sys
+import termios
 import threading
 
 
@@ -29,6 +30,25 @@ def _signal_sync(fd: int) -> None:
     """Signal parent: namespace exists, safe to apply iptables + slirp."""
     os.write(fd, b"1")
     os.close(fd)
+
+
+def _disable_tty_suspend():
+    """Disable Ctrl+Z on the controlling tty.
+
+    Suspending inside the cave is unrecoverable: the supervisor has no
+    parent shell with job control to `fg` it back. Clear VSUSP so
+    Ctrl+Z is a no-op. Returns a restore callable, or None if stdin
+    isn't a tty.
+    """
+    fd = sys.stdin.fileno()
+    try:
+        original = termios.tcgetattr(fd)
+    except termios.error:
+        return None
+    new = termios.tcgetattr(fd)
+    new[6][termios.VSUSP] = b"\x00"
+    termios.tcsetattr(fd, termios.TCSANOW, new)
+    return lambda: termios.tcsetattr(fd, termios.TCSANOW, original)
 
 
 # -- kernel overlayfs --
@@ -239,10 +259,14 @@ def main() -> None:
     if upper:
         stop_watcher = start_lock_watcher("/nix/store", upper)
 
+    restore_tty = _disable_tty_suspend()
+
     # Run bwrap as a child (not exec) so we stay alive to clean up.
     try:
         result = subprocess.run(sys.argv[1:])
     finally:
+        if restore_tty:
+            restore_tty()
         if stop_watcher:
             stop_watcher()
         if merged and upper:
