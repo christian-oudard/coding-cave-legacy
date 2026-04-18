@@ -317,8 +317,17 @@ def _try_reclaim_one(base: Path):
 
 
 def _auto_cleanup_if_clean(base, agent_id):
-    """Remove agent if all work is approved or irrecoverable across all projects."""
+    """Remove agent if all work is approved or irrecoverable across all projects.
+
+    Called on every `cav agent` launch to reclaim stale slots, so skip
+    reasons are logged only under -v; the common "has uncommitted work"
+    case would otherwise spam the console on every startup.
+    """
     from .status import _remove_agent
+
+    def skip(reason):
+        if config.verbose:
+            print(f"Warning: keeping {name}: {reason}", file=sys.stderr)
 
     name = registry.display_name(base, agent_id)
     all_agent_branches = []  # (base_path, branch) pairs for removal
@@ -329,12 +338,10 @@ def _auto_cleanup_if_clean(base, agent_id):
             try:
                 st = git.git_output("status", "--porcelain", cwd=ws)
                 if st.strip():
-                    print(f"Warning: keeping {name}: "
-                          f"worktree {ws} has uncommitted changes.")
+                    skip(f"worktree {ws} has uncommitted changes.")
                     return
             except Exception as e:
-                print(f"Warning: keeping {name}: "
-                      f"cannot verify worktree {ws}: {e}")
+                skip(f"cannot verify worktree {ws}: {e}")
                 return
 
         path = registry.project_path(slug)
@@ -348,8 +355,7 @@ def _auto_cleanup_if_clean(base, agent_id):
                     check=False, capture=True)
             branches = git.remote_branches(CAVE_SHARED_REMOTE, cwd=proj_base)
         except Exception as e:
-            print(f"Warning: keeping {name}: "
-                  f"git fetch failed for {slug}: {e}")
+            skip(f"git fetch failed for {slug}: {e}")
             return
         for b in branches:
             parsed = config.parse_dev_branch(b)
@@ -361,20 +367,17 @@ def _auto_cleanup_if_clean(base, agent_id):
             base_ref = f"{CAVE_SHARED_REMOTE}/{base_name}"
             try:
                 if not git.has_merge_base(remote_dev, base_ref, cwd=proj_base):
-                    print(f"Warning: keeping {name}: "
-                          f"{b} has diverged from {base_name}.")
+                    skip(f"{b} has diverged from {base_name}.")
                     return
                 if git.cherry_undelivered(base_ref, remote_dev, cwd=proj_base):
                     return  # has unapproved work, normal
             except Exception as e:
-                print(f"Warning: keeping {name}: "
-                      f"cannot check {b} against {base_name}: {e}")
+                skip(f"cannot check {b} against {base_name}: {e}")
                 return
 
     # All branches in all projects are approved (or irrecoverable),
     # and no worktrees have uncommitted changes.
     if config.verbose:
-        import sys
         ws = config.worktree_dir(config.project_slug(base), agent_id)
         print(f"+ auto-cleanup: removing {name} "
               f"(worktree {'exists' if ws.is_dir() else 'gone'}, "
