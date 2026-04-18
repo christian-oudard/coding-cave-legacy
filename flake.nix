@@ -87,7 +87,7 @@
             (try-fwd-env "TZ")
 
             # Nix inside the cave
-            (set-env "NIX_CONFIG" "sandbox = false\nexperimental-features = nix-command flakes")
+            (set-env "NIX_CONFIG" "sandbox = false\nexperimental-features = nix-command flakes\nbuild-users-group =")
             (set-env "NIX_PATH" "nixpkgs=${nixpkgs}")
 
             # Nix store overlay (writable for autonomous package management)
