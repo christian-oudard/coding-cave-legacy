@@ -360,6 +360,77 @@ class TestInitNewProject(unittest.TestCase):
         self.assertIn("add readme", log)
 
 
+class TestSplitCommitArg(unittest.TestCase):
+    """_split_commit_arg distinguishes agent IDs from commit SHAs."""
+
+    def _split(self, *args):
+        from cav.cli import _split_commit_arg
+        return _split_commit_arg(args)
+
+    def test_empty(self):
+        self.assertEqual(self._split(), ((), None))
+
+    def test_digits_only_is_agent_id(self):
+        remaining, sha = self._split("3")
+        self.assertEqual(remaining, ("3",))
+        self.assertIsNone(sha)
+
+    def test_long_digits_is_agent_id(self):
+        """Even 7+ digit strings are agent IDs, not SHAs."""
+        remaining, sha = self._split("1234567")
+        self.assertEqual(remaining, ("1234567",))
+        self.assertIsNone(sha)
+
+    def test_hex_7_chars_is_sha(self):
+        remaining, sha = self._split("abcdef1")
+        self.assertEqual(remaining, ())
+        self.assertEqual(sha, "abcdef1")
+
+    def test_hex_40_chars_is_sha(self):
+        full = "a" * 39 + "1"
+        remaining, sha = self._split(full)
+        self.assertEqual(sha, full)
+
+    def test_hex_6_chars_too_short(self):
+        """6-char hex is too short to auto-detect, passes through."""
+        remaining, sha = self._split("abcdef")
+        self.assertEqual(remaining, ("abcdef",))
+        self.assertIsNone(sha)
+
+    def test_uppercase_hex(self):
+        remaining, sha = self._split("ABCDEF1")
+        self.assertEqual(sha, "ABCDEF1")
+
+    def test_project_slug_passes_through(self):
+        remaining, sha = self._split("my-project")
+        self.assertEqual(remaining, ("my-project",))
+        self.assertIsNone(sha)
+
+    def test_agent_id_and_sha(self):
+        remaining, sha = self._split("3", "abcdef1")
+        self.assertEqual(remaining, ("3",))
+        self.assertEqual(sha, "abcdef1")
+
+    def test_project_agent_sha(self):
+        remaining, sha = self._split("my-project", "3", "abcdef1")
+        self.assertEqual(remaining, ("my-project", "3"))
+        self.assertEqual(sha, "abcdef1")
+
+    def test_two_shas_raises(self):
+        with self.assertRaises(SystemExit):
+            self._split("abcdef1", "1234abc")
+
+    def test_at_prefix_is_agent_id(self):
+        remaining, sha = self._split("@6")
+        self.assertEqual(remaining, ("@6",))
+        self.assertIsNone(sha)
+
+    def test_slug_at_id_is_agent_id(self):
+        remaining, sha = self._split("dotfiles@6")
+        self.assertEqual(remaining, ("dotfiles@6",))
+        self.assertIsNone(sha)
+
+
 class TestTopLevelHelp(unittest.TestCase):
     """cav --help shows top-level usage, not agent subcommand."""
 

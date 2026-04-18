@@ -20,6 +20,31 @@ def _parse_agent_id(s: str) -> str:
     return s.lstrip("@").split("@")[-1]
 
 
+_HEX_SHA_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
+
+
+def _split_commit_arg(args):
+    """Extract a commit SHA from positional args.
+
+    Digits-only strings are agent IDs. Hex strings (7-40 chars with at
+    least one a-f letter) are commit SHAs. Everything else passes through.
+    """
+    remaining = []
+    commit = None
+    for arg in args:
+        candidate = _parse_agent_id(arg)
+        if AGENT_ID_RE.match(candidate):
+            remaining.append(arg)
+        elif _HEX_SHA_RE.match(arg):
+            if commit is not None:
+                raise SystemExit(
+                    f"Multiple commit SHAs: {commit}, {arg}")
+            commit = arg
+        else:
+            remaining.append(arg)
+    return tuple(remaining), commit
+
+
 def resolve_target(args: tuple[str, ...],
                    infer_agent: bool = False) -> tuple[Path, str | None]:
     """Resolve positional args to (project_base, agent_id).
@@ -360,24 +385,41 @@ def _auto_cleanup_if_clean(base, agent_id):
 
 
 @cli.command()
-@click.argument("args", nargs=-1, metavar="[PROJECT] [AGENT-ID]")
+@click.argument("args", nargs=-1, metavar="[AGENT-ID] [COMMIT]")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
-def approve(args, yes):
+@click.option("--commit", "-c", metavar="SHA",
+              help="Approve only up to this commit (partial approval)")
+def approve(args, yes, commit):
     """Approve agent work into base branch."""
     from .approve import approve as _approve
-    base, agent_id = resolve_target(args, infer_agent=True)
-    _approve(base=base, agent_id=agent_id, yes=yes)
+    target_args, sha = _split_commit_arg(args)
+    if sha and commit:
+        raise SystemExit(
+            "Commit specified both as argument and --commit.")
+    base, agent_id = resolve_target(target_args, infer_agent=True)
+    _approve(base=base, agent_id=agent_id, yes=yes, commit=commit or sha)
 
 
 @cli.command()
-@click.argument("agent_id", required=False)
+@click.argument("args", nargs=-1, metavar="[AGENT-ID] [COMMIT]")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
-def reject(agent_id, yes):
-    """Reject tip commit of base branch."""
+@click.option("--commit", "-c", metavar="SHA",
+              help="Reject from this commit through the tip (deep reject)")
+def reject(args, yes, commit):
+    """Reject approved commits from base branch."""
     base = find_repo_root()
     require_init(base)
+    target_args, sha = _split_commit_arg(args)
+    if sha and commit:
+        raise SystemExit(
+            "Commit specified both as argument and --commit.")
+    agent_id = None
+    if target_args:
+        agent_id = _parse_agent_id(target_args[0])
+        if not AGENT_ID_RE.match(agent_id):
+            raise SystemExit(f"Expected agent ID, got: {target_args[0]}")
     from .reject import reject as _reject
-    _reject(base, agent_id=agent_id, yes=yes)
+    _reject(base, agent_id=agent_id, yes=yes, commit=commit or sha)
 
 
 @cli.command()

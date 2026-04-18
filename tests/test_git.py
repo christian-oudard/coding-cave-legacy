@@ -1493,6 +1493,342 @@ class TestCAV(unittest.TestCase):
         registry.mark_agent_exited(id1)
         registry.mark_agent_exited(id2)
 
+    def test_approve_multi_branch_disambiguate(self):
+        """cav approve on a checked-out dev branch picks it from multiple."""
+        agents = self._init_and_agents("1")
+        ws = agents["1"]
+        id1 = registry.acquire_agent_id(self.user_repo)
+
+        # Agent pushes two dev branches
+        (ws / "a.py").write_text("# a\n")
+        git("add", "a.py", cwd=ws)
+        git("commit", "-m", "Work on main", cwd=ws)
+        git("push", "host-cave", "main:agent-1/main", cwd=ws, env=agent_env("1"))
+
+        git("checkout", "-b", "feature", "main", cwd=ws)
+        (ws / "b.py").write_text("# b\n")
+        git("add", "b.py", cwd=ws)
+        git("commit", "-m", "Work on feature", cwd=ws)
+        git("push", "host-cave", "feature:agent-1/feature", cwd=ws, env=agent_env("1"))
+
+        # Without checkout, approve fails with --yes (multiple choices)
+        result = cav_cli("approve", "1", "--yes", cwd=self.user_repo, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Multiple choices", result.stderr)
+
+        # Checkout one and approve succeeds
+        git("fetch", "cave", cwd=self.user_repo)
+        git("checkout", "-b", "agent-1/main", "cave/agent-1/main",
+            cwd=self.user_repo)
+        cav_cli("approve", "--yes", cwd=self.user_repo)
+
+        log = git_out("log", "--oneline", cwd=self.user_repo)
+        self.assertIn("Work on main", log)
+        self.assertNotIn("Work on feature", log)
+
+        registry.mark_agent_exited(id1)
+
+    def test_approve_partial_commit(self):
+        """cav approve <sha> approves only up to specified commit."""
+        agents = self._init_and_agents("1")
+        ws = agents["1"]
+        id1 = registry.acquire_agent_id(self.user_repo)
+
+        # Agent makes 3 commits
+        shas = []
+        for i in range(1, 4):
+            (ws / f"f{i}.py").write_text(f"# v{i}\n")
+            git("add", f"f{i}.py", cwd=ws)
+            git("commit", "-m", f"Commit {i}", cwd=ws)
+            shas.append(git_out("rev-parse", "HEAD", cwd=ws))
+        git("push", "host-cave", "main:agent-1/main", cwd=ws, env=agent_env("1"))
+
+        # Approve only the first commit (SHA as positional arg)
+        git("fetch", "cave", cwd=self.user_repo)
+        git("checkout", "-b", "agent-1/main", "cave/agent-1/main",
+            cwd=self.user_repo)
+        cav_cli("approve", "--yes", shas[0], cwd=self.user_repo)
+
+        log = git_out("log", "--oneline", cwd=self.user_repo)
+        self.assertIn("Commit 1", log)
+        self.assertNotIn("Commit 2", log)
+
+        # Dev branch should still exist with remaining commits
+        git("fetch", "--prune", "cave", cwd=self.user_repo)
+        branches = git_out("branch", "-r", cwd=self.user_repo)
+        self.assertIn("cave/agent-1/main", branches)
+
+        # Approve the rest
+        cav_cli("approve", "1", "--yes", cwd=self.user_repo)
+        log = git_out("log", "--oneline", cwd=self.user_repo)
+        self.assertIn("Commit 2", log)
+        self.assertIn("Commit 3", log)
+
+        registry.mark_agent_exited(id1)
+
+    def test_approve_sha_with_agent_id(self):
+        """cav approve <agent-id> <sha> combines agent selection with partial."""
+        agents = self._init_and_agents("1")
+        ws = agents["1"]
+        id1 = registry.acquire_agent_id(self.user_repo)
+
+        shas = []
+        for i in range(1, 3):
+            (ws / f"f{i}.py").write_text(f"# v{i}\n")
+            git("add", f"f{i}.py", cwd=ws)
+            git("commit", "-m", f"Commit {i}", cwd=ws)
+            shas.append(git_out("rev-parse", "HEAD", cwd=ws))
+        git("push", "host-cave", "main:agent-1/main", cwd=ws, env=agent_env("1"))
+
+        # Approve agent 1 up to first commit (both args positional)
+        cav_cli("approve", "1", shas[0], "--yes", cwd=self.user_repo)
+
+        log = git_out("log", "--oneline", cwd=self.user_repo)
+        self.assertIn("Commit 1", log)
+        self.assertNotIn("Commit 2", log)
+
+        registry.mark_agent_exited(id1)
+
+    def test_reject_deep_commit(self):
+        """cav reject <sha> rejects from specified commit through tip."""
+        agents = self._init_and_agents("1")
+        ws = agents["1"]
+        id1 = registry.acquire_agent_id(self.user_repo)
+
+        # Agent makes 3 commits
+        for i in range(1, 4):
+            (ws / f"f{i}.py").write_text(f"# v{i}\n")
+            git("add", f"f{i}.py", cwd=ws)
+            git("commit", "-m", f"Commit {i}", cwd=ws)
+        git("push", "host-cave", "main:agent-1/main", cwd=ws, env=agent_env("1"))
+
+        # Approve all 3
+        git("fetch", "cave", cwd=self.user_repo)
+        git("checkout", "-b", "agent-1/main", "cave/agent-1/main",
+            cwd=self.user_repo)
+        cav_cli("approve", "--yes", cwd=self.user_repo)
+
+        # Get SHA of Commit 1 (deepest to reject)
+        log_lines = git_out("log", "--oneline", cwd=self.user_repo).splitlines()
+        # log is newest first: Commit 3, Commit 2, Commit 1, Initial commit
+        commit1_sha = log_lines[2].split()[0]
+
+        # Reject from Commit 1 onwards (SHA as positional arg)
+        cav_cli("reject", "--yes", commit1_sha, cwd=self.user_repo)
+
+        log = git_out("log", "--oneline", cwd=self.user_repo)
+        self.assertNotIn("Commit 1", log)
+        self.assertNotIn("Commit 2", log)
+        self.assertNotIn("Commit 3", log)
+        self.assertIn("Initial commit", log)
+
+        # Dev branch should have all 3 rejected commits
+        git("fetch", "--prune", "cave", cwd=self.user_repo)
+        log = git_out("log", "--oneline", "cave/agent-1/main", cwd=self.user_repo)
+        self.assertIn("Commit 1", log)
+        self.assertIn("Commit 3", log)
+
+        registry.mark_agent_exited(id1)
+
+    def test_approve_partial_commit_at_base_fails(self):
+        """cav approve <sha> where sha == base tip fails cleanly."""
+        agents = self._init_and_agents("1")
+        ws = agents["1"]
+        id1 = registry.acquire_agent_id(self.user_repo)
+
+        (ws / "f1.py").write_text("# v1\n")
+        git("add", "f1.py", cwd=ws)
+        git("commit", "-m", "Commit 1", cwd=ws)
+        git("push", "host-cave", "main:agent-1/main", cwd=ws, env=agent_env("1"))
+
+        # Get the base tip (main on shared remote = base before agent work)
+        base_sha = git_out("rev-parse", "cave/main", cwd=self.user_repo)
+
+        result = cav_cli("approve", "1", base_sha, "--yes",
+                         cwd=self.user_repo, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Nothing to approve", result.stderr)
+
+        registry.mark_agent_exited(id1)
+
+    def test_approve_partial_commit_not_on_branch_fails(self):
+        """cav approve <sha> where sha is not on the dev branch fails."""
+        agents = self._init_and_agents("1")
+        ws = agents["1"]
+        id1 = registry.acquire_agent_id(self.user_repo)
+
+        (ws / "f1.py").write_text("# v1\n")
+        git("add", "f1.py", cwd=ws)
+        git("commit", "-m", "Commit 1", cwd=ws)
+        git("push", "host-cave", "main:agent-1/main", cwd=ws, env=agent_env("1"))
+
+        # Create a commit on a different branch (not on agent-1/main)
+        git("checkout", "-b", "other", cwd=self.user_repo)
+        (self.user_repo / "other.py").write_text("# other\n")
+        git("add", "other.py", cwd=self.user_repo)
+        git("commit", "-m", "Other branch", cwd=self.user_repo)
+        other_sha = git_out("rev-parse", "HEAD", cwd=self.user_repo)
+        git("checkout", "main", cwd=self.user_repo)
+
+        result = cav_cli("approve", "1", other_sha, "--yes",
+                         cwd=self.user_repo, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not on the dev branch", result.stderr)
+
+        registry.mark_agent_exited(id1)
+
+    def test_approve_picker_yes_multiple_agents_fails(self):
+        """cav approve --yes with multiple agents and no selection fails."""
+        agents = self._init_and_agents("1", "2")
+        ws1, ws2 = agents["1"], agents["2"]
+        id1 = registry.acquire_agent_id(self.user_repo)
+        id2 = registry.acquire_agent_id(self.user_repo)
+
+        # Both agents push work
+        (ws1 / "a.py").write_text("# a\n")
+        git("add", "a.py", cwd=ws1)
+        git("commit", "-m", "Agent 1 work", cwd=ws1)
+        git("push", "host-cave", "main:agent-1/main", cwd=ws1, env=agent_env("1"))
+
+        (ws2 / "b.py").write_text("# b\n")
+        git("add", "b.py", cwd=ws2)
+        git("commit", "-m", "Agent 2 work", cwd=ws2)
+        git("push", "host-cave", "main:agent-2/main", cwd=ws2, env=agent_env("2"))
+
+        # Approve without specifying agent and with --yes should fail
+        result = cav_cli("approve", "--yes", cwd=self.user_repo, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Multiple choices", result.stderr)
+
+        registry.mark_agent_exited(id1)
+        registry.mark_agent_exited(id2)
+
+    def test_reject_unapproved_commit_fails(self):
+        """cav reject on a branch with no approval records fails."""
+        agents = self._init_and_agents("1")
+        ws = agents["1"]
+        id1 = registry.acquire_agent_id(self.user_repo)
+
+        # Manually push a commit to main on shared remote without going
+        # through cav approve (so no approval record exists).
+        (self.user_repo / "sneaky.py").write_text("# sneaky\n")
+        git("add", "sneaky.py", cwd=self.user_repo)
+        git("commit", "-m", "Manual commit", cwd=self.user_repo)
+        git("push", "cave", "main", cwd=self.user_repo)
+
+        result = cav_cli("reject", "--yes", cwd=self.user_repo, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("No approval record", result.stderr)
+
+        registry.mark_agent_exited(id1)
+
+    def test_reject_with_agent_id_and_sha(self):
+        """cav reject <agent-id> <sha> targets a specific commit with a specific agent."""
+        agents = self._init_and_agents("1", "2")
+        ws1 = agents["1"]
+        id1 = registry.acquire_agent_id(self.user_repo)
+        id2 = registry.acquire_agent_id(self.user_repo)
+
+        # Agent 1 makes 3 commits
+        shas = []
+        for i in range(1, 4):
+            (ws1 / f"f{i}.py").write_text(f"# v{i}\n")
+            git("add", f"f{i}.py", cwd=ws1)
+            git("commit", "-m", f"Commit {i}", cwd=ws1)
+            shas.append(git_out("rev-parse", "HEAD", cwd=ws1))
+        git("push", "host-cave", "main:agent-1/main", cwd=ws1, env=agent_env("1"))
+
+        # Approve all
+        git("fetch", "cave", cwd=self.user_repo)
+        git("checkout", "-b", "agent-1/main", "cave/agent-1/main",
+            cwd=self.user_repo)
+        cav_cli("approve", "--yes", cwd=self.user_repo)
+
+        # Get the SHA of Commit 2 from user repo
+        log_lines = git_out("log", "--oneline", cwd=self.user_repo).splitlines()
+        # Commit 3, Commit 2, Commit 1, Initial commit
+        commit2_sha = log_lines[1].split()[0]
+
+        # Reject from Commit 2 onwards, assigning to agent 2
+        cav_cli("reject", "2", commit2_sha, "--yes", cwd=self.user_repo)
+
+        log = git_out("log", "--oneline", cwd=self.user_repo)
+        self.assertIn("Commit 1", log)
+        self.assertNotIn("Commit 2", log)
+        self.assertNotIn("Commit 3", log)
+
+        # Work should be on agent-2's branch, not agent-1's
+        git("fetch", "--prune", "cave", cwd=self.user_repo)
+        log = git_out("log", "--oneline", "cave/agent-2/main", cwd=self.user_repo)
+        self.assertIn("Commit 2", log)
+        self.assertIn("Commit 3", log)
+
+        registry.mark_agent_exited(id1)
+        registry.mark_agent_exited(id2)
+
+    def test_partial_approve_then_full_approve(self):
+        """Partial approve followed by full approve of remaining commits."""
+        agents = self._init_and_agents("1")
+        ws = agents["1"]
+        id1 = registry.acquire_agent_id(self.user_repo)
+
+        # Agent makes 4 commits
+        shas = []
+        for i in range(1, 5):
+            (ws / f"f{i}.py").write_text(f"# v{i}\n")
+            git("add", f"f{i}.py", cwd=ws)
+            git("commit", "-m", f"Commit {i}", cwd=ws)
+            shas.append(git_out("rev-parse", "HEAD", cwd=ws))
+        git("push", "host-cave", "main:agent-1/main", cwd=ws, env=agent_env("1"))
+
+        # Partial approve: first 2 commits
+        cav_cli("approve", "1", shas[1], "--yes", cwd=self.user_repo)
+
+        log = git_out("log", "--oneline", cwd=self.user_repo)
+        self.assertIn("Commit 1", log)
+        self.assertIn("Commit 2", log)
+        self.assertNotIn("Commit 3", log)
+
+        # Dev branch still exists
+        git("fetch", "--prune", "cave", cwd=self.user_repo)
+        branches = git_out("branch", "-r", cwd=self.user_repo)
+        self.assertIn("cave/agent-1/main", branches)
+
+        # Full approve of remaining
+        cav_cli("approve", "1", "--yes", cwd=self.user_repo)
+
+        log = git_out("log", "--oneline", cwd=self.user_repo)
+        self.assertIn("Commit 3", log)
+        self.assertIn("Commit 4", log)
+
+        # All 4 commits are now approved
+        self.assertIn("Commit 1", log)
+        self.assertIn("Commit 2", log)
+
+        registry.mark_agent_exited(id1)
+
+    def test_reject_from_dev_branch_fails(self):
+        """cav reject on a dev branch (not a base branch) fails."""
+        agents = self._init_and_agents("1")
+        ws = agents["1"]
+        id1 = registry.acquire_agent_id(self.user_repo)
+
+        (ws / "f1.py").write_text("# v1\n")
+        git("add", "f1.py", cwd=ws)
+        git("commit", "-m", "Commit 1", cwd=ws)
+        git("push", "host-cave", "main:agent-1/main", cwd=ws, env=agent_env("1"))
+
+        # Checkout the dev branch
+        git("fetch", "cave", cwd=self.user_repo)
+        git("checkout", "-b", "agent-1/main", "cave/agent-1/main",
+            cwd=self.user_repo)
+
+        result = cav_cli("reject", "--yes", cwd=self.user_repo, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Cannot reject from dev branch", result.stderr)
+
+        registry.mark_agent_exited(id1)
+
     # -- rollback workflows --
 
     def test_user_force_push_shared_branch_rollback(self):
