@@ -35,9 +35,14 @@ def _format_age(timestamp: float) -> str:
     return f"{delta // 86400}d ago"
 
 
-# Agent info tuple: (last_activity, agent_id, name, running, state, unapproved)
+# Agent info tuple:
+# (last_activity, agent_id, name, running, state, unapproved, dirty_worktrees)
 # unapproved: list of (branch, ahead_count, commit_lines)
-AgentInfo = tuple[float, str, str, bool, str, list[tuple[str, int, list[str]]]]
+# dirty_worktrees: list of worktree Paths with uncommitted changes
+AgentInfo = tuple[
+    float, str, str, bool, str,
+    list[tuple[str, int, list[str]]], list[Path],
+]
 
 
 def sort_agents(agents: list[AgentInfo]) -> list[AgentInfo]:
@@ -49,7 +54,8 @@ def sort_agents(agents: list[AgentInfo]) -> list[AgentInfo]:
 def format_agents(agents: list[AgentInfo], max_commits: int | None = 3) -> str:
     """Format sorted agent list into display text."""
     lines = []
-    for i, (last_activity, _, name, _, state, unapproved) in enumerate(agents):
+    for i, agent in enumerate(agents):
+        last_activity, _, name, _, state, unapproved, dirty_worktrees = agent
         if i > 0:
             lines.append("")
         age = _format_age(last_activity) if last_activity else ""
@@ -62,6 +68,8 @@ def format_agents(agents: list[AgentInfo], max_commits: int | None = 3) -> str:
                 lines.append(f"    {line}")
             if max_commits and ahead > max_commits:
                 lines.append(f"    ... and {ahead - max_commits} more")
+        for ws in dirty_worktrees:
+            lines.append(f"  uncommitted changes in {ws}")
     return "\n".join(lines)
 
 
@@ -187,15 +195,32 @@ def status(base: Path, agent_filter: str | None = None, scoped: bool = True) -> 
 
         total_ahead = sum(a for _, a, _ in unapproved)
 
+        # Surface agents whose worktrees still hold uncommitted changes,
+        # so the user knows the slot is pinned by something `cav
+        # remove-agent` would have to clear.
+        dirty_worktrees: list[Path] = []
+        for slug in registry.agent_all_slugs(agent_id):
+            ws = config.worktree_dir(slug, agent_id)
+            if not ws.is_dir():
+                continue
+            try:
+                st = git.git_output("status", "--porcelain", cwd=ws)
+            except Exception:
+                continue
+            if st.strip():
+                dirty_worktrees.append(ws)
+
         state = "running" if running else "stopped"
 
-        # Only show agents that are running or have unapproved work.
-        # Exited agents with no pending commits are kept in the registry
-        # for cav -c but aren't interesting for status.
-        if not running and total_ahead == 0:
+        # Only show agents that are running, have unapproved work, or
+        # are holding a slot via a dirty worktree. Exited agents that
+        # are fully clean sit in the registry for `cav -c` but aren't
+        # interesting for status.
+        if not running and total_ahead == 0 and not dirty_worktrees:
             continue
 
-        agents.append((last_activity, agent_id, name, running, state, unapproved))
+        agents.append((last_activity, agent_id, name, running, state,
+                       unapproved, dirty_worktrees))
 
     agents = sort_agents(agents)
 

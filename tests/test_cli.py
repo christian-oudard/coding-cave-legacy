@@ -1048,8 +1048,10 @@ class TestAgentSorting(unittest.TestCase):
         self.sort_agents = sort_agents
         self.format_agents = format_agents
 
-    def _agent(self, ts, aid, name, running, state="running", unapproved=None):
-        return (ts, aid, name, running, state, unapproved or [])
+    def _agent(self, ts, aid, name, running, state="running",
+               unapproved=None, dirty_worktrees=None):
+        return (ts, aid, name, running, state,
+                unapproved or [], dirty_worktrees or [])
 
     def test_sort_most_recent_first(self):
         agents = [
@@ -1106,6 +1108,39 @@ class TestAgentSorting(unittest.TestCase):
         self.assertIn("... and 2 more", out)
         self.assertNotIn("commit 3", out)
         self.assertNotIn("commit 4", out)
+
+    def test_format_agents_dirty_worktree(self):
+        ws = Path("/tmp/coding-cave/agent-1")
+        agents = [
+            self._agent(1000.0, "1", "proj@1", False, "stopped",
+                        dirty_worktrees=[ws]),
+        ]
+        out = self.format_agents(agents)
+        self.assertIn(f"uncommitted changes in {ws}", out)
+
+    def test_format_agents_multiple_dirty_worktrees(self):
+        ws1 = Path("/tmp/coding-cave/agent-1")
+        ws2 = Path("/tmp/other-proj/agent-1")
+        agents = [
+            self._agent(1000.0, "1", "proj@1", False, "stopped",
+                        dirty_worktrees=[ws1, ws2]),
+        ]
+        out = self.format_agents(agents)
+        self.assertIn(f"uncommitted changes in {ws1}", out)
+        self.assertIn(f"uncommitted changes in {ws2}", out)
+
+    def test_format_agents_dirty_and_unapproved(self):
+        ws = Path("/tmp/coding-cave/agent-1")
+        agents = [
+            self._agent(1000.0, "1", "proj@1", False, "stopped",
+                        unapproved=[("agent-1/main", 1, ["abc feat"])],
+                        dirty_worktrees=[ws]),
+        ]
+        out = self.format_agents(agents)
+        self.assertIn("1 commit on agent-1/main", out)
+        self.assertIn("abc feat", out)
+        self.assertIn(f"uncommitted changes in {ws}", out)
+
 
 
 class TestLaunchOpts(unittest.TestCase):
