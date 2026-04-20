@@ -10,7 +10,13 @@ from pathlib import Path
 import click
 
 from . import completion as _completion, config, git, registry
-from .constants import AGENT_ID_RE, CAVE_SHARED_REMOTE, HOST_SHARED_REPO_DIR, VERSION
+from .constants import (
+    AGENT_ID_RE,
+    CAVE_SHARED_REMOTE,
+    HOST_SHARED_REPO_DIR,
+    VERSION,
+    VERSION_DATE,
+)
 
 _completion.register()
 
@@ -653,13 +659,12 @@ def completion(shell):
 @cli.command()
 def version():
     """Show version."""
-    ts = "@VERSION_DATE@"
-    if ts.isdigit():
+    if VERSION_DATE.isdigit():
         from datetime import datetime
-        dt = datetime.fromtimestamp(int(ts))
+        dt = datetime.fromtimestamp(int(VERSION_DATE))
         print(f"cav {VERSION} ({dt:%Y-%m-%d %H:%M})")
     else:
-        print(f"cav {VERSION} ({ts})")
+        print(f"cav {VERSION} ({VERSION_DATE})")
 
 
 def main():

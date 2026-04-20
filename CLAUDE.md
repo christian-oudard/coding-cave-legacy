@@ -22,7 +22,7 @@ Always run the git and cave tiers in the background (the `run_in_background` opt
 
 ## Build
 
-Nix-only. `nix build` produces the `cav` binary. Build-time placeholders (`@VERSION@`, `@VERSION_DATE@`, `@SANDBOX_BIN@`, `@CAV_BIN@`, `@NIXPKGS_URL@`, `@CLAUDE_CODE_NIX_URL@`, `@NIX_CLAUDE_URL@`, `@MKCAVEENV_PATH@`, `@SYSTEM_CLAUDE_MD_PATH@`, `@DEFAULT_STATUSLINE_PATH@`) in cli.py, sandbox.py, and user_env.py are substituted by the Nix derivation. Running from source via `nix develop` works for tests and most CLI commands, but `cav version` and `cav agent` require a full `nix build` since they depend on substituted values.
+Nix-only. `nix build` produces the `cav` binary. Build-time values (version, sandbox config path, flake URLs) are emitted as a single JSON file at `$out/share/coding-cave/build.json`; the wrapper sets `CODING_CAVE_BUILD_CONFIG` to point at it. `cav/constants.py` loads the JSON at import time. Running from source via `nix develop` leaves the env var unset — most CLI commands work, but `cav version` and `cav agent` need a full `nix build`.
 
 ## Layout
 

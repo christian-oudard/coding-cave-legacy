@@ -1,8 +1,10 @@
 """Sandbox launcher for running agents.
 
-Sets up the nix store overlay, configures environment variables for the
-jail.nix-generated sandbox binary, and launches it. The sandbox binary
-handles bwrap args, /etc, SSL certs, PATH, and entry script.
+Sets up the nix store overlay, builds the bwrap argv (via cav.bwrap),
+and launches the sandbox through supervisor.py. The static bwrap args
+and bind-mount paths come from lib/sandbox.nix (consumed as JSON by
+cav.bwrap); the per-launch dynamic args (workspaces, GPG socket, DNS,
+etc.) are composed here from the agent's environment.
 """
 
 import logging
@@ -17,17 +19,18 @@ import sys
 import time
 from pathlib import Path
 
-from . import config, daemon, git, registry, user_env
-from .constants import CAVE_SHARED_REMOTE, HOST_SHARED_REMOTE, VERSION
+from . import bwrap, config, daemon, git, registry, user_env
+from .constants import (
+    CAV_BIN,
+    CAVE_SHARED_REMOTE,
+    HOST_SHARED_REMOTE,
+    SUPERVISOR_PY,
+    VERSION,
+)
 
 log = logging.getLogger("cav")
 
 GIT_WRAPPER = (Path(__file__).parent / "git_wrapper.py").read_text()
-
-# Substituted at nix build time with the jail.nix sandbox binary path.
-SANDBOX_BIN = "@SANDBOX_BIN@"
-# Substituted at nix build time with the cav bin directory.
-CAV_BIN = "@CAV_BIN@"
 
 
 def _signal_descendants(pid: int, sig: int) -> None:
@@ -141,7 +144,7 @@ def _crinj_ca_path() -> Path:
     """Find crinj CA certificate.
 
     Inside a cave, prefer /etc/crinj-ca.pem (the ancestor cert inherited
-    from jail.nix). Each nesting level's crinj runs in tunnel/passthrough
+    from the parent). Each nesting level's crinj runs in tunnel/passthrough
     mode, so the MITM cert is always from the outermost (host) crinj.
     The inherited /etc/crinj-ca.pem is the right cert at every depth.
 
@@ -686,9 +689,6 @@ def _setup_nix_overlay(home: Path, agent_id: str) -> str:
 
 SLIRP_GATEWAY = "10.0.2.2"
 
-# Substituted at nix build time with the supervisor.py helper path.
-SUPERVISOR_PY = "@SUPERVISOR_PY@"
-
 
 def _apply_firewall(pid: int, allowed_ports: list[int]):
     """Apply iptables firewall rules inside the child's network namespace.
@@ -796,7 +796,7 @@ def _build_claude_cmd(session_id: str | None, resuming: bool,
     via 'cav agent -c --prompt ...' resumes the same Claude session
     instead of starting a fresh one each call.
     """
-    cmd = [SANDBOX_BIN, "claude", "--dangerously-skip-permissions"]
+    cmd = ["claude", "--dangerously-skip-permissions"]
     if session_id:
         if resuming:
             cmd += ["--resume", session_id]
@@ -812,7 +812,7 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
            session_id: str | None = None, resuming: bool = False,
            prompt: str | None = None,
            host_ports: list[int] | None = None):
-    """Launch claude in a bwrap sandbox via the jail.nix binary.
+    """Launch claude in a bwrap sandbox via the cave's wrapper binary.
 
     workspaces: list of (workspace_path, shared_repo, slug) tuples.
     project_slug: slug of the primary project (for cd on entry).
@@ -911,14 +911,13 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
     shared_repos = ":".join(str(sr) for _, sr, _ in workspaces)
     slugs = ":".join(s for _, _, s in workspaces)
 
-    # Build a minimal environment for the jail wrapper. Only include
-    # vars the add-runtime blocks and try-fwd-env calls actually need.
+    # Build a minimal environment for the bwrap wrapper. Only include
+    # vars the wrapper's runtime block and forwardEnv list actually need.
     # Using **os.environ here would leak host secrets (API keys, tokens,
     # SSH_AUTH_SOCK, etc.) via /proc/1/environ inside the sandbox.
-    # HOME is needed by the wrapper for ~/.local/share/jail.nix/passwd.
-    # TERM/COLORTERM/TZ are forwarded into the cave via try-fwd-env.
+    # TERM/COLORTERM/TZ are forwarded into the cave via forwardEnv.
     env = {}
-    for var in ("HOME", "TERM", "COLORTERM", "TZ"):
+    for var in ("TERM", "COLORTERM", "TZ"):
         if var in os.environ:
             env[var] = os.environ[var]
     env.update({
@@ -1031,6 +1030,12 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
         if not unshare_bin:
             raise SystemExit("unshare not found on PATH (install util-linux)")
 
+        # Build the full bwrap argv from the sandbox config + env. The
+        # returned pass_fds are inheritable fds (currently the seccomp
+        # BPF filter) that must survive through unshare -> supervisor.py
+        # -> bwrap.
+        bwrap_argv, bwrap_fds = bwrap.build_argv(env, claude_cmd)
+
         # Map to uid/gid 0 inside the namespace so iptables-restore
         # (nf_tables backend) works. It checks getuid()==0 rather than
         # capabilities. bwrap creates its own inner user namespace so
@@ -1039,11 +1044,16 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
             unshare_bin, "--user", "--net", "--mount",
             "--map-user=0", "--map-group=0",
             "--", sys.executable, SUPERVISOR_PY,
-        ] + claude_cmd
+        ] + bwrap_argv
 
         log.info("launching sandbox...")
-        proc = subprocess.Popen(ns_cmd, env=env, close_fds=False)
+        proc = subprocess.Popen(
+            ns_cmd, env=env, close_fds=False,
+            pass_fds=(sync_w, *bwrap_fds),
+        )
         os.close(sync_w)
+        for fd in bwrap_fds:
+            os.close(fd)
 
         # Record the bwrap child PID so cav cp can reach cave-internal
         # absolute paths via /proc/<cave_pid>/root/<path>.

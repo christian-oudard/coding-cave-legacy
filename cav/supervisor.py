@@ -262,8 +262,11 @@ def main() -> None:
     restore_tty = _disable_tty_suspend()
 
     # Run bwrap as a child (not exec) so we stay alive to clean up.
+    # close_fds=False so the seccomp BPF fd (opened by cav.bwrap with
+    # CLOEXEC cleared and threaded through unshare via pass_fds) reaches
+    # bwrap. Nothing else sensitive is inheritable at this point.
     try:
-        result = subprocess.run(sys.argv[1:])
+        result = subprocess.run(sys.argv[1:], close_fds=False)
     finally:
         if restore_tty:
             restore_tty()

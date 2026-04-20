@@ -110,28 +110,32 @@ class TestPathHomeLint(unittest.TestCase):
 
 
 class TestSandboxEnvCompleteness(unittest.TestCase):
-    """Verify launch() sets all env vars that flake.nix expects.
+    """Verify launch() sets all env vars the sandbox reads.
 
-    The sandbox binary (jail.nix) reads env vars to configure bind mounts,
-    PATH, and identity. If launch() forgets one, the cave starts broken.
+    cav/bwrap.py and lib/sandbox.nix (entry.sh) read CODING_CAVE_* vars
+    to configure bind mounts, PATH, and identity. If launch() forgets
+    one, the cave starts broken.
 
-    This would have caught: missing CODING_CAVE_HOME, missing proxy config,
-    missing CLAUDE_CODE_OAUTH_TOKEN.
+    This would have caught: missing CODING_CAVE_HOME, missing proxy
+    config, missing CLAUDE_CODE_OAUTH_TOKEN.
     """
 
-    def _extract_env_refs_from_nix(self) -> set[str]:
-        """Parse flake.nix for CODING_CAVE_* env var references."""
-        flake = PROJECT_ROOT / "flake.nix"
-        if not flake.exists():
-            self.skipTest("flake.nix not found")
-        text = flake.read_text()
+    def _extract_env_refs_from_sandbox(self) -> set[str]:
+        """Parse cav/bwrap.py and lib/sandbox.nix for CODING_CAVE_* refs."""
         import re
-        # Match env var names in try-fwd-env, fwd-env, and shell variable references
         refs = set()
-        for m in re.finditer(r'(?:try-fwd-env|fwd-env)\s+"(CODING_CAVE_\w+)"', text):
-            refs.add(m.group(1))
-        for m in re.finditer(r'\$\{?(CODING_CAVE_\w+)', text):
-            refs.add(m.group(1))
+        bwrap = CAV_DIR / "bwrap.py"
+        if bwrap.exists():
+            for m in re.finditer(r'["\'](CODING_CAVE_\w+)["\']', bwrap.read_text()):
+                refs.add(m.group(1))
+        nix = PROJECT_ROOT / "lib" / "sandbox.nix"
+        if nix.exists():
+            text = nix.read_text()
+            # forwardEnv entries and ${VAR} shell refs in the entry script
+            for m in re.finditer(r'"(CODING_CAVE_\w+)"', text):
+                refs.add(m.group(1))
+            for m in re.finditer(r'\$\{?(CODING_CAVE_\w+)', text):
+                refs.add(m.group(1))
         return refs
 
     def _extract_env_sets_from_launch(self) -> set[str]:
@@ -146,8 +150,8 @@ class TestSandboxEnvCompleteness(unittest.TestCase):
         return sets
 
     def test_launch_sets_all_required_env_vars(self):
-        """Every CODING_CAVE_* var referenced in flake.nix must be set in launch()."""
-        nix_refs = self._extract_env_refs_from_nix()
+        """Every CODING_CAVE_* var the sandbox reads must be set in launch()."""
+        sandbox_refs = self._extract_env_refs_from_sandbox()
         launch_sets = self._extract_env_sets_from_launch()
 
         # These are conditionally set (only when the feature is available)
@@ -160,10 +164,10 @@ class TestSandboxEnvCompleteness(unittest.TestCase):
             "CODING_CAVE_NIX_DB_DIR",    # only if host has nix DB
         }
 
-        missing = nix_refs - launch_sets - conditional
+        missing = sandbox_refs - launch_sets - conditional
         if missing:
             self.fail(
-                "flake.nix references env vars not set by launch():\n  "
+                "sandbox reads env vars not set by launch():\n  "
                 + "\n  ".join(sorted(missing))
                 + "\nThese will be unset when the sandbox starts."
             )

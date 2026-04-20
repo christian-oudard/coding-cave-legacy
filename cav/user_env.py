@@ -27,13 +27,12 @@ import subprocess
 import sys
 from pathlib import Path
 from . import config
-
-
-# Build-time substituted store paths and URLs.
-_NIXPKGS_URL = "@NIXPKGS_URL@"
-_CLAUDE_CODE_NIX_URL = "@CLAUDE_CODE_NIX_URL@"
-_HOME_MANAGER_URL = "@HOME_MANAGER_URL@"
-_CODING_CAVE_URL = "@CODING_CAVE_URL@"
+from .constants import (
+    CLAUDE_CODE_NIX_URL as _CLAUDE_CODE_NIX_URL,
+    CODING_CAVE_URL as _CODING_CAVE_URL,
+    HOME_MANAGER_URL as _HOME_MANAGER_URL,
+    NIXPKGS_URL as _NIXPKGS_URL,
+)
 
 
 def _cave_nix_path():
