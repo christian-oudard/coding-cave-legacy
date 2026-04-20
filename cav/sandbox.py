@@ -273,6 +273,11 @@ def _prune_nix_caches() -> None:
     """
     nix_cache = config.persistent_home() / ".cache" / "nix"
 
+    try:
+        store_names = set(os.listdir("/nix/store"))
+    except OSError:
+        store_names = set()
+
     # Fetcher cache: delete individual rows with dead store paths
     for db_path in nix_cache.glob("fetcher-cache-*.sqlite"):
         try:
@@ -286,7 +291,7 @@ def _prune_nix_caches() -> None:
                 if idx < 0:
                     continue
                 sp = val[idx + 13:].split('"', 1)[0]
-                if not (Path("/nix/store") / sp).exists():
+                if sp not in store_names:
                     conn.execute(
                         "DELETE FROM Cache WHERE domain=? AND key=?",
                         (domain, key),
@@ -314,7 +319,9 @@ def _prune_nix_caches() -> None:
         except (sqlite3.Error, OSError):
             db_path.unlink(missing_ok=True)
             continue
-        if rows and any(not Path(r[0]).exists() for r in rows):
+        if rows and any(
+                r[0][len("/nix/store/"):].split("/", 1)[0] not in store_names
+                for r in rows):
             db_path.unlink(missing_ok=True)
 
 
@@ -425,6 +432,19 @@ def _seed_nix_db(home: Path, agent_id: str,
               / "nix-overlay" / f"agent-{agent_id}" / "db")
     db_dir.mkdir(parents=True, exist_ok=True)
     cave_db = db_dir / "db.sqlite"
+    stamp = db_dir / "db.stamp"
+
+    # Skip reseed if the host DB hasn't changed since our last run.
+    # mtime+size captures every host-side install or GC.
+    parent_st = parent_db.stat()
+    state = f"{parent_st.st_mtime_ns}:{parent_st.st_size}"
+    if cave_db.exists() and stamp.exists():
+        try:
+            if stamp.read_text() == state:
+                log.debug("nix DB: host unchanged, skipping reseed")
+                return db_dir
+        except OSError:
+            pass
 
     # Use the merged overlay for existence checks when available,
     # otherwise fall back to the parent's /nix/store view.
@@ -436,6 +456,11 @@ def _seed_nix_db(home: Path, agent_id: str,
         candidate = Path(merged_path)
         if _overlay_alive(candidate):
             store_root = candidate
+
+    try:
+        store_names = set(os.listdir(store_root))
+    except OSError:
+        store_names = set()
 
     try:
         # Collect cave-only paths and their DerivationOutputs before overwriting
@@ -451,8 +476,7 @@ def _seed_nix_db(home: Path, agent_id: str,
                 "ultimate, sigs, ca FROM ValidPaths"
             ):
                 if row[0] not in host_paths:
-                    basename = Path(row[0]).name
-                    if (store_root / basename).exists():
+                    if Path(row[0]).name in store_names:
                         cave_only_rows.append(row)
                         cave_only_paths.add(row[0])
             # Preserve DerivationOutputs for cave-only derivations
@@ -506,8 +530,7 @@ def _seed_nix_db(home: Path, agent_id: str,
         # genuinely gone.
         stale_ids = []
         for vid, path in dst.execute("SELECT id, path FROM ValidPaths"):
-            basename = Path(path).name
-            if not (store_root / basename).exists():
+            if Path(path).name not in store_names:
                 stale_ids.append(vid)
         if stale_ids:
             dst.executemany(
@@ -543,8 +566,16 @@ def _seed_nix_db(home: Path, agent_id: str,
         src.close()
     except sqlite3.Error as e:
         log.warning(f"nix DB seed failed: {e}")
+        return db_dir
 
     _prune_nix_caches()
+
+    # Record the host DB state we just synced from, so the next launch
+    # can skip the reseed if nothing on the host changed.
+    try:
+        stamp.write_text(state)
+    except OSError:
+        pass
 
     return db_dir
 
@@ -621,7 +652,10 @@ def _setup_nix_overlay(home: Path, agent_id: str) -> str:
     upper, work, merged = _nix_overlay_dirs(home, agent_id)
 
     # Clean the upper layer of stale entries.
-    host_store = Path("/nix/store")
+    try:
+        host_names = set(os.listdir("/nix/store"))
+    except OSError:
+        host_names = set()
     stale = []
     for entry in upper.iterdir():
         if entry.name.startswith("."):
@@ -635,7 +669,7 @@ def _setup_nix_overlay(home: Path, agent_id: str) -> str:
             if stat.S_ISCHR(s.st_mode) or s.st_size == 0:
                 entry.unlink()
                 continue
-        if not (host_store / entry.name).exists():
+        if entry.name not in host_names:
             stale.append(entry)
     for entry in stale:
         _rm_store_path(entry)
@@ -791,12 +825,15 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
     # Extract numeric agent ID from display name (e.g. "coding-cave@5" -> "5")
     agent_id = agent_name.split("@")[-1]
 
-    # Start git daemon for remote isolation (bare repos served over git://)
+    # Start git daemon in the background; the workspace layout checks
+    # below don't need it, so we let both run concurrently and join
+    # before the first remote URL is used.
     log.info("starting git daemon...")
     shared_repos_for_daemon = [(sr, slug) for _, sr, slug in workspaces]
-    daemon_proc, daemon_dir = daemon.start(agent_id, shared_repos_for_daemon)
-    log.info("git daemon ready")
-
+    from concurrent.futures import ThreadPoolExecutor
+    daemon_pool = ThreadPoolExecutor(max_workers=1)
+    daemon_fut = daemon_pool.submit(
+        daemon.start, agent_id, shared_repos_for_daemon)
 
     # Install git wrapper in shared home (shadows real git on PATH).
     agent_bin = home / "bin"
@@ -827,6 +864,11 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
     from . import workspace
     for ws, _, _ in workspaces:
         workspace.verify_layout(ws, agent_id)
+
+    # Join the daemon thread before we use daemon.remote_url.
+    daemon_proc, daemon_dir = daemon_fut.result()
+    daemon_pool.shutdown(wait=True)
+    log.info("git daemon ready")
 
     # Update workspace remotes to use git:// via daemon (localhost for
     # host-side sync, then switch to slirp address for inside the namespace)

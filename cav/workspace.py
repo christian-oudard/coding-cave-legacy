@@ -121,19 +121,19 @@ def create(base: Path, agent_id: str) -> tuple[Path, Path]:
             f"Invalid agent ID '{agent_id}'. Must be a number (e.g. 1, 2, 3)."
         )
 
-    empty = _repo_is_empty(base)
-    if empty:
-        base_name = "main"
-    else:
-        user_branch = git.current_branch(cwd=base)
-        base_name = config.resolve_base(user_branch)
-
     slug = config.project_slug(base)
     ws_path = config.worktree_dir(slug, agent_id)
     shared = config.shared_repo_path(base)
 
     if ws_path.exists():
         return ws_path, shared
+
+    empty = _repo_is_empty(base)
+    if empty:
+        base_name = "main"
+    else:
+        user_branch = git.current_branch(cwd=base)
+        base_name = config.resolve_base(user_branch)
 
     # "HEAD" means detached HEAD, which is not a valid base.
     if base_name == "HEAD":
