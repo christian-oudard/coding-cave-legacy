@@ -49,8 +49,10 @@ BLOCKED_X86_64 = {
     "keyctl": 250,
     # eBPF: kernel extension mechanism.
     "bpf": 321,
-    # Kernel profiling / tracing.
-    "perf_event_open": 298,
+    # Kernel profiling / tracing. perf_event_open stays allowed so
+    # in-cave profiling (perf, cargo flamegraph, py-spy --native) works;
+    # perf_event_paranoid + CapEff=0 already restrict it to own-process
+    # userspace samples.
     "lookup_dcookie": 212,
     # Kernel modules.
     "init_module": 175,
@@ -79,6 +81,14 @@ BLOCKED_X86_64 = {
     "nfsservctl": 180,
     # userfaultfd (defense in depth).
     "userfaultfd": 323,
+    # Host fingerprinting: sysinfo(2) returns totalram/freeram/uptime
+    # kernel-globally (not per-cgroup, not per-ns). Masking /proc/meminfo
+    # alone doesn't stop runtime GCs (Node libuv, JVM fallback) from
+    # reading host RAM via this syscall. Returning EPERM makes them
+    # degrade to defaults: Node's os.totalmem()/os.freemem()/os.uptime()
+    # return 0; glibc sysconf(_SC_PHYS_PAGES) falls back to /proc/meminfo
+    # which is also masked. Go/Rust runtimes don't use sysinfo at all.
+    "sysinfo": 99,
 }
 
 BLOCKED_AARCH64 = {
@@ -92,8 +102,7 @@ BLOCKED_AARCH64 = {
     "keyctl": 219,
     # eBPF.
     "bpf": 280,
-    # Profiling / tracing.
-    "perf_event_open": 241,
+    # Profiling / tracing. perf_event_open stays allowed; see x86_64 note.
     "lookup_dcookie": 18,
     # Kernel modules.
     "init_module": 105,
@@ -116,6 +125,8 @@ BLOCKED_AARCH64 = {
     "quotactl": 60,
     # userfaultfd.
     "userfaultfd": 282,
+    # Host fingerprinting: sysinfo(2). See x86_64 entry for rationale.
+    "sysinfo": 179,
     # Note: ioperm, iopl, nfsservctl, settimeofday not present on aarch64.
 }
 

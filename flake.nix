@@ -60,13 +60,94 @@
             else { loader = "${pkgs.glibc}/lib/ld-linux-aarch64.so.1"; path = "/lib/ld-linux-aarch64.so.1"; };
           gccLib = "${pkgs.stdenv.cc.cc.lib}/lib";
 
+          # Empty regular file used to mask host-fingerprinting /proc
+          # entries. A regular file (not /dev/null) so reads see an
+          # empty file instead of EACCES on a char device.
+          procMask = pkgs.writeText "cave-proc-mask" "";
+
+          # Empty directory used to mask /proc subtrees (e.g. /proc/asound,
+          # which exposes the exact laptop model via /proc/asound/cards).
+          procMaskDir = pkgs.runCommand "cave-proc-mask-dir" { } "mkdir $out";
+
+          # Zero-valued /proc/meminfo. An empty file causes glibc's
+          # sysconf(_SC_PHYS_PAGES) parser to return uninitialized stack
+          # memory because it loops looking for "MemTotal:" and returns
+          # an unset local on no-match. Giving it a well-formed file with
+          # zero values makes the parser return a clean 0.
+          procMaskMeminfo = pkgs.writeText "cave-proc-meminfo" ''
+            MemTotal:              0 kB
+            MemFree:               0 kB
+            MemAvailable:          0 kB
+            Buffers:               0 kB
+            Cached:                0 kB
+            SwapTotal:             0 kB
+            SwapFree:              0 kB
+          '';
+
+          # Static /etc/passwd and /etc/group. jail.nix's base-permissions
+          # include a `fake-passwd` combinator that generates these from
+          # the host caller's `id -un`, `id -u`, `id -g`, and $HOME. That
+          # leaks the host username (e.g. "christian") and host home path
+          # (e.g. "/home/christian") into /etc/passwd inside the cave.
+          # Bind these later so they win over fake-passwd's ro-bind.
+          nologin = "${pkgs.shadow}/bin/nologin";
+          cavePasswd = pkgs.writeText "cave-passwd" ''
+            root:x:0:0:System administrator:/root:${nologin}
+            cave-coder:x:1000:1000::/home/cave-coder:${nologin}
+            nobody:x:65534:65534:Unmapped user:/:${nologin}
+          '';
+          caveGroup = pkgs.writeText "cave-group" ''
+            root:x:0:
+            cave-coder:x:1000:
+            nogroup:x:65534:
+          '';
+
+          # Static /etc/hosts. NixOS auto-adds `127.0.0.2 <host-hostname>`
+          # to /etc/hosts for apps that resolve their own hostname. Inside
+          # the cave that leaks the host machine's name, so replace with
+          # just localhost plus the cave's own uts hostname.
+          caveHosts = pkgs.writeText "cave-hosts" ''
+            127.0.0.1 localhost coding-cave
+            ::1       localhost coding-cave
+          '';
+
+          # UTC localtime. The host's /etc/localtime symlinks into the
+          # tzdata zoneinfo tree and reveals the host's geographic region.
+          # Use UTC inside the cave; if users want a specific timezone,
+          # set TZ=<name> on the host and it's forwarded via try-fwd-env.
+          caveLocaltime = "${pkgs.tzdata}/share/zoneinfo/UTC";
+
           sandbox = jail "coding-cave" pkgs.bashInteractive (with jail.combinators; [
             no-die-with-parent
             (set-hostname "coding-cave")
             (unsafe-add-raw-args "--uid 1000 --gid 1000")
+            # --as-pid-1 makes the target process PID 1 directly rather than
+            # bwrap installing a reaper. This hides bwrap's argv (host paths
+            # in --bind flags) and bwrap's own environ (host HOME, consumed
+            # CODING_CAVE_* vars) from /proc/1 inside the cave.
+            (unsafe-add-raw-args "--as-pid-1")
             (unsafe-add-raw-args "--dir /bin --ro-bind ${pkgs.bashInteractive}/bin/bash /bin/bash --ro-bind ${pkgs.coreutils}/bin/env /usr/bin/env")
             (unsafe-add-raw-args "--ro-bind ${fhsLdLinux.loader} ${fhsLdLinux.path}")
-            network
+            # Reimplement jail.nix's `network` combinator without the
+            # two sub-combinators that leak host state:
+            #   * time-zone symlinks the host's zoneinfo into the cave
+            #   * runtime-deep-ro-bind /etc/hosts binds the host's
+            #     /etc/hosts (with NixOS's "127.0.0.2 <host-hostname>"
+            #     entry) as a symlink to a nix store path, and that
+            #     symlink blocks us from binding our own /etc/hosts
+            #     later (bwrap follows it and fails with "No such file
+            #     or directory" on the read-only store target).
+            # Pre-register the `network` include-once key with a no-op
+            # so anything that adds `network` later becomes a no-op,
+            # then pull in the non-leaky pieces manually.
+            (include-once "network" (x: x))
+            (share-ns "net")
+            (runtime-deep-ro-bind "/etc/nsswitch.conf")
+            (runtime-deep-ro-bind "/etc/resolv.conf")
+            (runtime-deep-ro-bind "/etc/ssl")
+            (try-readonly "/run/systemd/resolve")
+            (write-text "/etc/hostname" "coding-cave\n")
+            (unsafe-add-raw-args "--hostname coding-cave")
             (add-seccomp seccompFilter)
 
             # FHS library path for pre-built native extensions (libstdc++ etc.)
@@ -194,12 +275,13 @@
               fi
             '')
 
-            # Clear env vars that were consumed by add-runtime blocks
-            # above. Without this, they leak via /proc/1/environ inside
-            # the cave (bwrap is PID 1, same uid, readable).
-            # Use bwrap --unsetenv instead of shell unset: jail.nix
-            # needs $HOME for ~ expansion in the bwrap command line.
-            # HOME itself is already overridden by set-env above.
+            # Remove PWD from the child env. bwrap's --clearenv preserves
+            # PWD by design, so without --unsetenv it leaks the host cwd
+            # via /proc/1/environ (now the target process, thanks to
+            # --as-pid-1). The CODING_CAVE_* entries are belt-and-braces:
+            # they aren't try-fwd-env'd so --clearenv already drops them,
+            # but the list guards against future additions accidentally
+            # re-exposing host paths.
             (add-runtime ''
               for _v in \
                 PWD SHLVL \
@@ -212,6 +294,98 @@
               ; do
                 RUNTIME_ARGS+=(--unsetenv "$_v")
               done
+            '')
+
+            # Static /etc that overrides host-derived content. jail.nix's
+            # fake-passwd bakes in the host's username and $HOME; `network`
+            # pulls in runtime-deep-ro-bind /etc/hosts which reveals the
+            # host's hostname (NixOS appends `127.0.0.2 <host-hostname>`).
+            # The time-zone combinator (also via network) is suppressed
+            # by the include-once above. Emit these via add-runtime so
+            # they land at the END of RUNTIME_ARGS, after the network
+            # runtime binds, and win by bwrap last-wins ordering.
+            (add-runtime ''
+              RUNTIME_ARGS+=(
+                --ro-bind ${cavePasswd} /etc/passwd
+                --ro-bind ${caveGroup} /etc/group
+                --ro-bind ${caveHosts} /etc/hosts
+                --ro-bind ${caveLocaltime} /etc/localtime
+              )
+            '')
+
+            # Shadow procfs for mount_too_revealing(). The kernel blocks
+            # a new procfs mount in a user_ns when every existing procfs
+            # has locked submounts hiding non-empty paths. The /proc
+            # masks below would trip that check and break nested subcave
+            # launches. A second `--proc` mount (fresh procfs, not a
+            # bind of the host's /proc) has no submounts and satisfies
+            # the kernel's fully-visible check. Using `--proc` (not
+            # `--bind /proc`) is critical: `--bind /proc` would bind the
+            # HOST's procfs, exposing the host's PID namespace and every
+            # host process's environ/cmdline/root. `--proc` creates a
+            # fresh procfs in the cave's own pid_ns, so /shadow-proc/1
+            # is the cave's init, not the host's.
+            #
+            # To hide this unmasked procfs from the cave user (who
+            # otherwise could read /shadow-proc/cmdline and other
+            # kernel-global paths), we overmount a tmpfs at the parent
+            # dir. The shadow-proc mount remains in the mount namespace
+            # (so mnt_already_visible() finds it when scanning ns->list)
+            # but is unreachable by path. The cave user lacks
+            # CAP_SYS_ADMIN in the bwrap-created user_ns, so they cannot
+            # unmount the tmpfs or bind-mount the shadowed procfs
+            # elsewhere. In a child user_ns they'd create, inherited
+            # mounts carry MNT_LOCKED, which forbids those operations.
+            (unsafe-add-raw-args "--dir /run/.cave-priv --proc /run/.cave-priv/shadow-proc --perms 0700 --tmpfs /run/.cave-priv")
+
+            # Mask host-system fingerprinting via /proc. Binding an empty
+            # regular file (procMask) or empty directory (procMaskDir)
+            # hides kernel build/config/symbols, loaded modules, hardware
+            # interrupts/diskstats (live side channels), the cross-cave
+            # boot_id, disk/partition/swap layout, PCI and audio device
+            # trees (the audio tree exposes the exact laptop model), the
+            # kernel osrelease/version sysctls, host RAM totals, host
+            # uptime/loadavg, and the session/user keyring listing.
+            # Works with the shadow mount above so nested caves still launch.
+            (add-runtime ''
+              for _p in \
+                /proc/cmdline /proc/version /proc/config.gz \
+                /proc/kallsyms /proc/kcore /proc/modules /proc/kmsg \
+                /proc/iomem /proc/ioports \
+                /proc/interrupts /proc/diskstats \
+                /proc/partitions /proc/swaps /proc/devices \
+                /proc/fb /proc/misc /proc/tty/drivers \
+                /proc/consoles /proc/crypto \
+                /proc/uptime /proc/loadavg /proc/keys /proc/key-users \
+                /proc/buddyinfo /proc/zoneinfo /proc/pagetypeinfo \
+                /proc/vmstat /proc/softirqs /proc/schedstat /proc/locks \
+                /proc/execdomains \
+                /proc/sys/kernel/random/boot_id \
+                /proc/sys/kernel/osrelease /proc/sys/kernel/version \
+              ; do
+                RUNTIME_ARGS+=(--ro-bind-try ${procMask} "$_p")
+              done
+              for _d in \
+                /proc/asound /proc/driver /proc/bus \
+                /proc/acpi /proc/fs /proc/irq /proc/pressure \
+              ; do
+                RUNTIME_ARGS+=(--ro-bind-try ${procMaskDir} "$_d")
+              done
+              RUNTIME_ARGS+=(--ro-bind ${procMaskMeminfo} /proc/meminfo)
+            '')
+
+            # Synthetic /proc/cpuinfo. Node's os.cpus() parses this file
+            # and crashes on empty input; tools like make -j / nproc use
+            # sched_getaffinity(2) instead, so we don't need the real
+            # file. Emit N generic processor blocks (N = sched CPUs via
+            # nproc) with a fixed fake model to hide the host CPU brand.
+            (add-runtime ''
+              _cpuinfo=$(${pkgs.coreutils}/bin/mktemp)
+              _n=$(${pkgs.coreutils}/bin/nproc 2>/dev/null || echo 1)
+              for ((_i=0; _i<_n; _i++)); do
+                printf 'processor\t: %d\nvendor_id\t: GenericCPU\ncpu family\t: 0\nmodel\t\t: 0\nmodel name\t: Generic CPU\nstepping\t: 0\ncpu MHz\t\t: 0.000\ncache size\t: 0 KB\nsiblings\t: %d\ncore id\t\t: %d\ncpu cores\t: %d\nflags\t\t:\nbogomips\t: 0.00\n\n' "$_i" "$_n" "$_i" "$_n" >> "$_cpuinfo"
+              done
+              RUNTIME_ARGS+=(--ro-bind "$_cpuinfo" /proc/cpuinfo)
             '')
 
             # Forward identity and config into the cave
