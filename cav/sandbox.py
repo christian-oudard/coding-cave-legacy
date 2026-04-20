@@ -32,17 +32,25 @@ CAV_BIN = "@CAV_BIN@"
 
 def _signal_descendants(pid: int, sig: int) -> None:
     """Send a signal to all descendant processes of pid via /proc walk."""
-    try:
-        children = Path(f"/proc/{pid}/task/{pid}/children").read_text().split()
-    except (FileNotFoundError, ProcessLookupError):
-        return
-    for child in children:
-        child_pid = int(child)
-        _signal_descendants(child_pid, sig)
+    visited: set[int] = set()
+
+    def walk(p: int) -> None:
+        if p in visited:
+            return
+        visited.add(p)
         try:
-            os.kill(child_pid, sig)
-        except (ProcessLookupError, PermissionError):
-            pass
+            children = Path(f"/proc/{p}/task/{p}/children").read_text().split()
+        except (FileNotFoundError, ProcessLookupError):
+            return
+        for child in children:
+            child_pid = int(child)
+            walk(child_pid)
+            try:
+                os.kill(child_pid, sig)
+            except (ProcessLookupError, PermissionError):
+                pass
+
+    walk(pid)
 
 
 def _host_git_identity() -> dict[str, str]:
