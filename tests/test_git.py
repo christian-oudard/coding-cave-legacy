@@ -19,7 +19,8 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from cav import config, registry, workspace
+from cav import config, registry
+from cav.git import workspace
 from cav.constants import CAVE_SHARED_REMOTE, HOST_SHARED_REMOTE, HOST_SHARED_REPO_DIR
 from tests import find_agent_by_session
 
@@ -194,7 +195,7 @@ class TestCAV(unittest.TestCase):
 
     def test_workspace_from_detached_at_branch_tip(self):
         """Workspace creation works when detached at a unique branch tip."""
-        from cav.init import init
+        from cav.commands.init import init
         init(str(self.user_repo))
 
         head = git_out("rev-parse", "HEAD", cwd=self.user_repo)
@@ -205,7 +206,7 @@ class TestCAV(unittest.TestCase):
 
     def test_workspace_rejects_unresolvable_detached_head(self):
         """Workspace from detached HEAD far from any branch must fail."""
-        from cav.init import init
+        from cav.commands.init import init
         init(str(self.user_repo))
 
         git("checkout", "--detach", cwd=self.user_repo)
@@ -1889,7 +1890,7 @@ class TestCAV(unittest.TestCase):
 
     def test_checkout_retargets_agent_from_cave(self):
         """cav checkout on a dev branch retargets to new base branch."""
-        from cav.checkout import checkout as _checkout
+        from cav.commands.checkout import checkout as _checkout
 
         agents = self._init_and_agents("1")
         ws = agents["1"]
@@ -1924,7 +1925,7 @@ class TestCAV(unittest.TestCase):
 
     def test_checkout_retargets_from_host(self):
         """cav checkout from the host renames bare repo and workspace."""
-        from cav.checkout import checkout as _checkout
+        from cav.commands.checkout import checkout as _checkout
 
         agents = self._init_and_agents("1")
         ws = agents["1"]
@@ -1951,7 +1952,7 @@ class TestCAV(unittest.TestCase):
 
     def test_checkout_creates_base_branch(self):
         """cav checkout auto-creates the base branch if it doesn't exist."""
-        from cav.checkout import checkout as _checkout
+        from cav.commands.checkout import checkout as _checkout
 
         agents = self._init_and_agents("1")
         ws = agents["1"]
@@ -2020,8 +2021,8 @@ class TestCAV(unittest.TestCase):
         deletes the agent from the registry. Then cav -c creates agent 2
         instead of continuing agent 1.
         """
-        from cav import git as cavgit
-        from cav.init import init
+        from cav.git import git as cavgit
+        from cav.commands.init import init
         init(str(self.user_repo))
 
         aid = registry.acquire_agent_id(self.user_repo)
@@ -2079,7 +2080,7 @@ class TestCAV(unittest.TestCase):
         removes them when a new agent needs an ID.
         """
         from cav.cli import _auto_cleanup_if_clean
-        from cav.init import init
+        from cav.commands.init import init
 
         init(str(self.user_repo))
 
@@ -2099,7 +2100,7 @@ class TestCAV(unittest.TestCase):
         The relative path resolves on the host (via symlink to shared repo
         objects) and inside the cave (via bwrap overlay on the mount point).
         """
-        from cav.init import init
+        from cav.commands.init import init
 
         init(str(self.user_repo))
         shared = config.shared_repo_path(self.user_repo)
@@ -2148,7 +2149,7 @@ class TestGitWrapper(unittest.TestCase):
         git("commit", "-m", "Initial commit", cwd=self.user_repo)
         os.environ["CODING_CAVE_DATA_DIR"] = str(self.data_dir)
         config.DATA_DIR = self.data_dir
-        from cav import init as cav_init
+        from cav.commands import init as cav_init
         cav_init.init(str(self.user_repo))
         self.a1, _ = workspace.create(self.user_repo, "1")
         git("config", "user.email", "1@test.com", cwd=self.a1)
@@ -2366,7 +2367,7 @@ class TestReview(TestCAV):
         git("push", "host-cave", "main:agent-1/main", cwd=ws, env=agent_env("1"))
 
         # Review from main
-        from cav.review import review
+        from cav.commands.review import review
         review(self.user_repo, "1")
 
         branch = git_out("branch", "--show-current", cwd=self.user_repo)
@@ -2384,7 +2385,7 @@ class TestReview(TestCAV):
         git("commit", "-m", "v1", cwd=ws)
         git("push", "host-cave", "main:agent-1/main", cwd=ws, env=agent_env("1"))
 
-        from cav.review import review
+        from cav.commands.review import review
         review(self.user_repo, "1")
 
         # Agent adds more work
@@ -2401,7 +2402,7 @@ class TestReview(TestCAV):
     def test_review_nonexistent_agent(self):
         """cav review with unknown agent ID gives a clear error."""
         self._init()
-        from cav.review import review
+        from cav.commands.review import review
         with self.assertRaises(SystemExit) as ctx:
             review(self.user_repo, "99")
         self.assertIn("No agent branch", str(ctx.exception))
@@ -2420,7 +2421,7 @@ class TestReview(TestCAV):
         git("push", "host-cave", "main:agent-1/main", cwd=ws, env=agent_env("1"))
 
         import io
-        from cav.review import review
+        from cav.commands.review import review
         captured = io.StringIO()
         old_stdout = sys.stdout
         sys.stdout = captured
@@ -2465,7 +2466,7 @@ class TestShallowClone(unittest.TestCase):
         shutil.rmtree(self.tmpdir)
 
     def _init(self):
-        from cav.init import init
+        from cav.commands.init import init
         init(str(self.user_repo))
 
     def _create_agent(self, name):
@@ -2494,7 +2495,7 @@ class TestShallowClone(unittest.TestCase):
 
     def test_agent_push_and_approve(self):
         """Agent can push work and user can approve on a shallow clone."""
-        from cav.approve import approve
+        from cav.commands.approve import approve
         self._init()
         ws = self._create_agent("1")
 
@@ -2535,7 +2536,7 @@ class TestShallowClone(unittest.TestCase):
 
     def test_status(self):
         """cav status works on a shallow clone."""
-        from cav.status import status
+        from cav.commands.status import status
         self._init()
         registry.acquire_agent_id(self.user_repo)  # register agent 1
         ws = self._create_agent("1")
@@ -2559,7 +2560,7 @@ class TestShallowClone(unittest.TestCase):
 
     def test_pull_on_dev_branch(self):
         """cav pull works on a shallow clone's dev branch."""
-        from cav.pull import pull
+        from cav.commands.pull import pull
         self._init()
         ws = self._create_agent("1")
 
@@ -2586,7 +2587,7 @@ class TestShallowClone(unittest.TestCase):
 
     def test_reinit_enables_shallow_update(self):
         """cav init --reinitialize sets shallowUpdate on an existing project."""
-        from cav.init import init
+        from cav.commands.init import init
         self._init()
         shared = config.shared_repo_path(self.user_repo)
         # Clear it, then re-init

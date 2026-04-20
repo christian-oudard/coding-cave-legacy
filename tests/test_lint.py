@@ -28,8 +28,13 @@ class TestImportSmoke(unittest.TestCase):
         """Every .py file under cav/ must be importable."""
         sys.path.insert(0, str(PROJECT_ROOT))
         failures = []
-        for py in sorted(CAV_DIR.glob("*.py")):
-            mod_name = f"cav.{py.stem}"
+        for py in sorted(CAV_DIR.rglob("*.py")):
+            if py.name == "__init__.py":
+                parts = py.relative_to(CAV_DIR).parent.parts
+                mod_name = ".".join(("cav",) + parts) if parts else "cav"
+            else:
+                rel = py.relative_to(CAV_DIR).with_suffix("")
+                mod_name = "cav." + ".".join(rel.parts)
             try:
                 importlib.import_module(mod_name)
             except Exception as e:
@@ -49,26 +54,28 @@ class TestPathHomeLint(unittest.TestCase):
     required individual fixes.
     """
 
-    # Approved Path.home() usage: {filename: {function_or_variable_names}}
-    # Duplicate keys merged manually since Python dicts overwrite.
+    # Approved Path.home() usage: {relative path: {function_or_variable_names}}
+    # Keys are POSIX-style paths relative to cav/.
     ALLOWED = {
         # DATA_DIR default uses Path.home()
         "config.py": {"DATA_DIR"},
         # _host_home fallback + CODING_CAVE_HOST_HOME fallback in launch()
-        # _crinj_ca_path intentionally checks cave home (where cave-local crinj puts its cert)
-        # _start_crinj runs in the current namespace and reads rules from that
-        # namespace's home, so Path.home() is the correct fallback
-        "sandbox.py": {"_host_home", "launch", "_crinj_ca_path", "_start_crinj"},
+        "sandbox/launch.py": {"launch"},
+        # _host_home fallback; _crinj_ca_path intentionally checks cave home
+        # (where cave-local crinj puts its cert); _start_crinj runs in the
+        # current namespace and reads rules from that namespace's home, so
+        # Path.home() is the correct fallback.
+        "sandbox/crinj.py": {"_host_home", "_crinj_ca_path", "_start_crinj"},
         # _cave_nix_path uses CODING_CAVE_HOST_HOME with Path.home() fallback
-        "user_env.py": {"_cave_nix_path"},
+        "sandbox/user_env.py": {"_cave_nix_path"},
         # _offer_cave_nix runs on host only (cav init), Path.home() is correct
-        "init.py": {"_offer_cave_nix"},
+        "commands/init.py": {"_offer_cave_nix"},
     }
 
     def test_no_bare_path_home(self):
         """Path.home() must not appear outside approved patterns."""
         violations = []
-        for py in sorted(CAV_DIR.glob("*.py")):
+        for py in sorted(CAV_DIR.rglob("*.py")):
             try:
                 tree = ast.parse(py.read_text(), filename=py.name)
             except SyntaxError:
@@ -82,7 +89,8 @@ class TestPathHomeLint(unittest.TestCase):
                     continue
                 # Check if this call is inside an approved function or assignment
                 approved = False
-                allowed_names = self.ALLOWED.get(py.name, set())
+                rel = py.relative_to(CAV_DIR).as_posix()
+                allowed_names = self.ALLOWED.get(rel, set())
                 for parent in ast.walk(tree):
                     if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)):
                         if parent.name in allowed_names:
@@ -99,7 +107,7 @@ class TestPathHomeLint(unittest.TestCase):
                                 approved = True
                                 break
                 if not approved:
-                    violations.append(f"{py.name}:{node.lineno}")
+                    violations.append(f"{rel}:{node.lineno}")
         if violations:
             self.fail(
                 "Bare Path.home() found outside approved locations.\n"
@@ -121,10 +129,10 @@ class TestSandboxEnvCompleteness(unittest.TestCase):
     """
 
     def _extract_env_refs_from_sandbox(self) -> set[str]:
-        """Parse cav/bwrap.py and lib/sandbox.nix for CODING_CAVE_* refs."""
+        """Parse cav/sandbox/bwrap.py and lib/sandbox.nix for CODING_CAVE_* refs."""
         import re
         refs = set()
-        bwrap = CAV_DIR / "bwrap.py"
+        bwrap = CAV_DIR / "sandbox" / "bwrap.py"
         if bwrap.exists():
             for m in re.finditer(r'["\'](CODING_CAVE_\w+)["\']', bwrap.read_text()):
                 refs.add(m.group(1))
@@ -139,12 +147,12 @@ class TestSandboxEnvCompleteness(unittest.TestCase):
         return refs
 
     def _extract_env_sets_from_launch(self) -> set[str]:
-        """Parse sandbox.py launch() for env vars it sets."""
-        sandbox = CAV_DIR / "sandbox.py"
+        """Parse sandbox/launch.py launch() for env vars it sets."""
+        sandbox = CAV_DIR / "sandbox" / "launch.py"
         text = sandbox.read_text()
         import re
         sets = set()
-        # Match any quoted CODING_CAVE_* string in sandbox.py
+        # Match any quoted CODING_CAVE_* string in launch.py
         for m in re.finditer(r'["\'](CODING_CAVE_\w+)["\']', text):
             sets.add(m.group(1))
         return sets
@@ -183,7 +191,7 @@ class TestClaudeCommandConstruction(unittest.TestCase):
     """
 
     def _get_build_claude_cmd_source(self) -> str:
-        sandbox = CAV_DIR / "sandbox.py"
+        sandbox = CAV_DIR / "sandbox" / "launch.py"
         src = sandbox.read_text()
         tree = ast.parse(src)
         for node in ast.walk(tree):
@@ -191,7 +199,7 @@ class TestClaudeCommandConstruction(unittest.TestCase):
                     and node.name == "_build_claude_cmd"):
                 lines = src.splitlines()
                 return "\n".join(lines[node.lineno - 1:node.end_lineno])
-        self.fail("_build_claude_cmd() function not found in sandbox.py")
+        self.fail("_build_claude_cmd() function not found in sandbox/launch.py")
 
     def test_build_claude_cmd_has_resuming_parameter(self):
         """_build_claude_cmd() must accept 'resuming' to distinguish new vs continue."""
@@ -261,7 +269,7 @@ class TestSeccompFilter(unittest.TestCase):
 
     def test_filter_size(self):
         """Filter must have exactly 3 + N + 2 instructions (8 bytes each)."""
-        from cav.seccomp_gen import generate_filter, BLOCKED_X86_64, BLOCKED_AARCH64
+        from cav.sandbox.seccomp_gen import generate_filter, BLOCKED_X86_64, BLOCKED_AARCH64
         for arch, blocked in [("x86_64", BLOCKED_X86_64), ("aarch64", BLOCKED_AARCH64)]:
             bpf = generate_filter(arch)
             expected = (3 + len(blocked) + 2) * 8
@@ -269,20 +277,20 @@ class TestSeccompFilter(unittest.TestCase):
 
     def test_filter_blocks_io_uring(self):
         """io_uring syscalls must be in the blocked list."""
-        from cav.seccomp_gen import BLOCKED_X86_64
+        from cav.sandbox.seccomp_gen import BLOCKED_X86_64
         self.assertIn("io_uring_setup", BLOCKED_X86_64)
         self.assertIn("io_uring_enter", BLOCKED_X86_64)
         self.assertIn("io_uring_register", BLOCKED_X86_64)
 
     def test_filter_blocks_keyctl(self):
         """Kernel keyring syscalls must be in the blocked list."""
-        from cav.seccomp_gen import BLOCKED_X86_64
+        from cav.sandbox.seccomp_gen import BLOCKED_X86_64
         self.assertIn("keyctl", BLOCKED_X86_64)
         self.assertIn("add_key", BLOCKED_X86_64)
 
     def test_filter_allows_needed_syscalls(self):
         """Syscalls needed by the cave must NOT be blocked."""
-        from cav.seccomp_gen import BLOCKED_X86_64
+        from cav.sandbox.seccomp_gen import BLOCKED_X86_64
         needed = ["clone", "clone3", "unshare", "mount", "umount2",
                    "pivot_root", "setns", "mknod", "personality",
                    "ptrace"]  # needed for gdb/strace; Yama handles scope
@@ -293,7 +301,7 @@ class TestSeccompFilter(unittest.TestCase):
     def test_bpf_instructions_valid(self):
         """Every BPF instruction must have valid jump offsets."""
         import struct
-        from cav.seccomp_gen import generate_filter, BLOCKED_X86_64
+        from cav.sandbox.seccomp_gen import generate_filter, BLOCKED_X86_64
         bpf = generate_filter("x86_64")
         n_insns = len(bpf) // 8
         for i in range(n_insns):

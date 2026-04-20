@@ -8,7 +8,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import config
+from .. import config
 
 
 def _vprint(*args, **kwargs):

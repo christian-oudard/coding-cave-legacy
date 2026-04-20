@@ -12,7 +12,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from .constants import SANDBOX_CONFIG
+from ..constants import SANDBOX_CONFIG
 
 _cfg_cache: dict | None = None
 

@@ -8,8 +8,9 @@ own .git, making it self-contained for bwrap mounting.
 import subprocess
 from pathlib import Path
 
-from . import config, git
-from .constants import AGENT_ID_RE, CAVE_SHARED_REMOTE, HOST_SHARED_REMOTE, HOST_SHARED_REPO_DIR
+from . import git
+from .. import config
+from ..constants import AGENT_ID_RE, CAVE_SHARED_REMOTE, HOST_SHARED_REMOTE, HOST_SHARED_REPO_DIR
 
 
 def _repo_is_empty(path: Path) -> bool:

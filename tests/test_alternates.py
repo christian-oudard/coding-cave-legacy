@@ -11,7 +11,8 @@ import sys
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from cav import config, workspace
+from cav import config
+from cav.git import workspace
 from cav.constants import HOST_SHARED_REPO_DIR
 
 
@@ -41,7 +42,7 @@ class TestAlternates(unittest.TestCase):
         git("commit", "-m", "init", cwd=self.user_repo)
 
         # Init Coding Cave
-        from cav.init import init
+        from cav.commands.init import init
         init(str(self.user_repo))
 
     def tearDown(self):
@@ -125,7 +126,7 @@ class TestBrokenWorkspaceReconfigure(unittest.TestCase):
         git("add", "file.txt", cwd=self.user_repo)
         git("commit", "-m", "init", cwd=self.user_repo)
 
-        from cav.init import init
+        from cav.commands.init import init
         init(str(self.user_repo))
 
         # Create a real workspace, then rewrite it to the pre-split
@@ -158,7 +159,7 @@ class TestBrokenWorkspaceReconfigure(unittest.TestCase):
     def test_init_without_reinitialize_is_noop(self):
         """Plain cav init on an already-init'd project does not touch
         workspaces."""
-        from cav.init import init
+        from cav.commands.init import init
         init(str(self.user_repo))  # no reinitialize
         # Stale alternates untouched.
         self.assertEqual(
@@ -170,7 +171,7 @@ class TestBrokenWorkspaceReconfigure(unittest.TestCase):
 
     def test_init_reinitialize_reconfigures_workspace(self):
         """cav init --reinitialize restores the correct workspace layout."""
-        from cav.init import init
+        from cav.commands.init import init
         init(str(self.user_repo), reinitialize=True)
 
         expected = f"../../.coding-cave/{HOST_SHARED_REPO_DIR}/objects"
@@ -182,7 +183,7 @@ class TestBrokenWorkspaceReconfigure(unittest.TestCase):
 
     def test_require_init_accepts_after_fix(self):
         """After cav init --reinitialize migrates, require_init passes."""
-        from cav.init import init
+        from cav.commands.init import init
         from cav import cli
         init(str(self.user_repo), reinitialize=True)
         cli.require_init(self.user_repo)  # no raise
@@ -245,7 +246,7 @@ class TestInsideCaveInit(unittest.TestCase):
     def test_init_inside_cave_creates_cave_shared(self):
         """cav init inside a cave creates cave-shared.git as a real bare repo
         and configures a 'cave' remote for down-link commands."""
-        from cav.init import init
+        from cav.commands.init import init
         init(str(self.user_repo))
 
         shared = self.user_repo / ".coding-cave" / "cave-shared.git"
@@ -261,7 +262,7 @@ class TestInsideCaveInit(unittest.TestCase):
 
     def test_init_inside_cave_publishes_host_cave_bases(self):
         """Base branches from host-cave land on cave-shared.git for subagents."""
-        from cav.init import init
+        from cav.commands.init import init
         init(str(self.user_repo))
 
         shared = self.user_repo / ".coding-cave" / "cave-shared.git"
@@ -278,14 +279,14 @@ class TestInsideCaveInit(unittest.TestCase):
         stub.mkdir()
         (stub / "objects").symlink_to("/does/not/exist")
 
-        from cav.init import init
+        from cav.commands.init import init
         init(str(self.user_repo))
         self.assertTrue((stub / "HEAD").exists())
         self.assertTrue((stub / "config").exists())
 
     def test_init_inside_cave_idempotent_on_real_repo(self):
         """Re-running init on a real cave-shared.git must preserve its refs."""
-        from cav.init import init
+        from cav.commands.init import init
         init(str(self.user_repo))
 
         shared = self.user_repo / ".coding-cave" / "cave-shared.git"
@@ -305,7 +306,7 @@ class TestInsideCaveInit(unittest.TestCase):
         """cav init inside a cave errors if host-cave-shared.git is missing."""
         shutil.rmtree(self.host_shared)
 
-        from cav.init import init
+        from cav.commands.init import init
         with self.assertRaises(SystemExit) as cm:
             init(str(self.user_repo))
         self.assertIn("host-cave-shared.git", str(cm.exception))

@@ -30,8 +30,8 @@ CLAUDE_CODE_NIX_URL = _build.get("claudeCodeNixUrl", "")
 HOME_MANAGER_URL = _build.get("homeManagerUrl", "")
 CODING_CAVE_URL = _build.get("codingCaveUrl", "")
 
-# supervisor.py is a sibling of this module; no build-time injection needed.
-SUPERVISOR_PY = str(Path(__file__).parent / "supervisor.py")
+# supervisor.py ships inside cav/sandbox/; no build-time injection needed.
+SUPERVISOR_PY = str(Path(__file__).parent / "sandbox" / "supervisor.py")
 
 # Git remote names
 CAVE_SHARED_REMOTE = "cave"

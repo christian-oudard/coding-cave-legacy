@@ -74,7 +74,7 @@
               cp -r cav/* $out/lib/cav/
 
               # Pin the python interpreter in hook shebangs.
-              substituteInPlace $out/lib/cav/hooks/pre-receive \
+              substituteInPlace $out/lib/cav/scripts/hooks/pre-receive \
                 --replace-fail "#!/usr/bin/env python3" "#!${python}/bin/python3"
 
               # Emit build-time config at a public path. constants.py
@@ -91,7 +91,7 @@
               from cav.cli import main
               main()
               WRAPPER
-              chmod +x $out/bin/cav $out/lib/cav/hooks/pre-receive
+              chmod +x $out/bin/cav $out/lib/cav/scripts/hooks/pre-receive
 
               # Wrap with runtime deps on PATH + build-config pointer.
               wrapProgram $out/bin/cav \

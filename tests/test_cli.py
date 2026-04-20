@@ -250,7 +250,7 @@ class TestInitNewProject(unittest.TestCase):
         """cav init on an empty plain directory creates git but errors on no commits."""
         project = Path(self.tmpdir) / "newproject"
         project.mkdir()
-        from cav.init import init
+        from cav.commands.init import init
         with self.assertRaises(SystemExit) as ctx:
             init(str(project))
         self.assertTrue((project / ".git").exists())
@@ -261,7 +261,7 @@ class TestInitNewProject(unittest.TestCase):
         project = Path(self.tmpdir) / "emptyrepo"
         project.mkdir()
         git("init", "-b", "main", cwd=project)
-        from cav.init import init
+        from cav.commands.init import init
         with self.assertRaises(SystemExit) as ctx:
             init(str(project))
         self.assertIn("No commits yet", str(ctx.exception))
@@ -276,7 +276,7 @@ class TestInitNewProject(unittest.TestCase):
         (project / "f.txt").write_text("hi\n")
         git("add", "f.txt", cwd=project)
         git("commit", "-m", "init", cwd=project)
-        from cav.init import init
+        from cav.commands.init import init
         init(str(project))
         shared = project / ".coding-cave" / "cave-shared.git"
         # Verify the branch was pushed
@@ -290,7 +290,7 @@ class TestInitNewProject(unittest.TestCase):
         project = Path(self.tmpdir) / "nocommits"
         project.mkdir()
         (project / "app.py").write_text("print('hello')\n")
-        from cav.init import init
+        from cav.commands.init import init
         with self.assertRaises(SystemExit) as ctx:
             init(str(project))
         self.assertIn("No commits yet", str(ctx.exception))
@@ -309,7 +309,7 @@ class TestInitNewProject(unittest.TestCase):
         git("commit", "-m", "init", cwd=project)
         # Leave an uncommitted file
         (project / "b.txt").write_text("uncommitted\n")
-        from cav.init import init
+        from cav.commands.init import init
         from cav import config
         config.DATA_DIR = Path(self.tmpdir) / "data"
         captured = io.StringIO()
@@ -331,9 +331,10 @@ class TestInitNewProject(unittest.TestCase):
         (project / "seed.txt").write_text("seed\n")
         git("add", "seed.txt", cwd=project)
         git("commit", "-m", "seed commit", cwd=project)
-        from cav.init import init
-        from cav import config, workspace
-        from cav.approve import approve
+        from cav.commands.init import init
+        from cav import config
+        from cav.git import workspace
+        from cav.commands.approve import approve
         config.DATA_DIR = Path(self.tmpdir) / "data"
         init(str(project))
         ws, _ = workspace.create(project, "1")
@@ -797,7 +798,7 @@ class TestSessionResume(unittest.TestCase):
                    return_value="some-session-uuid"), \
              patch("cav.cli.registry.read_agent_launch_opts",
                    return_value=([], False)), \
-             patch("cav.sandbox.launch", return_value=0) as mock_launch, \
+             patch("cav.sandbox.launch.launch", return_value=0) as mock_launch, \
              patch("cav.cli.registry.mark_agent_exited"):
             result = CliRunner().invoke(
                 cli, ["agent", "--resume", "some-session-uuid"])
@@ -807,9 +808,10 @@ class TestSessionResume(unittest.TestCase):
     def test_write_then_find_session(self):
         """write_session_id + find_agent_by_session round-trip."""
         from cav import config, registry
+        from cav.registry.db import _open
         from tests import find_agent_by_session
         config.DATA_DIR.mkdir(parents=True, exist_ok=True)
-        db = registry._open()
+        db = _open()
         db.execute("INSERT INTO agents (agent_id, project, session_id) VALUES ('5', 'proj', NULL)")
         db.commit()
         db.close()
@@ -971,7 +973,7 @@ class TestFormatAll(unittest.TestCase):
     """Unit tests for multi-project status formatting."""
 
     def setUp(self):
-        from cav.status import format_all
+        from cav.commands.status import format_all
         self.format_all = format_all
 
     def test_no_agents_anywhere(self):
@@ -1044,7 +1046,7 @@ class TestAgentSorting(unittest.TestCase):
     """Unit tests for agent sorting and formatting (no git needed)."""
 
     def setUp(self):
-        from cav.status import sort_agents, format_agents
+        from cav.commands.status import sort_agents, format_agents
         self.sort_agents = sort_agents
         self.format_agents = format_agents
 

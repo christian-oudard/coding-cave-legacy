@@ -75,11 +75,11 @@ let
     SwapFree:              0 kB
   '';
 
-  # Seccomp BPF denylist. Generated from cav/seccomp_gen.py which emits
-  # raw cBPF bytecode (struct sock_filter[]).
+  # Seccomp BPF denylist. Generated from cav/sandbox/seccomp_gen.py which
+  # emits raw cBPF bytecode (struct sock_filter[]).
   seccompArch = if pkgs.stdenv.hostPlatform.isx86_64 then "x86_64" else "aarch64";
   seccompFilter = pkgs.runCommand "cave-seccomp-filter" { } ''
-    ${pkgs.python3}/bin/python3 ${../cav/seccomp_gen.py} --arch=${seccompArch} > $out
+    ${pkgs.python3}/bin/python3 ${../cav/sandbox/seccomp_gen.py} --arch=${seccompArch} > $out
   '';
 
   # FHS dynamic linker compatibility, so pre-built binaries

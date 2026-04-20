@@ -9,7 +9,7 @@ from unittest.mock import patch, MagicMock
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from cav.user_env import _do_build
+from cav.sandbox.user_env import _do_build
 
 
 class TestDoBuild(unittest.TestCase):
@@ -27,7 +27,7 @@ class TestDoBuild(unittest.TestCase):
             fake_run.returncode = 1
             fake_run.stdout = ""
 
-            with patch("cav.user_env.subprocess.run", return_value=fake_run):
+            with patch("cav.sandbox.user_env.subprocess.run", return_value=fake_run):
                 out = _do_build(user_env)
 
             self.assertIsNone(out)
@@ -43,7 +43,7 @@ class TestDoBuild(unittest.TestCase):
             fake_run.returncode = 0
             fake_run.stdout = str(new_path) + "\n"
 
-            with patch("cav.user_env.subprocess.run", return_value=fake_run):
+            with patch("cav.sandbox.user_env.subprocess.run", return_value=fake_run):
                 out = _do_build(user_env)
 
             self.assertEqual(out, new_path)

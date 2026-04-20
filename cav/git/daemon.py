@@ -16,7 +16,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from . import config, constants
+from .. import config, constants
 
 
 def _find_bin(name: str) -> str:

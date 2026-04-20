@@ -2,8 +2,9 @@
 
 from pathlib import Path
 
-from . import config, git, registry
-from .constants import CAVE_SHARED_REMOTE
+from .. import config, registry
+from ..constants import CAVE_SHARED_REMOTE
+from ..git import git
 
 
 def reject(base: Path, agent_id: str | None = None, yes: bool = False,

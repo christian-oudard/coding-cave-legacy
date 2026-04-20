@@ -12,7 +12,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from cav import config, registry
-from cav.cp import (
+from cav.commands.cp import (
     cp, _resolve_cave_path, _worktree_for_slug, _complete_cp_path,
     _expand_cave_glob, _cave_root_for_slug, _completer_cave_root,
 )
@@ -478,7 +478,7 @@ class TestCpPathResolution(CpTestCase):
         src = Path(self.tmpdir) / "f.txt"
         src.write_text("cave cwd\n")
 
-        with patch("cav.cp._cwd_info", return_value=("proj", None)):
+        with patch("cav.commands.cp._cwd_info", return_value=("proj", None)):
             cp([str(src)], "cave:f.txt")
 
         assert (self.ws / "f.txt").read_text() == "cave cwd\n"
@@ -497,7 +497,7 @@ class TestCpPathResolution(CpTestCase):
         db.commit()
         db.close()
 
-        with patch("cav.cp.git.current_branch", return_value="agent-5/main"):
+        with patch("cav.commands.cp.git.current_branch", return_value="agent-5/main"):
             cp([str(src)], "cave:g.txt")
 
         assert (ws / "g.txt").read_text() == "from branch\n"
@@ -518,7 +518,7 @@ class TestCpPathResolution(CpTestCase):
         db.commit()
         db.close()
 
-        with patch("cav.cp.git.current_branch", return_value="agent-2/main"):
+        with patch("cav.commands.cp.git.current_branch", return_value="agent-2/main"):
             cp([str(src)], "cave:h.txt")
 
         assert not (ws1 / "h.txt").exists()
@@ -539,7 +539,7 @@ class TestCpPathResolution(CpTestCase):
         db.close()
 
         # _cwd_info would fail (CWD not in any project), but cave@7 shouldn't need it
-        with patch("cav.cp._cwd_info", side_effect=SystemExit("should not be called")):
+        with patch("cav.commands.cp._cwd_info", side_effect=SystemExit("should not be called")):
             cp([str(src)], "cave@7:i.txt")
 
         assert (ws / "i.txt").read_text() == "via registry\n"
@@ -841,7 +841,7 @@ class TestCpCaveInternal(CpTestCase):
         (self.cave_root / "tmp" / "c.txt").write_bytes(b"C")
 
         self._patcher = patch(
-            "cav.cp._cave_root_for_slug",
+            "cav.commands.cp._cave_root_for_slug",
             return_value=(self.cave_root, "1"),
         )
         self._patcher.start()
@@ -960,7 +960,7 @@ class TestCpCompleterCaveInternal(CpTestCase):
         (self.cave_root / "etc").mkdir()
 
         self._patcher = patch(
-            "cav.cp._completer_cave_root",
+            "cav.commands.cp._completer_cave_root",
             return_value=self.cave_root,
         )
         self._patcher.start()
@@ -998,7 +998,7 @@ class TestCpCompleterCaveInternal(CpTestCase):
     def test_no_cave_returns_empty(self):
         """If _completer_cave_root returns None, no suggestions."""
         self._patcher.stop()
-        with patch("cav.cp._completer_cave_root", return_value=None):
+        with patch("cav.commands.cp._completer_cave_root", return_value=None):
             vals = _complete_cp_path(None, None, "demo:/tmp/")
         # Restart for tearDown.
         self._patcher.start()

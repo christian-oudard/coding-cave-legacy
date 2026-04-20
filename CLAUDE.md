@@ -26,7 +26,7 @@ Nix-only. `nix build` produces the `cav` binary. Build-time values (version, san
 
 ## Layout
 
-- `cav/` - Python package (cli, config, daemon, handler, init, sandbox, workspace, pull, push, status, git, user_env, hooks/)
+- `cav/` - Python package. Top level: cli, config, constants, completion. Subpackages: `commands/` (init, approve, reject, pull, push, review, checkout, cp, status), `git/` (git subprocess wrappers, daemon, handler, workspace), `registry/` (SQLite DB + schema), `sandbox/` (launch, bwrap argv, supervisor, seccomp, user_env), `scripts/` (git_wrapper.py, hooks/).
 - `lib/` - Nix library (mkCaveEnv.nix, exported as `lib.mkCaveEnv` in the flake)
 - `tests/` - test_hook (hook security), test_cli (CLI usability), test_alternates (shared clone setup), test_nixdb (nix DB seeding, cache pruning), test_lint (import smoke, Path.home() audit, env completeness), test_git (full integration), test_daemon (daemon isolation), test_security (protocol fuzzing, agent isolation, stress)
 - `.coding-cave/` - per-project data dir created by `cav init` (bare repo with pre-receive hook)

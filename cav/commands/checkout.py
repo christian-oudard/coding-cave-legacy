@@ -2,8 +2,9 @@
 
 from pathlib import Path
 
-from . import config, git, workspace
-from .constants import CAVE_SHARED_REMOTE, HOST_SHARED_REMOTE
+from .. import config
+from ..constants import CAVE_SHARED_REMOTE, HOST_SHARED_REMOTE
+from ..git import git, workspace
 
 
 def checkout(base: Path, name: str, agent_id: str | None = None):

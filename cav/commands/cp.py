@@ -7,7 +7,8 @@ import stat
 import sys
 from pathlib import Path
 
-from . import config, git, registry
+from .. import config, registry
+from ..git import git
 
 
 def _copy_nofollow(src: str, dst: str, **_kwargs) -> None:

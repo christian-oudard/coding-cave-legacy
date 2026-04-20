@@ -9,7 +9,8 @@ from pathlib import Path
 
 import click
 
-from . import completion as _completion, config, git, registry
+from . import completion as _completion, config, registry
+from .git import git
 from .constants import (
     AGENT_ID_RE,
     CAVE_SHARED_REMOTE,
@@ -193,7 +194,7 @@ def cli():
                    "migrate its workspaces to the current layout.")
 def init(path, reinitialize):
     """Initialize Coding Cave in a project."""
-    from .init import init as _init
+    from .commands.init import init as _init
     _init(path, reinitialize=reinitialize)
 
 
@@ -212,8 +213,8 @@ def agent(continue_agent, resume_agent, extra_projects, host_ports, prompt):
     """Launch an agent in a sandbox."""
     base = find_repo_root()
     require_init(base)
-    from .workspace import create
-    from .sandbox import launch
+    from .git.workspace import create
+    from .sandbox.launch import launch
 
     # Resolve branch context upfront. Agent branches carry routing info:
     # agent-1/main tells us which agent to continue.
@@ -329,7 +330,7 @@ def _auto_cleanup_if_clean(base, agent_id):
     reasons are logged only under -v; the common "has uncommitted work"
     case would otherwise spam the console on every startup.
     """
-    from .status import _remove_agent
+    from .commands.status import _remove_agent
 
     def skip(reason):
         if config.verbose:
@@ -400,7 +401,7 @@ def _auto_cleanup_if_clean(base, agent_id):
               help="Approve only up to this commit (partial approval)")
 def approve(args, yes, commit):
     """Approve agent work into base branch."""
-    from .approve import approve as _approve
+    from .commands.approve import approve as _approve
     target_args, sha = _split_commit_arg(args)
     if sha and commit:
         raise SystemExit(
@@ -427,7 +428,7 @@ def reject(args, yes, commit):
         agent_id = _parse_agent_id(target_args[0])
         if not AGENT_ID_RE.match(agent_id):
             raise SystemExit(f"Expected agent ID, got: {target_args[0]}")
-    from .reject import reject as _reject
+    from .commands.reject import reject as _reject
     _reject(base, agent_id=agent_id, yes=yes, commit=commit or sha)
 
 
@@ -438,7 +439,7 @@ def pull(force):
     """Pull dev branch from shared remote."""
     base = find_repo_root()
     require_init(base)
-    from .pull import pull as _pull
+    from .commands.pull import pull as _pull
     _pull(base, force=force)
 
 
@@ -448,7 +449,7 @@ def push(force):
     """Push current branch to shared remote."""
     base = find_repo_root()
     require_init(base)
-    from .push import push as _push
+    from .commands.push import push as _push
     _push(base, force)
 
 
@@ -458,7 +459,7 @@ def push(force):
               help="Show status for all registered projects")
 def status(args, all_projects):
     """Show agent and dev branch status."""
-    from .status import status as _status
+    from .commands.status import status as _status
     # Without explicit args, fall back to all-projects view when the
     # cwd isn't inside any registered project (e.g. user ran cav status
     # from their home dir). Saves a confusing "not a git repo" error
@@ -471,7 +472,7 @@ def status(args, all_projects):
             all_projects = True
     if all_projects:
         import io, contextlib
-        from .status import format_all
+        from .commands.status import format_all
         projects = registry.all_projects()
         if not projects:
             raise SystemExit("No registered projects. Run: cav init")
@@ -503,7 +504,7 @@ def status(args, all_projects):
 @click.argument("agent_id")
 def remove_agent(agent_id):
     """Remove a paused agent and its branches."""
-    from .status import _remove_agent
+    from .commands.status import _remove_agent
 
     aid = agent_id.lstrip("@").split("@")[-1]
     if not AGENT_ID_RE.match(aid):
@@ -573,7 +574,7 @@ def review(agent_id):
     aid = agent_id.lstrip("@").split("@")[-1]
     if not AGENT_ID_RE.match(aid):
         raise SystemExit(f"Invalid agent ID '{agent_id}'. Use a number (e.g. 3).")
-    from .review import review as _review
+    from .commands.review import review as _review
     _review(base, aid)
 
 
@@ -587,12 +588,12 @@ def checkout(branch, agent_id):
     # repo), so it works without cav init in the cave's filesystem.
     if not config.inside_cave():
         require_init(base)
-    from .checkout import checkout as _checkout
+    from .commands.checkout import checkout as _checkout
     _checkout(base, branch, agent_id=agent_id)
 
 
 def _cp_path_completer(ctx, param, incomplete):
-    from .cp import _complete_cp_path
+    from .commands.cp import _complete_cp_path
     return _complete_cp_path(ctx, param, incomplete)
 
 
@@ -604,7 +605,7 @@ def _cp_path_completer(ctx, param, incomplete):
               help="Overwrite existing files without prompting")
 def cp(paths, recursive, force):
     """Copy files to/from a cave agent worktree."""
-    from .cp import cp as _cp
+    from .commands.cp import cp as _cp
     if len(paths) < 2:
         raise SystemExit("Usage: cav cp <src>... <dest>")
     _cp(list(paths[:-1]), paths[-1], recursive=recursive, force=force)
@@ -619,7 +620,7 @@ def env():
 @env.command("build")
 def env_build():
     """Rebuild the cave environment from cave.nix."""
-    from . import user_env
+    from .sandbox import user_env
     user_env.build()
 
 
@@ -627,14 +628,14 @@ def env_build():
 @click.argument("input_name", required=False)
 def env_update(input_name):
     """Update flake lock file (does not rebuild)."""
-    from . import user_env
+    from .sandbox import user_env
     user_env.update(input_name)
 
 
 @env.command("metadata")
 def env_metadata():
     """Show cave environment flake input versions."""
-    from . import user_env
+    from .sandbox import user_env
     user_env.metadata()
 
 

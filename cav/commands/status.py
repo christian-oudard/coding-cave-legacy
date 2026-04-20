@@ -4,8 +4,9 @@ import shutil
 import time
 from pathlib import Path
 
-from . import config, git, registry
-from .constants import CAVE_SHARED_REMOTE
+from .. import config, registry
+from ..constants import CAVE_SHARED_REMOTE
+from ..git import git
 
 
 def format_all(

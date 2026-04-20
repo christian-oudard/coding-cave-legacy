@@ -12,7 +12,7 @@ import importlib.util
 import types
 from pathlib import Path
 
-hook_path = Path(__file__).parent.parent / "cav" / "hooks" / "pre-receive"
+hook_path = Path(__file__).parent.parent / "cav" / "scripts" / "hooks" / "pre-receive"
 loader = importlib.machinery.SourceFileLoader("pre_receive", str(hook_path))
 spec = importlib.util.spec_from_loader("pre_receive", loader)
 hook = importlib.util.module_from_spec(spec)

@@ -1,4 +1,4 @@
-"""Unit tests for the namespace supervisor (cav/supervisor.py)."""
+"""Unit tests for the namespace supervisor (cav/sandbox/supervisor.py)."""
 
 import os
 import stat
@@ -6,7 +6,7 @@ import time
 import unittest
 from unittest.mock import MagicMock, patch
 
-from cav import supervisor
+from cav.sandbox import supervisor
 
 
 class TestMountKernelOverlay(unittest.TestCase):

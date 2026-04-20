@@ -4,8 +4,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import config, git, registry
-from .constants import CAVE_SHARED_REMOTE, HOST_SHARED_REMOTE
+from .. import config, registry
+from ..constants import CAVE_SHARED_REMOTE, HOST_SHARED_REMOTE
+from ..git import git
 
 
 def push(base: Path, force: bool = False):

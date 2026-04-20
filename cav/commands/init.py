@@ -5,13 +5,14 @@ import shutil
 import sys
 from pathlib import Path
 
-from . import config, git, registry
-from .constants import CAVE_SHARED_REMOTE, HOST_SHARED_REMOTE, HOST_SHARED_REPO_DIR
+from .. import config, registry
+from ..constants import CAVE_SHARED_REMOTE, HOST_SHARED_REMOTE, HOST_SHARED_REPO_DIR
+from ..git import git
 
 
 def install_hooks(shared: Path):
     """Install git hooks with correct python3 shebang."""
-    hooks_dir = Path(__file__).parent / "hooks"
+    hooks_dir = Path(__file__).parent.parent / "scripts" / "hooks"
     for name in ("pre-receive", "post-receive"):
         src = hooks_dir / name
         dst = shared / "hooks" / name
@@ -93,14 +94,14 @@ def _offer_cave_nix():
         return
     if answer and answer != "y":
         return
-    from . import user_env
+    from ..sandbox import user_env
     cave_nix.parent.mkdir(parents=True, exist_ok=True)
     cave_nix.write_text(user_env.default_cave_nix())
     print(f"Created {cave_nix}")
 
 
 def init(path: str, reinitialize: bool = False):
-    from . import workspace
+    from ..git import workspace
 
     base = Path(path).resolve()
     if not (base / ".git").exists():

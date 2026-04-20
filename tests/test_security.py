@@ -25,9 +25,10 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from cav import config, constants, daemon, workspace
+from cav import config, constants
+from cav.git import daemon, workspace
 from cav.constants import DAEMON_BASE_PORT, HOST_SHARED_REMOTE
-from cav.handler import parse_request, validate_service, resolve_repo
+from cav.git.handler import parse_request, validate_service, resolve_repo
 
 TEST_DAEMON_BASE_PORT = 19500  # distinct from test_daemon's 19400
 
@@ -160,7 +161,7 @@ class DaemonSecurityBase(unittest.TestCase):
         git("add", "file.txt", cwd=self.user_repo)
         git("commit", "-m", "init", cwd=self.user_repo)
 
-        from cav.init import init
+        from cav.commands.init import init
         init(str(self.user_repo))
 
         self.shared = config.shared_repo_path(self.user_repo)

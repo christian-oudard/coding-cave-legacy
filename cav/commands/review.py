@@ -3,8 +3,9 @@
 import subprocess
 from pathlib import Path
 
-from . import config, git
-from .constants import CAVE_SHARED_REMOTE
+from .. import config
+from ..constants import CAVE_SHARED_REMOTE
+from ..git import git
 
 
 def review(base: Path, agent_id: str):

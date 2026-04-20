@@ -447,7 +447,7 @@ class TestPruneNixCaches(unittest.TestCase):
         db.commit()
         db.close()
 
-        with patch("cav.sandbox.config") as mock_config:
+        with patch("cav.sandbox.nix_overlay.config") as mock_config:
             mock_config.persistent_home.return_value = tmp
             _prune_nix_caches()
 
@@ -485,7 +485,7 @@ class TestPruneNixCaches(unittest.TestCase):
         db.commit()
         db.close()
 
-        with patch("cav.sandbox.config") as mock_config:
+        with patch("cav.sandbox.nix_overlay.config") as mock_config:
             mock_config.persistent_home.return_value = tmp
             _prune_nix_caches()
 
@@ -499,7 +499,7 @@ class TestPruneNixCaches(unittest.TestCase):
         eval_dir.mkdir(parents=True)
 
         # Use a path that definitely exists
-        existing_path = str(Path(__file__).parent.parent / "cav" / "sandbox.py")
+        existing_path = str(Path(__file__).parent.parent / "cav" / "sandbox" / "launch.py")
 
         db_path = eval_dir / "valid.sqlite"
         db = sqlite3.connect(str(db_path))
@@ -520,7 +520,7 @@ class TestPruneNixCaches(unittest.TestCase):
         db.commit()
         db.close()
 
-        with patch("cav.sandbox.config") as mock_config:
+        with patch("cav.sandbox.nix_overlay.config") as mock_config:
             mock_config.persistent_home.return_value = tmp
             _prune_nix_caches()
 

@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from cav.cp import _check_in_dir, _norm, cp
+from cav.commands.cp import _check_in_dir, _norm, cp
 
 
 class TestSymlinkDestinationEscape(unittest.TestCase):
@@ -125,7 +125,7 @@ class TestCheckRefNonBranch(unittest.TestCase):
     def setUp(self):
         # Import hook module
         import importlib.util
-        hook_path = Path(__file__).parent.parent / "cav" / "hooks" / "pre-receive"
+        hook_path = Path(__file__).parent.parent / "cav" / "scripts" / "hooks" / "pre-receive"
         loader = importlib.machinery.SourceFileLoader("pre_receive", str(hook_path))
         spec = importlib.util.spec_from_loader("pre_receive", loader)
         self.hook = importlib.util.module_from_spec(spec)
