@@ -62,20 +62,14 @@ fn now() -> f64 {
 }
 
 fn is_pid_alive(pid: u32) -> bool {
-    unsafe { libc_kill(pid as i32, 0) == 0 || *libc_errno() == EPERM }
+    let Some(pid) = rustix::process::Pid::from_raw(pid as i32) else {
+        return false;
+    };
+    match rustix::process::test_kill_process(pid) {
+        Ok(()) => true,
+        Err(e) => e == rustix::io::Errno::PERM,
+    }
 }
-
-extern "C" {
-    fn kill(pid: i32, sig: i32) -> i32;
-    fn __errno_location() -> *mut i32;
-}
-fn libc_kill(pid: i32, sig: i32) -> i32 {
-    unsafe { kill(pid, sig) }
-}
-fn libc_errno() -> *mut i32 {
-    unsafe { __errno_location() }
-}
-const EPERM: i32 = 1;
 
 fn sweep_dead_pids(db: &Connection, ts: f64) -> Result<()> {
     let rows: Vec<(String, u32)> = collect_rows(

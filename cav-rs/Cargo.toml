@@ -35,6 +35,7 @@ path = "src/bin/seccomp_gen.rs"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 libc = "0.2"
+rustix = { version = "0.38", features = ["event", "process", "thread", "fs", "mount", "termios", "pipe", "stdio"] }
 regex = "1"
 rusqlite = { version = "0.32", features = ["bundled", "backup"] }
 serde = { version = "1", features = ["derive"] }

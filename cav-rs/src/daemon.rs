@@ -152,14 +152,17 @@ fn kill_by_inode(inode: u64) {
         for fd_entry in fds.flatten() {
             if let Ok(link) = std::fs::read_link(fd_entry.path()) {
                 if link.to_string_lossy() == target {
-                    unsafe { libc::kill(pid, libc::SIGTERM) };
+                    let Some(rpid) = rustix::process::Pid::from_raw(pid) else {
+                        return;
+                    };
+                    let _ = rustix::process::kill_process(rpid, rustix::process::Signal::Term);
                     for _ in 0..10 {
-                        if unsafe { libc::kill(pid, 0) } != 0 {
+                        if rustix::process::test_kill_process(rpid).is_err() {
                             return;
                         }
                         thread::sleep(Duration::from_millis(100));
                     }
-                    unsafe { libc::kill(pid, libc::SIGKILL) };
+                    let _ = rustix::process::kill_process(rpid, rustix::process::Signal::Kill);
                     return;
                 }
             }

@@ -123,7 +123,7 @@ fn offer_cave_nix() {
     if cave_nix.exists() {
         return;
     }
-    if !atty::stdin_is_tty() {
+    if !rustix::termios::isatty(rustix::stdio::stdin()) {
         return;
     }
     print!("Create default cave.nix? [Y/n] ");
@@ -262,15 +262,3 @@ pub fn init(path: &PathBuf, reinitialize: bool) -> Result<()> {
     Ok(())
 }
 
-// Simple stdin tty check without extra dependencies
-mod atty {
-    pub fn stdin_is_tty() -> bool {
-        unsafe { libc_isatty(0) != 0 }
-    }
-    extern "C" {
-        fn isatty(fd: i32) -> i32;
-    }
-    fn libc_isatty(fd: i32) -> i32 {
-        unsafe { isatty(fd) }
-    }
-}

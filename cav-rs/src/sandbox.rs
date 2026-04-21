@@ -1,14 +1,14 @@
 use std::collections::HashMap;
 use std::io::Write;
-use std::os::fd::RawFd;
+use std::os::fd::{AsFd, AsRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
+use rustix::process::Signal;
 use serde::Deserialize;
 
 use crate::config::{self, inside_cave, launch_home, parse_dev_branch, project_slug,
@@ -87,21 +87,10 @@ fn temp_file(prefix: &str) -> Result<PathBuf> {
 }
 
 fn num_cpus() -> usize {
-    unsafe {
-        let mut set: libc::cpu_set_t = std::mem::zeroed();
-        if libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut set) == 0 {
-            let mut count = 0usize;
-            for i in 0..libc::CPU_SETSIZE as usize {
-                if libc::CPU_ISSET(i, &set) {
-                    count += 1;
-                }
-            }
-            if count > 0 {
-                return count;
-            }
-        }
-    }
-    1
+    let n = rustix::process::sched_getaffinity(None)
+        .map(|s| s.count() as usize)
+        .unwrap_or(0);
+    n.max(1)
 }
 
 fn build_bwrap_argv(
@@ -398,10 +387,12 @@ fn crinj_pid_file() -> PathBuf {
     config::data_dir().join("crinj.pid")
 }
 
-fn crinj_signal(sig: libc::c_int) {
+fn crinj_signal(sig: Signal) {
     if let Ok(text) = std::fs::read_to_string(crinj_pid_file()) {
-        if let Ok(pid) = text.trim().parse::<libc::pid_t>() {
-            unsafe { libc::kill(pid, sig) };
+        if let Ok(raw) = text.trim().parse::<i32>() {
+            if let Some(pid) = rustix::process::Pid::from_raw(raw) {
+                let _ = rustix::process::kill_process(pid, sig);
+            }
         }
     }
 }
@@ -411,8 +402,8 @@ fn crinj_register_session() -> PathBuf {
     let _ = std::fs::create_dir_all(&d);
     if let Ok(entries) = std::fs::read_dir(&d) {
         for entry in entries.flatten() {
-            if let Ok(pid) = entry.file_name().to_string_lossy().parse::<libc::pid_t>() {
-                if unsafe { libc::kill(pid, 0) } != 0 {
+            if let Ok(raw) = entry.file_name().to_string_lossy().parse::<i32>() {
+                if !pid_alive(raw) {
                     let _ = std::fs::remove_file(entry.path());
                 }
             }
@@ -421,6 +412,16 @@ fn crinj_register_session() -> PathBuf {
     let f = d.join(std::process::id().to_string());
     let _ = std::fs::File::create(&f);
     f
+}
+
+fn pid_alive(raw: i32) -> bool {
+    let Some(pid) = rustix::process::Pid::from_raw(raw) else {
+        return false;
+    };
+    match rustix::process::test_kill_process(pid) {
+        Ok(()) => true,
+        Err(e) => e == rustix::io::Errno::PERM,
+    }
 }
 
 fn crinj_unregister_session(session: &Path) -> bool {
@@ -434,7 +435,7 @@ fn start_crinj() -> Result<Option<std::process::Child>> {
         bail!("crinj not found on PATH");
     }
     if crinj_listening() {
-        crinj_signal(libc::SIGHUP);
+        crinj_signal(Signal::Hup);
         return Ok(None);
     }
     let xdg = std::env::var("XDG_CONFIG_HOME")
@@ -515,30 +516,21 @@ fn apply_firewall(pid: u32, allowed_ports: &[u16]) -> Result<()> {
 
 fn start_slirp4netns(pid: u32) -> Result<std::process::Child> {
     let slirp = find_bin("slirp4netns")?;
-    let (ready_r, ready_w) = make_pipe()?;
+    let (ready_r, ready_w) = rustix::pipe::pipe()?;
     let proc = Command::new(&slirp)
         .args([
             "--configure",
-            &format!("--ready-fd={ready_w}"),
+            &format!("--ready-fd={}", ready_w.as_raw_fd()),
             &pid.to_string(),
             "tap0",
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()?;
-    unsafe { libc::close(ready_w) };
+    drop(ready_w);
     let mut buf = [0u8; 1];
-    unsafe { libc::read(ready_r, buf.as_mut_ptr() as *mut libc::c_void, 1) };
-    unsafe { libc::close(ready_r) };
+    let _ = rustix::io::read(&ready_r, &mut buf);
     Ok(proc)
-}
-
-fn make_pipe() -> Result<(RawFd, RawFd)> {
-    let mut fds = [0i32; 2];
-    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
-        bail!("pipe() failed");
-    }
-    Ok((fds[0], fds[1]))
 }
 
 fn find_bin(name: &str) -> Result<String> {
@@ -551,9 +543,9 @@ fn find_bin(name: &str) -> Result<String> {
     bail!("{name} not found on PATH")
 }
 
-fn signal_descendants(pid: u32, sig: libc::c_int) {
+fn signal_descendants(pid: u32, sig: Signal) {
     let mut visited = std::collections::HashSet::new();
-    fn walk(p: u32, visited: &mut std::collections::HashSet<u32>, sig: libc::c_int) {
+    fn walk(p: u32, visited: &mut std::collections::HashSet<u32>, sig: Signal) {
         if !visited.insert(p) {
             return;
         }
@@ -562,12 +554,60 @@ fn signal_descendants(pid: u32, sig: libc::c_int) {
             for child in s.split_whitespace() {
                 if let Ok(cpid) = child.parse::<u32>() {
                     walk(cpid, visited, sig);
-                    unsafe { libc::kill(cpid as libc::pid_t, sig) };
+                    if let Some(target) = rustix::process::Pid::from_raw(cpid as i32) {
+                        let _ = rustix::process::kill_process(target, sig);
+                    }
                 }
             }
         }
     }
     walk(pid, &mut visited, sig);
+}
+
+// bwrap --new-session puts the sandboxed process in a fresh session, so the
+// kernel delivers terminal signals (SIGINT/SIGTERM/SIGWINCH) only to cav, not
+// to descendants. Forward them via the self-pipe trick: a minimal AS-safe
+// handler writes the signal number to a pipe, and a reader thread fans it out
+// to descendants.
+static SIG_PIPE_WRITE: AtomicI32 = AtomicI32::new(-1);
+
+extern "C" fn self_pipe_handler(sig: libc::c_int) {
+    let fd = SIG_PIPE_WRITE.load(Ordering::Relaxed);
+    if fd >= 0 {
+        let byte = sig as u8;
+        unsafe { libc::write(fd, &byte as *const u8 as *const libc::c_void, 1) };
+    }
+}
+
+fn forward_cave_signals(cave_pid: u32) -> Result<()> {
+    let (read_fd, write_fd) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)?;
+    SIG_PIPE_WRITE.store(write_fd.into_raw_fd(), Ordering::SeqCst);
+
+    let handler = self_pipe_handler as *const () as usize;
+    unsafe {
+        libc::signal(libc::SIGINT, handler);
+        libc::signal(libc::SIGTERM, handler);
+        libc::signal(libc::SIGWINCH, handler);
+    }
+
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 64];
+        loop {
+            match rustix::io::read(&read_fd, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    for &b in &buf[..n] {
+                        if let Some(sig) = Signal::from_raw(b as i32) {
+                            signal_descendants(cave_pid, sig);
+                        }
+                    }
+                }
+                Err(e) if e == rustix::io::Errno::INTR => continue,
+                Err(_) => break,
+            }
+        }
+    });
+    Ok(())
 }
 
 fn build_claude_cmd(
@@ -1199,10 +1239,12 @@ pub fn run_agent(
     let claude_cmd = build_claude_cmd(session_id.as_deref(), resuming, prompt.as_deref());
     let daemon_port = daemon::agent_port(&agent_id);
 
-    let (sync_r, sync_w) = make_pipe()?;
-    unsafe { libc::fcntl(sync_w, libc::F_SETFD, 0) };
+    let (sync_r, sync_w) = rustix::pipe::pipe()?;
 
-    env.insert("CODING_CAVE_NS_SYNC_FD".to_string(), sync_w.to_string());
+    env.insert(
+        "CODING_CAVE_NS_SYNC_FD".to_string(),
+        sync_w.as_raw_fd().to_string(),
+    );
     if !inside_cave() {
         let (upper, work, merged_pb) = nix_overlay_dirs(&home, &agent_id);
         env.insert(
@@ -1219,20 +1261,15 @@ pub fn run_agent(
         );
     }
 
-    let seccomp_fd = unsafe {
-        libc::open(
-            std::ffi::CString::new(cfg.seccomp_filter.as_str())
-                .unwrap()
-                .as_ptr(),
-            libc::O_RDONLY,
-        )
-    };
-    if seccomp_fd < 0 {
-        bail!("Cannot open seccomp filter: {}", cfg.seccomp_filter);
-    }
-    unsafe { libc::fcntl(seccomp_fd, libc::F_SETFD, 0) };
+    let seccomp_fd = rustix::fs::open(
+        cfg.seccomp_filter.as_str(),
+        rustix::fs::OFlags::RDONLY,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(|e| anyhow::anyhow!("Cannot open seccomp filter {}: {e}", cfg.seccomp_filter))?;
+    rustix::io::fcntl_setfd(&seccomp_fd, rustix::io::FdFlags::empty())?;
 
-    let bwrap_argv = build_bwrap_argv(&cfg, &env, &claude_cmd, seccomp_fd);
+    let bwrap_argv = build_bwrap_argv(&cfg, &env, &claude_cmd, seccomp_fd.as_raw_fd());
     let supervisor_bin = constants::supervisor_path();
     let unshare_bin = find_bin("unshare")?;
 
@@ -1259,15 +1296,15 @@ pub fn run_agent(
     }
 
     let mut proc = proc_cmd.spawn()?;
-    unsafe { libc::close(sync_w) };
-    unsafe { libc::close(seccomp_fd) };
+    drop(sync_w);
+    drop(seccomp_fd);
 
     registry::set_cave_pid(&agent_id, proc.id())?;
 
     let mut sync_buf = [0u8; 1];
-    let n = unsafe { libc::read(sync_r, sync_buf.as_mut_ptr() as *mut libc::c_void, 1) };
-    unsafe { libc::close(sync_r) };
-    if n <= 0 {
+    let n = rustix::io::read(&sync_r, &mut sync_buf).unwrap_or(0);
+    drop(sync_r);
+    if n == 0 {
         let _ = proc.kill();
         bail!("sandbox child died during namespace setup");
     }
@@ -1278,19 +1315,7 @@ pub fn run_agent(
 
     let mut slirp = start_slirp4netns(proc.id())?;
 
-    // Signal forwarding
-    let forwarding = Arc::new(AtomicBool::new(false));
-    {
-        let fwd = forwarding.clone();
-        let pid = proc.id();
-        unsafe {
-            extern "C" fn sighandler(_: libc::c_int) {}
-            libc::signal(libc::SIGINT, sighandler as usize);
-            libc::signal(libc::SIGTERM, sighandler as usize);
-        }
-        // We rely on the process group forwarding and wait() for cleanup
-        let _ = (fwd, pid); // keep alive
-    }
+    forward_cave_signals(proc.id())?;
 
     let rc = proc.wait().map(|s| s.code().unwrap_or(1)).unwrap_or(1);
 
@@ -1299,7 +1324,7 @@ pub fn run_agent(
     let _ = slirp.kill();
     let _ = slirp.wait();
     if crinj_unregister_session(&crinj_session) {
-        crinj_signal(libc::SIGTERM);
+        crinj_signal(Signal::Term);
         if let Some(mut cp) = crinj_proc {
             let _ = cp.wait();
         }
