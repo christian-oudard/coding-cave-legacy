@@ -435,8 +435,7 @@ def launch(workspaces: list[tuple[Path, Path, str]], agent_name: str,
 
         log.info("launching sandbox...")
         proc = subprocess.Popen(
-            ns_cmd, env=env, close_fds=False,
-            pass_fds=(sync_w, *bwrap_fds),
+            ns_cmd, env=env, pass_fds=(sync_w, *bwrap_fds),
         )
         os.close(sync_w)
         for fd in bwrap_fds:

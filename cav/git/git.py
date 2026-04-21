@@ -18,8 +18,6 @@ def git(*args, cwd=None, check=True, capture=False, echo=True):
         text=True,
     )
     if check and r.returncode != 0:
-        if capture and r.stderr:
-            print(r.stderr, end="", file=sys.stderr)
         raise subprocess.CalledProcessError(
             r.returncode, cmd, output=r.stdout, stderr=r.stderr)
     return r

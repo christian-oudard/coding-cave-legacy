@@ -148,7 +148,7 @@ let
       export NO_PROXY="localhost,127.0.0.1,::1"
       export no_proxy="$NO_PROXY"
       if [ -f /etc/crinj-ca.pem ]; then
-        ${pkgs.coreutils}/bin/cat /etc/ssl/certs/ca-bundle.crt /etc/crinj-ca.pem > /tmp/combined-ca.pem
+        ${pkgs.coreutils}/bin/cat ${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt /etc/crinj-ca.pem > /tmp/combined-ca.pem
         export SSL_CERT_FILE=/tmp/combined-ca.pem
         export REQUESTS_CA_BUNDLE=/tmp/combined-ca.pem
         export NODE_EXTRA_CA_CERTS=/etc/crinj-ca.pem
