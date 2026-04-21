@@ -1,0 +1,3 @@
+[workspace]
+members = ["cav-rs"]
+resolver = "2"
