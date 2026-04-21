@@ -19,7 +19,7 @@
 
   # Cave-required packages. The user can add more via home.packages.
   home.packages = with pkgs; [
-    coreutils bash nix git gnupg gnugrep gnused
+    coreutils bash nix git gnupg gnugrep gnused jq
   ];
 
   coding-cave.claude-code = {

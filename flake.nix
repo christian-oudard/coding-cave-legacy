@@ -128,14 +128,14 @@
 
       checks = eachSystem (pkgs: {
         unit = pkgs.runCommand "cav-unit-tests" {
-          nativeBuildInputs = [ (pkgs.python3.withPackages (ps: [ ps.click ps.vulture ])) pkgs.git ];
+          nativeBuildInputs = [ (pkgs.python3.withPackages (ps: [ ps.click ps.vulture ])) pkgs.git pkgs.jq ];
         } ''
           cp -r ${pkgs.lib.cleanSource ./.}/* .
           export HOME=$TMPDIR
           git config --global init.defaultBranch main
           git config --global user.email "test@test.com"
           git config --global user.name "Test"
-          python3 -m unittest -v tests.test_hook tests.test_cli tests.test_alternates tests.test_nixdb tests.test_lint tests.test_cp_security tests.test_user_env tests.test_supervisor
+          python3 -m unittest -v tests.test_hook tests.test_cli tests.test_alternates tests.test_nixdb tests.test_lint tests.test_cp_security tests.test_user_env tests.test_supervisor tests.test_statusline
           touch $out
         '';
       });
