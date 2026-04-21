@@ -180,6 +180,7 @@ let
     "--ro-bind" "/nix/store" "/nix/store"
     "--dir" "/bin"
     "--ro-bind" "${pkgs.bashInteractive}/bin/bash" "/bin/bash"
+    "--symlink" "bash" "/bin/sh"
     "--ro-bind" "${pkgs.coreutils}/bin/env" "/usr/bin/env"
     "--ro-bind" fhsLdLinux.loader fhsLdLinux.path
 
