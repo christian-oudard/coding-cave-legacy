@@ -4,13 +4,14 @@ use std::process::Command;
 const ZERO_SHA: &str = "0000000000000000000000000000000000000000";
 
 fn main() {
-    let agent = std::env::var("CODING_CAVE_AGENT_ID")
+    // Agent-tip refs are only maintained for pushes from inside a cave.
+    let from_agent = std::env::var("CODING_CAVE_AGENT_ID")
         .ok()
-        .filter(|s| !s.is_empty());
-    let agent = match agent {
-        Some(a) => a,
-        None => return,
-    };
+        .filter(|s| !s.is_empty())
+        .is_some();
+    if !from_agent {
+        return;
+    }
 
     let stdin = io::stdin();
     for line in stdin.lock().lines() {
@@ -43,6 +44,5 @@ fn main() {
                 .output()
                 .ok();
         }
-        drop(agent.as_str()); // suppress unused warning
     }
 }

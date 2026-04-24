@@ -32,11 +32,18 @@ pub fn git(
 
     let output = cmd.output()?;
     if !output.status.success() {
-        bail!(
-            "git {} failed with exit code {}",
-            args.join(" "),
-            output.status.code().unwrap_or(-1)
-        );
+        let code = output.status.code().unwrap_or(-1);
+        let stderr_text = String::from_utf8_lossy(&output.stderr);
+        let stderr_trimmed = stderr_text.trim();
+        if capture && !stderr_trimmed.is_empty() {
+            bail!(
+                "git {} failed with exit code {}\n{}",
+                args.join(" "),
+                code,
+                stderr_trimmed
+            );
+        }
+        bail!("git {} failed with exit code {}", args.join(" "), code);
     }
     if capture {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())

@@ -3,10 +3,9 @@
 /// Verifies that the hook correctly accepts/rejects pushes by running the
 /// `cav-pre-receive` binary with stdin input and the CODING_CAVE_AGENT_ID
 /// env var set, mimicking git's hook invocation.
+use std::env;
 use std::io::Write;
-use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::{env, fs};
 
 const PRE_RECEIVE: &str = env!("CARGO_BIN_EXE_cav-pre-receive");
 

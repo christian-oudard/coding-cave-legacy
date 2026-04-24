@@ -199,11 +199,17 @@ fn run() -> Result<()> {
         } => {
             let base = find_repo_root()?;
             require_init(&base)?;
+            let extras = extra_projects
+                .iter()
+                .map(|p| {
+                    resolve_project(p).map(|pb| pb.to_string_lossy().into_owned())
+                })
+                .collect::<Result<Vec<_>>>()?;
             sandbox::run_agent(
                 base,
                 continue_agent,
                 resume_agent,
-                extra_projects,
+                extras,
                 host_ports,
                 prompt,
             )
@@ -361,11 +367,63 @@ fn run() -> Result<()> {
 }
 
 fn preprocess_args(raw: Vec<String>) -> Vec<String> {
-    // raw[0] is the binary name
+    // raw[0] is the binary name. Rewrite bare `cav <flags>` to
+    // `cav agent <flags>` so shortcuts like `cav -p ../proj` work.
+    // Subcommand and top-level flag names come from clap reflection so
+    // this stays correct when the `Cli` definition changes.
+    use clap::CommandFactory;
+
     let mut argv = vec![raw[0].clone()];
-    for a in &raw[1..] {
-        argv.push(a.clone());
+    let rest = &raw[1..];
+    let cmd = Cli::command();
+
+    let subcommands: Vec<String> = cmd
+        .get_subcommands()
+        .map(|c| c.get_name().to_string())
+        .collect();
+    let mut top_flags: Vec<String> = Vec::new();
+    for a in cmd.get_arguments() {
+        if let Some(c) = a.get_short() {
+            top_flags.push(format!("-{c}"));
+        }
+        if let Some(s) = a.get_long() {
+            top_flags.push(format!("--{s}"));
+        }
     }
+    // clap auto-adds help; make sure it's recognized even if reflection
+    // doesn't surface it in a future version.
+    for h in ["-h", "--help"] {
+        if !top_flags.iter().any(|f| f == h) {
+            top_flags.push(h.to_string());
+        }
+    }
+
+    // `-v` has ArgAction::Count, so it can stack as `-vv`, `-vvv`, etc.
+    // Consume any leading stacked verbose tokens before the subcommand check.
+    let is_verbose_token = |a: &str| {
+        a == "--verbose"
+            || (a.starts_with('-')
+                && !a.starts_with("--")
+                && a.len() > 1
+                && a[1..].chars().all(|c| c == 'v'))
+    };
+
+    let mut idx = 0;
+    while idx < rest.len() && is_verbose_token(&rest[idx]) {
+        argv.push(rest[idx].clone());
+        idx += 1;
+    }
+
+    if let Some(next) = rest.get(idx) {
+        let s = next.as_str();
+        let is_sub = subcommands.iter().any(|n| n == s);
+        let is_top = top_flags.iter().any(|n| n == s);
+        if !is_sub && !is_top {
+            argv.push("agent".to_string());
+        }
+    }
+
+    argv.extend(rest[idx..].iter().cloned());
     argv
 }
 
@@ -471,7 +529,9 @@ fn resolve_project(path: &str) -> Result<PathBuf> {
     if let Some(p) = registry::project_path(path)? {
         return Ok(PathBuf::from(p));
     }
-    let p = PathBuf::from(path).canonicalize()?;
+    let p = PathBuf::from(path)
+        .canonicalize()
+        .map_err(|e| anyhow::anyhow!("Cannot resolve project '{path}': {e}"))?;
     if !p.is_dir() {
         bail!("No project named '{path}'");
     }

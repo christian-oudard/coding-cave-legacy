@@ -31,7 +31,7 @@ fn compute_hash(cave_nix_content: Option<&str>, sibling_files: &[(String, String
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     let build = constants::build();
-    let mut parts = vec![
+    let parts = [
         build.nixpkgs_url.as_str(),
         build.claude_code_nix_url.as_str(),
         build.home_manager_url.as_str(),

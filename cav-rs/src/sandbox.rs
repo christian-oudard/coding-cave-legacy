@@ -1064,7 +1064,7 @@ pub fn run_agent(
         .map(|(_, sr, s)| (sr.clone(), s.clone()))
         .collect();
     let daemon_handle = daemon::start(&agent_id, &shared_repos)?;
-    let mut guard = DaemonGuard(Some(daemon_handle));
+    let guard = DaemonGuard(Some(daemon_handle));
 
     // Set remote URLs (localhost for sync)
     for (ws, _, s) in &workspaces {

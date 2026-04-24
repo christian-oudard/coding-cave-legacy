@@ -107,6 +107,58 @@ fn push_without_init_gives_friendly_error() {
     );
 }
 
+// Bare `cav <agent-flag>` should route to the `agent` subcommand rather
+// than failing with an "unexpected argument" parse error.
+#[test]
+fn bare_agent_flag_routes_to_agent() {
+    let repo = TestRepo::new("bare-agent-flag");
+    let out = repo.cav(&["-p", "/nonexistent/extra-project"]);
+    assert_ne!(out.status.code(), Some(0));
+    let err = stderr(&out);
+    assert!(
+        !err.contains("unexpected argument"),
+        "should not bail at top-level parse: {err}"
+    );
+}
+
+// `cav agent -p <missing-path>` should surface a clear error identifying
+// the bad extra, not a cryptic git failure from deep inside workspace setup.
+#[test]
+fn agent_extra_missing_path_is_friendly() {
+    let repo = TestRepo::new("extra-missing");
+    repo.cav(&["init", repo.dir.to_str().unwrap()]);
+    let out = repo.cav(&["agent", "-p", "/definitely/does/not/exist"]);
+    assert_ne!(out.status.code(), Some(0));
+    let err = stderr(&out);
+    assert!(
+        err.contains("/definitely/does/not/exist")
+            && !err.contains("git checkout")
+            && !err.contains("git clone"),
+        "expected clear error naming the bad path, got: {err}"
+    );
+}
+
+// `cav agent -p <uninitialized-project>` should say "not initialized" and
+// point at `cav init`, not proceed into clone/checkout.
+#[test]
+fn agent_extra_uninitialized_is_friendly() {
+    let primary = TestRepo::new("extra-primary");
+    primary.cav(&["init", primary.dir.to_str().unwrap()]);
+
+    // A second git repo that has NOT been cav init'd.
+    let uninit = TestRepo::new("extra-uninit");
+
+    let out = primary.cav(&["agent", "-p", uninit.dir.to_str().unwrap()]);
+    assert_ne!(out.status.code(), Some(0));
+    let err = stderr(&out);
+    assert!(
+        (err.contains("not initialized") || err.contains("cav init"))
+            && !err.contains("git checkout")
+            && !err.contains("git clone"),
+        "expected friendly init error for extra, got: {err}"
+    );
+}
+
 // --- cav init ---
 
 #[test]
