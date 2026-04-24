@@ -993,6 +993,7 @@ pub fn run_agent(
     let slug = project_slug(&base);
 
     // Resolve agent session
+    let resuming_launch = continue_agent || resume_agent.is_some();
     let (agent_id, session_id, resuming) = if continue_agent {
         let rc = registry::resolve_continue(&base, None)?;
         (rc.agent_id, Some(rc.session_id), rc.resuming)
@@ -1011,6 +1012,30 @@ pub fn run_agent(
     };
 
     let agent_name = registry::display_name(&base, &agent_id);
+
+    // On resume, inherit extras/ports from last launch if user didn't supply any.
+    let (extra_projects, host_ports) = if resuming_launch {
+        let (saved_slugs, saved_ports) = registry::read_agent_launch_opts(&agent_id)?;
+        let extras = if extra_projects.is_empty() && !saved_slugs.is_empty() {
+            saved_slugs
+                .iter()
+                .filter_map(|s| registry::project_path(s).ok().flatten())
+                .collect::<Vec<String>>()
+        } else {
+            extra_projects
+        };
+        let ports = if host_ports.is_empty() { saved_ports } else { host_ports };
+        (extras, ports)
+    } else {
+        (extra_projects, host_ports)
+    };
+
+    // Record effective launch opts so future -c/--resume rehydrates them.
+    let extra_slugs: Vec<String> = extra_projects
+        .iter()
+        .map(|p| project_slug(&PathBuf::from(p)))
+        .collect();
+    registry::save_agent_launch_opts(&agent_id, &extra_slugs, Some(&host_ports))?;
 
     // Create isolated workspace clones for the agent
     let (ws, shared) = workspace::create(&base, &agent_id)?;

@@ -82,7 +82,9 @@ Continue the most recently exited session with `--continue`. Continue arbitrary 
 
 Allow access to multiple projects with the `--project` flag (repeatable).
 
-With `--port`, expose a host TCP port inside the cave (repeatable). The agent can reach it at `10.0.2.2:<port>`. Ports are persisted across `--continue`/`--resume`.
+With `--port`, expose a host TCP port inside the cave (repeatable). The agent can reach it at `10.0.2.2:<port>`.
+
+Extra projects and ports are persisted across `--continue`/`--resume`. Passing `--project` or `--port` on resume replaces the saved value; omitting them inherits the prior launch.
 
 All caves are recursive. Agents can launch sub-caves for testing coding-cave features.
 
