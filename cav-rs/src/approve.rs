@@ -389,6 +389,15 @@ fn do_approve(
             false,
         )
         .ok();
+        // Prune the host's remote-tracking ref so `cave/<dev>` doesn't linger.
+        git::git(
+            &["fetch", "--prune", CAVE_SHARED_REMOTE],
+            Some(project_base),
+            false,
+            true,
+            false,
+        )
+        .ok();
     }
     Ok(())
 }

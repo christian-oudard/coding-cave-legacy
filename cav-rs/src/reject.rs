@@ -95,11 +95,17 @@ pub fn reject(base: &Path, agent_id: Option<&str>, yes: bool, commit: Option<&st
     let n = commits.len();
     let word = if n == 1 { "commit" } else { "commits" };
     let target_name = registry::display_name(base, &base_agent);
+    let target_running = registry::is_agent_running(&base_agent).unwrap_or(false);
     println!("\nRejecting {n} {word} from tip of {branch}:\n");
     for line in &commits {
         println!("  {line}");
     }
     println!("\nWork will be assigned to {target_name}.");
+    if !target_running {
+        println!(
+            "  ({target_name} is stopped. Resume with 'cav --resume {base_agent}' to continue the work.)"
+        );
+    }
 
     if !yes {
         print!("\nReject? [Y/n] ");
@@ -126,6 +132,26 @@ pub fn reject(base: &Path, agent_id: Option<&str>, yes: bool, commit: Option<&st
             verbose,
             verbose,
         )?;
+    }
+
+    // Recreate the local agent branch on host if approve deleted it.
+    let local_exists = git::git(
+        &["rev-parse", "--verify", &format!("refs/heads/{ab}")],
+        Some(base),
+        false,
+        true,
+        false,
+    )
+    .is_ok();
+    if !local_exists {
+        git::git(
+            &["branch", &ab, &tip_sha],
+            Some(base),
+            false,
+            true,
+            false,
+        )
+        .ok();
     }
 
     git::git(
@@ -155,7 +181,13 @@ pub fn reject(base: &Path, agent_id: Option<&str>, yes: bool, commit: Option<&st
         }
     }
 
-    println!("\nRejected. Agent branch '{ab}' restored for rework.");
+    if target_running {
+        println!("\nRejected. {target_name} will pick up '{ab}' on its next pull.");
+    } else {
+        println!(
+            "\nRejected. Resume {target_name} to continue the rejected work:\n  cav --resume {base_agent}"
+        );
+    }
     Ok(())
 }
 
@@ -306,8 +338,8 @@ fn resolve_target_agent(
     let all_ids = registry::all_agent_ids(None)?;
     if !all_ids.contains(&original_agent_id.to_string()) {
         bail!(
-            "Original agent {original_agent_id} is no longer in the registry.\n\
-             Start or continue an agent session, then re-run:\n  cav reject <agent-id>"
+            "Original agent {original_agent_id} has been removed from the registry.\n\
+             Specify a different agent to receive the rejected work:\n  cav reject <agent-id>"
         );
     }
     check_no_unapproved(base, branch, original_agent_id, tip_sha)?;
