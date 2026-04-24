@@ -1,3 +1,4 @@
+use std::io::{self, Write};
 use std::path::Path;
 
 use anyhow::{bail, Result};
@@ -5,6 +6,7 @@ use anyhow::{bail, Result};
 use crate::config::{self, parse_dev_branch, resolve_base};
 use crate::constants::CAVE_SHARED_REMOTE;
 use crate::git;
+use crate::registry;
 
 pub fn review(base: &Path, agent_id: &str) -> Result<()> {
     let verbose = config::verbose() >= 1;
@@ -16,18 +18,51 @@ pub fn review(base: &Path, agent_id: &str) -> Result<()> {
         verbose,
     )?;
 
-    let branches = git::remote_branches(CAVE_SHARED_REMOTE, Some(base))?;
-    let agent_branch = branches
+    // Gather all dev branches for this agent.
+    let all_branches = git::remote_branches(CAVE_SHARED_REMOTE, Some(base))?;
+    let candidates: Vec<String> = all_branches
         .into_iter()
-        .find(|b| parse_dev_branch(b).is_some_and(|(_, aid)| aid == agent_id));
+        .filter(|b| parse_dev_branch(b).is_some_and(|(_, aid)| aid == agent_id))
+        .collect();
 
-    let agent_branch = match agent_branch {
-        Some(b) => b,
-        None => bail!("No agent branch found for agent {agent_id}."),
+    if candidates.is_empty() {
+        bail!("No agent branch found for agent {agent_id}.");
+    }
+
+    // Prefer branches with unapproved commits.
+    let mut pending: Vec<(String, String, Vec<String>)> = vec![];
+    for branch in &candidates {
+        let target = resolve_base(branch.clone());
+        let remote_dev = format!("{CAVE_SHARED_REMOTE}/{branch}");
+        let remote_target = format!("{CAVE_SHARED_REMOTE}/{target}");
+        if git::has_merge_base(&remote_dev, &remote_target, Some(base)) {
+            let lines = git::cherry_undelivered(&remote_target, &remote_dev, Some(base))
+                .unwrap_or_default();
+            if !lines.is_empty() {
+                pending.push((branch.clone(), target, lines));
+            }
+        }
+    }
+
+    let (agent_branch, target) = if pending.len() == 1 {
+        let (b, t, _) = pending.remove(0);
+        (b, t)
+    } else if pending.len() > 1 {
+        let current = git::current_branch(Some(base)).unwrap_or_default();
+        if let Some(idx) = pending.iter().position(|(b, _, _)| *b == current) {
+            let (b, t, _) = pending.remove(idx);
+            (b, t)
+        } else {
+            pick(pending, base, agent_id)?
+        }
+    } else {
+        // No pending work; fall back to first candidate.
+        let b = candidates.into_iter().next().unwrap();
+        let t = resolve_base(b.clone());
+        (b, t)
     };
 
     let remote_ref = format!("{CAVE_SHARED_REMOTE}/{agent_branch}");
-    let target = resolve_base(agent_branch.clone());
     let remote_target = format!("{CAVE_SHARED_REMOTE}/{target}");
 
     let current = git::current_branch(Some(base)).unwrap_or_default();
@@ -63,4 +98,38 @@ pub fn review(base: &Path, agent_id: &str) -> Result<()> {
         println!("{log}");
     }
     Ok(())
+}
+
+fn pick(
+    pending: Vec<(String, String, Vec<String>)>,
+    base: &Path,
+    agent_id: &str,
+) -> Result<(String, String)> {
+    let name = registry::display_name(base, agent_id);
+    println!("\nMultiple branches with pending work for {name}:\n");
+    for (i, (branch, target, lines)) in pending.iter().enumerate() {
+        let n = lines.len();
+        let word = if n == 1 { "commit" } else { "commits" };
+        println!("  {}) {branch} \u{2192} {target}    {n} {word}", i + 1);
+        for line in lines.iter().take(3) {
+            println!("     {line}");
+        }
+        if n > 3 {
+            println!("     ... and {} more", n - 3);
+        }
+    }
+
+    print!("\nReview which? [1-{}] ", pending.len());
+    io::stdout().flush().ok();
+    let mut answer = String::new();
+    match io::stdin().read_line(&mut answer) {
+        Ok(0) | Err(_) => bail!("\nAborted."),
+        Ok(_) => {}
+    }
+    let idx: usize = answer.trim().parse().unwrap_or(0);
+    if idx >= 1 && idx <= pending.len() {
+        let (b, t, _) = &pending[idx - 1];
+        return Ok((b.clone(), t.clone()));
+    }
+    bail!("Invalid selection.")
 }

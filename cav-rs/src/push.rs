@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
 
-use crate::config::{self, inside_cave, parse_dev_branch, resolve_base, self_agent_id, worktree_dir};
+use crate::config::{self, dev_branch, inside_cave, parse_dev_branch, resolve_base, self_agent_id, worktree_dir};
 use crate::constants::{CAVE_SHARED_REMOTE, HOST_SHARED_REMOTE};
 use crate::git;
 use crate::registry;
@@ -195,8 +195,9 @@ fn rebase_agents(base: &Path, base_branch: &str) -> Result<()> {
         if resolve_base(branch.clone()) != base_branch {
             continue;
         }
+        let dev = dev_branch(&branch, &agent_id);
         let ahead = git::commits_ahead(
-            &format!("refs/heads/{branch}"),
+            &format!("refs/heads/{dev}"),
             &format!("refs/heads/{base_branch}"),
             None,
             Some(&shared),
@@ -229,14 +230,14 @@ fn rebase_agents(base: &Path, base_branch: &str) -> Result<()> {
         .is_ok();
         if !rebase_ok {
             git::git(&["rebase", "--abort"], Some(&ws), false, true, false).ok();
-            println!("Warning: rebase of {branch} onto {base_branch} failed (conflicts).");
+            println!("Warning: rebase of {dev} onto {base_branch} failed (conflicts).");
             continue;
         }
         git::git(
             &[
                 "fetch",
                 &ws.to_string_lossy(),
-                &format!("+refs/heads/{branch}:refs/heads/{branch}"),
+                &format!("+refs/heads/{branch}:refs/heads/{dev}"),
             ],
             Some(&shared),
             false,
@@ -244,8 +245,8 @@ fn rebase_agents(base: &Path, base_branch: &str) -> Result<()> {
             false,
         )
         .ok();
-        git::update_agent_tip(&shared, &branch).ok();
-        println!("Rebased {branch} onto {base_branch}.");
+        git::update_agent_tip(&shared, &dev).ok();
+        println!("Rebased {dev} onto {base_branch}.");
     }
     Ok(())
 }
