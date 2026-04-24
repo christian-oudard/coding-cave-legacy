@@ -42,7 +42,7 @@ let
       sessionVarsFile = pkgs.writeText "cave-env.sh"
         (pkgs.lib.concatStringsSep "\n"
           (pkgs.lib.mapAttrsToList
-            (k: v: ''export ${k}="${toString v}"'')
+            (k: v: "export ${k}=${pkgs.lib.escapeShellArg (toString v)}")
             hmEval.config.home.sessionVariables));
 
     in
