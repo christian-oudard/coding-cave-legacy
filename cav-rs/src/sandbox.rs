@@ -10,7 +10,7 @@ use anyhow::{bail, Result};
 use rustix::process::Signal;
 use serde::Deserialize;
 
-use crate::config::{self, inside_cave, launch_home, parse_dev_branch, project_slug};
+use crate::config::{self, inside_cave, launch_home, parse_dev_branch, project_slug, shared_repo_path};
 use crate::constants::{self, CAVE_SHARED_REMOTE, HOST_SHARED_REMOTE};
 use crate::{daemon, git, registry, user_env, workspace};
 
@@ -1197,11 +1197,12 @@ impl Drop for DaemonGuard {
     }
 }
 
-/// Trivially clean = no uncommitted worktree changes anywhere AND every
-/// agent-N/* branch on every shared repo is at the same sha as its base.
-/// Absent agent branches count as clean (the agent never pushed anything).
-/// An absent worktree dir counts as clean for that slug (nothing to check);
-/// any salvageable work still lives on the shared agent branch.
+/// Trivially clean = no uncommitted worktree changes anywhere, no unpushed
+/// local commits or stash entries in the worktree clone, AND every agent-N/*
+/// branch on every shared repo is at the same sha as its base. Absent agent
+/// branches count as clean (the agent never pushed anything). An absent
+/// worktree dir counts as clean for that slug (nothing to check); any
+/// salvageable work still lives on the shared agent branch.
 pub fn is_trivially_clean(
     workspaces: &[(PathBuf, PathBuf, String)],
     agent_id: &str,
@@ -1215,6 +1216,43 @@ pub fn is_trivially_clean(
             } else {
                 // Worktree dir exists but git status failed: weird state, preserve.
                 return false;
+            }
+
+            // Stash entries are always salvageable work.
+            if git::git(
+                &["rev-parse", "--verify", "--quiet", "refs/stash"],
+                Some(ws),
+                false,
+                true,
+                false,
+            )
+            .is_ok()
+            {
+                return false;
+            }
+
+            // Every local branch must have all its commits reachable from a
+            // remote-tracking ref. Unpushed local commits = preserve.
+            let local_branches = git::git_output(
+                &["for-each-ref", "refs/heads/", "--format=%(refname:short)"],
+                Some(ws),
+            )
+            .unwrap_or_default();
+            for br in local_branches.lines() {
+                let count = git::git_output(
+                    &[
+                        "rev-list",
+                        "--count",
+                        &format!("refs/heads/{br}"),
+                        "--not",
+                        "--remotes",
+                    ],
+                    Some(ws),
+                )
+                .unwrap_or_else(|_| "1".to_string());
+                if count.trim() != "0" {
+                    return false;
+                }
             }
         }
 
@@ -1349,6 +1387,45 @@ pub fn reap_dead_agents() {
         let primary_slug = workspaces[0].2.clone();
         let Ok(Some(base_str)) = registry::project_path(&primary_slug) else { continue };
         teardown_agent(&PathBuf::from(base_str), &workspaces, &aid);
+    }
+}
+
+/// Drop shared dev branches whose tip already matches the base tip.
+/// Provably nothing to lose: if approve's last push got the base tip caught
+/// up but the dev-branch deletion didn't run, the branch is just noise. Safe
+/// to call from any command that fetches the shared remote first.
+pub fn reconcile_merged_dev_branches(base: &Path, verbose: bool) {
+    let Ok(remotes) = git::remote_branches(CAVE_SHARED_REMOTE, Some(base)) else {
+        return;
+    };
+    let shared = shared_repo_path(base);
+    let mut deleted_any = false;
+    for rb in remotes {
+        let Some((base_name, _)) = parse_dev_branch(&rb) else { continue };
+        let remote_dev = format!("{CAVE_SHARED_REMOTE}/{rb}");
+        let remote_base = format!("{CAVE_SHARED_REMOTE}/{base_name}");
+        let (Ok(d), Ok(b)) = (
+            git::git_output(&["rev-parse", &remote_dev], Some(base)),
+            git::git_output(&["rev-parse", &remote_base], Some(base)),
+        ) else {
+            continue;
+        };
+        if d != b {
+            continue;
+        }
+        git::git(&["branch", "-D", &rb], Some(&shared), false, true, false).ok();
+        git::git(&["branch", "-D", &rb], Some(base), false, true, false).ok();
+        deleted_any = true;
+    }
+    if deleted_any {
+        git::git(
+            &["fetch", "--prune", CAVE_SHARED_REMOTE],
+            Some(base),
+            false,
+            verbose,
+            verbose,
+        )
+        .ok();
     }
 }
 
@@ -1922,5 +1999,29 @@ mod tests {
         let f = Fixture::new("other-agent");
         f.push_agent_branch("2", "main", true);
         assert!(is_trivially_clean(&f.workspaces(), "1"));
+    }
+
+    #[test]
+    fn unpushed_local_commit_is_not_clean() {
+        // Worktree clone has a local agent branch with a commit that was
+        // never pushed to the shared bare repo: must preserve.
+        let f = Fixture::new("unpushed");
+        let dev = "agent-1/main";
+        git(&["checkout", "-B", dev, "main"], &f.ws);
+        fs::write(f.ws.join("local-only"), "x\n").unwrap();
+        git(&["add", "local-only"], &f.ws);
+        git(&["commit", "-m", "local only, never pushed"], &f.ws);
+        git(&["checkout", "main"], &f.ws);
+        assert!(!is_trivially_clean(&f.workspaces(), "1"));
+    }
+
+    #[test]
+    fn stash_in_worktree_is_not_clean() {
+        // Stash entries are salvageable work even with a clean worktree:
+        // must preserve.
+        let f = Fixture::new("stash");
+        fs::write(f.ws.join("file"), "modified\n").unwrap();
+        git(&["stash", "push", "-m", "wip"], &f.ws);
+        assert!(!is_trivially_clean(&f.workspaces(), "1"));
     }
 }

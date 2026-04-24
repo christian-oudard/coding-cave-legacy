@@ -62,6 +62,7 @@ pub fn show(base: &Path, agent_id: Option<&str>) -> Result<()> {
     if agent_id.is_none() {
         show_branch_sync_status(base);
         sandbox::reap_dead_agents();
+        sandbox::reconcile_merged_dev_branches(base, config::verbose() >= 1);
     }
 
     let slug = config::project_slug(base);
@@ -333,6 +334,7 @@ fn capture_status_output(base: &Path) -> Result<(f64, String)> {
         true,
         false,
     );
+    sandbox::reconcile_merged_dev_branches(base, config::verbose() >= 1);
 
     let slug = config::project_slug(base);
     let registered = registry::all_agent_ids(Some(&slug))?;

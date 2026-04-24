@@ -28,6 +28,7 @@ pub fn reject(base: &Path, agent_id: Option<&str>, yes: bool, commit: Option<&st
     )?;
 
     sandbox::reap_dead_agents();
+    sandbox::reconcile_merged_dev_branches(base, verbose);
 
     let remote_base = format!("{CAVE_SHARED_REMOTE}/{branch}");
     let tip_sha = git::git_output(&["rev-parse", &remote_base], Some(base))

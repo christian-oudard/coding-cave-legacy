@@ -460,6 +460,55 @@ fn reaper_removes_dead_trivially_clean_agent() {
 }
 
 #[test]
+fn reconciler_drops_dev_branch_matching_base_tip() {
+    // Simulates: a prior approve advanced the base tip but failed to delete
+    // the dev branch. The reconciler should drop any shared agent-N/* whose
+    // tip matches the corresponding base, since identical tips means there
+    // is no unique work to lose.
+    let p = Project::new("reconcile-merged");
+    git(
+        &["push", "cave", "main:refs/heads/agent-99/main"],
+        &p.dir,
+    );
+    git(&["fetch", "cave"], &p.dir);
+    assert!(
+        p.shared_has_ref("refs/heads/agent-99/main"),
+        "test setup: stale dev branch should exist"
+    );
+
+    let out = p.cav(&["status"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "status failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert!(
+        !p.shared_has_ref("refs/heads/agent-99/main"),
+        "reconciler should drop dev branch whose tip matches base"
+    );
+}
+
+#[test]
+fn reconciler_preserves_dev_branch_with_unique_commits() {
+    // Opposite check: a dev branch with commits ahead of base must not be
+    // dropped. Only matched-tip branches are safe to delete.
+    let p = Project::new("reconcile-unique");
+    p.register_agent("3");
+    p.push_agent_commits("3", "main", &[("a.txt", "A\n")]);
+    assert!(p.shared_has_ref("refs/heads/agent-3/main"));
+
+    let out = p.cav(&["status"]);
+    assert_eq!(out.status.code(), Some(0));
+
+    assert!(
+        p.shared_has_ref("refs/heads/agent-3/main"),
+        "dev branch ahead of base must survive reconciler"
+    );
+}
+
+#[test]
 fn reaper_preserves_agent_with_unapproved_work() {
     // Opposite of the above: an exited agent that did push commits must NOT
     // be reaped, because their shared branch is salvageable work that the
