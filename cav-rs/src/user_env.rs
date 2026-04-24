@@ -304,7 +304,7 @@ fn read_sibling_files() -> Vec<(String, String)> {
     files
 }
 
-pub fn build() -> Result<()> {
+pub fn build(force: bool) -> Result<()> {
     let cave_nix = cave_nix_path();
     let cave_nix_content = if cave_nix.exists() {
         std::fs::read_to_string(&cave_nix).ok()
@@ -313,7 +313,7 @@ pub fn build() -> Result<()> {
     };
     let sibling_files = read_sibling_files();
 
-    if !needs_build(cave_nix_content.as_deref(), &sibling_files) {
+    if !force && !needs_build(cave_nix_content.as_deref(), &sibling_files) {
         return Ok(());
     }
 

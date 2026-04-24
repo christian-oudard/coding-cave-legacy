@@ -153,7 +153,11 @@ enum Cmd {
 #[derive(Subcommand)]
 enum EnvCmd {
     /// Rebuild the cave environment from cave.nix
-    Build,
+    Build {
+        /// Rebuild even if environment is unchanged
+        #[arg(long)]
+        rebuild: bool,
+    },
     /// Update flake lock file (does not rebuild)
     Update {
         input_name: Option<String>,
@@ -343,7 +347,7 @@ fn run() -> Result<()> {
             cp::cp(srcs, dest, recursive, force)
         }
         Cmd::Env { cmd } => match cmd {
-            EnvCmd::Build => user_env::build(),
+            EnvCmd::Build { rebuild } => user_env::build(rebuild),
             EnvCmd::Update { input_name } => user_env::update(input_name.as_deref()),
             EnvCmd::Metadata => user_env::metadata(),
         },

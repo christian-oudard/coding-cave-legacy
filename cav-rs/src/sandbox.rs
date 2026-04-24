@@ -1160,7 +1160,7 @@ pub fn run_agent(
     }
 
     // Build user env
-    let _ = user_env::build();
+    let _ = user_env::build(false);
     let uenv = user_env_path();
 
     // Inside a nested cave, overlayfs is not supported. Use the inherited
