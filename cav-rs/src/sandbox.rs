@@ -222,6 +222,22 @@ fn build_bwrap_argv(
         }
     }
 
+    // Channel messaging: bind broker socket and expose env to the MCP server.
+    if let Some(sock) = env.get("CODING_CAVE_MSG_SOCK") {
+        if Path::new(sock).exists() {
+            args.extend([
+                "--bind".to_string(), sock.clone(), "/run/cave-channel.sock".to_string(),
+                "--setenv".to_string(), "CAVE_MSG_SOCK".to_string(),
+                "/run/cave-channel.sock".to_string(),
+            ]);
+            if let Some(aid) = env.get("CODING_CAVE_AGENT_ID") {
+                args.extend([
+                    "--setenv".to_string(), "CAVE_AGENT_ID".to_string(), aid.clone(),
+                ]);
+            }
+        }
+    }
+
     if let Some(dns) = env.get("CODING_CAVE_DNS_SERVER") {
         if let Ok(resolv) = write_resolv_conf(dns) {
             args.extend([
@@ -445,10 +461,17 @@ fn start_crinj() -> Result<Option<std::process::Child>> {
         let _ = std::fs::File::create(&rules);
     }
     let _ = std::fs::create_dir_all(config::data_dir());
+    // Redirect stderr to a log file; piping without a reader would wedge
+    // crinj once the 64 KB pipe buffer fills.
+    let log_path = config::data_dir().join("crinj.log");
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)?;
     let proc = Command::new("crinj")
         .args(["--port", &CRINJ_PORT.to_string(), "--allow-empty-rules"])
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::from(log_file))
         .spawn()?;
 
     let start = Instant::now();
@@ -474,6 +497,153 @@ fn which_exists(name: &str) -> bool {
         }
     }
     false
+}
+
+// -- Channel broker (inter-agent messaging) --
+
+fn broker_dir() -> PathBuf {
+    config::data_dir().join("channel")
+}
+
+fn broker_socket_path() -> PathBuf {
+    broker_dir().join("broker.sock")
+}
+
+fn broker_pid_file() -> PathBuf {
+    broker_dir().join("broker.pid")
+}
+
+fn broker_sessions_dir() -> PathBuf {
+    broker_dir().join("sessions")
+}
+
+fn broker_register_session() -> PathBuf {
+    let d = broker_sessions_dir();
+    let _ = std::fs::create_dir_all(&d);
+    if let Ok(entries) = std::fs::read_dir(&d) {
+        for entry in entries.flatten() {
+            if let Ok(raw) = entry.file_name().to_string_lossy().parse::<i32>() {
+                if !pid_alive(raw) {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
+    let f = d.join(std::process::id().to_string());
+    let _ = std::fs::File::create(&f);
+    f
+}
+
+fn broker_unregister_session(session: &Path) -> bool {
+    let _ = std::fs::remove_file(session);
+    let d = broker_sessions_dir();
+    d.read_dir().map(|mut e| e.next().is_none()).unwrap_or(true)
+}
+
+fn broker_alive() -> bool {
+    let pid_file = broker_pid_file();
+    let sock = broker_socket_path();
+    if !pid_file.exists() || !sock.exists() {
+        return false;
+    }
+    let Ok(text) = std::fs::read_to_string(&pid_file) else { return false };
+    let Ok(raw) = text.trim().parse::<i32>() else { return false };
+    pid_alive(raw)
+}
+
+fn start_broker() -> Result<Option<std::process::Child>> {
+    if broker_alive() {
+        return Ok(None);
+    }
+    let broker_bin = PathBuf::from(&constants::build().cav_bin).join("cav-broker");
+    if !broker_bin.exists() {
+        bail!("cav-broker not found at {}", broker_bin.display());
+    }
+    let sock = broker_socket_path();
+    let _ = std::fs::create_dir_all(sock.parent().unwrap());
+    let _ = std::fs::remove_file(&sock);
+
+    // Redirect stderr to a log file. Piping without a reader would wedge
+    // the broker once the 64 KB pipe buffer fills with log lines.
+    let log_path = broker_dir().join("broker.log");
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)?;
+    let proc = Command::new(&broker_bin)
+        .arg(&sock)
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(log_file))
+        .spawn()?;
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if sock.exists() {
+            break;
+        }
+        if Instant::now() > deadline {
+            bail!("broker failed to start within 5s");
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    let _ = std::fs::write(broker_pid_file(), proc.id().to_string());
+    Ok(Some(proc))
+}
+
+fn stop_broker() {
+    if let Ok(text) = std::fs::read_to_string(broker_pid_file()) {
+        if let Ok(raw) = text.trim().parse::<i32>() {
+            if let Some(pid) = rustix::process::Pid::from_raw(raw) {
+                let _ = rustix::process::kill_process(pid, Signal::Term);
+            }
+        }
+    }
+    let _ = std::fs::remove_file(broker_pid_file());
+}
+
+/// Write the cave-messages plugin marketplace into the persistent home.
+/// Claude Code discovers it via extraKnownMarketplaces in settings.json.
+fn setup_channel_marketplace(home: &Path) -> Result<()> {
+    let mp_dir = home.join(".cave-marketplace");
+    let mp_meta = mp_dir.join(".claude-plugin");
+    let pl_meta = mp_dir.join("cave-messages").join(".claude-plugin");
+    std::fs::create_dir_all(&pl_meta)?;
+    std::fs::create_dir_all(&mp_meta)?;
+
+    let marketplace = serde_json::json!({
+        "name": "cave",
+        "owner": {"name": "coding-cave"},
+        "plugins": [{
+            "name": "cave-messages",
+            "source": "./cave-messages",
+            "version": "0.1.0",
+            "description": "Inter-agent messaging via Unix socket broker",
+        }],
+    });
+    std::fs::write(
+        mp_meta.join("marketplace.json"),
+        serde_json::to_string_pretty(&marketplace)?,
+    )?;
+
+    let server_bin = PathBuf::from(&constants::build().cav_bin).join("cav-channel-server");
+    let plugin = serde_json::json!({
+        "name": "cave-messages",
+        "version": "0.1.0",
+        "description": "Inter-agent messaging channel",
+        "mcpServers": {
+            "cave-messages": {
+                "command": server_bin.to_string_lossy(),
+                "args": [],
+            },
+        },
+        "channels": [{"server": "cave-messages"}],
+    });
+    std::fs::write(
+        pl_meta.join("plugin.json"),
+        serde_json::to_string_pretty(&plugin)?,
+    )?;
+
+    Ok(())
 }
 
 fn apply_firewall(pid: u32, allowed_ports: &[u16]) -> Result<()> {
@@ -633,11 +803,17 @@ fn build_claude_cmd(
     session_id: Option<&str>,
     resuming: bool,
     prompt: Option<&str>,
+    channels: bool,
 ) -> Vec<String> {
     let mut cmd = vec![
         "claude".to_string(),
         "--dangerously-skip-permissions".to_string(),
     ];
+    // Channels only work in interactive mode. --print short-circuits
+    // MCP server startup, so skip the flag there.
+    if channels && prompt.is_none() {
+        cmd.extend(["--channels".to_string(), "plugin:cave-messages@cave".to_string()]);
+    }
     if let Some(sid) = session_id {
         if resuming {
             cmd.extend(["--resume".to_string(), sid.to_string()]);
@@ -651,7 +827,7 @@ fn build_claude_cmd(
     cmd
 }
 
-fn seed_claude_config(home: &Path, project_slug_str: &str) {
+fn seed_claude_config(home: &Path, project_slug_str: &str, comms: bool) {
     let claude_json = home.join(".claude.json");
     if !claude_json.exists() {
         let host = host_home().join(".claude.json");
@@ -663,7 +839,10 @@ fn seed_claude_config(home: &Path, project_slug_str: &str) {
     let cfg_text = std::fs::read_to_string(&claude_json).unwrap_or_default();
     let mut cfg: serde_json::Value =
         serde_json::from_str(&cfg_text).unwrap_or_else(|_| serde_json::json!({}));
-    let needs_update = cfg
+
+    let mut changed = false;
+
+    if let Some(proj) = cfg
         .as_object_mut()
         .and_then(|o| {
             o.entry("projects")
@@ -675,27 +854,43 @@ fn seed_claude_config(home: &Path, project_slug_str: &str) {
                 .or_insert(serde_json::json!({}))
                 .as_object_mut()
         })
-        .map(|proj| {
-            let already = proj
-                .get("hasTrustDialogAccepted")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            if !already {
-                proj.insert(
-                    "hasTrustDialogAccepted".to_string(),
-                    serde_json::json!(true),
-                );
-                proj.insert(
-                    "hasCompletedProjectOnboarding".to_string(),
-                    serde_json::json!(true),
-                );
-                true
-            } else {
-                false
+    {
+        let already = proj
+            .get("hasTrustDialogAccepted")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !already {
+            proj.insert("hasTrustDialogAccepted".to_string(), serde_json::json!(true));
+            proj.insert(
+                "hasCompletedProjectOnboarding".to_string(),
+                serde_json::json!(true),
+            );
+            changed = true;
+        }
+    }
+
+    // Channel feature gates: tengu_harbor enables the channel system;
+    // tengu_harbor_ledger is the per-plan allowlist. Only seed when comms
+    // is enabled so the feature stays dormant by default.
+    if comms {
+        if let Some(gates) = cfg.as_object_mut().and_then(|o| {
+            o.entry("cachedGrowthBookFeatures")
+                .or_insert(serde_json::json!({}))
+                .as_object_mut()
+        }) {
+            if gates.get("tengu_harbor").and_then(|v| v.as_bool()) != Some(true) {
+                gates.insert("tengu_harbor".to_string(), serde_json::json!(true));
+                changed = true;
             }
-        })
-        .unwrap_or(false);
-    if needs_update {
+            let ledger = serde_json::json!([{"plugin": "cave-messages", "marketplace": "cave"}]);
+            if gates.get("tengu_harbor_ledger") != Some(&ledger) {
+                gates.insert("tengu_harbor_ledger".to_string(), ledger);
+                changed = true;
+            }
+        }
+    }
+
+    if changed {
         if let Ok(json) = serde_json::to_string(&cfg) {
             let _ = std::fs::write(&claude_json, json);
         }
@@ -1008,6 +1203,7 @@ pub fn run_agent(
     resume_agent: Option<String>,
     extra_projects: Vec<String>,
     host_ports: Vec<u16>,
+    comms: bool,
     prompt: Option<String>,
 ) -> Result<()> {
     let cfg = load_sandbox_config()?;
@@ -1041,9 +1237,10 @@ pub fn run_agent(
 
     let agent_name = registry::display_name(&base, &agent_id);
 
-    // On resume, inherit extras/ports from last launch if user didn't supply any.
-    let (extra_projects, host_ports) = if resuming_launch {
-        let (saved_slugs, saved_ports) = registry::read_agent_launch_opts(&agent_id)?;
+    // On resume, inherit extras/ports/comms from last launch unless user overrode.
+    let (extra_projects, host_ports, comms) = if resuming_launch {
+        let (saved_slugs, saved_ports, saved_comms) =
+            registry::read_agent_launch_opts(&agent_id)?;
         let extras = if extra_projects.is_empty() && !saved_slugs.is_empty() {
             saved_slugs
                 .iter()
@@ -1053,17 +1250,17 @@ pub fn run_agent(
             extra_projects
         };
         let ports = if host_ports.is_empty() { saved_ports } else { host_ports };
-        (extras, ports)
+        let c = if comms { true } else { saved_comms };
+        (extras, ports, c)
     } else {
-        (extra_projects, host_ports)
+        (extra_projects, host_ports, comms)
     };
 
-    // Record effective launch opts so future -c/--resume rehydrates them.
     let extra_slugs: Vec<String> = extra_projects
         .iter()
         .map(|p| project_slug(&PathBuf::from(p)))
         .collect();
-    registry::save_agent_launch_opts(&agent_id, &extra_slugs, Some(&host_ports))?;
+    registry::save_agent_launch_opts(&agent_id, &extra_slugs, Some(&host_ports), comms)?;
 
     // Create isolated workspace clones for the agent
     let (ws, shared) = workspace::create(&base, &agent_id)?;
@@ -1079,7 +1276,7 @@ pub fn run_agent(
     let home = launch_home(&agent_name);
     std::fs::create_dir_all(&home)?;
     for (_, _, s) in &workspaces {
-        seed_claude_config(&home, s);
+        seed_claude_config(&home, s, comms);
     }
 
     install_git_wrapper(&home)?;
@@ -1295,7 +1492,38 @@ pub fn run_agent(
             .to_string(),
     );
 
-    let claude_cmd = build_claude_cmd(session_id.as_deref(), resuming, prompt.as_deref());
+    // Channel broker (inter-agent messaging). Gated by --comms.
+    let (broker_session, broker_proc, channels_enabled) = if comms {
+        let session = broker_register_session();
+        let proc = match start_broker() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("Warning: channel broker failed to start: {e}");
+                None
+            }
+        };
+        let enabled = broker_socket_path().exists();
+        if enabled {
+            env.insert(
+                "CODING_CAVE_MSG_SOCK".to_string(),
+                broker_socket_path().to_string_lossy().to_string(),
+            );
+            env.insert("CODING_CAVE_AGENT_ID".to_string(), agent_id.clone());
+            if let Err(e) = setup_channel_marketplace(&home) {
+                eprintln!("Warning: channel marketplace setup failed: {e}");
+            }
+        }
+        (Some(session), proc, enabled)
+    } else {
+        (None, None, false)
+    };
+
+    let claude_cmd = build_claude_cmd(
+        session_id.as_deref(),
+        resuming,
+        prompt.as_deref(),
+        channels_enabled,
+    );
     let daemon_port = daemon::agent_port(&agent_id);
 
     let (sync_r, sync_w) = rustix::pipe::pipe()?;
@@ -1398,6 +1626,14 @@ pub fn run_agent(
         crinj_signal(Signal::Term);
         if let Some(mut cp) = crinj_proc {
             let _ = cp.wait();
+        }
+    }
+    if let Some(session) = broker_session {
+        if broker_unregister_session(&session) {
+            stop_broker();
+            if let Some(mut bp) = broker_proc {
+                let _ = bp.wait();
+            }
         }
     }
     drop(guard);

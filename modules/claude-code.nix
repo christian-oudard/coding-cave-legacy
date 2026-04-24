@@ -17,12 +17,18 @@ let
   # Bundle settings merge in declaration order; user extraSettings on top.
   # Strip permissions.allow/deny: caves run --dangerously-skip-permissions,
   # so the host user's deny list would only block legitimate cave commands.
+  # Force CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="" so the privacy level
+  # is "default", which is the only level that lets the channel feature
+  # gate refresh. Telemetry is blocked at the proxy (crinj) layer.
   mergedSettings = let
     raw = lib.foldl' lib.recursiveUpdate { }
       ((map (b: b.settings or { }) resolvedBundles) ++ [ cfg.extraSettings ]);
     perms = raw.permissions or { };
+    env = raw.env or { };
   in raw // lib.optionalAttrs (raw ? permissions) {
     permissions = removeAttrs perms [ "allow" "deny" ];
+  } // {
+    env = env // { CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = ""; };
   };
 
   # Skills/commands attrsets are merged across bundles. Later bundles win

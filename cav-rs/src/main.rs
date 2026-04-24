@@ -64,6 +64,9 @@ enum Cmd {
         /// Expose a host TCP port inside the cave (repeatable)
         #[arg(long = "port", value_name = "PORT", action = clap::ArgAction::Append)]
         host_ports: Vec<u16>,
+        /// Enable inter-agent communication (send_message tool + channel events)
+        #[arg(long = "comms")]
+        comms: bool,
         /// Non-interactive mode: execute prompt, print response, exit
         #[arg(long)]
         prompt: Option<String>,
@@ -187,6 +190,7 @@ fn run() -> Result<()> {
         resume_agent: None,
         extra_projects: vec![],
         host_ports: vec![],
+        comms: false,
         prompt: None,
     }) {
         Cmd::Init { path, reinitialize } => {
@@ -197,6 +201,7 @@ fn run() -> Result<()> {
             resume_agent,
             extra_projects,
             host_ports,
+            comms,
             prompt,
         } => {
             let base = find_repo_root()?;
@@ -213,6 +218,7 @@ fn run() -> Result<()> {
                 resume_agent,
                 extras,
                 host_ports,
+                comms,
                 prompt,
             )
         }

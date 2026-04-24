@@ -216,6 +216,8 @@ let
     "--unsetenv" "CODING_CAVE_USER_CLAUDE_MD"
     "--unsetenv" "CODING_CAVE_PROXY_CA"
     "--unsetenv" "CODING_CAVE_PROJECT_SLUGS"
+    "--unsetenv" "CODING_CAVE_MSG_SOCK"
+    "--unsetenv" "CODING_CAVE_AGENT_ID"
 
     # Host network config. --ro-bind-try silently skips if the host
     # doesn't have the path (e.g. no systemd-resolved).

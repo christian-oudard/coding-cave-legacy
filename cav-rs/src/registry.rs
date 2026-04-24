@@ -50,6 +50,9 @@ fn open() -> Result<Connection> {
         if !cols.iter().any(|c| c == "host_ports") {
             db.execute_batch("ALTER TABLE agents ADD COLUMN host_ports TEXT;")?;
         }
+        if !cols.iter().any(|c| c == "comms") {
+            db.execute_batch("ALTER TABLE agents ADD COLUMN comms INTEGER;")?;
+        }
     }
     Ok(db)
 }
@@ -162,6 +165,7 @@ pub fn save_agent_launch_opts(
     agent_id: &str,
     extra_slugs: &[String],
     host_ports: Option<&[u16]>,
+    comms: bool,
 ) -> Result<()> {
     let db = open()?;
     let extra = if extra_slugs.is_empty() {
@@ -177,29 +181,31 @@ pub fn save_agent_launch_opts(
         }
     });
     db.execute(
-        "UPDATE agents SET extra_projects = ?1, host_ports = ?2 WHERE agent_id = ?3",
-        params![extra, ports, agent_id],
+        "UPDATE agents SET extra_projects = ?1, host_ports = ?2, comms = ?3 \
+         WHERE agent_id = ?4",
+        params![extra, ports, comms as i64, agent_id],
     )?;
     Ok(())
 }
 
-pub fn read_agent_launch_opts(agent_id: &str) -> Result<(Vec<String>, Vec<u16>)> {
+pub fn read_agent_launch_opts(agent_id: &str) -> Result<(Vec<String>, Vec<u16>, bool)> {
     let db = open()?;
     let row = db
         .query_row(
-            "SELECT extra_projects, host_ports FROM agents WHERE agent_id = ?1",
+            "SELECT extra_projects, host_ports, comms FROM agents WHERE agent_id = ?1",
             params![agent_id],
             |row| {
                 Ok((
                     row.get::<_, Option<String>>(0)?,
                     row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
                 ))
             },
         )
         .ok();
     match row {
-        None => Ok((vec![], vec![])),
-        Some((extra, ports)) => {
+        None => Ok((vec![], vec![], false)),
+        Some((extra, ports, comms)) => {
             let slugs = extra
                 .as_deref()
                 .and_then(|s| serde_json::from_str(s).ok())
@@ -208,7 +214,7 @@ pub fn read_agent_launch_opts(agent_id: &str) -> Result<(Vec<String>, Vec<u16>)>
                 .as_deref()
                 .and_then(|s| serde_json::from_str(s).ok())
                 .unwrap_or_default();
-            Ok((slugs, port_vec))
+            Ok((slugs, port_vec, comms.unwrap_or(0) != 0))
         }
     }
 }

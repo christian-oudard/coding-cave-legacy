@@ -33,6 +33,18 @@
         type = "command";
         command = "~/.claude/statusline.sh";
       };
+      # Register the cave marketplace (directory source) and enable the
+      # cave-messages channel plugin for inter-agent messaging. The
+      # marketplace files are written to ~/.cave-marketplace by sandbox.rs
+      # at launch time.
+      extraKnownMarketplaces.cave = {
+        source = {
+          source = "directory";
+          name = "cave";
+          path = "/home/cave-coder/.cave-marketplace";
+        };
+      };
+      enabledPlugins."cave-messages@cave" = true;
     };
     memoryFragments = [ ../defaults/system-claude.md ];
   };

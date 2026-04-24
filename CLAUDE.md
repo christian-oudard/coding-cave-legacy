@@ -18,7 +18,7 @@ Run unit + integration tests before committing changes to core modules.
 
 ## Build
 
-Nix-only. `nix build` produces the `cav` binary and all helper binaries (`cav-pre-receive`, `cav-post-receive`, `cav-handler`, `cav-supervisor`, `cav-git`, `cav-seccomp-gen`). Build-time values (version, sandbox config path, flake URLs) are emitted as a single JSON file at `$out/share/coding-cave/build.json`; the wrapper sets `CODING_CAVE_BUILD_CONFIG` to point at it. `cav-rs/src/constants.rs` loads the JSON at import time. Running without a full `nix build` leaves the env var unset. Most CLI commands work, but `cav version` and `cav agent` need a full `nix build`.
+Nix-only. `nix build` produces the `cav` binary and all helper binaries (`cav-pre-receive`, `cav-post-receive`, `cav-handler`, `cav-supervisor`, `cav-git`, `cav-seccomp-gen`, `cav-broker`, `cav-channel-server`). Build-time values (version, sandbox config path, flake URLs) are emitted as a single JSON file at `$out/share/coding-cave/build.json`; the wrapper sets `CODING_CAVE_BUILD_CONFIG` to point at it. `cav-rs/src/constants.rs` loads the JSON at import time. Running without a full `nix build` leaves the env var unset. Most CLI commands work, but `cav version` and `cav agent` need a full `nix build`.
 
 ## Layout
 

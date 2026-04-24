@@ -31,6 +31,14 @@ path = "src/bin/git_wrapper.rs"
 name = "cav-seccomp-gen"
 path = "src/bin/seccomp_gen.rs"
 
+[[bin]]
+name = "cav-broker"
+path = "src/bin/broker.rs"
+
+[[bin]]
+name = "cav-channel-server"
+path = "src/bin/channel_server.rs"
+
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }

@@ -51,6 +51,12 @@ pub fn start(agent_id: &str, shared_repos: &[(PathBuf, String)]) -> Result<Daemo
         .stdout;
     let git_exec_path = String::from_utf8_lossy(&git_exec_path).trim().to_string();
 
+    // Redirect stderr to a log file under base_dir; piping without a reader
+    // would wedge socat once the 64 KB buffer fills with per-connection logs.
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(base_dir.join("daemon.log"))?;
     let mut proc = Command::new(&socat_bin)
         .arg(format!("TCP-LISTEN:{port},fork,reuseaddr,bind=127.0.0.1"))
         .arg(format!("EXEC:{handler_bin}"))
@@ -58,7 +64,7 @@ pub fn start(agent_id: &str, shared_repos: &[(PathBuf, String)]) -> Result<Daemo
         .env("PATH", &git_exec_path)
         .env("CODING_CAVE_HANDLER_AGENT_ID", agent_id)
         .env("CODING_CAVE_HANDLER_BASE_PATH", base_dir.to_str().unwrap_or(""))
-        .stderr(Stdio::piped())
+        .stderr(Stdio::from(log_file))
         .process_group(0)
         .spawn()?;
 
