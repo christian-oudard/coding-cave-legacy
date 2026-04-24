@@ -1298,11 +1298,17 @@ pub fn run_agent(
     let supervisor_bin = constants::supervisor_path();
     let unshare_bin = find_bin("unshare")?;
 
+    // --pid isolates the supervisor and its helpers (slirp4netns, nsenter) from
+    // the host pid-ns as defence-in-depth; bwrap handles the agent's pid-ns
+    // separately via --unshare-pid. --fork is required so the exec'd target
+    // becomes PID 1 of the new namespace.
     let mut ns_cmd: Vec<String> = vec![
         unshare_bin,
         "--user".to_string(),
         "--net".to_string(),
         "--mount".to_string(),
+        "--pid".to_string(),
+        "--fork".to_string(),
         "--map-user=0".to_string(),
         "--map-group=0".to_string(),
         "--".to_string(),
