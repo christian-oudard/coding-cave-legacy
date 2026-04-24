@@ -628,8 +628,18 @@ pub fn lookup_approval_by_after(
     }))
 }
 
-pub fn delete_approval(approval_id: i64) -> Result<()> {
-    let db = open()?;
-    db.execute("DELETE FROM approvals WHERE id = ?1", params![approval_id])?;
+pub fn delete_approvals(approval_ids: &[i64]) -> Result<()> {
+    if approval_ids.is_empty() {
+        return Ok(());
+    }
+    let mut db = open()?;
+    let tx = db.transaction()?;
+    {
+        let mut stmt = tx.prepare("DELETE FROM approvals WHERE id = ?1")?;
+        for id in approval_ids {
+            stmt.execute(params![id])?;
+        }
+    }
+    tx.commit()?;
     Ok(())
 }

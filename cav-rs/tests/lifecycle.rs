@@ -358,3 +358,65 @@ fn approve_reject_approve_cycle() {
     assert!(!p.shared_has_ref("refs/heads/agent-1/main"));
     assert!(!p.host_has_local_branch("agent-1/main"));
 }
+
+// --- Partial approve then reject rolls back base and preserves agent branch ---
+
+#[test]
+fn reject_after_partial_approve_restores_state() {
+    let p = Project::new("partial-reject");
+    p.register_agent("1");
+    let tip = p.push_agent_commits(
+        "1",
+        "main",
+        &[("a.txt", "A\n"), ("b.txt", "B\n")],
+    );
+    let original_base = p.shared_sha("refs/heads/main");
+    let first = git_out(&["rev-parse", &format!("{tip}^")], &p.dir);
+
+    // Partial approve: base advances to first commit, agent branch survives at tip.
+    let out = p.cav(&["approve", "-y", "1", "--commit", &first]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "partial approve failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(p.shared_sha("refs/heads/main"), first);
+    assert_eq!(p.shared_sha("refs/heads/agent-1/main"), tip);
+
+    // Reject undoes the partial approval.
+    let out = p.cav(&["reject", "-y"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "reject after partial approve failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert_eq!(
+        p.shared_sha("refs/heads/main"),
+        original_base,
+        "base must roll back to pre-approval sha"
+    );
+    assert!(
+        p.shared_has_ref("refs/heads/agent-1/main"),
+        "agent branch must remain"
+    );
+    assert_eq!(
+        p.shared_sha("refs/heads/agent-1/main"),
+        tip,
+        "agent branch tip preserved at full dev tip"
+    );
+    assert!(
+        p.host_has_local_branch("agent-1/main"),
+        "local host agent branch must exist"
+    );
+
+    // Approval record must be gone: a second reject with no approvals should fail.
+    let out = p.cav(&["reject", "-y"]);
+    assert_ne!(
+        out.status.code(),
+        Some(0),
+        "second reject should fail since approval was deleted"
+    );
+}

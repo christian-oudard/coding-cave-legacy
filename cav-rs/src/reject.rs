@@ -175,11 +175,8 @@ pub fn reject(base: &Path, agent_id: Option<&str>, yes: bool, commit: Option<&st
         verbose,
     )?;
 
-    for approval in &approvals {
-        if let Some(id) = approval["id"].as_i64() {
-            registry::delete_approval(id)?;
-        }
-    }
+    let approval_ids: Vec<i64> = approvals.iter().filter_map(|a| a["id"].as_i64()).collect();
+    registry::delete_approvals(&approval_ids)?;
 
     if target_running {
         println!("\nRejected. {target_name} will pick up '{ab}' on its next pull.");
