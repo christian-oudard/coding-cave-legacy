@@ -8,6 +8,7 @@ use crate::constants::CAVE_SHARED_REMOTE;
 use crate::git;
 use crate::push;
 use crate::registry;
+use crate::sandbox;
 
 pub fn approve(
     base: &Path,
@@ -25,6 +26,12 @@ pub fn approve(
         verbose,
         verbose,
     )?;
+
+    // Reconcile leftovers from prior crashes or half-done commands:
+    // reap any trivially-clean dead agents, and drop shared dev branches
+    // whose tip already matches the base tip (provably nothing to lose).
+    sandbox::reap_dead_agents();
+    reconcile_merged_dev_branches(base, verbose);
 
     // Build flat list of (branch, base_name, agent_id) candidates,
     // filtering out branches that are already fully merged (no new commits).
@@ -400,4 +407,42 @@ fn do_approve(
         .ok();
     }
     Ok(())
+}
+
+/// Drop any `agent-<n>/<base>` shared ref whose tip matches its base tip.
+/// These are leftovers from a prior approve that advanced the base but
+/// failed to delete the dev branch. Safe because identical tips means no
+/// unique commits to lose. Runs on every approve so the system reconciles
+/// itself without a background sweep.
+fn reconcile_merged_dev_branches(base: &Path, verbose: bool) {
+    let Ok(remotes) = git::remote_branches(CAVE_SHARED_REMOTE, Some(base)) else {
+        return;
+    };
+    let shared = shared_repo_path(base);
+    let mut deleted_any = false;
+    for rb in remotes {
+        let Some((base_name, _)) = parse_dev_branch(&rb) else { continue };
+        let remote_dev = format!("{CAVE_SHARED_REMOTE}/{rb}");
+        let remote_base = format!("{CAVE_SHARED_REMOTE}/{base_name}");
+        let (Ok(d), Ok(b)) = (
+            git::git_output(&["rev-parse", &remote_dev], Some(base)),
+            git::git_output(&["rev-parse", &remote_base], Some(base)),
+        ) else { continue };
+        if d != b {
+            continue;
+        }
+        git::git(&["branch", "-D", &rb], Some(&shared), false, true, false).ok();
+        git::git(&["branch", "-D", &rb], Some(base), false, true, false).ok();
+        deleted_any = true;
+    }
+    if deleted_any {
+        git::git(
+            &["fetch", "--prune", CAVE_SHARED_REMOTE],
+            Some(base),
+            false,
+            verbose,
+            verbose,
+        )
+        .ok();
+    }
 }

@@ -1200,17 +1200,22 @@ impl Drop for DaemonGuard {
 /// Trivially clean = no uncommitted worktree changes anywhere AND every
 /// agent-N/* branch on every shared repo is at the same sha as its base.
 /// Absent agent branches count as clean (the agent never pushed anything).
+/// An absent worktree dir counts as clean for that slug (nothing to check);
+/// any salvageable work still lives on the shared agent branch.
 pub fn is_trivially_clean(
     workspaces: &[(PathBuf, PathBuf, String)],
     agent_id: &str,
 ) -> bool {
     for (ws, shared, _slug) in workspaces {
-        if let Ok(out) = git::git_output(&["status", "--porcelain"], Some(ws)) {
-            if !out.is_empty() {
+        if ws.exists() {
+            if let Ok(out) = git::git_output(&["status", "--porcelain"], Some(ws)) {
+                if !out.is_empty() {
+                    return false;
+                }
+            } else {
+                // Worktree dir exists but git status failed: weird state, preserve.
                 return false;
             }
-        } else {
-            return false;
         }
 
         let refs = git::git_output(
@@ -1297,6 +1302,54 @@ fn teardown_agent(
         }
     }
     registry::remove_agent(agent_id).ok();
+}
+
+/// Reconstruct an agent's workspace tuples from registry state. Used at
+/// command boundaries when reaping agents whose run_agent handler never got
+/// the chance to do teardown (SIGKILL, OOM, etc).
+fn resolve_workspaces_for(agent_id: &str) -> Vec<(PathBuf, PathBuf, String)> {
+    let slugs = registry::agent_all_slugs(agent_id).unwrap_or_default();
+    let mut out = Vec::new();
+    for slug in slugs {
+        let Ok(Some(hb_str)) = registry::project_path(&slug) else { continue };
+        let hb = PathBuf::from(hb_str);
+        let shared = config::shared_repo_path(&hb);
+        let wt = config::worktree_dir(&slug, agent_id);
+        out.push((wt, shared, slug));
+    }
+    out
+}
+
+/// Walk the registry, detect agents whose PID is dead (reaped by
+/// `is_agent_running`) and whose state is trivially clean, and tear them
+/// down. Exists so crashes / SIGKILLs eventually get the teardown that a
+/// clean exit would have done, without a background sweeper.
+pub fn reap_dead_agents() {
+    let Ok(ids) = registry::all_agent_ids(None) else { return };
+    let current = std::env::var("CODING_CAVE_AGENT_ID").ok();
+    for aid in ids {
+        if current.as_deref() == Some(&aid) {
+            continue;
+        }
+        if registry::is_agent_running(&aid).unwrap_or(false) {
+            continue;
+        }
+        // An agent with approvals is still a valid reject target: keep the
+        // registry row alive so reject can reassign work back to it.
+        if registry::agent_has_approvals(&aid).unwrap_or(false) {
+            continue;
+        }
+        let workspaces = resolve_workspaces_for(&aid);
+        if workspaces.is_empty() {
+            continue;
+        }
+        if !is_trivially_clean(&workspaces, &aid) {
+            continue;
+        }
+        let primary_slug = workspaces[0].2.clone();
+        let Ok(Some(base_str)) = registry::project_path(&primary_slug) else { continue };
+        teardown_agent(&PathBuf::from(base_str), &workspaces, &aid);
+    }
 }
 
 pub fn run_agent(

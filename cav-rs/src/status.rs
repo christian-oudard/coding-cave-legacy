@@ -7,6 +7,7 @@ use crate::config::{self, inside_cave, parse_dev_branch, resolve_base, worktree_
 use crate::constants::CAVE_SHARED_REMOTE;
 use crate::git;
 use crate::registry;
+use crate::sandbox;
 
 fn format_age(timestamp: f64) -> String {
     let now = SystemTime::now()
@@ -60,6 +61,7 @@ pub fn show(base: &Path, agent_id: Option<&str>) -> Result<()> {
 
     if agent_id.is_none() {
         show_branch_sync_status(base);
+        sandbox::reap_dead_agents();
     }
 
     let slug = config::project_slug(base);
@@ -254,6 +256,8 @@ fn print_agents(agents: &[AgentInfo], max_commits: Option<usize>) {
 }
 
 pub fn show_all(projects: Vec<(String, String)>) -> Result<()> {
+    sandbox::reap_dead_agents();
+
     let mut entries: Vec<(f64, String, String)> = vec![];
     let mut problems: Vec<(String, String)> = vec![];
 

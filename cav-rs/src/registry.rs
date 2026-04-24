@@ -628,6 +628,18 @@ pub fn lookup_approval_by_after(
     }))
 }
 
+pub fn agent_has_approvals(agent_id: &str) -> Result<bool> {
+    let db = open()?;
+    let n: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM approvals WHERE agent_id = ?1",
+            params![agent_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    Ok(n > 0)
+}
+
 pub fn delete_approvals(approval_ids: &[i64]) -> Result<()> {
     if approval_ids.is_empty() {
         return Ok(());

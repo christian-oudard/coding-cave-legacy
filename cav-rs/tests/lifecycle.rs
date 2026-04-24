@@ -150,6 +150,17 @@ impl Project {
             .unwrap();
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
+
+    fn agent_registered(&self, agent_id: &str) -> bool {
+        let db_path = self.data_dir.join("coding-cave.db");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.query_row(
+            "SELECT 1 FROM agents WHERE agent_id = ?1",
+            rusqlite::params![agent_id],
+            |_| Ok(()),
+        )
+        .is_ok()
+    }
 }
 
 impl Drop for Project {
@@ -418,5 +429,54 @@ fn reject_after_partial_approve_restores_state() {
         out.status.code(),
         Some(0),
         "second reject should fail since approval was deleted"
+    );
+}
+
+// --- Reaper handles crashes that skipped teardown ---
+
+#[test]
+fn reaper_removes_dead_trivially_clean_agent() {
+    // Simulates: agent launched, crashed (SIGKILL) before it ever pushed
+    // anything. The registry row was never cleaned up because run_agent's
+    // exit path didn't run. On the next `cav status`, the reaper should
+    // spot an exited agent with no branches / no approvals / no worktree
+    // and remove the stale row.
+    let p = Project::new("reaper-clean");
+    p.register_agent("7");
+    assert!(p.agent_registered("7"));
+
+    let out = p.cav(&["status"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "status failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert!(
+        !p.agent_registered("7"),
+        "trivially-clean exited agent should have been reaped"
+    );
+}
+
+#[test]
+fn reaper_preserves_agent_with_unapproved_work() {
+    // Opposite of the above: an exited agent that did push commits must NOT
+    // be reaped, because their shared branch is salvageable work that the
+    // user still needs to approve or reject.
+    let p = Project::new("reaper-preserve");
+    p.register_agent("7");
+    p.push_agent_commits("7", "main", &[("a.txt", "A\n")]);
+
+    let out = p.cav(&["status"]);
+    assert_eq!(out.status.code(), Some(0));
+
+    assert!(
+        p.agent_registered("7"),
+        "agent with unapproved commits must survive"
+    );
+    assert!(
+        p.shared_has_ref("refs/heads/agent-7/main"),
+        "shared agent branch must survive"
     );
 }

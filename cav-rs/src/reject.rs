@@ -7,6 +7,7 @@ use crate::config::{self, dev_branch, parse_dev_branch};
 use crate::constants::CAVE_SHARED_REMOTE;
 use crate::git;
 use crate::registry;
+use crate::sandbox;
 
 pub fn reject(base: &Path, agent_id: Option<&str>, yes: bool, commit: Option<&str>) -> Result<()> {
     let branch = git::current_branch(Some(base))?;
@@ -25,6 +26,8 @@ pub fn reject(base: &Path, agent_id: Option<&str>, yes: bool, commit: Option<&st
         verbose,
         verbose,
     )?;
+
+    sandbox::reap_dead_agents();
 
     let remote_base = format!("{CAVE_SHARED_REMOTE}/{branch}");
     let tip_sha = git::git_output(&["rev-parse", &remote_base], Some(base))
