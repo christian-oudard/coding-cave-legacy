@@ -1,6 +1,8 @@
+use std::io::Read;
 use std::net::TcpStream;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -27,12 +29,7 @@ pub fn start(agent_id: &str, shared_repos: &[(PathBuf, String)]) -> Result<Daemo
     let port = agent_port(agent_id);
     kill_stale_listener(port);
 
-    let base_dir = {
-        let prefix = format!("cav-daemon-{agent_id}-");
-        let dir = std::env::temp_dir().join(&prefix);
-        let dir = tempdir_with_prefix(&prefix)?;
-        dir
-    };
+    let base_dir = tempdir_with_prefix(&format!("cav-daemon-{agent_id}-"))?;
 
     for (repo_path, slug) in shared_repos {
         let link = base_dir.join(slug);
@@ -54,16 +51,20 @@ pub fn start(agent_id: &str, shared_repos: &[(PathBuf, String)]) -> Result<Daemo
         .stdout;
     let git_exec_path = String::from_utf8_lossy(&git_exec_path).trim().to_string();
 
-    let proc = Command::new(&socat_bin)
+    let mut proc = Command::new(&socat_bin)
         .arg(format!("TCP-LISTEN:{port},fork,reuseaddr,bind=127.0.0.1"))
         .arg(format!("EXEC:{handler_bin}"))
         .env_clear()
         .env("PATH", &git_exec_path)
         .env("CODING_CAVE_HANDLER_AGENT_ID", agent_id)
         .env("CODING_CAVE_HANDLER_BASE_PATH", base_dir.to_str().unwrap_or(""))
+        .stderr(Stdio::piped())
+        .process_group(0)
         .spawn()?;
 
-    if !wait_for_port(port, 5.0, None) {
+    if !wait_for_port(port, 5.0, Some(&mut proc)) {
+        let _ = proc.kill();
+        let _ = std::fs::remove_dir_all(&base_dir);
         bail!("Git daemon failed to start on port {port}");
     }
 
@@ -71,8 +72,33 @@ pub fn start(agent_id: &str, shared_repos: &[(PathBuf, String)]) -> Result<Daemo
 }
 
 pub fn stop(mut handle: DaemonHandle) {
-    let _ = handle.proc.kill();
-    let _ = handle.proc.wait();
+    // SIGTERM, wait up to 5s, SIGKILL fallback (matches legacy graceful shutdown).
+    if let Some(pid) = rustix::process::Pid::from_raw(handle.proc.id() as i32) {
+        let _ = rustix::process::kill_process(pid, rustix::process::Signal::Term);
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match handle.proc.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(50)),
+            _ => {
+                let _ = handle.proc.kill();
+                let _ = handle.proc.wait();
+                break;
+            }
+        }
+    }
+    // Surface unexpected socat failures to stderr so daemon crashes aren't silent.
+    let status_code = handle.proc.wait().ok().and_then(|s| s.code());
+    let abnormal = !matches!(status_code, None | Some(0) | Some(143));
+    if abnormal {
+        if let Some(mut err) = handle.proc.stderr.take() {
+            let mut buf = String::new();
+            if err.read_to_string(&mut buf).is_ok() && !buf.is_empty() {
+                eprint!("{buf}");
+            }
+        }
+    }
     let _ = std::fs::remove_dir_all(&handle.base_dir);
 }
 
@@ -170,9 +196,15 @@ fn kill_by_inode(inode: u64) {
     }
 }
 
-fn wait_for_port(port: u16, timeout_secs: f64, _proc: Option<&Child>) -> bool {
+fn wait_for_port(port: u16, timeout_secs: f64, proc: Option<&mut Child>) -> bool {
     let deadline = Instant::now() + Duration::from_secs_f64(timeout_secs);
+    let mut proc = proc;
     while Instant::now() < deadline {
+        if let Some(p) = proc.as_deref_mut() {
+            if matches!(p.try_wait(), Ok(Some(_))) {
+                return false;
+            }
+        }
         if TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
             return true;
         }

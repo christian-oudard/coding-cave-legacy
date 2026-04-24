@@ -42,9 +42,23 @@ fn check_ref(old_sha: &str, new_sha: &str, refname: &str, agent: Option<&str>) -
     let branch = &refname["refs/heads/".len()..];
 
     if branch.contains("HEAD") {
+        // Something creates agent-N/HEAD branches occasionally; log full
+        // context so the root cause can be tracked down when it recurs.
+        let env_dump: Vec<(String, String)> = std::env::vars()
+            .filter(|(k, _)| k.starts_with("CODING_CAVE_") || k.starts_with("GIT_"))
+            .collect();
+        eprintln!("HEAD-in-branch bug diagnostics:");
+        eprintln!("  ref:    {refname}");
+        eprintln!("  branch: {branch}");
+        eprintln!("  old:    {old_sha}");
+        eprintln!("  new:    {new_sha}");
+        eprintln!("  agent:  {}", agent.unwrap_or("<none>"));
+        for (k, v) in &env_dump {
+            eprintln!("  env[{k}]={v}");
+        }
         return Some(format!(
             "REJECTED: branch name '{branch}' contains 'HEAD'.\n\
-             This is a bug."
+             This is a bug. Diagnostics printed above."
         ));
     }
 

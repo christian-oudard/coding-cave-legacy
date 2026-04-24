@@ -1,10 +1,9 @@
 use std::io::{self, Write};
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
 
-use crate::config::{self, parse_dev_branch, persistent_home, worktree_dir};
+use crate::config::{self, persistent_home, worktree_dir};
 use crate::registry;
 
 pub fn cp(srcs: Vec<String>, dest: String, recursive: bool, force: bool) -> Result<()> {
@@ -97,6 +96,7 @@ pub fn cp(srcs: Vec<String>, dest: String, recursive: bool, force: bool) -> Resu
                 copy_tree_nofollow(&src_path, &base)?;
             } else {
                 copy_nofollow(&src_path, &base)?;
+                copy_stat(&src_path, &base);
             }
             eprintln!("  {src} -> {dest}");
         }
@@ -489,6 +489,7 @@ fn copy_nofollow(src: &Path, dst: &Path) -> Result<()> {
 
 fn copy_tree_nofollow(src: &Path, dst: &Path) -> Result<()> {
     std::fs::create_dir_all(dst)?;
+    copy_stat(src, dst);
     for entry in std::fs::read_dir(src)?.flatten() {
         let path = entry.path();
         if path.is_symlink() {
@@ -500,6 +501,7 @@ fn copy_tree_nofollow(src: &Path, dst: &Path) -> Result<()> {
             copy_tree_nofollow(&path, &dst_path)?;
         } else {
             copy_nofollow(&path, &dst_path)?;
+            copy_stat(&path, &dst_path);
         }
     }
     Ok(())

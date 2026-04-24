@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::io::Write;
-use std::os::fd::{AsFd, AsRawFd, IntoRawFd, OwnedFd, RawFd};
-use std::os::unix::process::CommandExt;
+use std::os::fd::{AsRawFd, IntoRawFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -11,8 +10,7 @@ use anyhow::{bail, Result};
 use rustix::process::Signal;
 use serde::Deserialize;
 
-use crate::config::{self, inside_cave, launch_home, parse_dev_branch, project_slug,
-                    shared_repo_path, worktree_dir};
+use crate::config::{self, inside_cave, launch_home, parse_dev_branch, project_slug};
 use crate::constants::{self, CAVE_SHARED_REMOTE, HOST_SHARED_REMOTE};
 use crate::{daemon, git, registry, user_env, workspace};
 
@@ -515,21 +513,41 @@ fn apply_firewall(pid: u32, allowed_ports: &[u16]) -> Result<()> {
 }
 
 fn start_slirp4netns(pid: u32) -> Result<std::process::Child> {
+    use std::os::unix::process::CommandExt;
     let slirp = find_bin("slirp4netns")?;
     let (ready_r, ready_w) = rustix::pipe::pipe()?;
-    let proc = Command::new(&slirp)
-        .args([
+    let ready_w_fd = ready_w.as_raw_fd();
+    let mut cmd = Command::new(&slirp);
+    cmd.args([
             "--configure",
-            &format!("--ready-fd={}", ready_w.as_raw_fd()),
+            &format!("--ready-fd={ready_w_fd}"),
             &pid.to_string(),
             "tap0",
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn()?;
+        .process_group(0);
+    // slirp4netns reads ready-fd from the child — keep it open across exec.
+    unsafe {
+        cmd.pre_exec(move || {
+            let flags = libc::fcntl(ready_w_fd, libc::F_GETFD);
+            if flags >= 0 {
+                libc::fcntl(ready_w_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
+            }
+            Ok(())
+        });
+    }
+    let mut proc = cmd.spawn()?;
     drop(ready_w);
     let mut buf = [0u8; 1];
-    let _ = rustix::io::read(&ready_r, &mut buf);
+    let n = rustix::io::read(&ready_r, &mut buf).unwrap_or(0);
+    if n == 0 {
+        let status = proc.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
+        bail!("slirp4netns exited with code {status} before signaling ready");
+    }
+    if let Ok(Some(status)) = proc.try_wait() {
+        bail!("slirp4netns exited with code {}", status.code().unwrap_or(-1));
+    }
     Ok(proc)
 }
 
@@ -998,11 +1016,18 @@ pub fn run_agent(
         let rc = registry::resolve_continue(&base, None)?;
         (rc.agent_id, Some(rc.session_id), rc.resuming)
     } else if let Some(ref spec) = resume_agent {
-        // Parse agent ID from spec like "@3", "project@3", or "3"
-        let aid = spec
+        // Spec accepts agent id ("3", "@3", "project@3") or a session uuid.
+        let parsed = spec
             .rfind('@')
             .map(|i| spec[i + 1..].to_string())
             .unwrap_or_else(|| spec.trim_start_matches('@').to_string());
+        let aid = if config::is_agent_id(&parsed) {
+            parsed
+        } else if let Some(aid) = registry::find_agent_by_session(&parsed)? {
+            aid
+        } else {
+            bail!("No agent matches '{spec}'. Use an agent id or session id.");
+        };
         let rc = registry::resolve_continue(&base, Some(&aid))?;
         (rc.agent_id, Some(rc.session_id), rc.resuming)
     } else {
