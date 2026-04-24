@@ -3,7 +3,7 @@ use std::path::Path;
 
 use anyhow::{bail, Result};
 
-use crate::config::{self, parse_dev_branch, resolve_base};
+use crate::config::{self, parse_dev_branch, resolve_base, shared_repo_path};
 use crate::constants::CAVE_SHARED_REMOTE;
 use crate::git;
 use crate::push;
@@ -368,9 +368,22 @@ fn do_approve(
     }
 
     if !partial {
+        // Delete local copy in the user's working repo.
         git::git(
             &["branch", "-D", branch],
             Some(project_base),
+            false,
+            true,
+            false,
+        )
+        .ok();
+        // Delete from the shared bare repo so the branch doesn't linger as a
+        // phantom (no pending commits, invisible in status, confusing in review).
+        // The agent's next push recreates it automatically.
+        let shared = shared_repo_path(project_base);
+        git::git(
+            &["branch", "-D", branch],
+            Some(&shared),
             false,
             true,
             false,

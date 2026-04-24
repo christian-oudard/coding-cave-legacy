@@ -48,6 +48,25 @@ fn git(args: &[&str], dir: &Path) {
         .unwrap_or_else(|_| panic!("git {:?} failed", args));
 }
 
+fn git_out(args: &[&str], dir: &Path) -> String {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap_or_else(|_| panic!("git {:?} failed", args));
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+fn agent_push(args: &[&str], dir: &Path, agent_id: &str) {
+    Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .env("CODING_CAVE_AGENT_ID", agent_id)
+        .env("CODING_CAVE_AGENT_NAME", format!("coding-cave@{agent_id}"))
+        .output()
+        .unwrap_or_else(|_| panic!("agent git {:?} failed", args));
+}
+
 fn stderr(o: &Output) -> String {
     String::from_utf8_lossy(&o.stderr).to_string()
 }
@@ -217,4 +236,60 @@ fn version_prints_something() {
     // Version output either goes to stdout or stderr; just check it ran
     let combined = format!("{}{}", stdout(&out), stderr(&out));
     assert!(!combined.is_empty(), "version produced no output");
+}
+
+// --- approve: partial-then-full branch cleanup ---
+
+#[test]
+fn partial_approve_on_last_commit_deletes_dev_branch() {
+    // Regression: a partial approve whose commit target equals dev_tip must
+    // be treated as a full approve (partial=false) and delete the dev branch.
+    let repo = TestRepo::new("partial-full-approve");
+    repo.cav(&["init", repo.dir.to_str().unwrap()]);
+
+    let shared = repo.dir.join(".coding-cave").join("cave-shared.git");
+
+    // Push the base branch to the shared remote (simulates normal user push).
+    git(&["push", "cave", "main"], &repo.dir);
+
+    // Make two agent commits and push them as agent-1/main.
+    fs::write(repo.dir.join("a.txt"), "a\n").unwrap();
+    git(&["add", "a.txt"], &repo.dir);
+    git(&["commit", "-m", "commit-A"], &repo.dir);
+    let sha_a = git_out(&["rev-parse", "HEAD"], &repo.dir);
+
+    fs::write(repo.dir.join("b.txt"), "b\n").unwrap();
+    git(&["add", "b.txt"], &repo.dir);
+    git(&["commit", "-m", "commit-B"], &repo.dir);
+    let sha_b = git_out(&["rev-parse", "HEAD"], &repo.dir);
+
+    // Reset user's main back to before the agent commits so they're pending.
+    git(&["reset", "--hard", "HEAD~2"], &repo.dir);
+    git(&["push", "cave", "main"], &repo.dir);
+
+    // Push the two commits as an agent branch.
+    agent_push(
+        &["push", "cave", &format!("{sha_b}:refs/heads/agent-1/main")],
+        &repo.dir,
+        "1",
+    );
+
+    // Partial approve: approve only commit A.
+    let out = repo.cav(&["approve", "1", "--yes", &sha_a]);
+    assert_eq!(out.status.code(), Some(0), "partial approve failed: {}", stderr(&out));
+
+    // Dev branch should still exist (B is still pending).
+    let branches = git_out(&["branch", "--list", "agent-1/main"], &shared);
+    assert!(!branches.is_empty(), "dev branch should still exist after partial approve");
+
+    // Approve the last commit (B = dev tip). This should be a full approve.
+    let out = repo.cav(&["approve", "1", "--yes", &sha_b]);
+    assert_eq!(out.status.code(), Some(0), "final approve failed: {}", stderr(&out));
+
+    // Dev branch must be gone from the shared repo.
+    let branches = git_out(&["branch", "--list", "agent-1/main"], &shared);
+    assert!(
+        branches.is_empty(),
+        "dev branch should be deleted after approving the last commit, got: {branches}"
+    );
 }

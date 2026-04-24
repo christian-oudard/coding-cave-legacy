@@ -80,14 +80,23 @@ fn find_agent_base(base: &Path, agent_id: &str) -> Result<String> {
         verbose,
     )?;
     let branches = git::remote_branches(CAVE_SHARED_REMOTE, Some(base))?;
-    for b in branches {
-        if let Some((ob, aid)) = parse_dev_branch(&b) {
-            if aid == agent_id {
-                return Ok(ob);
-            }
+    let matches: Vec<String> = branches
+        .into_iter()
+        .filter(|b| parse_dev_branch(b).is_some_and(|(_, aid)| aid == agent_id))
+        .collect();
+    match matches.len() {
+        0 => bail!("No dev branch found for agent {agent_id}."),
+        1 => Ok(parse_dev_branch(&matches[0]).unwrap().0),
+        _ => {
+            let list = matches.join(", ");
+            bail!(
+                "Agent {agent_id} has multiple dev branches: {list}\n\
+                 Check out the branch to retarget first:\n\
+                 \n  git checkout {}",
+                &matches[0]
+            )
         }
     }
-    bail!("No dev branch found for agent {agent_id}.")
 }
 
 fn ensure_base_exists(base: &Path, name: &str, old_base: &str, remote: &str) -> Result<()> {
