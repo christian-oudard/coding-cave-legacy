@@ -31,7 +31,7 @@ pub fn approve(
     let mut candidates: Vec<(String, String, String)> = vec![];
     for rb in git::remote_branches(CAVE_SHARED_REMOTE, Some(base))? {
         if let Some((_, aid)) = parse_dev_branch(&rb) {
-            if agent_id.map_or(false, |a| a != aid) {
+            if agent_id.is_some_and(|a| a != aid) {
                 continue;
             }
             let base_name = resolve_base(rb.clone());
@@ -166,10 +166,7 @@ pub fn approve(
         print!("\nApprove? [Y/n] ");
         io::stdout().flush()?;
         let mut answer = String::new();
-        match io::stdin().read_line(&mut answer) {
-            Err(_) => bail!("\nAborted."),
-            Ok(_) => {}
-        }
+        if io::stdin().read_line(&mut answer).is_err() { bail!("\nAborted.") }
         let answer = answer.trim().to_lowercase();
         if answer == "n" || answer == "no" {
             bail!("Aborted.");

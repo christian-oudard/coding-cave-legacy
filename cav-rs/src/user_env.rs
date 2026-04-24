@@ -91,7 +91,7 @@ fn to_nix(value: &serde_json::Value) -> String {
 
 fn extract_user_inputs(cave_nix_dest: &Path) -> serde_json::Value {
     let r = Command::new("nix")
-        .args(&[
+        .args([
             "eval",
             "--json",
             "--impure",
@@ -187,7 +187,7 @@ fn copy_sibling_nix_files(
             continue;
         }
         let path = entry.path();
-        if path.is_file() && path.extension().map_or(false, |e| e == "nix") {
+        if path.is_file() && path.extension().is_some_and(|e| e == "nix") {
             let name = entry.file_name().to_string_lossy().to_string();
             let content = std::fs::read_to_string(&path)?;
             std::fs::write(user_env.join(&name), &content)?;
@@ -205,7 +205,7 @@ fn clean_stale_sibling_files(user_env: &Path, current_names: &[String]) -> Resul
         .collect();
     for entry in std::fs::read_dir(user_env)?.flatten() {
         let path = entry.path();
-        if path.is_file() && path.extension().map_or(false, |e| e == "nix") {
+        if path.is_file() && path.extension().is_some_and(|e| e == "nix") {
             let name = entry.file_name().to_string_lossy().to_string();
             if !keep.contains(name.as_str()) {
                 std::fs::remove_file(&path).ok();
@@ -244,7 +244,7 @@ fn prepare() -> Result<(Option<String>, Vec<(String, String)>)> {
 fn do_build(user_env: &Path) -> Option<PathBuf> {
     let _ = std::fs::remove_dir_all("/homeless-shelter");
     let result = Command::new("nix")
-        .args(&["build", "--no-link", "--print-out-paths"])
+        .args(["build", "--no-link", "--print-out-paths"])
         .current_dir(user_env)
         .output();
     match result {
@@ -290,7 +290,7 @@ fn read_sibling_files() -> Vec<(String, String)> {
                 continue;
             }
             let path = entry.path();
-            if path.is_file() && path.extension().map_or(false, |e| e == "nix") {
+            if path.is_file() && path.extension().is_some_and(|e| e == "nix") {
                 if let Ok(content) = std::fs::read_to_string(&path) {
                     files.push((entry.file_name().to_string_lossy().to_string(), content));
                 }
@@ -314,7 +314,7 @@ pub fn build() -> Result<()> {
     }
 
     let (content, siblings) = prepare()?;
-    if let Some(_) = do_build(&user_env_dir()) {
+    if do_build(&user_env_dir()).is_some() {
         let hash = compute_hash(content.as_deref(), &siblings);
         std::fs::write(hash_file(), hash)?;
     }
@@ -325,7 +325,7 @@ pub fn update(input_name: Option<&str>) -> Result<()> {
     prepare()?;
     let user_env = user_env_dir();
     let mut cmd = Command::new("nix");
-    cmd.args(&["flake", "update"]).current_dir(&user_env);
+    cmd.args(["flake", "update"]).current_dir(&user_env);
     if let Some(name) = input_name {
         cmd.arg(name);
     }
@@ -340,8 +340,8 @@ pub fn update(input_name: Option<&str>) -> Result<()> {
 pub fn metadata() -> Result<()> {
     prepare()?;
     Command::new("nix")
-        .args(&["flake", "metadata"])
-        .current_dir(&user_env_dir())
+        .args(["flake", "metadata"])
+        .current_dir(user_env_dir())
         .status()?;
     Ok(())
 }

@@ -6,7 +6,6 @@ use crate::config::{self, inside_cave, parse_dev_branch, resolve_base, self_agen
 use crate::constants::{CAVE_SHARED_REMOTE, HOST_SHARED_REMOTE};
 use crate::git;
 use crate::registry;
-use crate::workspace;
 
 pub fn push(base: &Path, force: bool) -> Result<()> {
     let branch = git::current_branch(Some(base))?;

@@ -63,7 +63,7 @@ fn main() {
         Err(_) => exit(1),
     };
 
-    if pkt_len < 4 || pkt_len > MAX_PKT_LEN {
+    if !(4..=MAX_PKT_LEN).contains(&pkt_len) {
         exit(1);
     }
 

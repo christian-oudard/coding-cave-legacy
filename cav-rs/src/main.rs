@@ -1,5 +1,3 @@
-#![allow(dead_code, unused_imports, unused_variables)]
-
 mod config;
 mod constants;
 mod git;
@@ -22,7 +20,7 @@ mod supervisor;
 mod user_env;
 mod workspace;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process;
 
 use anyhow::{bail, Result};
@@ -428,7 +426,7 @@ fn preprocess_args(raw: Vec<String>) -> Vec<String> {
 }
 
 fn parse_agent_id(s: &str) -> String {
-    s.trim_start_matches('@').split('@').last().unwrap_or(s).to_string()
+    s.trim_start_matches('@').split('@').next_back().unwrap_or(s).to_string()
 }
 
 fn split_commit_arg(args: &[String]) -> (Vec<String>, Option<String>) {
@@ -455,7 +453,7 @@ fn find_repo_root() -> Result<PathBuf> {
         .map_err(|_| anyhow::anyhow!("Not a git repository. Run: cav init"))
 }
 
-fn require_init(base: &PathBuf) -> Result<()> {
+fn require_init(base: &Path) -> Result<()> {
     if !shared_repo_path(base).exists() {
         bail!("Coding Cave not initialized. Run: cav init");
     }
@@ -488,13 +486,13 @@ pub fn resolve_target(
     for arg in args {
         let candidate = parse_agent_id(arg);
         if config::is_agent_id(&candidate) {
-            if agent_id.is_some() {
-                bail!("Multiple agent IDs given: {}, {candidate}", agent_id.unwrap());
+            if let Some(prev) = &agent_id {
+                bail!("Multiple agent IDs given: {prev}, {candidate}");
             }
             agent_id = Some(candidate);
         } else {
-            if project_slug.is_some() {
-                bail!("Multiple projects given: {}, {arg}", project_slug.unwrap());
+            if let Some(prev) = &project_slug {
+                bail!("Multiple projects given: {prev}, {arg}");
             }
             project_slug = Some(arg.clone());
         }
@@ -568,12 +566,12 @@ fn unix_to_ymdhm(secs: u64) -> (u64, u64, u64, u64, u64) {
     let mut days = secs / 86400;
     let mut y = 1970u64;
     loop {
-        let dy = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) { 366 } else { 365 };
+        let dy = if y.is_multiple_of(4) && (!y.is_multiple_of(100) || y.is_multiple_of(400)) { 366 } else { 365 };
         if days < dy { break; }
         days -= dy;
         y += 1;
     }
-    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let leap = y.is_multiple_of(4) && (!y.is_multiple_of(100) || y.is_multiple_of(400));
     let mdays = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
     let mut mo = 1u64;
     for dm in &mdays {

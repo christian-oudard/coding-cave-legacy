@@ -29,11 +29,10 @@ fn get_agent() -> Option<String> {
 
 fn check_ref(old_sha: &str, new_sha: &str, refname: &str, agent: Option<&str>) -> Option<String> {
     if !refname.starts_with("refs/heads/") {
-        if agent.is_some() {
+        if let Some(aid) = agent {
             return Some(format!(
-                "REJECTED: Agent {} cannot push to '{refname}'.\n\
-                 Agents may only push to branch refs.",
-                agent.unwrap()
+                "REJECTED: Agent {aid} cannot push to '{refname}'.\n\
+                 Agents may only push to branch refs."
             ));
         }
         return None;
@@ -62,9 +61,7 @@ fn check_ref(old_sha: &str, new_sha: &str, refname: &str, agent: Option<&str>) -
         ));
     }
 
-    if agent.is_none() {
-        return None;
-    }
+    agent?;
     let agent = agent.unwrap();
 
     // Check if it's an agent branch: agent-<n>/<base>
@@ -98,6 +95,38 @@ fn check_ref(old_sha: &str, new_sha: &str, refname: &str, agent: Option<&str>) -
         "REJECTED: Agent {agent} cannot push to base branch '{branch}'.\n\
          Work stays on your dev branch until the user approves it."
     ))
+}
+
+fn main() {
+    let agent = get_agent();
+    let stdin = io::stdin();
+    let mut errors = vec![];
+
+    for line in stdin.lock().lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => break,
+        };
+        let line = line.trim().to_string();
+        if line.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = line.splitn(3, ' ').collect();
+        if parts.len() != 3 {
+            continue;
+        }
+        let (old_sha, new_sha, refname) = (parts[0], parts[1], parts[2]);
+        if let Some(err) = check_ref(old_sha, new_sha, refname, agent.as_deref()) {
+            errors.push(err);
+        }
+    }
+
+    if !errors.is_empty() {
+        for err in &errors {
+            eprintln!("{err}");
+        }
+        exit(1);
+    }
 }
 
 #[cfg(test)]
@@ -266,37 +295,5 @@ mod tests {
                 .filter(|s| !s.is_empty());
             assert!(agent.is_none());
         }
-    }
-}
-
-fn main() {
-    let agent = get_agent();
-    let stdin = io::stdin();
-    let mut errors = vec![];
-
-    for line in stdin.lock().lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => break,
-        };
-        let line = line.trim().to_string();
-        if line.is_empty() {
-            continue;
-        }
-        let parts: Vec<&str> = line.splitn(3, ' ').collect();
-        if parts.len() != 3 {
-            continue;
-        }
-        let (old_sha, new_sha, refname) = (parts[0], parts[1], parts[2]);
-        if let Some(err) = check_ref(old_sha, new_sha, refname, agent.as_deref()) {
-            errors.push(err);
-        }
-    }
-
-    if !errors.is_empty() {
-        for err in &errors {
-            eprintln!("{err}");
-        }
-        exit(1);
     }
 }

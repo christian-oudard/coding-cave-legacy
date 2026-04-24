@@ -1,14 +1,14 @@
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{bail, Result};
 
 /// Run a git command. Echoes to stderr when `echo` is true.
 /// Returns stdout as a string if `capture` is true, otherwise empty string.
 pub fn git(
     args: &[&str],
     cwd: Option<&Path>,
-    check: bool,
+    _check: bool,
     capture: bool,
     echo: bool,
 ) -> Result<String> {
@@ -225,14 +225,3 @@ pub fn commit_oneline(
     Ok(out.lines().map(str::to_string).collect())
 }
 
-/// Check if `has_merge_base` returns true and there are undelivered commits.
-pub fn cherry_undelivered_has_merge_base(
-    base_ref: &str,
-    remote_dev: &str,
-    cwd: Option<&Path>,
-) -> Option<Vec<String>> {
-    if !has_merge_base(remote_dev, base_ref, cwd) {
-        return None;
-    }
-    cherry_undelivered(base_ref, remote_dev, cwd).ok()
-}

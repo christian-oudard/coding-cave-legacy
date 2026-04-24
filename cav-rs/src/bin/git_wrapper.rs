@@ -124,36 +124,36 @@ fn sync(real_git: &str, args: Vec<String>) {
 
     // Forward motion: fetch + rebase
     if let Some(ref sb) = sha_before {
-        if is_ancestor(real_git, sb, &sha_after, cwd_ref) {
-            if !rebase_in_progress(real_git, cwd_ref) {
-                let mut fetch_cmd = Command::new(real_git);
-                fetch_cmd.arg("fetch").arg("host-cave");
-                if let Some(d) = cwd_ref {
-                    fetch_cmd.current_dir(d);
-                }
-                let _ = fetch_cmd.output();
-
-                let remote_ref = format!("host-cave/{branch}");
-                if git_out(real_git, &["rev-parse", &remote_ref], cwd_ref).is_some() {
-                    let mut rebase_cmd = Command::new(real_git);
-                    rebase_cmd.arg("rebase").arg(&remote_ref);
-                    if let Some(d) = cwd_ref {
-                        rebase_cmd.current_dir(d);
-                    }
-                    if !rebase_cmd.status().map(|s| s.success()).unwrap_or(false) {
-                        let mut abort = Command::new(real_git);
-                        abort.args(["rebase", "--abort"]);
-                        if let Some(d) = cwd_ref {
-                            abort.current_dir(d);
-                        }
-                        let _ = abort.output();
-                        eprintln!("WARNING: rebase onto host-cave/{branch} failed (conflicts).");
-                    }
-                }
-                // Re-read tip after rebase
-                let (_, new_sha) = branch_tip(real_git, cwd_ref);
-                let _ = new_sha; // we'll use push with sha_after below
+        if is_ancestor(real_git, sb, &sha_after, cwd_ref)
+            && !rebase_in_progress(real_git, cwd_ref)
+        {
+            let mut fetch_cmd = Command::new(real_git);
+            fetch_cmd.arg("fetch").arg("host-cave");
+            if let Some(d) = cwd_ref {
+                fetch_cmd.current_dir(d);
             }
+            let _ = fetch_cmd.output();
+
+            let remote_ref = format!("host-cave/{branch}");
+            if git_out(real_git, &["rev-parse", &remote_ref], cwd_ref).is_some() {
+                let mut rebase_cmd = Command::new(real_git);
+                rebase_cmd.arg("rebase").arg(&remote_ref);
+                if let Some(d) = cwd_ref {
+                    rebase_cmd.current_dir(d);
+                }
+                if !rebase_cmd.status().map(|s| s.success()).unwrap_or(false) {
+                    let mut abort = Command::new(real_git);
+                    abort.args(["rebase", "--abort"]);
+                    if let Some(d) = cwd_ref {
+                        abort.current_dir(d);
+                    }
+                    let _ = abort.output();
+                    eprintln!("WARNING: rebase onto host-cave/{branch} failed (conflicts).");
+                }
+            }
+            // Re-read tip after rebase
+            let (_, new_sha) = branch_tip(real_git, cwd_ref);
+            let _ = new_sha; // we'll use push with sha_after below
         }
     }
 

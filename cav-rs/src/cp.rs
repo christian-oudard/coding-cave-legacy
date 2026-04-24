@@ -214,24 +214,30 @@ fn worktree_for_slug(slug: &str, agent_id: Option<&str>) -> Result<(PathBuf, Str
             .to_string();
         return Ok((candidates[0].clone(), aid));
     }
-    // Multiple: prompt
-    eprintln!("Multiple agents for '{slug}':");
     let aids: Vec<String> = candidates
         .iter()
         .map(|p| p.file_name().unwrap_or_default().to_string_lossy().to_string())
         .collect();
-    for (i, aid) in aids.iter().enumerate() {
+    let chosen = pick_agent_prompt(slug, &aids)?;
+    let idx = aids.iter().position(|a| a == &chosen).unwrap();
+    Ok((candidates[idx].clone(), chosen))
+}
+
+fn pick_agent_prompt(slug: &str, agent_ids: &[String]) -> Result<String> {
+    eprintln!("Multiple agents for '{slug}':");
+    for aid in agent_ids {
         let state = if registry::is_agent_running(aid).unwrap_or(false) { "running" } else { "exited" };
-        eprintln!("  {}) {slug}@{aid}  [{state}]", i + 1);
+        eprintln!("  {aid}) {slug}@{aid}  [{state}]");
     }
-    print!("Agent: ");
-    io::stdout().flush()?;
+    eprint!("Agent: ");
+    io::stderr().flush()?;
     let mut choice = String::new();
     io::stdin().read_line(&mut choice)?;
-    let choice = choice.trim();
-    let idx = aids.iter().position(|a| a == choice)
-        .ok_or_else(|| anyhow::anyhow!("Invalid choice."))?;
-    Ok((candidates[idx].clone(), aids[idx].clone()))
+    let choice = choice.trim().to_string();
+    if !agent_ids.iter().any(|a| a == &choice) {
+        bail!("Invalid choice.");
+    }
+    Ok(choice)
 }
 
 fn cave_root_for_slug(slug: &str, agent_id: Option<&str>) -> Result<(PathBuf, String)> {
@@ -260,7 +266,7 @@ fn cave_root_for_slug(slug: &str, agent_id: Option<&str>) -> Result<(PathBuf, St
     } else if candidates.len() == 1 {
         candidates[0].clone()
     } else {
-        candidates[0].clone() // pick lowest; user can disambiguate with @N
+        pick_agent_prompt(slug, &candidates)?
     };
 
     let pid = registry::cave_pid(&chosen)?.unwrap();

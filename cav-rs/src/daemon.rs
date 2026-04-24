@@ -17,7 +17,7 @@ pub struct DaemonHandle {
 
 pub fn agent_port(agent_id: &str) -> u16 {
     let n: u16 = agent_id.parse().unwrap_or(0);
-    DAEMON_BASE_PORT as u16 + n
+    DAEMON_BASE_PORT + n
 }
 
 pub fn remote_url(agent_id: &str, slug: &str, host: &str) -> String {

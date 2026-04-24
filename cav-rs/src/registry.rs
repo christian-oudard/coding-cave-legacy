@@ -494,7 +494,7 @@ pub fn all_agent_ids(project: Option<&str>) -> Result<Vec<String>> {
                     || extras
                         .as_deref()
                         .and_then(|e| serde_json::from_str::<Vec<String>>(e).ok())
-                        .map_or(false, |v| v.iter().any(|s| s == proj))
+                        .is_some_and(|v| v.iter().any(|s| s == proj))
             })
             .map(|(aid, _, _)| aid)
             .collect()

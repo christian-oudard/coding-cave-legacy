@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{bail, Result};
 
@@ -49,17 +49,17 @@ pub fn pull(base: &Path, force: bool) -> Result<()> {
     }
 
     // Courtesy: update local base branch if it exists
-    if git::git_output(&["rev-parse", &remote_base], Some(base)).is_ok() {
-        if git::git_output(&["rev-parse", &base_name], Some(base)).is_ok() {
-            git::git(
-                &["branch", "-f", "--no-track", &base_name, &remote_base],
-                Some(base),
-                false,
-                true,
-                false,
-            )
-            .ok();
-        }
+    if git::git_output(&["rev-parse", &remote_base], Some(base)).is_ok()
+        && git::git_output(&["rev-parse", &base_name], Some(base)).is_ok()
+    {
+        git::git(
+            &["branch", "-f", "--no-track", &base_name, &remote_base],
+            Some(base),
+            false,
+            true,
+            false,
+        )
+        .ok();
     }
 
     let local_sha = git::git_output(&["rev-parse", &local_branch], Some(base))?;

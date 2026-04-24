@@ -146,8 +146,8 @@ fn offer_cave_nix() {
     }
 }
 
-pub fn init(path: &PathBuf, reinitialize: bool) -> Result<()> {
-    let base = path.canonicalize().unwrap_or_else(|_| path.clone());
+pub fn init(path: &Path, reinitialize: bool) -> Result<()> {
+    let base = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
 
     if !base.join(".git").exists() {
         git::git(&["init", &base.to_string_lossy()], None, true, false, true)?;

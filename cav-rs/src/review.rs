@@ -19,7 +19,7 @@ pub fn review(base: &Path, agent_id: &str) -> Result<()> {
     let branches = git::remote_branches(CAVE_SHARED_REMOTE, Some(base))?;
     let agent_branch = branches
         .into_iter()
-        .find(|b| parse_dev_branch(b).map_or(false, |(_, aid)| aid == agent_id));
+        .find(|b| parse_dev_branch(b).is_some_and(|(_, aid)| aid == agent_id));
 
     let agent_branch = match agent_branch {
         Some(b) => b,

@@ -27,7 +27,6 @@ fn format_age(timestamp: f64) -> String {
 
 struct AgentInfo {
     last_activity: f64,
-    agent_id: String,
     name: String,
     running: bool,
     state: String,
@@ -51,8 +50,8 @@ pub fn show(base: &Path, agent_id: Option<&str>) -> Result<()> {
         }
         // Inside cave without a cave remote (not yet cav init'd): no sub-agents.
         let slug = config::project_slug(base);
-        if agent_id.is_some() {
-            println!("No agent {} in registry.", agent_id.unwrap());
+        if let Some(aid) = agent_id {
+            println!("No agent {aid} in registry.");
         } else {
             println!("No running agents in {slug}.");
         }
@@ -156,7 +155,6 @@ pub fn show(base: &Path, agent_id: Option<&str>) -> Result<()> {
 
         agents.push(AgentInfo {
             last_activity,
-            agent_id: aid.clone(),
             name,
             running,
             state,
@@ -283,15 +281,7 @@ pub fn show_all(projects: Vec<(String, String)>) -> Result<()> {
             ));
             continue;
         }
-        let _buf: Vec<u8> = Vec::new();
-        let ts = {
-            // Capture stdout for this project's status
-            let stdout_bak = std::io::stdout();
-            // We can't easily redirect stdout without a printer trait,
-            // so call a variant that returns the timestamp and text separately.
-            capture_status_output(&base)
-        };
-        match ts {
+        match capture_status_output(&base) {
             Ok((timestamp, text)) => entries.push((timestamp, slug.clone(), text)),
             Err(e) => problems.push((slug.clone(), e.to_string())),
         }
@@ -406,7 +396,6 @@ fn capture_status_output(base: &Path) -> Result<(f64, String)> {
         }
         agents.push(AgentInfo {
             last_activity,
-            agent_id: aid.clone(),
             name,
             running,
             state,

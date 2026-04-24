@@ -97,7 +97,7 @@ pub fn latest_session_file(slug: &str, home: Option<&Path>) -> Option<String> {
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().map_or(false, |e| e == "jsonl") {
+            if path.extension().is_some_and(|e| e == "jsonl") {
                 if let Ok(meta) = entry.metadata() {
                     if let Ok(mtime) = meta.modified() {
                         let stem = path.file_stem().unwrap().to_string_lossy().to_string();

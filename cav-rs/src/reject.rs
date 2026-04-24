@@ -105,10 +105,7 @@ pub fn reject(base: &Path, agent_id: Option<&str>, yes: bool, commit: Option<&st
         print!("\nReject? [Y/n] ");
         io::stdout().flush()?;
         let mut answer = String::new();
-        match io::stdin().read_line(&mut answer) {
-            Err(_) => bail!("\nAborted."),
-            Ok(_) => {}
-        }
+        if io::stdin().read_line(&mut answer).is_err() { bail!("\nAborted.") }
         let answer = answer.trim().to_lowercase();
         if answer == "n" || answer == "no" {
             bail!("Aborted.");
@@ -166,21 +163,16 @@ fn collect_all_approvals(slug: &str, branch: &str, tip_sha: &str) -> Vec<serde_j
     let mut approvals = vec![];
     let mut current = tip_sha.to_string();
     let null_sha = "0".repeat(40);
-    loop {
-        match registry::lookup_approval_by_after(slug, branch, &current) {
-            Ok(Some(approval)) => {
-                let before = approval["before_sha"]
-                    .as_str()
-                    .unwrap_or("")
-                    .to_string();
-                approvals.push(approval);
-                if before == null_sha {
-                    break;
-                }
-                current = before;
-            }
-            _ => break,
+    while let Ok(Some(approval)) = registry::lookup_approval_by_after(slug, branch, &current) {
+        let before = approval["before_sha"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        approvals.push(approval);
+        if before == null_sha {
+            break;
         }
+        current = before;
     }
     approvals
 }

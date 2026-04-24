@@ -290,12 +290,9 @@ fn host_gitconfig() -> Option<PathBuf> {
         .ok()
         .map(PathBuf::from)
         .unwrap_or_else(|| home.join(".config"));
-    for p in [home.join(".gitconfig"), xdg.join("git").join("config")] {
-        if p.exists() {
-            return Some(p);
-        }
-    }
-    None
+    [home.join(".gitconfig"), xdg.join("git").join("config")]
+        .into_iter()
+        .find(|p| p.exists())
 }
 
 fn gpg_homedir() -> Option<PathBuf> {
@@ -813,10 +810,11 @@ fn seed_nix_db(home: &Path, agent_id: &str, merged_path: &str) -> Option<PathBuf
         format!("{}:{}", m.mtime_nsec(), m.size())
     });
     if let Some(ref s) = state {
-        if cave_db.exists() && stamp.exists() {
-            if std::fs::read_to_string(&stamp).unwrap_or_default().trim() == s {
-                return Some(db_dir);
-            }
+        if cave_db.exists()
+            && stamp.exists()
+            && std::fs::read_to_string(&stamp).unwrap_or_default().trim() == s
+        {
+            return Some(db_dir);
         }
     }
 
