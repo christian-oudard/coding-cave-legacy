@@ -430,9 +430,11 @@ fn start_crinj() -> Result<Option<std::process::Child>> {
         bail!("crinj not found on PATH");
     }
     if crinj_listening() {
+        crate::log_debug!("crinj already listening, sending SIGHUP to reload config");
         crinj_signal(Signal::Hup);
         return Ok(None);
     }
+    crate::log_debug!("starting crinj...");
     let xdg = std::env::var("XDG_CONFIG_HOME")
         .ok()
         .map(PathBuf::from)
@@ -449,9 +451,11 @@ fn start_crinj() -> Result<Option<std::process::Child>> {
         .stderr(Stdio::piped())
         .spawn()?;
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let start = Instant::now();
+    let deadline = start + Duration::from_secs(5);
     loop {
         if crinj_listening() {
+            crate::log_debug!("crinj ready after {:.1}s", start.elapsed().as_secs_f64());
             break;
         }
         if Instant::now() > deadline {
@@ -814,6 +818,7 @@ fn seed_nix_db(home: &Path, agent_id: &str, merged_path: &str) -> Option<PathBuf
             && stamp.exists()
             && std::fs::read_to_string(&stamp).unwrap_or_default().trim() == s
         {
+            crate::log_debug!("nix DB: host unchanged, skipping reseed");
             return Some(db_dir);
         }
     }
@@ -1107,12 +1112,14 @@ pub fn run_agent(
     }
 
     // Start git daemon
+    crate::log_info!("starting git daemon...");
     let shared_repos: Vec<(PathBuf, String)> = workspaces
         .iter()
         .map(|(_, sr, s)| (sr.clone(), s.clone()))
         .collect();
     let daemon_handle = daemon::start(&agent_id, &shared_repos)?;
     let guard = DaemonGuard(Some(daemon_handle));
+    crate::log_info!("git daemon ready");
 
     // Set remote URLs (localhost for sync)
     for (ws, _, s) in &workspaces {
@@ -1127,6 +1134,7 @@ pub fn run_agent(
     }
 
     // Sync workspace branches
+    crate::log_info!("syncing workspace branches...");
     for (ws, _, _) in &workspaces {
         git::git(&["fetch", HOST_SHARED_REMOTE], Some(ws), false, true, false).ok();
         let current = git::current_branch(Some(ws)).unwrap_or_default();
@@ -1160,8 +1168,10 @@ pub fn run_agent(
     let (nix_merged, nix_db_dir) = if inside_cave() {
         (String::new(), None)
     } else {
+        crate::log_info!("setting up nix overlay...");
         let merged = setup_nix_overlay(&home, &agent_id);
         let db_dir = seed_nix_db(&home, &agent_id, &merged);
+        crate::log_info!("nix overlay ready");
         (merged, db_dir)
     };
 
@@ -1266,6 +1276,7 @@ pub fn run_agent(
     }
 
     let crinj_session = crinj_register_session();
+    crate::log_info!("starting crinj proxy...");
     let crinj_proc = start_crinj()?;
     env.insert("CODING_CAVE_GATEWAY".to_string(), SLIRP_GATEWAY.to_string());
     env.insert(
@@ -1349,12 +1360,14 @@ pub fn run_agent(
         proc_cmd.env("CODING_CAVE_BUILD_CONFIG", bc);
     }
 
+    crate::log_info!("launching sandbox...");
     let mut proc = proc_cmd.spawn()?;
     drop(sync_w);
     drop(seccomp_fd);
 
     registry::set_cave_pid(&agent_id, proc.id())?;
 
+    crate::log_debug!("waiting for sandbox namespace setup (pid {})", proc.id());
     let mut sync_buf = [0u8; 1];
     let n = rustix::io::read(&sync_r, &mut sync_buf).unwrap_or(0);
     drop(sync_r);
@@ -1362,12 +1375,16 @@ pub fn run_agent(
         let _ = proc.kill();
         bail!("sandbox child died during namespace setup");
     }
+    crate::log_debug!("namespace ready");
 
+    crate::log_debug!("applying firewall");
     let mut allowed = vec![daemon_port, CRINJ_PORT];
     allowed.extend(host_ports.iter().copied());
     apply_firewall(proc.id(), &allowed)?;
 
+    crate::log_debug!("starting slirp4netns");
     let mut slirp = start_slirp4netns(proc.id())?;
+    crate::log_debug!("slirp4netns ready");
 
     forward_cave_signals(proc.id())?;
 

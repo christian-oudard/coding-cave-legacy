@@ -243,9 +243,13 @@ fn prepare() -> Result<(Option<String>, Vec<(String, String)>)> {
 
 fn do_build(user_env: &Path) -> Option<PathBuf> {
     let _ = std::fs::remove_dir_all("/homeless-shelter");
+    // Capture stdout for --print-out-paths; let stderr inherit so the
+    // user sees nix's live progress during a slow rebuild.
     let result = Command::new("nix")
         .args(["build", "--no-link", "--print-out-paths"])
         .current_dir(user_env)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
         .output();
     match result {
         Ok(out) if out.status.success() => {
@@ -313,6 +317,7 @@ pub fn build() -> Result<()> {
         return Ok(());
     }
 
+    crate::log_info!("building user env");
     let (content, siblings) = prepare()?;
     if do_build(&user_env_dir()).is_some() {
         let hash = compute_hash(content.as_deref(), &siblings);

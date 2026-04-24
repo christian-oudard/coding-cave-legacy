@@ -141,6 +141,24 @@ pub fn set_verbose(v: u8) {
     VERBOSE.store(v, std::sync::atomic::Ordering::Relaxed);
 }
 
+#[macro_export]
+macro_rules! log_info {
+    ($($arg:tt)*) => {
+        if $crate::config::verbose() >= 1 {
+            eprintln!("[cav] {}", format_args!($($arg)*));
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! log_debug {
+    ($($arg:tt)*) => {
+        if $crate::config::verbose() >= 2 {
+            eprintln!("[cav] {}", format_args!($($arg)*));
+        }
+    };
+}
+
 pub fn self_agent_id() -> Option<String> {
     let name = env::var("CODING_CAVE_AGENT_NAME").unwrap_or_default();
     if !name.contains('@') {
