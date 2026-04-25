@@ -225,3 +225,19 @@ pub fn commit_oneline(
     Ok(out.lines().map(str::to_string).collect())
 }
 
+
+/// Format a list of commit lines for display, showing up to max items.
+/// If only 1 item would be hidden, shows it too (avoids "... and 1 more").
+pub fn format_commit_list(lines: &[String], max: usize) -> String {
+    let n = lines.len();
+    let show = if n == max + 1 { n } else { max.min(n) };
+    let mut out = String::new();
+    for line in &lines[..show] {
+        out.push_str(&format!("  {line}\n"));
+    }
+    let hidden = n - show;
+    if hidden >= 2 {
+        out.push_str(&format!("  ... and {hidden} more\n"));
+    }
+    out
+}

@@ -110,13 +110,8 @@ fn pick(
     for (i, (branch, target, lines)) in pending.iter().enumerate() {
         let n = lines.len();
         let word = if n == 1 { "commit" } else { "commits" };
-        println!("  {}) {branch} \u{2192} {target}    {n} {word}", i + 1);
-        for line in lines.iter().take(3) {
-            println!("     {line}");
-        }
-        if n > 3 {
-            println!("     ... and {} more", n - 3);
-        }
+        println!("  {}) {branch} -> {target}    {n} {word}", i + 1);
+        print!("{}", git::format_commit_list(lines, 3));
     }
 
     print!("\nReview which? [1-{}] ", pending.len());
