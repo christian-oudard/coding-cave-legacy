@@ -14,6 +14,22 @@ let
   resolveBundle = import ../lib/resolveBundle.nix { inherit lib; };
   resolvedBundles = map resolveBundle cfg.bundles;
 
+  # Auto-derive enabledPlugins from cfg.plugins. Once any enabledPlugins
+  # entry exists in settings.json, Claude Code treats the key as an
+  # explicit allow-list and silently disables every plugin not listed,
+  # including --plugin-dir entries. Reading each plugin's
+  # .claude-plugin/plugin.json and adding its name keeps every plugin in
+  # cfg.plugins active when bundles or extraSettings contribute their own
+  # entries (e.g. marketplace plugins like cave-messages@cave).
+  readPluginName = p:
+    let manifest = p + "/.claude-plugin/plugin.json";
+    in if builtins.pathExists manifest
+       then [ (lib.importJSON manifest).name ]
+       else [ ];
+  autoEnabledPlugins = lib.listToAttrs
+    (map (n: lib.nameValuePair n true)
+      (lib.concatMap readPluginName cfg.plugins));
+
   # Bundle settings merge in declaration order; user extraSettings on top.
   # Strip permissions.allow/deny: caves run --dangerously-skip-permissions,
   # so the host user's deny list would only block legitimate cave commands.
@@ -25,10 +41,13 @@ let
       ((map (b: b.settings or { }) resolvedBundles) ++ [ cfg.extraSettings ]);
     perms = raw.permissions or { };
     env = raw.env or { };
+    combinedEnabled = autoEnabledPlugins // (raw.enabledPlugins or { });
   in raw // lib.optionalAttrs (raw ? permissions) {
     permissions = removeAttrs perms [ "allow" "deny" ];
   } // {
     env = env // { CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = ""; };
+  } // lib.optionalAttrs (combinedEnabled != { }) {
+    enabledPlugins = combinedEnabled;
   };
 
   # Skills/commands attrsets are merged across bundles. Later bundles win
