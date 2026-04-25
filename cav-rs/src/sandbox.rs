@@ -1429,15 +1429,26 @@ pub fn reconcile_merged_dev_branches(base: &Path, verbose: bool) {
     }
 }
 
-pub fn run_agent(
-    base: PathBuf,
-    continue_agent: bool,
-    resume_agent: Option<String>,
-    extra_projects: Vec<String>,
-    host_ports: Vec<u16>,
-    comms: bool,
-    prompt: Option<String>,
-) -> Result<()> {
+pub struct RunAgentOpts {
+    pub base: PathBuf,
+    pub continue_agent: bool,
+    pub resume_agent: Option<String>,
+    pub extra_projects: Vec<String>,
+    pub host_ports: Vec<u16>,
+    pub comms: bool,
+    pub prompt: Option<String>,
+}
+
+pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
+    let RunAgentOpts {
+        base,
+        continue_agent,
+        resume_agent,
+        extra_projects,
+        host_ports,
+        comms,
+        prompt,
+    } = opts;
     let cfg = load_sandbox_config()?;
     let slug = project_slug(&base);
 

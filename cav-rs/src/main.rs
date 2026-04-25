@@ -212,15 +212,15 @@ fn run() -> Result<()> {
                     resolve_project(p).map(|pb| pb.to_string_lossy().into_owned())
                 })
                 .collect::<Result<Vec<_>>>()?;
-            sandbox::run_agent(
+            sandbox::run_agent(sandbox::RunAgentOpts {
                 base,
                 continue_agent,
                 resume_agent,
-                extras,
+                extra_projects: extras,
                 host_ports,
                 comms,
                 prompt,
-            )
+            })
         }
         Cmd::Approve { args, yes, commit } => {
             let (target_args, sha) = split_commit_arg(&args);
