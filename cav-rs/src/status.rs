@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -8,6 +9,28 @@ use crate::constants::CAVE_SHARED_REMOTE;
 use crate::git;
 use crate::registry;
 use crate::sandbox;
+
+const MAX_COMMITS_DISPLAY: usize = 3;
+
+fn format_commit_block(lines: &[String], ahead: usize, max: Option<usize>) -> String {
+    let show = match max {
+        None => lines.len(),
+        Some(m) => {
+            if ahead == m + 1 { m + 1 } else { m.min(lines.len()) }
+        }
+    };
+    let mut out = String::new();
+    for line in &lines[..show] {
+        out.push_str(&format!("    {line}\n"));
+    }
+    if max.is_some() {
+        let hidden = ahead - show;
+        if hidden >= 2 {
+            out.push_str(&format!("    ... and {hidden} more\n"));
+        }
+    }
+    out
+}
 
 fn format_age(timestamp: f64) -> String {
     let now = SystemTime::now()
@@ -71,20 +94,7 @@ pub fn show(base: &Path, agent_id: Option<&str>) -> Result<()> {
         registered.retain(|a| a == aid);
     }
 
-    let branches = git::remote_branches(CAVE_SHARED_REMOTE, Some(base))?;
-    let mut by_agent: std::collections::HashMap<String, Vec<(String, String)>> = registered
-        .iter()
-        .map(|aid| (aid.clone(), vec![]))
-        .collect();
-
-    for branch in &branches {
-        if let Some((_, branch_agent_id)) = parse_dev_branch(branch) {
-            if let Some(list) = by_agent.get_mut(&branch_agent_id) {
-                let base_name = resolve_base(branch.clone());
-                list.push((branch.clone(), base_name));
-            }
-        }
-    }
+    let by_agent = build_by_agent(base, &registered)?;
 
     if by_agent.is_empty() {
         if let Some(aid) = agent_id {
@@ -96,75 +106,9 @@ pub fn show(base: &Path, agent_id: Option<&str>) -> Result<()> {
     }
 
     let verbose_mode = config::verbose() >= 1 || agent_id.is_some();
-    let max_commits = if verbose_mode { None } else { Some(3usize) };
+    let max_commits = if verbose_mode { None } else { Some(MAX_COMMITS_DISPLAY) };
 
-    let mut agents: Vec<AgentInfo> = vec![];
-
-    for (aid, branches_list) in &by_agent {
-        let name = registry::display_name(base, aid);
-        let running = registry::is_agent_running(aid)?;
-
-        let mut unapproved: Vec<(String, usize, Vec<String>)> = vec![];
-        let mut last_activity = 0.0f64;
-
-        for (branch, base_name) in branches_list {
-            let remote_dev = format!("{CAVE_SHARED_REMOTE}/{branch}");
-            let remote_base = format!("{CAVE_SHARED_REMOTE}/{base_name}");
-            if let Some(ts) = git::commit_timestamp(&remote_dev, Some(base)) {
-                if ts > last_activity {
-                    last_activity = ts;
-                }
-            }
-            if git::has_merge_base(&remote_dev, &remote_base, Some(base)) {
-                if let Ok(lines) = git::cherry_undelivered(&remote_base, &remote_dev, Some(base)) {
-                    if !lines.is_empty() {
-                        unapproved.push((branch.clone(), lines.len(), lines));
-                    }
-                }
-            }
-        }
-
-        if last_activity == 0.0 {
-            if let Ok(Some(exit_t)) = registry::agent_exit_time(aid) {
-                last_activity = exit_t;
-            }
-        }
-
-        let total_ahead: usize = unapproved.iter().map(|(_, n, _)| n).sum();
-
-        let mut dirty_worktrees: Vec<PathBuf> = vec![];
-        for slug_s in registry::agent_all_slugs(aid)? {
-            let ws = worktree_dir(&slug_s, aid);
-            if !ws.is_dir() {
-                continue;
-            }
-            let st = git::git(
-                &["status", "--porcelain"],
-                Some(&ws),
-                false,
-                true,
-                false,
-            ).unwrap_or_default();
-            if !st.trim().is_empty() {
-                dirty_worktrees.push(ws);
-            }
-        }
-
-        let state = if running { "running" } else { "stopped" }.to_string();
-
-        if !running && total_ahead == 0 && dirty_worktrees.is_empty() {
-            continue;
-        }
-
-        agents.push(AgentInfo {
-            last_activity,
-            name,
-            running,
-            state,
-            unapproved,
-            dirty_worktrees,
-        });
-    }
+    let mut agents = collect_agent_infos(base, &by_agent)?;
 
     if agents.is_empty() {
         if let Some(aid) = agent_id {
@@ -237,18 +181,7 @@ fn print_agents(agents: &[AgentInfo], max_commits: Option<usize>) {
         for (branch, ahead, commit_lines) in &agent.unapproved {
             let n = if *ahead == 1 { "commit" } else { "commits" };
             println!("  {ahead} {n} on {branch}");
-            let show: &[String] = match max_commits {
-                None => commit_lines,
-                Some(m) => &commit_lines[..m.min(commit_lines.len())],
-            };
-            for line in show {
-                println!("    {line}");
-            }
-            if let Some(m) = max_commits {
-                if *ahead > m {
-                    println!("    ... and {} more", ahead - m);
-                }
-            }
+            print!("{}", format_commit_block(commit_lines, *ahead, max_commits));
         }
         for ws in &agent.dirty_worktrees {
             println!("  uncommitted changes in {}", ws.display());
@@ -338,77 +271,8 @@ fn capture_status_output(base: &Path) -> Result<(f64, String)> {
 
     let slug = config::project_slug(base);
     let registered = registry::all_agent_ids(Some(&slug))?;
-    let branches = git::remote_branches(CAVE_SHARED_REMOTE, Some(base))?;
-    let mut by_agent: std::collections::HashMap<String, Vec<(String, String)>> = registered
-        .iter()
-        .map(|aid| (aid.clone(), vec![]))
-        .collect();
-    for branch in &branches {
-        if let Some((_, branch_agent_id)) = parse_dev_branch(branch) {
-            if let Some(list) = by_agent.get_mut(&branch_agent_id) {
-                let base_name = resolve_base(branch.clone());
-                list.push((branch.clone(), base_name));
-            }
-        }
-    }
-
-    let mut agents: Vec<AgentInfo> = vec![];
-    for (aid, branches_list) in &by_agent {
-        let name = registry::display_name(base, aid);
-        let running = registry::is_agent_running(aid)?;
-        let mut unapproved = vec![];
-        let mut last_activity = 0.0f64;
-        for (branch, base_name) in branches_list {
-            let remote_dev = format!("{CAVE_SHARED_REMOTE}/{branch}");
-            let remote_base = format!("{CAVE_SHARED_REMOTE}/{base_name}");
-            if let Some(ts) = git::commit_timestamp(&remote_dev, Some(base)) {
-                if ts > last_activity {
-                    last_activity = ts;
-                }
-            }
-            if git::has_merge_base(&remote_dev, &remote_base, Some(base)) {
-                if let Ok(lines) = git::cherry_undelivered(&remote_base, &remote_dev, Some(base)) {
-                    if !lines.is_empty() {
-                        unapproved.push((branch.clone(), lines.len(), lines));
-                    }
-                }
-            }
-        }
-        if last_activity == 0.0 {
-            if let Ok(Some(exit_t)) = registry::agent_exit_time(aid) {
-                last_activity = exit_t;
-            }
-        }
-        let total_ahead: usize = unapproved.iter().map(|(_, n, _)| n).sum();
-        let mut dirty_worktrees = vec![];
-        for slug_s in registry::agent_all_slugs(aid)? {
-            let ws = worktree_dir(&slug_s, aid);
-            if ws.is_dir() {
-                let st = git::git(
-                    &["status", "--porcelain"],
-                    Some(&ws),
-                    false,
-                    true,
-                    false,
-                ).unwrap_or_default();
-                if !st.trim().is_empty() {
-                    dirty_worktrees.push(ws);
-                }
-            }
-        }
-        let state = if running { "running" } else { "stopped" }.to_string();
-        if !running && total_ahead == 0 && dirty_worktrees.is_empty() {
-            continue;
-        }
-        agents.push(AgentInfo {
-            last_activity,
-            name,
-            running,
-            state,
-            unapproved,
-            dirty_worktrees,
-        });
-    }
+    let by_agent = build_by_agent(base, &registered)?;
+    let mut agents = collect_agent_infos(base, &by_agent)?;
 
     agents.sort_by(|a, b| {
         let order_a = if a.running { 0 } else { 1 };
@@ -433,18 +297,98 @@ fn capture_status_output(base: &Path) -> Result<(f64, String)> {
         for (branch, ahead, commit_lines) in &agent.unapproved {
             let n = if *ahead == 1 { "commit" } else { "commits" };
             text.push_str(&format!("  {ahead} {n} on {branch}\n"));
-            for line in commit_lines.iter().take(3) {
-                text.push_str(&format!("    {line}\n"));
-            }
-            if *ahead > 3 {
-                text.push_str(&format!("    ... and {} more\n", ahead - 3));
-            }
+            text.push_str(&format_commit_block(commit_lines, *ahead, Some(MAX_COMMITS_DISPLAY)));
         }
         for ws in &agent.dirty_worktrees {
             text.push_str(&format!("  uncommitted changes in {}\n", ws.display()));
         }
     }
     Ok((ts, text))
+}
+
+fn build_by_agent(
+    base: &Path,
+    registered: &[String],
+) -> Result<HashMap<String, Vec<(String, String)>>> {
+    let branches = git::remote_branches(CAVE_SHARED_REMOTE, Some(base))?;
+    let mut by_agent: HashMap<String, Vec<(String, String)>> = registered
+        .iter()
+        .map(|aid| (aid.clone(), vec![]))
+        .collect();
+    for branch in &branches {
+        if let Some((_, branch_agent_id)) = parse_dev_branch(branch) {
+            if let Some(list) = by_agent.get_mut(&branch_agent_id) {
+                let base_name = resolve_base(branch.clone());
+                list.push((branch.clone(), base_name));
+            }
+        }
+    }
+    Ok(by_agent)
+}
+
+fn collect_agent_infos(
+    base: &Path,
+    by_agent: &HashMap<String, Vec<(String, String)>>,
+) -> Result<Vec<AgentInfo>> {
+    let mut agents = vec![];
+    for (aid, branches_list) in by_agent {
+        let name = registry::display_name(base, aid);
+        let running = registry::is_agent_running(aid)?;
+        let mut unapproved: Vec<(String, usize, Vec<String>)> = vec![];
+        let mut last_activity = 0.0f64;
+        for (branch, base_name) in branches_list {
+            let remote_dev = format!("{CAVE_SHARED_REMOTE}/{branch}");
+            let remote_base = format!("{CAVE_SHARED_REMOTE}/{base_name}");
+            if let Some(ts) = git::commit_timestamp(&remote_dev, Some(base)) {
+                if ts > last_activity {
+                    last_activity = ts;
+                }
+            }
+            if git::has_merge_base(&remote_dev, &remote_base, Some(base)) {
+                if let Ok(lines) = git::cherry_undelivered(&remote_base, &remote_dev, Some(base)) {
+                    if !lines.is_empty() {
+                        unapproved.push((branch.clone(), lines.len(), lines));
+                    }
+                }
+            }
+        }
+        if last_activity == 0.0 {
+            if let Ok(Some(exit_t)) = registry::agent_exit_time(aid) {
+                last_activity = exit_t;
+            }
+        }
+        let total_ahead: usize = unapproved.iter().map(|(_, n, _)| n).sum();
+        let mut dirty_worktrees: Vec<PathBuf> = vec![];
+        for slug_s in registry::agent_all_slugs(aid)? {
+            let ws = worktree_dir(&slug_s, aid);
+            if !ws.is_dir() {
+                continue;
+            }
+            let st = git::git(
+                &["status", "--porcelain"],
+                Some(&ws),
+                false,
+                true,
+                false,
+            ).unwrap_or_default();
+            if !st.trim().is_empty() {
+                dirty_worktrees.push(ws);
+            }
+        }
+        let state = if running { "running" } else { "stopped" }.to_string();
+        if !running && total_ahead == 0 && dirty_worktrees.is_empty() {
+            continue;
+        }
+        agents.push(AgentInfo {
+            last_activity,
+            name,
+            running,
+            state,
+            unapproved,
+            dirty_worktrees,
+        });
+    }
+    Ok(agents)
 }
 
 pub fn remove_agent(base: &Path, agent_id: &str) -> Result<()> {
