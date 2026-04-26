@@ -9,6 +9,14 @@ use crate::config;
 
 const SCHEMA: &str = include_str!("schema.sql");
 
+/// Past this many seconds since exit, an agent ID becomes reclaimable: the
+/// next `acquire_agent_id` may reuse it instead of minting a new number.
+/// Agents are NOT eagerly expired or removed — they remain continuable via
+/// `cav -c` and `cav -r N` until their slot is actually reclaimed by a new
+/// agent. After reclamation, the old session is still recoverable via
+/// `cav --resume <uuid>` against the permanent session archive.
+const RECLAIMABLE_AFTER_SECS: f64 = 24.0 * 60.0 * 60.0;
+
 fn registry_path() -> std::path::PathBuf {
     config::data_dir().join("coding-cave.db")
 }
@@ -74,19 +82,48 @@ fn is_pid_alive(pid: u32) -> bool {
     }
 }
 
+/// Best estimate of when an agent actually exited. Used when we discover a
+/// dead pid: prefer the session log's mtime (when the agent last did work)
+/// over now() (when we noticed). Falls back to now if no session file.
+fn estimate_exit_time(slug: &str, session_id: Option<&str>, now_ts: f64) -> f64 {
+    if let Some(sid) = session_id {
+        let path = config::claude_project_dir(slug, None).join(format!("{sid}.jsonl"));
+        if let Ok(secs) = std::fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .map(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+        {
+            if let Some(d) = secs {
+                let t = d.as_secs_f64();
+                if t > 0.0 && t <= now_ts {
+                    return t;
+                }
+            }
+        }
+    }
+    now_ts
+}
+
 fn sweep_dead_pids(db: &Connection, ts: f64) -> Result<()> {
-    let rows: Vec<(String, u32)> = collect_rows(
+    let rows: Vec<(String, u32, String, Option<String>)> = collect_rows(
         db,
-        "SELECT agent_id, host_pid FROM agents \
+        "SELECT agent_id, host_pid, project, session_id FROM agents \
          WHERE exited_at IS NULL AND host_pid IS NOT NULL",
-        |row| Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?)),
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, u32>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        },
     )?;
-    for (aid, pid) in rows {
+    for (aid, pid, slug, sid) in rows {
         if !is_pid_alive(pid) {
+            let exited = estimate_exit_time(&slug, sid.as_deref(), ts);
             db.execute(
                 "UPDATE agents SET exited_at = ?1, host_pid = NULL, cave_pid = NULL \
                  WHERE agent_id = ?2",
-                params![ts, aid],
+                params![exited, aid],
             )?;
         }
     }
@@ -225,26 +262,29 @@ pub fn is_agent_running(agent_id: &str) -> Result<bool> {
     let db = open()?;
     let row = db
         .query_row(
-            "SELECT host_pid, exited_at FROM agents WHERE agent_id = ?1",
+            "SELECT host_pid, exited_at, project, session_id FROM agents WHERE agent_id = ?1",
             params![agent_id],
             |row| {
                 Ok((
                     row.get::<_, Option<u32>>(0)?,
                     row.get::<_, Option<f64>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
                 ))
             },
         )
         .ok();
     match row {
-        None | Some((None, _)) | Some((_, Some(_))) => Ok(false),
-        Some((Some(pid), None)) => {
+        None | Some((None, _, _, _)) | Some((_, Some(_), _, _)) => Ok(false),
+        Some((Some(pid), None, slug, sid)) => {
             if is_pid_alive(pid) {
                 return Ok(true);
             }
+            let exited = estimate_exit_time(&slug, sid.as_deref(), now());
             db.execute(
                 "UPDATE agents SET exited_at = ?1, host_pid = NULL, cave_pid = NULL \
                  WHERE agent_id = ?2",
-                params![now(), agent_id],
+                params![exited, agent_id],
             )?;
             Ok(false)
         }
@@ -271,10 +311,21 @@ pub fn acquire_agent_id(base: &Path) -> Result<String> {
     db.execute_batch("BEGIN IMMEDIATE")?;
     sweep_dead_pids(&db, ts)?;
 
-    let occupied: Vec<String> = collect_rows(&db, "SELECT agent_id FROM agents", |row| row.get(0))?;
-    let occupied_set: std::collections::HashSet<String> = occupied.into_iter().collect();
+    // An ID is in use if its row exists AND it's not yet reclaimable. A row
+    // becomes reclaimable when the agent has exited and the exit was more
+    // than RECLAIMABLE_AFTER_SECS ago. Reclaimed slots get overwritten so
+    // the lowest free number is reused, preventing IDs from drifting upward.
+    let cutoff = ts - RECLAIMABLE_AFTER_SECS;
+    let in_use: std::collections::HashSet<String> = {
+        let mut stmt = db.prepare(
+            "SELECT agent_id FROM agents \
+             WHERE exited_at IS NULL OR exited_at > ?1",
+        )?;
+        let rows = stmt.query_map(params![cutoff], |row| row.get::<_, String>(0))?;
+        rows.filter_map(|r| r.ok()).collect()
+    };
     let mut n = 1u32;
-    while occupied_set.contains(&n.to_string()) {
+    while in_use.contains(&n.to_string()) {
         n += 1;
     }
     let aid = n.to_string();
@@ -311,7 +362,11 @@ pub fn continue_agent_id(base: &Path, agent_id: Option<&str>) -> Result<Option<S
             )
             .ok();
         match row {
-            None => bail!("No agent {aid} found."),
+            None => bail!(
+                "Agent {aid} not found (may have been reclaimed). To recover an\n\
+                 archived session, run: cav --resume <session-uuid>\n\
+                 (find uuids in ~/.claude/projects/)"
+            ),
             Some((Some(p), None)) if is_pid_alive(p) => {
                 bail!("Agent {aid} is still running.")
             }
@@ -366,19 +421,17 @@ pub fn resolve_continue(
     let agent_id = continue_agent_id(base, agent_id_hint)?;
 
     if agent_id.is_none() {
-        let found = config::latest_session_file(&slug, None);
-        if let Some(session_file) = found {
-            let aid = acquire_agent_id(base)?;
-            write_session_id(&aid, &session_file)?;
-            return Ok(ResolvedContinue {
-                agent_id: aid,
-                session_id: session_file,
-                resuming: true,
-            });
-        }
         let d = config::claude_project_dir(&slug, None);
+        if d.is_dir() {
+            bail!(
+                "No agents to continue. To recover an archived session, find\n\
+                 its uuid in\n  {}\n\
+                 then run: cav --resume <session-uuid>",
+                d.display()
+            );
+        }
         bail!(
-            "Nothing to continue. No agents in registry and no session files in {}\n\
+            "Nothing to continue. No agents in registry and no session archive at {}\n\
              Start a new session with: cav agent",
             d.display()
         );

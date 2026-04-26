@@ -1342,6 +1342,19 @@ fn teardown_agent(
     registry::remove_agent(agent_id).ok();
 }
 
+/// Print the cav resume commands. Claude already prints its own
+/// "Resume this session with: claude --resume <uuid>" line, so we just
+/// append the cav-flavored alternatives. Session uuid first (the
+/// canonical, archive-backed form), then the agent-id shortcut.
+fn print_resume_hints(agent_id: &str, session_id: Option<&str>, agent_id_gone: bool) {
+    if let Some(sid) = session_id {
+        eprintln!("cav --resume {sid}");
+    }
+    if !agent_id_gone {
+        eprintln!("cav -r {agent_id}");
+    }
+}
+
 /// Reconstruct an agent's workspace tuples from registry state. Used at
 /// command boundaries when reaping agents whose run_agent handler never got
 /// the chance to do teardown (SIGKILL, OOM, etc).
@@ -1449,34 +1462,41 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
         comms,
         prompt,
     } = opts;
-    let cfg = load_sandbox_config()?;
     let slug = project_slug(&base);
 
-    // Resolve agent session
+    // Resolve the agent session BEFORE loading sandbox config so error paths
+    // (missing agent, empty -c, etc.) don't trip on missing build config.
     let resuming_launch = continue_agent || resume_agent.is_some();
     let (agent_id, session_id, resuming) = if continue_agent {
         let rc = registry::resolve_continue(&base, None)?;
         (rc.agent_id, Some(rc.session_id), rc.resuming)
     } else if let Some(ref spec) = resume_agent {
-        // Spec accepts agent id ("3", "@3", "project@3") or a session uuid.
+        // Spec accepts agent id ("3", "@3", "project@3") or a Claude session
+        // uuid. If neither matches a known agent, mint a fresh agent ID and
+        // pass the uuid straight through to claude --resume. Claude validates.
         let parsed = spec
             .rfind('@')
             .map(|i| spec[i + 1..].to_string())
             .unwrap_or_else(|| spec.trim_start_matches('@').to_string());
-        let aid = if config::is_agent_id(&parsed) {
-            parsed
+        if config::is_agent_id(&parsed) {
+            let rc = registry::resolve_continue(&base, Some(&parsed))?;
+            (rc.agent_id, Some(rc.session_id), rc.resuming)
         } else if let Some(aid) = registry::find_agent_by_session(&parsed)? {
-            aid
+            let rc = registry::resolve_continue(&base, Some(&aid))?;
+            (rc.agent_id, Some(rc.session_id), rc.resuming)
         } else {
-            bail!("No agent matches '{spec}'. Use an agent id or session id.");
-        };
-        let rc = registry::resolve_continue(&base, Some(&aid))?;
-        (rc.agent_id, Some(rc.session_id), rc.resuming)
+            // Unknown session id -- mint a fresh agent and let claude resolve.
+            let aid = registry::acquire_agent_id(&base)?;
+            registry::write_session_id(&aid, &parsed)?;
+            (aid, Some(parsed), true)
+        }
     } else {
         let aid = registry::acquire_agent_id(&base)?;
         let sid = registry::read_session_id(&aid)?.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         (aid, Some(sid), false)
     };
+
+    let cfg = load_sandbox_config()?;
 
     let agent_name = registry::display_name(&base, &agent_id);
 
@@ -1861,10 +1881,33 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
 
     let rc = proc.wait().map(|s| s.code().unwrap_or(1)).unwrap_or(1);
 
-    if is_trivially_clean(&workspaces, &agent_id) {
-        teardown_agent(&base, &workspaces, &agent_id);
-    } else {
+    // Find the actual session uuid Claude wrote to. If we pre-assigned X but
+    // Claude generated Y (it sometimes does), the .jsonl will be at Y. Use
+    // the on-disk file's stem rather than what we asked for, so future
+    // resumes find the real archive.
+    let actual_sid = session_id
+        .as_deref()
+        .filter(|sid| config::session_file_exists(&slug, sid, Some(&home)))
+        .map(str::to_string)
+        .or_else(|| config::latest_session_file(&slug, Some(&home)));
+
+    // Keep the registry row alive whenever there's anything worth coming
+    // back to: salvageable git work OR an archived conversation. Pure
+    // teardown only when both are absent.
+    let trivially_clean = is_trivially_clean(&workspaces, &agent_id);
+    let agent_id_survives = !trivially_clean || actual_sid.is_some();
+    if agent_id_survives {
+        if let Some(ref sid) = actual_sid {
+            if Some(sid.as_str()) != session_id.as_deref() {
+                registry::write_session_id(&agent_id, sid).ok();
+            }
+        }
         registry::mark_agent_exited(&agent_id).ok();
+    } else {
+        teardown_agent(&base, &workspaces, &agent_id);
+    }
+    if actual_sid.is_some() {
+        print_resume_hints(&agent_id, actual_sid.as_deref(), !agent_id_survives);
     }
 
     let _ = slirp.kill();

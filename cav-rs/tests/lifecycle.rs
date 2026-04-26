@@ -529,3 +529,188 @@ fn reaper_preserves_agent_with_unapproved_work() {
         "shared agent branch must survive"
     );
 }
+
+// --- Agent ID lifecycle decoupled from session archive ---
+
+#[test]
+fn resume_unknown_agent_id_points_to_session_archive() {
+    // cav -r N for a missing/reclaimed agent should error with a hint
+    // pointing at cav --resume <session-uuid>, not silently substitute
+    // a different agent.
+    let p = Project::new("resume-missing-agent");
+    let out = p.cav(&["agent", "-r", "999"]);
+    assert_ne!(out.status.code(), Some(0));
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        err.contains("--resume <session-uuid>"),
+        "error should hint at --resume <session-uuid>, got: {err}"
+    );
+    assert!(
+        err.contains("999"),
+        "error should mention the requested agent, got: {err}"
+    );
+}
+
+#[test]
+fn continue_with_no_agents_points_to_session_archive() {
+    // cav -c with no agents should error with a hint pointing at
+    // cav --resume <session-uuid> for archive recovery.
+    let p = Project::new("continue-empty");
+    let out = p.cav(&["agent", "-c"]);
+    assert_ne!(out.status.code(), Some(0));
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        combined.contains("cav --resume") || combined.contains("Nothing to continue"),
+        "error should mention --resume or 'Nothing to continue', got: {combined}"
+    );
+}
+
+#[test]
+fn resume_unknown_session_uuid_mints_fresh_agent() {
+    // cav --resume <uuid> for an unrecognized uuid should mint a fresh
+    // agent id, bind the uuid as that agent's session, and try to launch.
+    // We can't run all the way through (sandbox config absent), but the
+    // registry side-effect should land before the launch fails.
+    let p = Project::new("resume-mint-uuid");
+    let fake_uuid = "deadbeef-0000-0000-0000-000000000000";
+    let _ = p.cav(&["agent", "-r", fake_uuid]); // expected to fail at sandbox launch
+    // The agent row should now exist with the uuid as its session_id.
+    let db_path = p.data_dir.join("coding-cave.db");
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let bound: Option<String> = conn
+        .query_row(
+            "SELECT agent_id FROM agents WHERE session_id = ?1",
+            rusqlite::params![fake_uuid],
+            |row| row.get(0),
+        )
+        .ok();
+    assert!(
+        bound.is_some(),
+        "an agent row should bind the unknown uuid; none found"
+    );
+}
+
+#[test]
+fn dead_pid_sweep_uses_session_mtime_for_exit_time() {
+    // When we discover an agent's pid is dead, exited_at should be set to
+    // the session log's mtime (when the agent last did work) rather than
+    // now() (when we noticed). Verifies the mtime-based exit estimate.
+    let p = Project::new("mtime-exit");
+    let slug = p
+        .dir
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_lowercase();
+
+    // Insert an agent row that claims to be running (host_pid set, no
+    // exited_at) with a known session id and a definitely-dead pid.
+    let sid = "11111111-1111-1111-1111-111111111111";
+    let dead_pid: u32 = 999_999_999;
+    let db_path = p.data_dir.join("coding-cave.db");
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS agents (\
+             agent_id TEXT PRIMARY KEY,\
+             project TEXT NOT NULL,\
+             session_id TEXT UNIQUE,\
+             host_pid INTEGER,\
+             cave_pid INTEGER,\
+             started_at REAL,\
+             exited_at REAL,\
+             extra_projects TEXT,\
+             host_ports TEXT);",
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT OR REPLACE INTO agents \
+         (agent_id, project, session_id, host_pid, started_at, exited_at) \
+         VALUES (?1, ?2, ?3, ?4, 0, NULL)",
+        rusqlite::params!["3", slug, sid, dead_pid],
+    )
+    .unwrap();
+
+    // Create a fake session jsonl with mtime backdated 7 days. Path matches
+    // config::claude_project_dir(slug, None) -> data_dir/home/.claude/projects/<encoded>
+    // where encoded replaces every non-alphanumeric char in /projects/<slug>.
+    let encoded = format!("/projects/{slug}")
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect::<String>();
+    let session_dir = p.data_dir
+        .join("home")
+        .join(".claude")
+        .join("projects")
+        .join(&encoded);
+    fs::create_dir_all(&session_dir).unwrap();
+    let session_file = session_dir.join(format!("{sid}.jsonl"));
+    fs::write(&session_file, "{}\n").unwrap();
+
+    let week_ago = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+        - 7 * 86400;
+    let _ = Command::new("touch")
+        .arg("-d")
+        .arg(format!("@{week_ago}"))
+        .arg(&session_file)
+        .output()
+        .unwrap();
+
+    // Trigger the dead-pid sweep via `cav status 3` (per-agent path that
+    // calls is_agent_running, but skips the reaper that would delete a
+    // trivially-clean row before we can read exited_at back).
+    let _ = p.cav(&["status", "3"]);
+
+    // Read back exited_at; should be approximately week_ago, not now.
+    let exited_at: f64 = conn
+        .query_row(
+            "SELECT exited_at FROM agents WHERE agent_id = '3'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as f64;
+    assert!(
+        exited_at < now_secs - 6.0 * 86400.0,
+        "exited_at should be near session mtime (week ago), got {exited_at}, now {now_secs}"
+    );
+
+    // Cleanup
+    let _ = fs::remove_dir_all(session_dir);
+}
+
+#[test]
+fn continue_after_pre_ttl_exit_still_works() {
+    // An agent whose row exists with exited_at = 1 (epoch second) should
+    // still be continuable -- old rows are reclaimable, not auto-expired.
+    // We can't run cav -c to completion (would need sandbox launch), but
+    // we can confirm cav status sees the agent normally.
+    let p = Project::new("old-agent-still-visible");
+    p.register_agent("3");
+    p.push_agent_commits("3", "main", &[("a.txt", "A\n")]);
+    let out = p.cav(&["status", "3"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "status should succeed for old agent: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        combined.contains("@3") || combined.contains("agent-3"),
+        "status should show agent 3, got: {combined}"
+    );
+}
