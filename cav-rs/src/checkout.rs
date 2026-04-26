@@ -56,7 +56,7 @@ pub fn checkout(base: &Path, name: &str, agent_id: Option<&str>) -> Result<()> {
             let ob = find_agent_base(base, explicit_aid)?;
             (ob, explicit_aid.to_string())
         } else {
-            bail!("Not on a dev branch.\nUsage: cav checkout <branch> <agent-id>");
+            bail!("Not on a dev branch, please specify agent id.\nUsage: cav checkout <branch> <agent-id>");
         };
         if old_base == name {
             bail!("Agent {aid} already targeting '{name}'.");
