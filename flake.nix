@@ -133,9 +133,13 @@
       devShells = eachSystem (pkgs: {
         default = pkgs.mkShell {
           packages = with pkgs; [
-            cargo rustc rustfmt clippy
+            cargo rustc rustfmt clippy cargo-llvm-cov
             git jq socat iptables util-linux slirp4netns
           ];
+          # nixpkgs rustc omits llvm-tools-preview; point cargo-llvm-cov at the
+          # version-matched llvm bundled with rustc.
+          LLVM_COV = "${pkgs.rustc.llvm}/bin/llvm-cov";
+          LLVM_PROFDATA = "${pkgs.rustc.llvm}/bin/llvm-profdata";
         };
       });
     };
