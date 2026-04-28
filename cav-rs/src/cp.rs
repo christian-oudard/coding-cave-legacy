@@ -14,8 +14,13 @@ pub fn cp(srcs: Vec<String>, dest: String, recursive: bool, force: bool) -> Resu
     }
     let srcs = expanded;
 
+    // Pre-resolve ALL src cave paths before any prompting so we only ask for
+    // agent selection once, even when there are multiple sources.
+    let resolved_srcs: Vec<Option<PathBuf>> = srcs.iter()
+        .map(|s| resolve_cave_path(s, false))
+        .collect::<Result<_>>()?;
+
     let dest_path = resolve_cave_path(&dest, true)?;
-    let first_src_path = resolve_cave_path(srcs.first().unwrap(), false)?;
 
     if let Some(dp) = dest_path {
         // host -> cave
@@ -56,8 +61,8 @@ pub fn cp(srcs: Vec<String>, dest: String, recursive: bool, force: bool) -> Resu
             }
             eprintln!("  {src} -> {dest}");
         }
-    } else if first_src_path.is_some() {
-        // cave -> host
+    } else if resolved_srcs.iter().any(|p| p.is_some()) {
+        // cave -> host (use pre-resolved paths)
         let host_dest = PathBuf::from(&dest);
         if let Some(parent) = host_dest.parent() {
             std::fs::create_dir_all(parent)?;
@@ -65,8 +70,8 @@ pub fn cp(srcs: Vec<String>, dest: String, recursive: bool, force: bool) -> Resu
         if srcs.len() > 1 && !host_dest.is_dir() {
             bail!("cp: base '{}': not a directory", dest);
         }
-        for src in &srcs {
-            let src_path = resolve_cave_path(src, false)?.ok_or_else(|| {
+        for (src, src_path) in srcs.iter().zip(resolved_srcs.iter()) {
+            let src_path = src_path.as_ref().ok_or_else(|| {
                 anyhow::anyhow!("Source not found in cave: {src}")
             })?;
             if src_path.is_symlink() {
@@ -93,10 +98,10 @@ pub fn cp(srcs: Vec<String>, dest: String, recursive: bool, force: bool) -> Resu
                 }
             }
             if src_path.is_dir() {
-                copy_tree_nofollow(&src_path, &base)?;
+                copy_tree_nofollow(src_path, &base)?;
             } else {
-                copy_nofollow(&src_path, &base)?;
-                copy_stat(&src_path, &base);
+                copy_nofollow(src_path, &base)?;
+                copy_stat(src_path, &base);
             }
             eprintln!("  {src} -> {dest}");
         }
@@ -128,6 +133,10 @@ fn resolve_cave_path(spec: &str, is_dest: bool) -> Result<Option<PathBuf>> {
         (slug, Some(id_str.to_string()))
     } else if prefix == "cave" {
         (detect_slug()?, None)
+    } else if prefix.chars().all(|c| c.is_ascii_digit()) && !prefix.is_empty() {
+        bail!(
+            "Use cave@{prefix}:{path} to specify agent {prefix}, not bare {prefix}:{path}."
+        );
     } else {
         (prefix.to_string(), None)
     };

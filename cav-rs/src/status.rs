@@ -148,6 +148,7 @@ fn show_branch_sync_status(base: &Path) {
                 .unwrap_or(0);
             let local_ahead =
                 git::commits_ahead(&local_branch, &remote_ref, None, Some(base)).unwrap_or(0);
+            let is_dev = parse_dev_branch(&local_branch).is_some();
             if behind > 0 && local_ahead > 0 {
                 let nb = if behind == 1 { "commit" } else { "commits" };
                 let na = if local_ahead == 1 { "commit" } else { "commits" };
@@ -157,10 +158,17 @@ fn show_branch_sync_status(base: &Path) {
                 );
             } else if behind > 0 {
                 let n = if behind == 1 { "commit" } else { "commits" };
-                println!(
-                    "{local_branch} is behind {remote_ref} by {behind} {n}, and can be fast-forwarded.\n\
-                     Run: git merge --ff-only {remote_ref}\n"
-                );
+                if is_dev {
+                    println!(
+                        "{local_branch} is behind {remote_ref} by {behind} {n}.\n\
+                         Run: cav pull\n"
+                    );
+                } else {
+                    println!(
+                        "{local_branch} is behind {remote_ref} by {behind} {n}, and can be fast-forwarded.\n\
+                         Run: git merge --ff-only {remote_ref}\n"
+                    );
+                }
             } else if local_ahead > 0 {
                 let n = if local_ahead == 1 { "commit" } else { "commits" };
                 println!(
@@ -476,6 +484,7 @@ pub fn remove_agent(base: &Path, agent_id: &str, yes: bool) -> Result<()> {
 }
 
 pub fn _remove_agent(base: &Path, agent_id: &str, branches: &[String]) -> Result<()> {
+    let shared = config::shared_repo_path(base);
     for branch in branches {
         git::git(
             &["push", CAVE_SHARED_REMOTE, &format!(":refs/heads/{branch}")],
@@ -485,6 +494,8 @@ pub fn _remove_agent(base: &Path, agent_id: &str, branches: &[String]) -> Result
             false,
         )
         .ok();
+        // Directly delete from shared repo as fallback in case the push fails.
+        git::git(&["branch", "-D", branch], Some(&shared), false, true, false).ok();
         git::git(&["branch", "-D", branch], Some(base), false, true, false).ok();
     }
 
@@ -500,6 +511,7 @@ pub fn _remove_agent(base: &Path, agent_id: &str, branches: &[String]) -> Result
         }
         if let Ok(Some(path)) = registry::project_path(slug) {
             let sec_base = PathBuf::from(path);
+            let sec_shared = config::shared_repo_path(&sec_base);
             if let Ok(sec_branches) = git::remote_branches(CAVE_SHARED_REMOTE, Some(&sec_base)) {
                 for b in sec_branches {
                     if let Some((_, aid)) = parse_dev_branch(&b) {
@@ -512,6 +524,7 @@ pub fn _remove_agent(base: &Path, agent_id: &str, branches: &[String]) -> Result
                                 false,
                             )
                             .ok();
+                            git::git(&["branch", "-D", &b], Some(&sec_shared), false, true, false).ok();
                             git::git(
                                 &["branch", "-D", &b],
                                 Some(&sec_base),

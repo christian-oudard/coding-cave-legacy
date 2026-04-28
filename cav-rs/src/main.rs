@@ -59,7 +59,7 @@ enum Cmd {
     /// Launch an agent in a sandbox
     Agent {
         /// Continue the most recently paused agent
-        #[arg(short = 'c', long = "continue")]
+        #[arg(short = 'c', long = "continue", conflicts_with = "resume_agent")]
         continue_agent: bool,
         /// Resume a specific agent (e.g. @3, coding-cave@3)
         #[arg(short = 'r', long = "resume", value_name = "AGENT")]
