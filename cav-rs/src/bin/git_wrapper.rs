@@ -128,7 +128,7 @@ fn sync(real_git: &str, args: Vec<String>) {
             && !rebase_in_progress(real_git, cwd_ref)
         {
             let mut fetch_cmd = Command::new(real_git);
-            fetch_cmd.arg("fetch").arg("host-cave");
+            fetch_cmd.arg("fetch").arg("--prune").arg("host-cave");
             if let Some(d) = cwd_ref {
                 fetch_cmd.current_dir(d);
             }

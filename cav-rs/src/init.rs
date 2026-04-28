@@ -78,7 +78,7 @@ fn publish_bases(base: &Path) -> Result<()> {
 
     let prefix = if has_host_cave {
         git::git(
-            &["fetch", HOST_SHARED_REMOTE],
+            &["fetch", "--prune", HOST_SHARED_REMOTE],
             Some(base),
             false,
             true,

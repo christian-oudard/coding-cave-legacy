@@ -102,7 +102,7 @@ fn find_agent_base(base: &Path, agent_id: &str) -> Result<String> {
 fn ensure_base_exists(base: &Path, name: &str, old_base: &str, remote: &str) -> Result<()> {
     let verbose = config::verbose() >= 1;
     git::git(
-        &["fetch", remote],
+        &["fetch", "--prune", remote],
         Some(base),
         true,
         verbose,
@@ -224,7 +224,7 @@ fn retarget_remote(
     }
 
     git::git(
-        &["fetch", HOST_SHARED_REMOTE],
+        &["fetch", "--prune", HOST_SHARED_REMOTE],
         Some(&ws),
         false,
         true,

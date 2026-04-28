@@ -1596,7 +1596,7 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
     // Sync workspace branches
     crate::log_info!("syncing workspace branches...");
     for (ws, _, _) in &workspaces {
-        git::git(&["fetch", HOST_SHARED_REMOTE], Some(ws), false, true, false).ok();
+        git::git(&["fetch", "--prune", HOST_SHARED_REMOTE], Some(ws), false, true, false).ok();
         let current = git::current_branch(Some(ws)).unwrap_or_default();
         for branch in git::remote_branches(HOST_SHARED_REMOTE, Some(ws)).unwrap_or_default() {
             if parse_dev_branch(&branch).is_some() || branch == current {
