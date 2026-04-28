@@ -112,12 +112,12 @@ pub fn reject(base: &Path, agent_id: Option<&str>, yes: bool, commit: Option<&st
     }
 
     if !yes {
-        print!("\nReject? [Y/n] ");
+        print!("\nReject? [y/N] ");
         io::stdout().flush()?;
         let mut answer = String::new();
-        if io::stdin().read_line(&mut answer).is_err() { bail!("\nAborted.") }
+        io::stdin().read_line(&mut answer).unwrap_or(0);
         let answer = answer.trim().to_lowercase();
-        if answer == "n" || answer == "no" {
+        if answer != "y" && answer != "yes" {
             bail!("Aborted.");
         }
     }

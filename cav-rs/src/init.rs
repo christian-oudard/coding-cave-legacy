@@ -126,14 +126,14 @@ fn offer_cave_nix() {
     if !rustix::termios::isatty(rustix::stdio::stdin()) {
         return;
     }
-    print!("Create default cave.nix? [Y/n] ");
+    print!("Create default cave.nix? [y/N] ");
     io::stdout().flush().ok();
     let mut answer = String::new();
     if io::stdin().read_line(&mut answer).is_err() {
         return;
     }
     let answer = answer.trim().to_lowercase();
-    if !answer.is_empty() && answer != "y" {
+    if answer != "y" && answer != "yes" {
         return;
     }
     if let Some(parent) = cave_nix.parent() {

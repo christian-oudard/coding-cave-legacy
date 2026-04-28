@@ -1,8 +1,9 @@
 use std::collections::HashMap;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 
 use crate::config::{self, inside_cave, parse_dev_branch, resolve_base, worktree_dir};
 use crate::constants::CAVE_SHARED_REMOTE;
@@ -391,7 +392,7 @@ fn collect_agent_infos(
     Ok(agents)
 }
 
-pub fn remove_agent(base: &Path, agent_id: &str) -> Result<()> {
+pub fn remove_agent(base: &Path, agent_id: &str, yes: bool) -> Result<()> {
     let branches = git::remote_branches(CAVE_SHARED_REMOTE, Some(base))?;
     let agent_branches: Vec<String> = branches
         .into_iter()
@@ -401,6 +402,8 @@ pub fn remove_agent(base: &Path, agent_id: &str) -> Result<()> {
                 .unwrap_or(false)
         })
         .collect();
+
+    let mut needs_confirm = false;
 
     for b in &agent_branches {
         let parsed = parse_dev_branch(b);
@@ -413,18 +416,44 @@ pub fn remove_agent(base: &Path, agent_id: &str) -> Result<()> {
         if git::has_merge_base(&remote_dev, &base_ref, Some(base)) {
             if let Ok(commits) = git::cherry_undelivered(&base_ref, &remote_dev, Some(base)) {
                 if !commits.is_empty() {
-                    let n = if commits.len() == 1 { "commit" } else { "commits" };
-                    println!(
-                        "Warning: discarding {} unapproved {n} on {b}:",
-                        commits.len()
-                    );
-                    if let Ok(lines) = git::commit_oneline(&format!("{base_ref}..{remote_dev}"), None, Some(base)) {
-                        for line in &lines {
-                            println!("  {line}");
-                        }
-                    }
+                    needs_confirm = true;
+                    let count = commits.len();
+                    let n = if count == 1 { "commit" } else { "commits" };
+                    println!("Warning: discarding {count} unapproved {n} on {b}:");
+                    let block = format_commit_block(&commits, count, Some(MAX_COMMITS_DISPLAY));
+                    print!("{block}");
                 }
             }
+        }
+    }
+
+    for slug_s in registry::agent_all_slugs(agent_id).unwrap_or_default() {
+        let ws = worktree_dir(&slug_s, agent_id);
+        if !ws.is_dir() {
+            continue;
+        }
+        let st = git::git(
+            &["status", "--porcelain"],
+            Some(&ws),
+            false,
+            true,
+            false,
+        )
+        .unwrap_or_default();
+        if !st.trim().is_empty() {
+            needs_confirm = true;
+            println!("Warning: uncommitted changes in {}", ws.display());
+        }
+    }
+
+    if needs_confirm && !yes {
+        print!("Remove anyway? [y/N] ");
+        io::stdout().flush()?;
+        let mut answer = String::new();
+        io::stdin().read_line(&mut answer).unwrap_or(0);
+        let answer = answer.trim().to_lowercase();
+        if answer != "y" && answer != "yes" {
+            bail!("Aborted.");
         }
     }
 

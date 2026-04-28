@@ -293,3 +293,68 @@ fn partial_approve_on_last_commit_deletes_dev_branch() {
         "dev branch should be deleted after approving the last commit, got: {branches}"
     );
 }
+
+// --- review: auto-pick agent ID ---
+
+#[test]
+fn review_no_args_picks_from_current_dev_branch() {
+    // When the user is already on an agent dev branch, `cav review` (no args)
+    // should pick that agent without requiring an explicit ID.
+    let repo = TestRepo::new("review-current-branch");
+    repo.cav(&["init", repo.dir.to_str().unwrap()]);
+
+    git(&["push", "cave", "main"], &repo.dir);
+
+    fs::write(repo.dir.join("a.txt"), "a\n").unwrap();
+    git(&["add", "a.txt"], &repo.dir);
+    git(&["commit", "-m", "commit-A"], &repo.dir);
+    let sha_a = git_out(&["rev-parse", "HEAD"], &repo.dir);
+
+    git(&["reset", "--hard", "HEAD~1"], &repo.dir);
+    git(&["push", "cave", "main"], &repo.dir);
+
+    agent_push(
+        &["push", "cave", &format!("{sha_a}:refs/heads/agent-2/main")],
+        &repo.dir,
+        "2",
+    );
+
+    // Place the host on the dev branch so the inference picks agent 2.
+    git(&["checkout", "-B", "agent-2/main", &sha_a], &repo.dir);
+
+    let out = repo.cav(&["review"]);
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert!(
+        stdout(&out).contains("Checked out agent-2/main"),
+        "expected auto-pick of agent 2, got: {}",
+        stdout(&out)
+    );
+}
+
+#[test]
+fn review_no_args_with_no_agents_errors_clearly() {
+    let repo = TestRepo::new("review-no-agents");
+    repo.cav(&["init", repo.dir.to_str().unwrap()]);
+
+    let out = repo.cav(&["review"]);
+    assert_ne!(out.status.code(), Some(0));
+    let err = stderr(&out);
+    assert!(
+        err.contains("No agents"),
+        "expected friendly empty-registry error, got: {err}"
+    );
+}
+
+#[test]
+fn remove_agent_no_args_with_no_paused_agents_errors_clearly() {
+    let repo = TestRepo::new("remove-agent-no-agents");
+    repo.cav(&["init", repo.dir.to_str().unwrap()]);
+
+    let out = repo.cav(&["remove-agent"]);
+    assert_ne!(out.status.code(), Some(0));
+    let err = stderr(&out);
+    assert!(
+        err.contains("No paused agents"),
+        "expected friendly empty-registry error, got: {err}"
+    );
+}

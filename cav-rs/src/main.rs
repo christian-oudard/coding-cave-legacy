@@ -114,7 +114,10 @@ enum Cmd {
     /// Remove a paused agent and its branches
     #[command(name = "remove-agent")]
     RemoveAgent {
-        agent_id: String,
+        agent_id: Option<String>,
+        /// Skip confirmation
+        #[arg(short = 'y', long = "yes")]
+        yes: bool,
     },
     /// Unregister a project from the cave
     #[command(name = "remove-project")]
@@ -123,7 +126,7 @@ enum Cmd {
     },
     /// Fetch and checkout an agent branch for review
     Review {
-        agent_id: String,
+        agent_id: Option<String>,
     },
     /// Retarget an agent to deliver to a different branch
     Checkout {
@@ -287,11 +290,29 @@ fn run() -> Result<()> {
                 status::show(&base, agent_id.as_deref())
             }
         }
-        Cmd::RemoveAgent { agent_id } => {
-            let aid = parse_agent_id(&agent_id);
-            if !config::is_agent_id(&aid) {
-                bail!("Invalid agent ID '{agent_id}'. Use a number (e.g. 3).");
-            }
+        Cmd::RemoveAgent { agent_id, yes } => {
+            let aid = if let Some(raw) = agent_id {
+                let a = parse_agent_id(&raw);
+                if !config::is_agent_id(&a) {
+                    bail!("Invalid agent ID '{raw}'. Use a number (e.g. 3).");
+                }
+                a
+            } else {
+                let base = find_repo_root().ok();
+                let slug = base.as_deref().map(config::project_slug);
+                let candidates: Vec<String> = registry::all_agent_ids(slug.as_deref())?
+                    .into_iter()
+                    .filter(|a| !registry::is_agent_running(a).unwrap_or(false))
+                    .collect();
+                match candidates.len() {
+                    0 => bail!("No paused agents to remove."),
+                    1 => candidates.into_iter().next().unwrap(),
+                    _ => bail!(
+                        "Multiple paused agents: {}\nSpecify which: cav remove-agent <agent-id>",
+                        candidates.join(", ")
+                    ),
+                }
+            };
             let all_ids = registry::all_agent_ids(None)?;
             if !all_ids.contains(&aid) {
                 bail!("Agent {aid} not found.");
@@ -311,7 +332,7 @@ fn run() -> Result<()> {
                     let name = registry::display_name(&base, &aid);
                     bail!("{name} is running. Stop it first.");
                 }
-                status::remove_agent(&base, &aid)
+                status::remove_agent(&base, &aid, yes)
             } else {
                 registry::remove_agent(&aid)?;
                 println!("Removed agent {aid} (project directory missing).");
@@ -331,10 +352,16 @@ fn run() -> Result<()> {
         Cmd::Review { agent_id } => {
             let base = find_repo_root()?;
             require_init(&base)?;
-            let aid = parse_agent_id(&agent_id);
-            if !config::is_agent_id(&aid) {
-                bail!("Invalid agent ID '{agent_id}'. Use a number (e.g. 3).");
-            }
+            let aid = match agent_id {
+                Some(s) => {
+                    let a = parse_agent_id(&s);
+                    if !config::is_agent_id(&a) {
+                        bail!("Invalid agent ID '{s}'. Use a number (e.g. 3).");
+                    }
+                    a
+                }
+                None => auto_pick_agent_id(&base, "review")?,
+            };
             review::review(&base, &aid)
         }
         Cmd::Checkout { branch, agent_id } => {
@@ -531,6 +558,28 @@ pub fn resolve_target(
     }
 
     Ok((base, agent_id))
+}
+
+/// Pick an agent ID for the current project when none was given.
+/// Tries the current dev branch first, then falls back to the only
+/// agent registered for this project. Bails with a helpful message
+/// when there are zero or multiple candidates.
+fn auto_pick_agent_id(base: &Path, cmd: &str) -> Result<String> {
+    if let Ok(branch) = git::current_branch(Some(base)) {
+        if let Some((_, aid)) = parse_dev_branch(&branch) {
+            return Ok(aid);
+        }
+    }
+    let slug = config::project_slug(base);
+    let ids = registry::all_agent_ids(Some(&slug))?;
+    match ids.len() {
+        1 => Ok(ids.into_iter().next().unwrap()),
+        0 => bail!("No agents in {slug}."),
+        _ => bail!(
+            "Multiple agents in {slug}: {}\nSpecify which: cav {cmd} <agent-id>",
+            ids.join(", ")
+        ),
+    }
 }
 
 fn resolve_project(path: &str) -> Result<PathBuf> {

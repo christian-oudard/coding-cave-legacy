@@ -114,9 +114,9 @@ Retargets an agent to a different base branch. The agent's workspace is switched
 
 Shows the current list of agents and unmerged commits for the current project, or for all projects with `cav status --all`. It fetches from the shared remote to get latest information, and queries the registry database. The status command is read-only, and does not change registry database state or Git state except for fetching. The status command shows agent status of "running" or "stopped". The sort order is most recent first. Similar to `git status`, it shows whether the host base branch is behind or ahead of the cave remote.
 
-### `cav remove-agent <n>`
+### `cav remove-agent [--yes] [<n>]`
 
-Removes a paused agent by agent ID. Deletes its session from the database, deletes its worktree, deletes its remote agent branch, and deletes the corresponding host-side checkout. Warns about unapproved commits being discarded, giving commit hashes. Refuses to remove a running agent.
+Removes a paused agent by agent ID. Deletes its session from the database, deletes its worktree, deletes its remote agent branch, and deletes the corresponding host-side checkout. Warns about unapproved commits being discarded, giving commit hashes, and prompts for confirmation when there is unapproved work or uncommitted changes; with `--yes`, skips that prompt. If the agent ID is omitted, the only paused agent in the project is selected. Refuses to remove a running agent.
 
 ### `cav env build`
 
