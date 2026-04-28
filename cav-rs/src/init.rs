@@ -169,6 +169,7 @@ pub fn init(path: &Path, reinitialize: bool) -> Result<()> {
 
     if is_bare_repo(&shared) {
         if !reinitialize {
+            registry::register_project(&base)?;
             println!("Coding Cave already initialized at {}", cav.display());
             return Ok(());
         }
