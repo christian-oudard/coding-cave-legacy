@@ -158,11 +158,15 @@ fn show_branch_sync_status(base: &Path) {
             } else if behind > 0 {
                 let n = if behind == 1 { "commit" } else { "commits" };
                 println!(
-                    "{local_branch} is behind {remote_ref} by {behind} {n}, and can be fast-forwarded.\n"
+                    "{local_branch} is behind {remote_ref} by {behind} {n}, and can be fast-forwarded.\n\
+                     Run: git merge --ff-only {remote_ref}\n"
                 );
             } else if local_ahead > 0 {
                 let n = if local_ahead == 1 { "commit" } else { "commits" };
-                println!("{local_branch} is ahead of {remote_ref} by {local_ahead} {n}.\n");
+                println!(
+                    "{local_branch} is ahead of {remote_ref} by {local_ahead} {n}.\n\
+                     Run: cav push\n"
+                );
             }
         }
     }

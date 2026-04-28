@@ -52,6 +52,8 @@ pub fn push(base: &Path, force: bool) -> Result<()> {
             if !verbose {
                 if up_to_date {
                     println!("Already up to date.");
+                } else if force {
+                    println!("Force-pushed {branch} to shared remote.");
                 } else {
                     println!("Pushed {branch} to shared remote.");
                 }

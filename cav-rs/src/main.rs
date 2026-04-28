@@ -31,7 +31,13 @@ use crate::config::{inside_cave, parse_dev_branch, shared_repo_path};
 use crate::constants::{HOST_SHARED_REPO_DIR};
 
 #[derive(Parser)]
-#[command(name = "cav", disable_help_flag = false, disable_version_flag = true)]
+#[command(
+    name = "cav",
+    about = "Coding Cave: coordinate parallel AI agents on a Git project.\n\n\
+             Running bare `cav` starts a new agent session.",
+    disable_help_flag = false,
+    disable_version_flag = true,
+)]
 struct Cli {
     /// Enable verbose output (-v info, -vv debug)
     #[arg(short = 'v', action = clap::ArgAction::Count, global = true)]

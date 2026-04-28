@@ -202,6 +202,46 @@ fn git_out(args: &[&str], dir: &Path) -> String {
 // --- Approve teardown ---
 
 #[test]
+fn approve_disambiguates_by_base_branch() {
+    // When on 'main' with agents targeting 'main' and 'develop', approve should
+    // auto-select the one targeting 'main' without prompting.
+    let p = Project::new("approve-disambig");
+    p.register_agent("1");
+    p.register_agent("2");
+    // Create 'develop' branch
+    git(&["checkout", "-b", "develop"], &p.dir);
+    git(&["push", "cave", "develop"], &p.dir);
+    git(&["checkout", "main"], &p.dir);
+    git(&["fetch", "cave"], &p.dir);
+    // Agent 1 targets main, agent 2 targets develop
+    p.push_agent_commits("1", "main", &[("a.txt", "A\n")]);
+    p.push_agent_commits("2", "develop", &[("b.txt", "B\n")]);
+    // push_agent_commits leaves us on the last base branch used, so switch back.
+    git(&["checkout", "main"], &p.dir);
+
+    // With -y, should auto-select agent 1 since we're on main
+    let out = p.cav(&["approve", "-y"]);
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "approve should auto-select agent 1 when on main: {combined}"
+    );
+    assert!(
+        !p.shared_has_ref("refs/heads/agent-1/main"),
+        "agent-1/main should be deleted after approval: {combined}"
+    );
+    assert!(
+        p.shared_has_ref("refs/heads/agent-2/develop"),
+        "agent-2/develop should be untouched: {combined}"
+    );
+}
+
+#[test]
 fn full_approve_removes_agent_branch_everywhere() {
     let p = Project::new("full-approve");
     p.push_agent_commits("1", "main", &[("a.txt", "A\n")]);

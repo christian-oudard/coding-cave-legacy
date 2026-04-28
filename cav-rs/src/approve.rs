@@ -106,13 +106,24 @@ pub fn approve(
     // Disambiguate by current branch if checked out.
     if candidates.len() > 1 {
         let current = git::current_branch(Some(base)).unwrap_or_default();
-        let matching: Vec<_> = candidates
+        // First try exact agent-branch match (user is on a reviewed branch).
+        let by_branch: Vec<_> = candidates
             .iter()
             .filter(|(b, _, _)| b == &current)
             .cloned()
             .collect();
-        if !matching.is_empty() {
-            candidates = matching;
+        if !by_branch.is_empty() {
+            candidates = by_branch;
+        } else {
+            // Then try base-branch match: on 'main' with only one agent targeting 'main'.
+            let by_base: Vec<_> = candidates
+                .iter()
+                .filter(|(_, base_name, _)| base_name == &current)
+                .cloned()
+                .collect();
+            if by_base.len() == 1 {
+                candidates = by_base;
+            }
         }
     }
 

@@ -23,7 +23,8 @@ pub fn pull(base: &Path, force: bool) -> Result<()> {
     if parsed.is_none() {
         bail!(
             "Not on a dev branch (current: '{local_branch}').\n\
-             cav pull is only valid on dev branches."
+             cav pull is only valid on agent branches (e.g. agent-1/main).\n\
+             To review agent changes, run: cav review <agent-id>"
         );
     }
     let (base_name, agent_id) = parsed.unwrap();
