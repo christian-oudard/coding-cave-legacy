@@ -74,14 +74,24 @@ fn push_cave_self(
     verbose: bool,
 ) -> Result<(bool, Vec<String>)> {
     let remote_branch = config::dev_branch(local_branch, agent_id);
+    // Compare local & remote SHAs directly. `git push` reports up-to-date on
+    // stderr, not stdout, so parsing its output is unreliable.
+    let local_sha = git::git_output(&["rev-parse", &format!("refs/heads/{local_branch}")], Some(base)).ok();
+    let remote_sha = git::git_output(
+        &["rev-parse", &format!("refs/remotes/{HOST_SHARED_REMOTE}/{remote_branch}")],
+        Some(base),
+    ).ok();
+    if !force && local_sha.is_some() && local_sha == remote_sha {
+        return Ok((true, vec![]));
+    }
     let refspec = format!("refs/heads/{local_branch}:refs/heads/{remote_branch}");
     let mut args = vec!["push", HOST_SHARED_REMOTE, &refspec];
     let force_flag = "--force".to_string();
     if force {
         args.insert(1, &force_flag);
     }
-    let out = git::git(&args, Some(base), true, verbose, verbose)?;
-    Ok((out.contains("up-to-date"), vec![]))
+    git::git(&args, Some(base), true, verbose, verbose)?;
+    Ok((false, vec![]))
 }
 
 pub fn push_base(
@@ -92,14 +102,27 @@ pub fn push_base(
     verbose: bool,
 ) -> Result<(bool, Vec<String>)> {
     let refspec_str = refspec.unwrap_or(base_branch).to_string();
+    // refspec may be "sha:refs/heads/branch" (from approve) or just "branch".
+    let local_sha = if let Some(colon) = refspec_str.find(':') {
+        git::git_output(&["rev-parse", "--verify", &refspec_str[..colon]], Some(base)).ok()
+    } else {
+        git::git_output(&["rev-parse", &format!("refs/heads/{base_branch}")], Some(base)).ok()
+    };
+    let remote_sha = git::git_output(
+        &["rev-parse", &format!("refs/remotes/{CAVE_SHARED_REMOTE}/{base_branch}")],
+        Some(base),
+    ).ok();
+    if !force && local_sha.is_some() && local_sha == remote_sha {
+        return Ok((true, vec![]));
+    }
     let mut args = vec!["push", "--no-set-upstream", CAVE_SHARED_REMOTE, &refspec_str];
     let force_flag = "--force".to_string();
     if force {
         args.insert(1, &force_flag);
     }
-    let out = git::git(&args, Some(base), true, verbose, verbose)?;
+    git::git(&args, Some(base), true, verbose, verbose)?;
     let notes = rebase_agents(base, base_branch);
-    Ok((out.contains("up-to-date"), notes))
+    Ok((false, notes))
 }
 
 fn push_dev(
@@ -109,13 +132,20 @@ fn push_dev(
     force: bool,
     verbose: bool,
 ) -> Result<(bool, Vec<String>)> {
-    let mut args = vec!["push", "--no-set-upstream", CAVE_SHARED_REMOTE, branch];
-    let force_flag = "--force".to_string();
-    if force {
-        args.insert(1, &force_flag);
+    let local_sha = git::git_output(&["rev-parse", &format!("refs/heads/{branch}")], Some(base)).ok();
+    let remote_sha = git::git_output(
+        &["rev-parse", &format!("refs/remotes/{CAVE_SHARED_REMOTE}/{branch}")],
+        Some(base),
+    ).ok();
+    let up_to_date = !force && local_sha.is_some() && local_sha == remote_sha;
+    if !up_to_date {
+        let mut args = vec!["push", "--no-set-upstream", CAVE_SHARED_REMOTE, branch];
+        let force_flag = "--force".to_string();
+        if force {
+            args.insert(1, &force_flag);
+        }
+        git::git(&args, Some(base), true, verbose, verbose)?;
     }
-    let out = git::git(&args, Some(base), true, verbose, verbose)?;
-    let up_to_date = out.contains("up-to-date");
 
     let slug = config::project_slug(base);
     let ws = worktree_dir(&slug, agent_id);

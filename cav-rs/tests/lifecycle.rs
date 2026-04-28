@@ -754,3 +754,115 @@ fn continue_after_pre_ttl_exit_still_works() {
         "status should show agent 3, got: {combined}"
     );
 }
+
+// --- Checkout (retarget) ---
+
+#[test]
+fn checkout_retargets_agent_branch_in_shared_remote() {
+    // `cav checkout develop 1` renames agent-1/main -> agent-1/develop in the
+    // shared remote (from outside the cave, specifying agent id explicitly).
+    let p = Project::new("checkout-retarget");
+    p.push_agent_commits("1", "main", &[("a.txt", "A\n")]);
+    assert!(p.shared_has_ref("refs/heads/agent-1/main"));
+
+    // Create develop branch in the shared remote (from main).
+    let main_sha = p.shared_sha("refs/heads/main");
+    git(
+        &["push", "cave", &format!("{main_sha}:refs/heads/develop")],
+        &p.dir,
+    );
+    git(&["fetch", "cave"], &p.dir);
+    assert!(p.host_has_remote_tracking("develop"));
+
+    // Run checkout from host (on main branch, agent id explicit).
+    let out = p.cav(&["checkout", "develop", "1"]);
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "checkout should succeed: {combined}"
+    );
+
+    // agent-1/main should be gone, agent-1/develop should exist.
+    assert!(
+        !p.shared_has_ref("refs/heads/agent-1/main"),
+        "old agent branch must be removed: {combined}"
+    );
+    assert!(
+        p.shared_has_ref("refs/heads/agent-1/develop"),
+        "new agent branch must exist: {combined}"
+    );
+}
+
+// --- Push idempotency ---
+
+#[test]
+fn push_already_up_to_date_on_second_push() {
+    let p = Project::new("push-idem");
+    // Make a new commit so first push has something to send.
+    fs::write(p.dir.join("x.txt"), "x\n").unwrap();
+    git(&["add", "x.txt"], &p.dir);
+    git(&["commit", "-m", "add x"], &p.dir);
+
+    let out1 = p.cav(&["push"]);
+    let stdout1 = String::from_utf8_lossy(&out1.stdout);
+    assert_eq!(
+        out1.status.code(),
+        Some(0),
+        "first push should succeed: {}{}",
+        stdout1,
+        String::from_utf8_lossy(&out1.stderr)
+    );
+    assert!(
+        stdout1.contains("Pushed"),
+        "first push should say 'Pushed': {stdout1}"
+    );
+
+    let out2 = p.cav(&["push"]);
+    let stdout2 = String::from_utf8_lossy(&out2.stdout);
+    assert_eq!(
+        out2.status.code(),
+        Some(0),
+        "second push should succeed: {}{}",
+        stdout2,
+        String::from_utf8_lossy(&out2.stderr)
+    );
+    assert!(
+        stdout2.contains("Already up to date"),
+        "second push should say 'Already up to date': {stdout2}"
+    );
+}
+
+// --- Partial approve remaining count message ---
+
+#[test]
+fn partial_approve_prints_remaining_count() {
+    let p = Project::new("partial-remaining");
+    let tip = p.push_agent_commits(
+        "1",
+        "main",
+        &[("a.txt", "A\n"), ("b.txt", "B\n"), ("c.txt", "C\n")],
+    );
+    // Approve only the first commit (two before tip).
+    let first = git_out(&["rev-parse", &format!("{tip}^^")], &p.dir);
+
+    let out = p.cav(&["approve", "-y", "1", "--commit", &first]);
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "partial approve failed: {combined}"
+    );
+    assert!(
+        combined.contains("remain") || combined.contains("future approval"),
+        "should mention remaining commits: {combined}"
+    );
+}

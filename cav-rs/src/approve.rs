@@ -300,7 +300,10 @@ fn pick_candidate(
     print!("\nApprove which? [1-{}] ", candidates.len());
     io::stdout().flush()?;
     let mut answer = String::new();
-    io::stdin().read_line(&mut answer).map_err(|_| anyhow::anyhow!("\nAborted."))?;
+    match io::stdin().read_line(&mut answer) {
+        Ok(0) | Err(_) => bail!("\nAborted."),
+        Ok(_) => {}
+    }
     let idx: usize = answer
         .trim()
         .parse::<usize>()
