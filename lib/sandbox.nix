@@ -112,7 +112,8 @@ let
           ${pkgs.coreutils}/bin/mkdir -p "$(${pkgs.coreutils}/bin/dirname "$dest")"
           ${pkgs.coreutils}/bin/chmod u+w "$(${pkgs.coreutils}/bin/dirname "$dest")" 2>/dev/null || true
           [ -f "$dest" ] && ${pkgs.coreutils}/bin/chmod u+w "$dest" 2>/dev/null || true
-          ${pkgs.coreutils}/bin/cp --no-preserve=mode "$f" "$dest"
+          ${pkgs.coreutils}/bin/cp --remove-destination "$f" "$dest"
+          ${pkgs.coreutils}/bin/chmod u+w "$dest"
         done
         cd /
       fi
