@@ -56,8 +56,7 @@ fn warn_dirty(base: &Path) {
         .collect();
     if !filtered.is_empty() {
         eprintln!(
-            "Warning: uncommitted changes will not be visible to agents.\n\
-             Commit them first, or use 'cav cp' to copy files in later.\n"
+            "Warning: uncommitted changes will not be visible to agents. Commit them first, or use 'cav cp' to copy files in later.\n"
         );
     }
 }
