@@ -37,7 +37,7 @@ Projects are registered with the coding-cave system with `cav init`. This create
 
 ## Agent IDs
 
-Agent sessions are launched with `cav agent`, or just `cav` for short. Agent sessions are identified by unique IDs: agent-1, agent-2, agent-3, etc.  Display name tags combine the project slug with the ID: `web-frontend@1`, `data_pipeline@2`, and so on. Each agent gets its own workspace clone of the shared repo. Agent session information, including Claude session IDs, are stored in the agent registry database table.
+Agent sessions are launched with `cav agent`, or just `cav` for short. Agent sessions are identified by unique numeric IDs (1, 2, 3, etc.). Display name tags combine the project slug with the ID: `web-frontend@1`, `data_pipeline@2`, and so on. Dev branches are named `agent-<n>/<base>` (e.g. `agent-1/main`). Each agent gets its own workspace clone of the shared repo. Agent session information, including Claude session IDs, are stored in the agent registry database table.
 
 `cav status` shows current running agents and work in progress, as unmerged commits. The agent session can be running or stopped. Running sessions are visible in `cav status`. Stopped sessions with unmerged work also show in `cav status`.
 
@@ -90,9 +90,11 @@ Extra projects, ports, and `--comms` are persisted across `--continue`/`--resume
 
 All caves are recursive. Agents can launch sub-caves for testing coding-cave features.
 
-### `cav approve [agent-id]`
+### `cav approve [agent-id] [--commit <SHA>]`
 
 Approves an agent's work and fast-forwards the canonical base branch to the tip of the agent's branch. Specify which agent ID number to approve, or the agent ID is inferred from the currently checked-out agent branch. Approval errors out if the merge is not a fast-forward (the agent must rebase first). To process an approval, the command advances the base branch on both the cave remote and the host repo.
+
+With `--commit SHA`, approve only up to that commit (partial approval). The dev branch is preserved with remaining commits for a future approval.
 
 ### `cav reject [agent-id]`
 
@@ -110,9 +112,9 @@ Pushes the current branch to the shared remote. With `--force`, force-pushes (fo
 
 Retargets an agent to a different base branch. The agent's workspace is switched to the new base, and its unmerged work is rebased onto it. Agent ID is inferred from the currently checked-out agent branch if present, otherwise it must be specified.
 
-### `cav status [-a,--all]`
+### `cav status [-a,--all] [agent-id]`
 
-Shows the current list of agents and unmerged commits for the current project, or for all projects with `cav status --all`. It fetches from the shared remote to get latest information, and queries the registry database. The status command is read-only, and does not change registry database state or Git state except for fetching. The status command shows agent status of "running" or "stopped". The sort order is most recent first. Similar to `git status`, it shows whether the host base branch is behind or ahead of the cave remote.
+Shows the current list of agents and unmerged commits for the current project, or for all projects with `cav status --all`. Optionally filter to a single agent by ID. The agent ID resolves from the registry regardless of the current working directory. It fetches from the shared remote to get latest information, and queries the registry database. As a side effect, the status command performs lightweight maintenance: it reaps agents whose process has died and removes their registry entries and branches if they left no pending work, and it drops shared dev branches whose tip already matches their base (already merged). The status command shows agent status of "running" or "stopped". The sort order is most recent first. Similar to `git status`, it shows whether the host base branch is behind or ahead of the cave remote.
 
 ### `cav remove-agent [--yes] [<n>]`
 

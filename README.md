@@ -1,8 +1,47 @@
 # Coding Cave
 
-Coordinates multiple Claude agents working in parallel on a Git project, using Git as the sole coordination mechanism. Each agent runs in a bwrap sandbox with nix packages.
+Coordinates multiple Claude agents working in parallel on a Git project, using
+Git as the sole coordination mechanism. Each agent runs in a bubblewrap sandbox
+with Nix packages.
 
 See [SPEC.md](SPEC.md) for the full specification.
+
+## Install
+
+**Requirements:** Linux, Nix with flakes enabled, bubblewrap (`bwrap`).
+
+```
+$ git clone <this-repo> && cd coding-cave
+$ nix profile add .
+```
+
+Or for NixOS / home-manager, add the flake to your inputs and include `cav` in
+your packages.
+
+After install, run `cav --help` to verify.
+
+## Quickstart
+
+```
+$ cd ~/code/myproject          # must be a git repo with at least one commit
+$ cav init .                   # set up the shared repo and hooks
+$ cav agent                    # launch an agent (auto-assigns agent ID)
+```
+
+The agent runs Claude Code in a sandbox. When you're happy with the work:
+
+```
+$ cav pull                     # fetch agent commits to your local branch
+$ cav review 1                 # inspect what the agent did
+$ cav approve 1                # fast-forward your base branch
+```
+
+To keep iterating:
+
+```
+$ cav push                     # send your edits back to the agent
+$ cav status                   # see unmerged agent commits
+```
 
 ## Bringing your dotfiles
 
@@ -57,11 +96,14 @@ Note: the cave has no general internet egress, so plugin managers that fetch at 
 ## Testing
 
 ```
-nix develop --command cargo test
+$ nix develop --command cargo test
 ```
 
-Integration tests (real git repos, cave launches) are not yet ported. See `cav-rs/` for the Rust test suite.
+Unit and integration tests live in `cav-rs/`. Run against real git repos, no
+network required.
 
 ## Build
 
-Nix-only. `nix build` produces the `cav` binary and all helper binaries.
+Nix-only. `nix build` produces the `cav` binary and all helper binaries
+(`cav-pre-receive`, `cav-post-receive`, `cav-handler`, `cav-supervisor`,
+`cav-broker`, `cav-channel-server`).
