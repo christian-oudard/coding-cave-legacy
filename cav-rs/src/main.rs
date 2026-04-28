@@ -331,6 +331,17 @@ fn run() -> Result<()> {
             if !projects.contains_key(&slug) {
                 bail!("No project \"{slug}\" in registry.");
             }
+            // Refuse if any agents for this project are still running.
+            let running: Vec<String> = registry::all_agent_ids(Some(&slug))?
+                .into_iter()
+                .filter(|a| registry::is_agent_running(a).unwrap_or(false))
+                .collect();
+            if !running.is_empty() {
+                bail!(
+                    "Project \"{slug}\" has running agents: {}\nStop them first.",
+                    running.join(", ")
+                );
+            }
             registry::remove_project(&slug)?;
             println!("Removed project \"{slug}\".");
             Ok(())
@@ -509,7 +520,12 @@ fn require_init(base: &Path) -> Result<()> {
             // Inside the cave the registry is isolated. Auto-register.
             registry::register_project(base)?;
         } else {
-            bail!("Shared repo exists but project not registered. Run: cav init");
+            bail!(
+                "Shared repo exists but project '{slug}' is not registered.\n\
+                 If this project was renamed from another directory, run:\n\
+                   cav remove-project <old-slug>   # remove stale registry entry\n\
+                   cav init                        # re-register under new name"
+            );
         }
     }
     config::check_workspace_consistent(base)?;

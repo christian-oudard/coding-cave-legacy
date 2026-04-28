@@ -118,6 +118,10 @@ Shows the current list of agents and unmerged commits for the current project, o
 
 Removes a paused agent by agent ID. Deletes its session from the database, deletes its worktree, deletes its remote agent branch, and deletes the corresponding host-side checkout. Warns about unapproved commits being discarded, giving commit hashes, and prompts for confirmation when there is unapproved work or uncommitted changes; with `--yes`, skips that prompt. If the agent ID is omitted, the only paused agent in the project is selected. Refuses to remove a running agent.
 
+### `cav remove-project <slug>`
+
+Unregisters a project from the coding-cave registry. Refuses if the project has running agents. Does not delete the project directory, worktrees, or the shared bare repo — it only removes the registry entry. Use this to clean up after a project directory has been moved or deleted.
+
 ### `cav env build`
 
 Force-rebuilds the cave environment from `~/.config/coding-cave/cave.nix` (or the default). Useful for iterating on cave.nix without starting an agent.

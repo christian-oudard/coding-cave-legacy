@@ -76,9 +76,9 @@ pub fn show(base: &Path, agent_id: Option<&str>) -> Result<()> {
         // Inside cave without a cave remote (not yet cav init'd): no sub-agents.
         let slug = config::project_slug(base);
         if let Some(aid) = agent_id {
-            println!("No agent {aid} in registry.");
+            println!("No agent {aid} in {slug}.");
         } else {
-            println!("No running agents in {slug}.");
+            println!("No agents in {slug}. Start one with: cav agent");
         }
         return Ok(());
     }
@@ -185,7 +185,12 @@ fn print_agents(agents: &[AgentInfo], max_commits: Option<usize>) {
             print!("{}", format_commit_block(commit_lines, *ahead, max_commits));
         }
         for ws in &agent.dirty_worktrees {
-            println!("  uncommitted changes in {}", ws.display());
+            // Extract slug from worktree path (data_dir/worktrees/<slug>/<id>)
+            let label = ws.parent()
+                .and_then(|p| p.file_name())
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| ws.display().to_string());
+            println!("  uncommitted changes in {label} working directory");
         }
     }
 }
@@ -235,7 +240,7 @@ pub fn show_all(projects: Vec<(String, String)>) -> Result<()> {
         .collect();
 
     if active.is_empty() && problems.is_empty() && inactive.is_empty() {
-        println!("No running agents in any project.");
+        println!("No agents in any project. Start one with: cav agent");
         return Ok(());
     }
 
@@ -301,7 +306,11 @@ fn capture_status_output(base: &Path) -> Result<(f64, String)> {
             text.push_str(&format_commit_block(commit_lines, *ahead, Some(MAX_COMMITS_DISPLAY)));
         }
         for ws in &agent.dirty_worktrees {
-            text.push_str(&format!("  uncommitted changes in {}\n", ws.display()));
+            let label = ws.parent()
+                .and_then(|p| p.file_name())
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| ws.display().to_string());
+            text.push_str(&format!("  uncommitted changes in {label} working directory\n"));
         }
     }
     Ok((ts, text))

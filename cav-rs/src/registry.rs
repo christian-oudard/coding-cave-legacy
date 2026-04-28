@@ -583,10 +583,18 @@ pub fn register_project(base: &Path) -> Result<String> {
         .ok();
     if let Some(existing_path) = existing {
         if existing_path != path {
-            bail!(
-                "Slug collision: '{slug}' is already registered to {existing_path}\n\
-                 Rename one of the project directories to avoid this."
-            );
+            // If the old path is gone, allow re-registration silently.
+            if !std::path::Path::new(&existing_path).is_dir() {
+                db.execute(
+                    "DELETE FROM projects WHERE slug = ?1",
+                    params![slug],
+                )?;
+            } else {
+                bail!(
+                    "Slug collision: '{slug}' is already registered to {existing_path}\n\
+                     If that project was moved or deleted, run: cav remove-project {slug}"
+                );
+            }
         }
     }
     db.execute(

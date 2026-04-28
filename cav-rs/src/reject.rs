@@ -30,17 +30,10 @@ pub fn reject(base: &Path, agent_id: Option<&str>, yes: bool, commit: Option<&st
     sandbox::reap_dead_agents();
     sandbox::reconcile_merged_dev_branches(base, verbose);
 
-    let remote_base = format!("{CAVE_SHARED_REMOTE}/{branch}");
-    let tip_sha = git::git_output(&["rev-parse", &remote_base], Some(base))
-        .map_err(|_| anyhow::anyhow!("No remote branch '{remote_base}'."))?;
-
-    let local_sha = git::git_output(&["rev-parse", "HEAD"], Some(base))?;
-    if local_sha != tip_sha {
-        bail!(
-            "Local '{branch}' is not in sync with '{remote_base}'.\n\
-             Run 'cav pull' first."
-        );
-    }
+    // Local '{branch}' is the source of truth; reject force-pushes it to
+    // the cave at the end, so any drift between local and cave/{branch}
+    // resolves itself.
+    let tip_sha = git::git_output(&["rev-parse", "HEAD"], Some(base))?;
 
     let slug = config::project_slug(base);
 

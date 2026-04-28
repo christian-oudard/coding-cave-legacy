@@ -226,6 +226,24 @@ fn init_reinitialize_updates_hooks() {
     assert!(post_recv.exists(), "post-receive hook must be restored");
 }
 
+#[test]
+fn init_in_subdirectory_errors_helpfully() {
+    let repo = TestRepo::new("subdir-init");
+    let subdir = repo.dir.join("src");
+    fs::create_dir_all(&subdir).unwrap();
+    let out = Command::new(CAV)
+        .arg("init")
+        .current_dir(&subdir)
+        .output()
+        .expect("cav binary not found");
+    assert_ne!(out.status.code(), Some(0), "should fail in subdirectory");
+    let err = stderr(&out);
+    assert!(
+        err.contains("existing git repo") || err.contains("repo root"),
+        "error should mention git repo root: {err}"
+    );
+}
+
 // --- version ---
 
 #[test]

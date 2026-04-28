@@ -36,11 +36,13 @@ pub fn approve(
     // Build flat list of (branch, base_name, agent_id) candidates,
     // filtering out branches that are already fully merged (no new commits).
     let mut candidates: Vec<(String, String, String)> = vec![];
+    let mut has_any_agent_branches = false;
     for rb in git::remote_branches(CAVE_SHARED_REMOTE, Some(base))? {
         if let Some((_, aid)) = parse_dev_branch(&rb) {
             if agent_id.is_some_and(|a| a != aid) {
                 continue;
             }
+            has_any_agent_branches = true;
             let base_name = resolve_base(rb.clone());
             let remote_dev = format!("{CAVE_SHARED_REMOTE}/{rb}");
             let remote_base = format!("{CAVE_SHARED_REMOTE}/{base_name}");
@@ -60,6 +62,9 @@ pub fn approve(
     if candidates.is_empty() {
         if let Some(aid) = agent_id {
             bail!("No commits to approve for agent {aid} in {slug}.");
+        }
+        if has_any_agent_branches {
+            bail!("No unmerged commits to approve in {slug}.");
         }
         bail!("No agent branches in {slug}.");
     }

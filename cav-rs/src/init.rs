@@ -148,6 +148,19 @@ fn offer_cave_nix() {
 pub fn init(path: &Path, reinitialize: bool) -> Result<()> {
     let base = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
 
+    // If we're inside an existing git repo but not at its root, redirect.
+    if let Ok(root) = git::repo_root(Some(&base)) {
+        let root_path = PathBuf::from(&root);
+        if root_path != base && !base.join(".git").exists() {
+            bail!(
+                "This directory is inside an existing git repo at {}.\n\
+                 Run 'cav init {}' to initialize there instead.",
+                root_path.display(),
+                root_path.display()
+            );
+        }
+    }
+
     if !base.join(".git").exists() {
         git::git(&["init", &base.to_string_lossy()], None, true, false, true)?;
         println!();
