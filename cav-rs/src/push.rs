@@ -48,13 +48,16 @@ pub fn push(base: &Path, force: bool) -> Result<()> {
             }
             std::process::exit(1);
         }
-        Ok(up_to_date) => {
+        Ok((up_to_date, notes)) => {
             if !verbose {
                 if up_to_date {
                     println!("Already up to date.");
                 } else {
                     println!("Pushed {branch} to shared remote.");
                 }
+            }
+            for note in notes {
+                eprintln!("{note}");
             }
             Ok(())
         }
@@ -67,7 +70,7 @@ fn push_cave_self(
     agent_id: &str,
     force: bool,
     verbose: bool,
-) -> Result<bool> {
+) -> Result<(bool, Vec<String>)> {
     let remote_branch = config::dev_branch(local_branch, agent_id);
     let refspec = format!("refs/heads/{local_branch}:refs/heads/{remote_branch}");
     let mut args = vec!["push", HOST_SHARED_REMOTE, &refspec];
@@ -76,7 +79,7 @@ fn push_cave_self(
         args.insert(1, &force_flag);
     }
     let out = git::git(&args, Some(base), true, verbose, verbose)?;
-    Ok(out.contains("up-to-date"))
+    Ok((out.contains("up-to-date"), vec![]))
 }
 
 pub fn push_base(
@@ -85,7 +88,7 @@ pub fn push_base(
     refspec: Option<&str>,
     force: bool,
     verbose: bool,
-) -> Result<bool> {
+) -> Result<(bool, Vec<String>)> {
     let refspec_str = refspec.unwrap_or(base_branch).to_string();
     let mut args = vec!["push", "--no-set-upstream", CAVE_SHARED_REMOTE, &refspec_str];
     let force_flag = "--force".to_string();
@@ -93,8 +96,8 @@ pub fn push_base(
         args.insert(1, &force_flag);
     }
     let out = git::git(&args, Some(base), true, verbose, verbose)?;
-    rebase_agents(base, base_branch)?;
-    Ok(out.contains("up-to-date"))
+    let notes = rebase_agents(base, base_branch);
+    Ok((out.contains("up-to-date"), notes))
 }
 
 fn push_dev(
@@ -103,7 +106,7 @@ fn push_dev(
     agent_id: &str,
     force: bool,
     verbose: bool,
-) -> Result<bool> {
+) -> Result<(bool, Vec<String>)> {
     let mut args = vec!["push", "--no-set-upstream", CAVE_SHARED_REMOTE, branch];
     let force_flag = "--force".to_string();
     if force {
@@ -115,7 +118,7 @@ fn push_dev(
     let slug = config::project_slug(base);
     let ws = worktree_dir(&slug, agent_id);
     if !ws.exists() {
-        return Ok(up_to_date);
+        return Ok((up_to_date, vec![]));
     }
 
     let shared = config::shared_repo_path(base);
@@ -134,15 +137,17 @@ fn push_dev(
 
     let ws_branch = resolve_base(branch.to_string());
     let current = git::current_branch(Some(&ws)).unwrap_or_default();
-    if current == ws_branch {
-        sync_agent_worktree(&ws, branch, force);
-    }
+    let notes = if current == ws_branch {
+        sync_agent_worktree(&ws, branch, force)
+    } else {
+        vec![]
+    };
 
     git::update_agent_tip(&shared, branch).ok();
-    Ok(up_to_date)
+    Ok((up_to_date, notes))
 }
 
-fn sync_agent_worktree(ws: &Path, branch: &str, force: bool) {
+fn sync_agent_worktree(ws: &Path, branch: &str, force: bool) -> Vec<String> {
     let remote_ref = format!("{HOST_SHARED_REMOTE}/{branch}");
     let has_changes = git::git_output(&["status", "--porcelain"], Some(ws))
         .map(|s| !s.is_empty())
@@ -151,6 +156,8 @@ fn sync_agent_worktree(ws: &Path, branch: &str, force: bool) {
     if has_changes {
         git::git(&["stash"], Some(ws), false, true, false).ok();
     }
+
+    let mut notes = vec![];
 
     if force {
         git::git(&["reset", "--hard", &remote_ref], Some(ws), false, true, false).ok();
@@ -163,7 +170,7 @@ fn sync_agent_worktree(ws: &Path, branch: &str, force: bool) {
             if !rebase_ok {
                 git::git(&["rebase", "--abort"], Some(ws), false, true, false).ok();
                 git::git(&["reset", "--hard", &remote_ref], Some(ws), false, true, false).ok();
-                println!("Warning: could not rebase agent worktree, reset to pushed state.");
+                notes.push("Note: agent worktree could not be rebased; reset to pushed state.".to_string());
             }
         }
     }
@@ -172,18 +179,25 @@ fn sync_agent_worktree(ws: &Path, branch: &str, force: bool) {
         let pop_ok =
             git::git(&["stash", "pop"], Some(ws), false, true, false).is_ok();
         if !pop_ok {
-            println!("Warning: agent worktree has merge conflicts from pushed changes.");
+            notes.push("Note: agent worktree has merge conflicts from pushed changes.".to_string());
         }
     }
+
+    notes
 }
 
-fn rebase_agents(base: &Path, base_branch: &str) -> Result<()> {
+fn rebase_agents(base: &Path, base_branch: &str) -> Vec<String> {
+    let mut notes = vec![];
     let slug = config::project_slug(base);
     let shared = config::shared_repo_path(base);
     if !shared.exists() {
-        return Ok(());
+        return notes;
     }
-    for agent_id in registry::all_agent_ids(Some(&slug))? {
+    let agent_ids = match registry::all_agent_ids(Some(&slug)) {
+        Ok(ids) => ids,
+        Err(_) => return notes,
+    };
+    for agent_id in agent_ids {
         let ws = worktree_dir(&slug, &agent_id);
         if !ws.exists() {
             continue;
@@ -230,7 +244,9 @@ fn rebase_agents(base: &Path, base_branch: &str) -> Result<()> {
         .is_ok();
         if !rebase_ok {
             git::git(&["rebase", "--abort"], Some(&ws), false, true, false).ok();
-            println!("Warning: rebase of {dev} onto {base_branch} failed (conflicts).");
+            notes.push(format!(
+                "Note: rebase of {dev} onto {base_branch} failed (conflicts). Agent must resolve them."
+            ));
             continue;
         }
         git::git(
@@ -246,7 +262,7 @@ fn rebase_agents(base: &Path, base_branch: &str) -> Result<()> {
         )
         .ok();
         git::update_agent_tip(&shared, &dev).ok();
-        println!("Rebased {dev} onto {base_branch}.");
+        notes.push(format!("Rebased {dev} onto {base_branch}."));
     }
-    Ok(())
+    notes
 }

@@ -213,7 +213,7 @@ pub fn approve(
         }
     }
 
-    do_approve(
+    let notes = do_approve(
         &slug,
         base,
         &branch,
@@ -226,6 +226,9 @@ pub fn approve(
     )?;
 
     println!("Approved.");
+    for note in notes {
+        eprintln!("{note}");
+    }
     Ok(())
 }
 
@@ -326,9 +329,9 @@ fn do_approve(
     after_sha: &str,
     creating: bool,
     partial: bool,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     let verbose = config::verbose() >= 1;
-    push::push_base(
+    let (_, mut notes) = push::push_base(
         project_base,
         base_name,
         Some(&format!("{after_sha}:refs/heads/{base_name}")),
@@ -374,7 +377,9 @@ fn do_approve(
         )
         .is_ok();
         if !ok {
-            println!("Approved, but local '{base_name}' could not be updated. Run 'cav pull' to sync.");
+            notes.push(format!(
+                "Note: local branch '{base_name}' could not be updated."
+            ));
         }
     } else {
         git::git(
@@ -427,6 +432,6 @@ fn do_approve(
         )
         .ok();
     }
-    Ok(())
+    Ok(notes)
 }
 
