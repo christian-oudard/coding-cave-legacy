@@ -327,7 +327,7 @@ mod tests {
 
     #[test]
     fn read_message_skips_invalid_json() {
-        // invalid line followed by valid — skips invalid, returns valid
+        // invalid line followed by valid: skips invalid, returns valid
         let v = parse("not-json\n{\"ok\":true}\n").unwrap();
         assert_eq!(v["ok"], true);
     }

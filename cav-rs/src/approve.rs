@@ -181,8 +181,9 @@ pub fn approve(
         };
         let remaining = all_commits.len() - commits.len();
         let n = commits.len();
-        let word = if n == 1 { "commit" } else { "commits" };
-        println!("\nApproving {n} of {} {word} from {name} into {slug}/{base_name}:\n", all_commits.len());
+        let total = all_commits.len();
+        let word = if total == 1 { "commit" } else { "commits" };
+        println!("\nApproving {n} of {total} {word} from {name} into {slug}/{base_name}:\n");
         for line in &commits {
             println!("  {line}");
         }
@@ -260,11 +261,13 @@ fn pick_candidate(
         let n = commits.len();
         let word = if n == 1 { "commit" } else { "commits" };
         println!("  {}) {name} → {base_name}    {n} {word}", i + 1);
-        for line in commits.iter().take(3) {
+        let show = if n == 4 { 4 } else { 3.min(n) };
+        for line in commits.iter().take(show) {
             println!("     {line}");
         }
-        if n > 3 {
-            println!("     ... and {} more", n - 3);
+        let hidden = n - show;
+        if hidden >= 2 {
+            println!("     ... and {} more", hidden);
         }
     }
 

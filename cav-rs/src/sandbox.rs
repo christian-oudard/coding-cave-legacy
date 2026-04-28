@@ -698,7 +698,7 @@ fn start_slirp4netns(pid: u32) -> Result<std::process::Child> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .process_group(0);
-    // slirp4netns reads ready-fd from the child — keep it open across exec.
+    // slirp4netns reads ready-fd from the child, keep it open across exec.
     unsafe {
         cmd.pre_exec(move || {
             let flags = libc::fcntl(ready_w_fd, libc::F_GETFD);

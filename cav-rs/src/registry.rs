@@ -11,7 +11,7 @@ const SCHEMA: &str = include_str!("schema.sql");
 
 /// Past this many seconds since exit, an agent ID becomes reclaimable: the
 /// next `acquire_agent_id` may reuse it instead of minting a new number.
-/// Agents are NOT eagerly expired or removed — they remain continuable via
+/// Agents are NOT eagerly expired or removed; they remain continuable via
 /// `cav -c` and `cav -r N` until their slot is actually reclaimed by a new
 /// agent. After reclamation, the old session is still recoverable via
 /// `cav --resume <uuid>` against the permanent session archive.

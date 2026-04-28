@@ -506,7 +506,7 @@ fn require_init(base: &Path) -> Result<()> {
     let slug = config::project_slug(base);
     if registry::project_path(&slug)?.is_none() {
         if inside_cave() {
-            // Inside the cave, the registry is isolated — auto-register.
+            // Inside the cave the registry is isolated. Auto-register.
             registry::register_project(base)?;
         } else {
             bail!("Shared repo exists but project not registered. Run: cav init");
