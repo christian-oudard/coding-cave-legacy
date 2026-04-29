@@ -64,6 +64,33 @@ pub fn approve(
         bail!("No agent branches in {slug}.");
     }
 
+    // Resolve commit prefix against candidates' pending ranges.
+    // This both narrows the candidate (when agent isn't given) and
+    // produces the full SHA without relying on global rev-parse, which
+    // can fail for short prefixes due to git's abbreviation minimum.
+    let mut commit_sha: Option<String> = None;
+    if let Some(prefix) = commit {
+        let lower = prefix.to_ascii_lowercase();
+        let mut matches: Vec<((String, String, String), String)> = vec![];
+        for cand in &candidates {
+            if let Some(sha) = candidate_match_commit(&cand.0, &cand.1, &lower, base) {
+                matches.push((cand.clone(), sha));
+            }
+        }
+        match matches.len() {
+            0 => bail!("No pending commit matches '{prefix}' in {slug}."),
+            1 => {
+                let (cand, sha) = matches.into_iter().next().unwrap();
+                candidates = vec![cand];
+                commit_sha = Some(sha);
+            }
+            _ => bail!(
+                "Commit prefix '{prefix}' is ambiguous in {slug}.\n\
+                 Specify agent: cav approve <agent-id> -c {prefix}"
+            ),
+        }
+    }
+
     // Disambiguate by current branch if checked out.
     if candidates.len() > 1 {
         let current = git::current_branch(Some(base)).unwrap_or_default();
@@ -125,8 +152,8 @@ pub fn approve(
         }
     }
 
-    let after_sha = if let Some(sha_prefix) = commit {
-        resolve_partial(sha_prefix, before_sha.as_deref(), &dev_tip, base)?
+    let after_sha = if let Some(sha) = commit_sha {
+        sha
     } else {
         dev_tip.clone()
     };
@@ -254,45 +281,31 @@ fn pick_candidate(
     Ok(candidates.into_iter().nth(idx - 1).unwrap())
 }
 
-fn resolve_partial(
-    sha_prefix: &str,
-    before_sha: Option<&str>,
-    dev_tip: &str,
+/// Returns the full SHA of the unique commit in the candidate's pending
+/// range whose hex starts with `prefix`. Returns None if no commit matches.
+fn candidate_match_commit(
+    branch: &str,
+    base_name: &str,
+    prefix: &str,
     base: &Path,
-) -> Result<String> {
-    let full_sha = git::git_output(&["rev-parse", "--verify", sha_prefix], Some(base))
-        .map_err(|_| anyhow::anyhow!("Cannot resolve commit: {sha_prefix}"))?;
-
-    // Must be an ancestor of dev tip
-    let ok = git::git(
-        &["merge-base", "--is-ancestor", &full_sha, dev_tip],
+) -> Option<String> {
+    let remote_dev = format!("{CAVE_SHARED_REMOTE}/{branch}");
+    let remote_base = format!("{CAVE_SHARED_REMOTE}/{base_name}");
+    let has_base = git::git(
+        &["rev-parse", "--verify", &remote_base],
         Some(base),
         false,
         true,
         false,
     )
     .is_ok();
-    if !ok {
-        bail!("Commit {sha_prefix} is not on the dev branch.");
-    }
-
-    if let Some(bs) = before_sha {
-        let ok = git::git(
-            &["merge-base", "--is-ancestor", bs, &full_sha],
-            Some(base),
-            false,
-            true,
-            false,
-        )
-        .is_ok();
-        if !ok {
-            bail!("Commit {sha_prefix} is not after the base branch tip.");
-        }
-        if full_sha == bs {
-            bail!("Nothing to approve: commit is the current base.");
-        }
-    }
-    Ok(full_sha)
+    let range = if has_base {
+        format!("{remote_base}..{remote_dev}")
+    } else {
+        remote_dev
+    };
+    let shas = git::git_output(&["rev-list", &range], Some(base)).ok()?;
+    shas.lines().find(|sha| sha.starts_with(prefix)).map(String::from)
 }
 
 fn do_approve(

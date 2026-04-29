@@ -183,9 +183,9 @@ pub fn cherry_undelivered(
         .filter(|l| l.starts_with("+ "))
         .map(|l| {
             let rest = &l[2..];
-            let sha_short: String = rest.chars().take(7).collect();
-            let subject = rest.get(8..).unwrap_or("").trim().to_string();
-            format!("{sha_short} {subject}")
+            let (sha, subject) = rest.split_once(' ').unwrap_or((rest, ""));
+            let sha_short: String = sha.chars().take(7).collect();
+            format!("{sha_short} {}", subject.trim())
         })
         .collect();
     lines.reverse();

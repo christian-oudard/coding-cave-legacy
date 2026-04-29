@@ -275,7 +275,7 @@ fn partial_approve_on_last_commit_deletes_dev_branch() {
     );
 
     // Partial approve: approve only commit A.
-    let out = repo.cav(&["approve", "1", "--yes", &sha_a]);
+    let out = repo.cav(&["approve", "1", "--yes", "-c", &sha_a]);
     assert_eq!(out.status.code(), Some(0), "partial approve failed: {}", stderr(&out));
 
     // Dev branch should still exist (B is still pending).
@@ -283,7 +283,7 @@ fn partial_approve_on_last_commit_deletes_dev_branch() {
     assert!(!branches.is_empty(), "dev branch should still exist after partial approve");
 
     // Approve the last commit (B = dev tip). This should be a full approve.
-    let out = repo.cav(&["approve", "1", "--yes", &sha_b]);
+    let out = repo.cav(&["approve", "1", "--yes", "-c", &sha_b]);
     assert_eq!(out.status.code(), Some(0), "final approve failed: {}", stderr(&out));
 
     // Dev branch must be gone from the shared repo.

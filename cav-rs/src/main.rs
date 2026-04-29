@@ -226,30 +226,16 @@ fn run() -> Result<()> {
             })
         }
         Cmd::Approve { args, yes, commit } => {
-            let (target_args, sha) = split_commit_arg(&args);
-            if sha.is_some() && commit.is_some() {
-                bail!("Commit specified both as argument and --commit.");
-            }
-            let (base, agent_id) = resolve_target(&target_args, true)?;
-            approve::approve(&base, agent_id.as_deref(), yes, commit.or(sha).as_deref())
+            let agent_id = parse_single_agent_arg(&args, "approve")?;
+            let base = approve_reject_base(agent_id.as_deref())?;
+            require_init(&base)?;
+            approve::approve(&base, agent_id.as_deref(), yes, commit.as_deref())
         }
         Cmd::Reject { args, yes, commit } => {
-            let base = find_repo_root()?;
+            let agent_id = parse_single_agent_arg(&args, "reject")?;
+            let base = approve_reject_base(agent_id.as_deref())?;
             require_init(&base)?;
-            let (target_args, sha) = split_commit_arg(&args);
-            if sha.is_some() && commit.is_some() {
-                bail!("Commit specified both as argument and --commit.");
-            }
-            let agent_id = if target_args.is_empty() {
-                None
-            } else {
-                let aid = parse_agent_id(&target_args[0]);
-                if !config::is_agent_id(&aid) {
-                    bail!("Expected agent ID, got: {}", target_args[0]);
-                }
-                Some(aid)
-            };
-            reject::reject(&base, agent_id.as_deref(), yes, commit.or(sha).as_deref())
+            reject::reject(&base, agent_id.as_deref(), yes, commit.as_deref())
         }
         Cmd::Pull { force } => {
             let base = find_repo_root()?;
@@ -466,22 +452,39 @@ fn parse_agent_id(s: &str) -> String {
     s.trim_start_matches('@').split('@').next_back().unwrap_or(s).to_string()
 }
 
-fn split_commit_arg(args: &[String]) -> (Vec<String>, Option<String>) {
-    let hex_re = regex::Regex::new(r"^[0-9a-fA-F]{7,40}$").unwrap();
-    let has_letter = |s: &str| s.chars().any(|c| c.is_ascii_alphabetic());
-    let mut remaining = vec![];
-    let mut commit = None;
+fn parse_single_agent_arg(args: &[String], cmd: &str) -> Result<Option<String>> {
+    let mut agent_id: Option<String> = None;
     for arg in args {
         let candidate = parse_agent_id(arg);
         if config::is_agent_id(&candidate) {
-            remaining.push(arg.clone());
-        } else if hex_re.is_match(arg) && has_letter(arg) {
-            commit = Some(arg.clone());
+            if let Some(prev) = &agent_id {
+                bail!("Multiple agent IDs given: {prev}, {candidate}");
+            }
+            agent_id = Some(candidate);
+        } else if looks_like_hash(arg) {
+            bail!("'{arg}' looks like a commit prefix. Did you mean: cav {cmd} -c {arg}");
         } else {
-            remaining.push(arg.clone());
+            bail!(
+                "Unknown argument '{arg}'. Usage: cav {cmd} [agent-id] [-c <commit>]"
+            );
         }
     }
-    (remaining, commit)
+    Ok(agent_id)
+}
+
+fn looks_like_hash(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn approve_reject_base(agent_id: Option<&str>) -> Result<PathBuf> {
+    if let Some(aid) = agent_id {
+        if let Some(slug) = registry::agent_project(aid) {
+            if let Some(p) = registry::project_path(&slug)? {
+                return Ok(PathBuf::from(p));
+            }
+        }
+    }
+    find_repo_root()
 }
 
 fn find_repo_root() -> Result<PathBuf> {
