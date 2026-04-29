@@ -1403,10 +1403,11 @@ pub fn reap_dead_agents() {
     }
 }
 
-/// Drop shared dev branches whose tip already matches the base tip.
-/// Provably nothing to lose: if approve's last push got the base tip caught
-/// up but the dev-branch deletion didn't run, the branch is just noise. Safe
-/// to call from any command that fetches the shared remote first.
+/// Drop shared dev branches whose tip is already reachable from the base.
+/// Provably nothing to lose: the dev tip is an ancestor of base, so every
+/// commit on it is already in base. Covers tip == base (the post-approve
+/// case) and tip behind base (agent lagging while base advanced). Safe to
+/// call from any command that fetches the shared remote first.
 pub fn reconcile_merged_dev_branches(base: &Path, verbose: bool) {
     let Ok(remotes) = git::remote_branches(CAVE_SHARED_REMOTE, Some(base)) else {
         return;
@@ -1417,13 +1418,20 @@ pub fn reconcile_merged_dev_branches(base: &Path, verbose: bool) {
         let Some((base_name, _)) = parse_dev_branch(&rb) else { continue };
         let remote_dev = format!("{CAVE_SHARED_REMOTE}/{rb}");
         let remote_base = format!("{CAVE_SHARED_REMOTE}/{base_name}");
-        let (Ok(d), Ok(b)) = (
-            git::git_output(&["rev-parse", &remote_dev], Some(base)),
-            git::git_output(&["rev-parse", &remote_base], Some(base)),
-        ) else {
+        if git::git_output(&["rev-parse", &remote_dev], Some(base)).is_err()
+            || git::git_output(&["rev-parse", &remote_base], Some(base)).is_err()
+        {
             continue;
-        };
-        if d != b {
+        }
+        let merged = git::git(
+            &["merge-base", "--is-ancestor", &remote_dev, &remote_base],
+            Some(base),
+            false,
+            true,
+            false,
+        )
+        .is_ok();
+        if !merged {
             continue;
         }
         git::git(&["branch", "-D", &rb], Some(&shared), false, true, false).ok();
