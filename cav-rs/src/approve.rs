@@ -352,7 +352,46 @@ fn do_approve(
     partial: bool,
 ) -> Result<Vec<String>> {
     let verbose = config::verbose() >= 1;
-    let (_, mut notes) = push::push_base(
+
+    // Sync local base branch first. If the working tree is dirty in a
+    // way that blocks the ff-merge, git's own message ('Please commit
+    // your changes or stash them before you merge') is surfaced and
+    // approve aborts before touching the cave or the registry.
+    let current = git::current_branch(Some(project_base)).unwrap_or_default();
+    if creating {
+        git::git(
+            &["checkout", "-B", base_name, after_sha],
+            Some(project_base),
+            false,
+            true,
+            false,
+        )?;
+    } else if current == base_name {
+        git::git(
+            &["merge", "--ff-only", after_sha],
+            Some(project_base),
+            false,
+            true,
+            false,
+        )?;
+    } else {
+        git::git(
+            &["branch", "-f", base_name, after_sha],
+            Some(project_base),
+            false,
+            true,
+            false,
+        )?;
+        git::git(
+            &["checkout", base_name],
+            Some(project_base),
+            false,
+            true,
+            false,
+        )?;
+    }
+
+    let (_, notes) = push::push_base(
         project_base,
         base_name,
         Some(&format!("{after_sha}:refs/heads/{base_name}")),
@@ -375,50 +414,6 @@ fn do_approve(
     for sha in shas.lines() {
         registry::record_approval(slug, base_name, agent_id, &prev, sha)?;
         prev = sha.to_string();
-    }
-
-    // Courtesy: sync local base branch
-    let current = git::current_branch(Some(project_base)).unwrap_or_default();
-    if creating {
-        git::git(
-            &["checkout", "-B", base_name, after_sha],
-            Some(project_base),
-            false,
-            true,
-            false,
-        )
-        .ok();
-    } else if current == base_name {
-        let ok = git::git(
-            &["merge", "--ff-only", after_sha],
-            Some(project_base),
-            false,
-            true,
-            false,
-        )
-        .is_ok();
-        if !ok {
-            notes.push(format!(
-                "Note: local branch '{base_name}' could not be updated."
-            ));
-        }
-    } else {
-        git::git(
-            &["branch", "-f", base_name, after_sha],
-            Some(project_base),
-            false,
-            true,
-            false,
-        )
-        .ok();
-        git::git(
-            &["checkout", base_name],
-            Some(project_base),
-            false,
-            true,
-            false,
-        )
-        .ok();
     }
 
     if !partial {

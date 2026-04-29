@@ -164,9 +164,10 @@ fn show_branch_sync_status(base: &Path) {
                          Run: cav pull\n"
                     );
                 } else {
-                    println!(
-                        "{local_branch} is behind {remote_ref} by {behind} {n}, and can be fast-forwarded.\n\
-                         Run: git merge --ff-only {remote_ref}\n"
+                    panic!(
+                        "invariant violation: {remote_ref} is ahead of local \
+                         {local_branch} by {behind} {n}. cav approve and \
+                         cav reject should keep the cave in sync with local."
                     );
                 }
             } else if local_ahead > 0 {
