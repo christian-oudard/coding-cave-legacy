@@ -34,7 +34,8 @@ pub fn approve(
     sandbox::reconcile_merged_dev_branches(base, verbose);
 
     // Build flat list of (branch, base_name, agent_id) candidates,
-    // filtering out branches that are already fully merged (no new commits).
+    // filtering out branches with no commits ahead of base. Covers branches
+    // already merged into base and branches that lag behind base.
     let mut candidates: Vec<(String, String, String)> = vec![];
     let mut has_any_agent_branches = false;
     for rb in git::remote_branches(CAVE_SHARED_REMOTE, Some(base))? {
@@ -46,14 +47,20 @@ pub fn approve(
             let base_name = resolve_base(rb.clone());
             let remote_dev = format!("{CAVE_SHARED_REMOTE}/{rb}");
             let remote_base = format!("{CAVE_SHARED_REMOTE}/{base_name}");
-            // Skip branches that are already merged (tip == base tip)
-            if let (Ok(dev_sha), Ok(base_sha)) = (
-                git::git_output(&["rev-parse", &remote_dev], Some(base)),
-                git::git_output(&["rev-parse", &remote_base], Some(base)),
-            ) {
-                if dev_sha == base_sha {
-                    continue;
-                }
+            let has_base = git::git(
+                &["rev-parse", "--verify", &remote_base],
+                Some(base),
+                false,
+                true,
+                false,
+            )
+            .is_ok();
+            if has_base
+                && git::commits_ahead(&remote_dev, &remote_base, None, Some(base))
+                    .unwrap_or(0)
+                    == 0
+            {
+                continue;
             }
             candidates.push((rb, base_name, aid));
         }

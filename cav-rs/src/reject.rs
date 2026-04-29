@@ -208,7 +208,7 @@ fn pick_reject(
     base: &Path,
     branch: &str,
 ) -> Result<Vec<serde_json::Value>> {
-    println!("\nApproved commits on {branch}:\n");
+    println!("\nApproved commits on {branch} (newest first):\n");
     for (i, approval) in approvals.iter().enumerate() {
         let sha = approval["after_sha"].as_str().unwrap_or("");
         let aid = approval["agent_id"].as_str().unwrap_or("");
@@ -219,7 +219,7 @@ fn pick_reject(
     }
 
     print!(
-        "\nReject from? [1=tip only, {}=all] ",
+        "\nReject how many commits from the tip? [1-{}] ",
         approvals.len()
     );
     io::stdout().flush()?;
@@ -238,7 +238,7 @@ fn pick_reject(
 
 fn resolve_reject_target(sha_prefix: &str, tip_sha: &str, base: &Path) -> Result<String> {
     let full_sha = git::git_output(&["rev-parse", "--verify", sha_prefix], Some(base))
-        .map_err(|_| anyhow::anyhow!("Cannot resolve commit: {sha_prefix}"))?;
+        .map_err(|_| short_prefix_error(sha_prefix, base))?;
     let on_branch = git::git(
         &["merge-base", "--is-ancestor", &full_sha, tip_sha],
         Some(base),
@@ -250,13 +250,21 @@ fn resolve_reject_target(sha_prefix: &str, tip_sha: &str, base: &Path) -> Result
     if !on_branch {
         bail!("Commit {sha_prefix} is not on this branch.");
     }
-    if full_sha == tip_sha {
-        bail!(
-            "Commit {sha_prefix} is the current tip. \
-             Use 'cav reject' without --commit."
-        );
-    }
     Ok(full_sha)
+}
+
+fn short_prefix_error(sha_prefix: &str, base: &Path) -> anyhow::Error {
+    let lower = sha_prefix.to_ascii_lowercase();
+    let matches = git::git_output(&["rev-parse", "--disambiguate", &lower], Some(base))
+        .unwrap_or_default();
+    let n = matches.lines().filter(|l| !l.is_empty()).count();
+    if n > 1 {
+        anyhow::anyhow!(
+            "Commit prefix '{sha_prefix}' is ambiguous ({n} matches). Use a longer prefix."
+        )
+    } else {
+        anyhow::anyhow!("Cannot resolve commit: {sha_prefix}")
+    }
 }
 
 fn collect_approval_chain(
