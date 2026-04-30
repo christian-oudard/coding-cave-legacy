@@ -451,12 +451,9 @@ pub fn resolve_continue(
         }
     }
 
-    if let Some(ref sid) = session_id {
-        let d = config::claude_project_dir(&slug, Some(&home));
-        eprintln!(
-            "Warning: session file missing ({}), starting fresh.",
-            d.join(format!("{sid}.jsonl")).display()
-        );
+    if session_id.is_some() {
+        // No .jsonl at the recorded uuid -- claude exited without
+        // persisting (early exit, no messages sent). Reuse the slot fresh.
         clear_session_id(&aid)?;
     }
     let new_sid = Uuid::new_v4().to_string();

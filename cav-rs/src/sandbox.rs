@@ -2059,15 +2059,15 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
 
     let rc = proc.wait().map(|s| s.code().unwrap_or(1)).unwrap_or(1);
 
-    // Find the actual session uuid Claude wrote to. If we pre-assigned X but
-    // Claude generated Y (it sometimes does), the .jsonl will be at Y. Use
-    // the on-disk file's stem rather than what we asked for, so future
-    // resumes find the real archive.
+    // claude --session-id is binding: the .jsonl lands at the uuid we asked
+    // for, or claude wrote nothing (early exit, no messages sent). No
+    // post-hoc inference needed -- check the path we requested and that's
+    // it. The previous "fall back to latest .jsonl" path silently stole
+    // sessions from other agents in the shared archive.
     let actual_sid = session_id
         .as_deref()
         .filter(|sid| config::session_file_exists(&slug, sid, Some(&home)))
-        .map(str::to_string)
-        .or_else(|| config::latest_session_file(&slug, Some(&home)));
+        .map(str::to_string);
 
     // Keep the registry row alive whenever there's anything worth coming
     // back to: salvageable git work OR an archived conversation. Pure

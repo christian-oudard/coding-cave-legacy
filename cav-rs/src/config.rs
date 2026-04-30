@@ -88,27 +88,6 @@ pub fn session_file_exists(slug: &str, session_id: &str, home: Option<&Path>) ->
         .is_file()
 }
 
-/// Most recently modified .jsonl session file in the project's archive
-/// (or None if the dir doesn't exist or is empty). Used to recover when
-/// claude wrote to a different uuid than the one we pre-assigned.
-pub fn latest_session_file(slug: &str, home: Option<&Path>) -> Option<String> {
-    let dir = claude_project_dir(slug, home);
-    let entries = std::fs::read_dir(&dir).ok()?;
-    let mut best: Option<(String, std::time::SystemTime)> = None;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().is_some_and(|e| e == "jsonl") {
-            if let Ok(mtime) = entry.metadata().and_then(|m| m.modified()) {
-                let stem = path.file_stem()?.to_string_lossy().to_string();
-                if best.as_ref().is_none_or(|(_, t)| mtime > *t) {
-                    best = Some((stem, mtime));
-                }
-            }
-        }
-    }
-    best.map(|(s, _)| s)
-}
-
 pub fn project_slug(base: &Path) -> String {
     let name = base
         .file_name()
