@@ -94,71 +94,6 @@ let
     };
   gccLib = "${pkgs.stdenv.cc.cc.lib}/lib";
 
-  # ---- Entry script: runs inside the cave as the target process ----
-
-  entry = pkgs.writeShellScript "coding-cave-entry" ''
-    # cav itself (for `cav version` etc. inside the cave)
-    [ -n "''${CODING_CAVE_BIN:-}" ] && export PATH="$CODING_CAVE_BIN:$PATH"
-    # User environment from cave.nix (HM-built packages, env vars, files)
-    if [ -n "''${CODING_CAVE_USER_ENV:-}" ] && [ -d "''${CODING_CAVE_USER_ENV}" ]; then
-      [ -d "''${CODING_CAVE_USER_ENV}/home-path/bin" ] && \
-        export PATH="''${CODING_CAVE_USER_ENV}/home-path/bin:$PATH"
-      # shellcheck disable=SC1091
-      [ -f "''${CODING_CAVE_USER_ENV}/env.sh" ] && . "''${CODING_CAVE_USER_ENV}/env.sh"
-      if [ -d "''${CODING_CAVE_USER_ENV}/files" ]; then
-        cd "''${CODING_CAVE_USER_ENV}/files"
-        ${pkgs.findutils}/bin/find . -type f | while read -r f; do
-          dest="$HOME/$f"
-          ${pkgs.coreutils}/bin/mkdir -p "$(${pkgs.coreutils}/bin/dirname "$dest")"
-          ${pkgs.coreutils}/bin/chmod u+w "$(${pkgs.coreutils}/bin/dirname "$dest")" 2>/dev/null || true
-          [ -f "$dest" ] && ${pkgs.coreutils}/bin/chmod u+w "$dest" 2>/dev/null || true
-          ${pkgs.coreutils}/bin/cp --remove-destination "$f" "$dest"
-          ${pkgs.coreutils}/bin/chmod u+w "$dest"
-        done
-        cd /
-      fi
-      # Append per-session user CLAUDE.md (bind-mounted by pre-bwrap)
-      if [ -f /tmp/.cave-user-claude.md ] && [ -f "$HOME/.claude/CLAUDE.md" ]; then
-        ${pkgs.coreutils}/bin/chmod u+w "$HOME/.claude/CLAUDE.md" 2>/dev/null || true
-        printf '\n' >> "$HOME/.claude/CLAUDE.md"
-        ${pkgs.coreutils}/bin/cat /tmp/.cave-user-claude.md >> "$HOME/.claude/CLAUDE.md"
-      fi
-    fi
-    # Git wrapper (syncs agent branches to host-cave on state changes)
-    [ -d "$HOME/bin" ] && export PATH="$HOME/bin:$PATH"
-    # Git identity (fallback when no .gitconfig was copied)
-    if [ ! -f "$HOME/.gitconfig" ]; then
-      [ -n "''${CODING_CAVE_GIT_NAME:-}" ] && ${pkgs.git}/bin/git config --global user.name "$CODING_CAVE_GIT_NAME"
-      [ -n "''${CODING_CAVE_GIT_EMAIL:-}" ] && ${pkgs.git}/bin/git config --global user.email "$CODING_CAVE_GIT_EMAIL"
-      [ -n "''${CODING_CAVE_GIT_SIGNINGKEY:-}" ] && ${pkgs.git}/bin/git config --global user.signingkey "$CODING_CAVE_GIT_SIGNINGKEY"
-      [ "''${CODING_CAVE_GIT_GPGSIGN:-}" = "true" ] && ${pkgs.git}/bin/git config --global commit.gpgsign true
-    fi
-    # GPG: set ultimate trust on signing key to avoid verification warnings
-    _sigkey=$(${pkgs.git}/bin/git config user.signingkey 2>/dev/null || true)
-    if [ -n "$_sigkey" ]; then
-      ${pkgs.coreutils}/bin/mkdir -p "$HOME/.gnupg"
-      ${pkgs.coreutils}/bin/chmod 700 "$HOME/.gnupg" 2>/dev/null || true
-      echo "$_sigkey:6:" | ${pkgs.gnupg}/bin/gpg --import-ownertrust 2>/dev/null || true
-    fi
-    # HTTP proxy (crinj credential injection)
-    if [ -n "''${CODING_CAVE_PROXY_ADDR:-}" ]; then
-      export HTTP_PROXY="http://''${CODING_CAVE_PROXY_ADDR}"
-      export HTTPS_PROXY="http://''${CODING_CAVE_PROXY_ADDR}"
-      export http_proxy="$HTTP_PROXY"
-      export https_proxy="$HTTPS_PROXY"
-      export NO_PROXY="localhost,127.0.0.1,::1"
-      export no_proxy="$NO_PROXY"
-      if [ -f /etc/crinj-ca.pem ]; then
-        ${pkgs.coreutils}/bin/cat ${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt /etc/crinj-ca.pem > /tmp/combined-ca.pem
-        export SSL_CERT_FILE=/tmp/combined-ca.pem
-        export REQUESTS_CA_BUNDLE=/tmp/combined-ca.pem
-        export NODE_EXTRA_CA_CERTS=/etc/crinj-ca.pem
-      fi
-    fi
-    cd "/projects/''${CODING_CAVE_PROJECT_SLUG:-project}"
-    exec "$@"
-  '';
-
   # ---- Static bwrap args (build-time constant) ----
 
   staticArgs = [
@@ -214,7 +149,6 @@ let
     "--unsetenv" "CODING_CAVE_GPG_SOCKET"
     "--unsetenv" "CODING_CAVE_GPG_PUBRING"
     "--unsetenv" "CODING_CAVE_GITCONFIG"
-    "--unsetenv" "CODING_CAVE_USER_CLAUDE_MD"
     "--unsetenv" "CODING_CAVE_PROXY_CA"
     "--unsetenv" "CODING_CAVE_PROJECT_SLUGS"
     "--unsetenv" "CODING_CAVE_MSG_SOCK"
@@ -309,14 +243,13 @@ let
 
   config = {
     bwrap = "${pkgs.bubblewrap}/bin/bwrap";
-    bash = "${pkgs.bashInteractive}/bin/bash";
-    entry = "${entry}";
     inherit staticArgs forwardEnv procMaskFiles procMaskDirs;
     procMask = "${procMask}";
     procMaskDir = "${procMaskDir}";
     procMaskMeminfo = "${procMaskMeminfo}";
     seccompFilter = "${seccompFilter}";
     dotClaudeJsonDefault = "${dotClaudeJsonDefault}";
+    caCertBundle = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
   };
 
 in pkgs.writeText "coding-cave-sandbox.json" (builtins.toJSON config)

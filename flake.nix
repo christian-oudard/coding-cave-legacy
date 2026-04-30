@@ -75,29 +75,36 @@
             codingCaveUrl = "path:${self}";
           };
 
-          # unshare --map-user/--map-group requires util-linux >= 2.39.
-          cav = assert pkgs.lib.versionAtLeast pkgs.util-linux.version "2.39";
+          mkCav = { profile ? "release" }:
+            # unshare --map-user/--map-group requires util-linux >= 2.39.
+            assert pkgs.lib.versionAtLeast pkgs.util-linux.version "2.39";
             craneLib.buildPackage (commonArgs // {
-            inherit cargoArtifacts;
+              inherit cargoArtifacts;
+              CARGO_PROFILE = profile;
 
-            postInstall = ''
-              mkdir -p $out/share/coding-cave
-              cat > $out/share/coding-cave/build.json <<'JSON'
-              ${buildConfig}
-              JSON
+              postInstall = ''
+                mkdir -p $out/share/coding-cave
+                cat > $out/share/coding-cave/build.json <<'JSON'
+                ${buildConfig}
+                JSON
 
-              wrapProgram $out/bin/cav \
-                --set-default CODING_CAVE_BUILD_CONFIG \
-                  "$out/share/coding-cave/build.json" \
-                --prefix PATH : ${pkgs.lib.makeBinPath [
-                  pkgs.git pkgs.gnupg pkgs.socat pkgs.slirp4netns pkgs.iptables
-                  pkgs.util-linux
-                  crinj.packages.${pkgs.stdenv.hostPlatform.system}.default
-                ]}
-            '';
+                wrapProgram $out/bin/cav \
+                  --set-default CODING_CAVE_BUILD_CONFIG \
+                    "$out/share/coding-cave/build.json" \
+                  --prefix PATH : ${pkgs.lib.makeBinPath [
+                    pkgs.git pkgs.gnupg pkgs.socat pkgs.slirp4netns pkgs.iptables
+                    pkgs.util-linux
+                    crinj.packages.${pkgs.stdenv.hostPlatform.system}.default
+                  ]}
+              '';
 
-            meta.mainProgram = "cav";
-          });
+              meta.mainProgram = "cav";
+            });
+
+          cav = mkCav { };
+          # Debug build keeps debug_assertions on, which enables verbose
+          # timing logs in cav, supervisor, and entry script.
+          cavDebug = mkCav { profile = "dev"; };
 
           tests = craneLib.cargoTest {
             pname = "cav-tests";
@@ -114,7 +121,11 @@
           };
 
         in {
-          packages = { default = cav; inherit sandbox; };
+          packages = {
+            default = cav;
+            cav-debug = cavDebug;
+            inherit sandbox;
+          };
           checks = { build = cav; inherit tests; };
         }
       );

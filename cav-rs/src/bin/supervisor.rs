@@ -7,7 +7,29 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
+#[cfg(debug_assertions)]
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::{env, fs};
+
+#[cfg(debug_assertions)]
+fn log_phase(msg: &str) {
+    if env::var("CODING_CAVE_VERBOSE").is_err() {
+        return;
+    }
+    let start_ns: u128 = env::var("CODING_CAVE_TS_START")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let now_ns = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let elapsed = now_ns.saturating_sub(start_ns) as f64 / 1e9;
+    eprintln!("[cav +{elapsed:6.3}s] supervisor: {msg}");
+}
+
+#[cfg(not(debug_assertions))]
+fn log_phase(_msg: &str) {}
 
 use rustix::event::{poll, PollFd, PollFlags};
 use rustix::fs::inotify::{self, CreateFlags, WatchFlags};
@@ -177,6 +199,8 @@ fn main() {
     let upper = env_var("CODING_CAVE_NS_OVERLAY_UPPER");
     let work = env_var("CODING_CAVE_NS_OVERLAY_WORK");
 
+    log_phase("started");
+
     // Signal parent: namespace exists
     if sync_fd_raw >= 0 {
         let sync_fd = unsafe { OwnedFd::from_raw_fd(sync_fd_raw) };
@@ -186,11 +210,14 @@ fn main() {
     // Shadow host lock files before overlay mount
     if !upper.is_empty() {
         shadow_host_lock_files(&upper);
+        log_phase("lock files shadowed");
     }
 
     // Mount kernel overlayfs (non-fatal: nested caves may not support it)
     let overlay_mounted = if !merged.is_empty() && !upper.is_empty() {
-        mount_kernel_overlay(&merged, &upper, &work)
+        let m = mount_kernel_overlay(&merged, &upper, &work);
+        log_phase(if m { "overlay mounted" } else { "overlay skipped" });
+        m
     } else {
         false
     };
@@ -206,6 +233,7 @@ fn main() {
 
     // Run bwrap as child, stay alive to clean up
     let argv: Vec<String> = env::args().skip(1).collect();
+    log_phase("exec bwrap");
     let rc = if argv.is_empty() {
         eprintln!("supervisor: no command given");
         1

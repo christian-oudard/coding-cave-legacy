@@ -22,8 +22,6 @@ const CRINJ_PORT: u16 = 10255;
 #[serde(rename_all = "camelCase", default)]
 struct SandboxConfig {
     bwrap: String,
-    bash: String,
-    entry: String,
     static_args: Vec<String>,
     forward_env: Vec<String>,
     proc_mask_files: Vec<String>,
@@ -33,6 +31,7 @@ struct SandboxConfig {
     proc_mask_meminfo: String,
     seccomp_filter: String,
     dot_claude_json_default: String,
+    ca_cert_bundle: String,
 }
 
 fn load_sandbox_config() -> Result<SandboxConfig> {
@@ -139,14 +138,6 @@ fn build_bwrap_argv(
         let _ = std::fs::copy(&cfg.dot_claude_json_default, &claude_json);
     }
 
-    if let Some(md) = env.get("CODING_CAVE_USER_CLAUDE_MD") {
-        if Path::new(md).is_file() {
-            args.extend([
-                "--ro-bind".to_string(), md.clone(), "/tmp/.cave-user-claude.md".to_string(),
-            ]);
-        }
-    }
-
     args.extend(["--dir".to_string(), "/projects".to_string()]);
     let workspaces: Vec<&str> = env
         .get("CODING_CAVE_WORKSPACES")
@@ -180,13 +171,6 @@ fn build_bwrap_argv(
                 "--ro-bind".to_string(), repo.to_string(),
                 format!("/projects/{slug}/.coding-cave/host-cave-shared.git"),
             ]);
-        }
-    }
-
-    if let Some(gc) = env.get("CODING_CAVE_GITCONFIG") {
-        if Path::new(gc).is_file() {
-            let dest = PathBuf::from(&cave_home).join(".gitconfig");
-            let _ = std::fs::copy(gc, &dest);
         }
     }
 
@@ -273,12 +257,65 @@ fn build_bwrap_argv(
     }
 
     args.extend(["--seccomp".to_string(), seccomp_fd.to_string()]);
+    extend_runtime_env(&mut args, env);
+    if let Some(slug) = env.get("CODING_CAVE_PROJECT_SLUG") {
+        args.extend(["--chdir".to_string(), format!("/projects/{slug}")]);
+    }
 
-    args.push(cfg.bash.clone());
-    args.push(cfg.entry.clone());
     args.extend_from_slice(claude_cmd);
-
     args
+}
+
+/// Build the per-launch environment that bwrap should inject via --setenv:
+/// PATH, the home-manager session vars (env.json), HTTP proxy and TLS-CA
+/// vars when a crinj proxy is wired up. Replaces what the old bash entry
+/// script exported on every launch.
+fn extend_runtime_env(args: &mut Vec<String>, env: &HashMap<String, String>) {
+    let mut path = vec!["/home/cave-coder/bin".to_string()];
+    if let Some(uenv) = env.get("CODING_CAVE_USER_ENV") {
+        path.push(format!("{uenv}/home-path/bin"));
+    }
+    if let Some(cb) = env.get("CODING_CAVE_BIN") {
+        path.push(cb.clone());
+    }
+    args.extend(["--setenv".to_string(), "PATH".to_string(), path.join(":")]);
+
+    if let Some(uenv) = env.get("CODING_CAVE_USER_ENV") {
+        let env_json = Path::new(uenv).join("env.json");
+        if let Ok(text) = std::fs::read_to_string(&env_json) {
+            if let Ok(map) = serde_json::from_str::<HashMap<String, String>>(&text) {
+                for (k, v) in map {
+                    args.extend(["--setenv".to_string(), k, v]);
+                }
+            }
+        }
+    }
+
+    if let Some(addr) = env.get("CODING_CAVE_PROXY_ADDR") {
+        let url = format!("http://{addr}");
+        for k in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
+            args.extend(["--setenv".to_string(), k.to_string(), url.clone()]);
+        }
+        for k in ["NO_PROXY", "no_proxy"] {
+            args.extend([
+                "--setenv".to_string(),
+                k.to_string(),
+                "localhost,127.0.0.1,::1".to_string(),
+            ]);
+        }
+    }
+
+    if env.contains_key("CODING_CAVE_PROXY_CA") {
+        let combined = "/home/cave-coder/.cave-ca-combined.pem".to_string();
+        for k in ["SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"] {
+            args.extend(["--setenv".to_string(), k.to_string(), combined.clone()]);
+        }
+        args.extend([
+            "--setenv".to_string(),
+            "NODE_EXTRA_CA_CERTS".to_string(),
+            "/etc/crinj-ca.pem".to_string(),
+        ]);
+    }
 }
 
 fn host_git_identity() -> HashMap<String, String> {
@@ -1154,6 +1191,104 @@ fn user_env_path() -> Option<PathBuf> {
     result.canonicalize().ok().filter(|p| p.exists())
 }
 
+/// Mirror the user-env's `files/` tree into the persistent cave home.
+/// Replaces what the old shell entry script did with find | while-read |
+/// per-file forks. fs::copy uses sendfile on Linux so this stays cheap
+/// even for thousands of small files.
+fn merge_user_files(src: &Path, dst: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    if !src.is_dir() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(dst)?;
+    if let Ok(meta) = std::fs::metadata(dst) {
+        let mut p = meta.permissions();
+        p.set_mode(p.mode() | 0o200);
+        let _ = std::fs::set_permissions(dst, p);
+    }
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let src_p = entry.path();
+        let dst_p = dst.join(entry.file_name());
+        let ft = entry.file_type()?;
+        if ft.is_dir() {
+            merge_user_files(&src_p, &dst_p)?;
+        } else if ft.is_symlink() {
+            let _ = std::fs::remove_file(&dst_p);
+            let target = std::fs::read_link(&src_p)?;
+            std::os::unix::fs::symlink(target, &dst_p)?;
+        } else {
+            let _ = std::fs::remove_file(&dst_p);
+            std::fs::copy(&src_p, &dst_p)?;
+            let m = std::fs::metadata(&dst_p)?;
+            let mut p = m.permissions();
+            p.set_mode(p.mode() | 0o200);
+            std::fs::set_permissions(&dst_p, p)?;
+        }
+    }
+    Ok(())
+}
+
+fn append_user_claude_md(home: &Path, host_md: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let dest = home.join(".claude").join("CLAUDE.md");
+    if !dest.exists() || !host_md.exists() {
+        return Ok(());
+    }
+    let m = std::fs::metadata(&dest)?;
+    let mut p = m.permissions();
+    p.set_mode(p.mode() | 0o200);
+    std::fs::set_permissions(&dest, p)?;
+    let mut text = std::fs::read_to_string(&dest)?;
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push('\n');
+    text.push_str(&std::fs::read_to_string(host_md)?);
+    std::fs::write(&dest, text)?;
+    Ok(())
+}
+
+fn write_combined_ca_bundle(home: &Path, os_bundle: &Path, crinj_ca: &Path) -> Result<()> {
+    let dest = home.join(".cave-ca-combined.pem");
+    let mut content = std::fs::read(os_bundle)?;
+    if content.last() != Some(&b'\n') {
+        content.push(b'\n');
+    }
+    content.extend(std::fs::read(crinj_ca)?);
+    std::fs::write(&dest, content)?;
+    Ok(())
+}
+
+/// Write a minimal ~/.gitconfig in the cave when the host has no
+/// gitconfig but exposed git identity via env vars (CODING_CAVE_GIT_*).
+/// host_gitconfig() copy already covers the more common case.
+fn ensure_gitconfig(home: &Path) -> Result<()> {
+    let dest = home.join(".gitconfig");
+    if dest.exists() {
+        return Ok(());
+    }
+    let mut user = String::new();
+    if let Ok(v) = std::env::var("CODING_CAVE_GIT_NAME") {
+        user.push_str(&format!("\tname = {v}\n"));
+    }
+    if let Ok(v) = std::env::var("CODING_CAVE_GIT_EMAIL") {
+        user.push_str(&format!("\temail = {v}\n"));
+    }
+    if let Ok(v) = std::env::var("CODING_CAVE_GIT_SIGNINGKEY") {
+        user.push_str(&format!("\tsigningkey = {v}\n"));
+    }
+    if user.is_empty() {
+        return Ok(());
+    }
+    let mut content = format!("[user]\n{user}");
+    if std::env::var("CODING_CAVE_GIT_GPGSIGN").as_deref() == Ok("true") {
+        content.push_str("[commit]\n\tgpgsign = true\n");
+    }
+    std::fs::write(&dest, content)?;
+    Ok(())
+}
+
 fn install_git_wrapper(home: &Path) -> Result<()> {
     // Copy cav-git binary as ~/bin/git inside the cave
     let cav_bin_dir = &constants::build().cav_bin;
@@ -1534,6 +1669,7 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
     registry::save_agent_launch_opts(&agent_id, &extra_slugs, Some(&host_ports), comms)?;
 
     // Create isolated workspace clones for the agent
+    crate::log_info!("preparing workspaces...");
     let (ws, shared) = workspace::create(&base, &agent_id)?;
     let mut workspaces: Vec<(PathBuf, PathBuf, String)> =
         vec![(ws, shared, slug.clone())];
@@ -1578,6 +1714,7 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
     for (ws, _, _) in &workspaces {
         workspace::verify_layout(ws, &agent_id)?;
     }
+    crate::log_info!("workspaces ready");
 
     // Start git daemon
     crate::log_info!("starting git daemon...");
@@ -1614,6 +1751,7 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
             git::git(&["branch", "-f", &branch, &remote_ref], Some(ws), false, true, false).ok();
         }
     }
+    crate::log_info!("branches synced");
 
     // Set slirp-reachable URL
     for (ws, _, s) in &workspaces {
@@ -1628,8 +1766,10 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
     }
 
     // Build user env
+    crate::log_info!("checking user env...");
     let _ = user_env::build(false);
     let uenv = user_env_path();
+    crate::log_info!("user env ready");
 
     // Inside a nested cave, overlayfs is not supported. Use the inherited
     // /nix/store (from bwrap static_args ro-bind) without a writable overlay.
@@ -1667,6 +1807,17 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
         }
     }
     env.insert("CODING_CAVE_VERSION".to_string(), constants::version().to_string());
+    #[cfg(debug_assertions)]
+    if config::verbose() >= 1 {
+        env.insert(
+            "CODING_CAVE_VERBOSE".to_string(),
+            config::verbose().to_string(),
+        );
+        env.insert(
+            "CODING_CAVE_TS_START".to_string(),
+            config::log_anchor().to_string(),
+        );
+    }
     if !nix_merged.is_empty() {
         env.insert("CODING_CAVE_NIX_MERGED".to_string(), nix_merged.clone());
     }
@@ -1736,16 +1887,11 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
         .join(".config")
         .join("coding-cave")
         .join("CLAUDE.md");
-    if user_claude_md.exists() {
-        env.insert(
-            "CODING_CAVE_USER_CLAUDE_MD".to_string(),
-            user_claude_md.to_string_lossy().to_string(),
-        );
-    }
 
     let crinj_session = crinj_register_session();
     crate::log_info!("starting crinj proxy...");
     let crinj_proc = start_crinj()?;
+    crate::log_info!("crinj proxy ready");
     env.insert("CODING_CAVE_GATEWAY".to_string(), SLIRP_GATEWAY.to_string());
     env.insert(
         "CODING_CAVE_PROXY_ADDR".to_string(),
@@ -1788,6 +1934,30 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
     } else {
         (None, None, false)
     };
+
+    // Materialize cave-home contents the in-cave entry script used to do
+    // each launch: HM-files merge, per-session CLAUDE.md append, gitconfig
+    // copy/fallback, combined TLS-CA bundle. All endpoints are host paths
+    // (cave_home is bind-mounted at /home/cave-coder), so doing this here
+    // means the cave can exec claude directly without a shell wrapper.
+    crate::log_info!("seeding cave home...");
+    if let Some(uep) = &uenv {
+        let src = uep.join("files");
+        if src.is_dir() {
+            merge_user_files(&src, &home)?;
+        }
+    }
+    if user_claude_md.is_file() {
+        append_user_claude_md(&home, &user_claude_md)?;
+    }
+    if let Some(gc) = host_gitconfig() {
+        let _ = std::fs::copy(&gc, home.join(".gitconfig"));
+    }
+    ensure_gitconfig(&home)?;
+    if !cfg.ca_cert_bundle.is_empty() {
+        write_combined_ca_bundle(&home, Path::new(&cfg.ca_cert_bundle), &ca_path)?;
+    }
+    crate::log_info!("cave home ready");
 
     let claude_cmd = build_claude_cmd(
         session_id.as_deref(),
@@ -1866,7 +2036,7 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
 
     registry::set_cave_pid(&agent_id, proc.id())?;
 
-    crate::log_debug!("waiting for sandbox namespace setup (pid {})", proc.id());
+    crate::log_info!("waiting for sandbox namespace setup (pid {})", proc.id());
     let mut sync_buf = [0u8; 1];
     let n = rustix::io::read(&sync_r, &mut sync_buf).unwrap_or(0);
     drop(sync_r);
@@ -1874,16 +2044,16 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
         let _ = proc.kill();
         bail!("sandbox child died during namespace setup");
     }
-    crate::log_debug!("namespace ready");
+    crate::log_info!("namespace ready");
 
-    crate::log_debug!("applying firewall");
+    crate::log_info!("applying firewall");
     let mut allowed = vec![daemon_port, CRINJ_PORT];
     allowed.extend(host_ports.iter().copied());
     apply_firewall(proc.id(), &allowed)?;
 
-    crate::log_debug!("starting slirp4netns");
+    crate::log_info!("starting slirp4netns");
     let mut slirp = start_slirp4netns(proc.id())?;
-    crate::log_debug!("slirp4netns ready");
+    crate::log_info!("slirp4netns ready, agent running");
 
     forward_cave_signals(proc.id())?;
 

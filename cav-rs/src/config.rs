@@ -134,11 +134,49 @@ pub fn set_verbose(v: u8) {
     VERBOSE.store(v, std::sync::atomic::Ordering::Relaxed);
 }
 
+#[cfg(debug_assertions)]
+static START_NS: std::sync::OnceLock<u128> = std::sync::OnceLock::new();
+
+#[cfg(debug_assertions)]
+fn now_ns() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
+}
+
+/// Anchor wall-clock time for verbose logs. Honors CODING_CAVE_TS_START so
+/// child processes (supervisor, entry script) share the cav process's t=0.
+#[cfg(debug_assertions)]
+pub fn log_anchor() -> u128 {
+    *START_NS.get_or_init(|| {
+        if let Ok(s) = env::var("CODING_CAVE_TS_START") {
+            if let Ok(n) = s.parse::<u128>() {
+                return n;
+            }
+        }
+        let n = now_ns();
+        env::set_var("CODING_CAVE_TS_START", n.to_string());
+        n
+    })
+}
+
+pub fn log_prefix() -> String {
+    #[cfg(debug_assertions)]
+    {
+        let elapsed_ns = now_ns().saturating_sub(log_anchor());
+        let secs = elapsed_ns as f64 / 1e9;
+        format!("[cav +{secs:6.3}s]")
+    }
+    #[cfg(not(debug_assertions))]
+    "[cav]".to_string()
+}
+
 #[macro_export]
 macro_rules! log_info {
     ($($arg:tt)*) => {
         if $crate::config::verbose() >= 1 {
-            eprintln!("[cav] {}", format_args!($($arg)*));
+            eprintln!("{} {}", $crate::config::log_prefix(), format_args!($($arg)*));
         }
     };
 }
@@ -147,7 +185,7 @@ macro_rules! log_info {
 macro_rules! log_debug {
     ($($arg:tt)*) => {
         if $crate::config::verbose() >= 2 {
-            eprintln!("[cav] {}", format_args!($($arg)*));
+            eprintln!("{} {}", $crate::config::log_prefix(), format_args!($($arg)*));
         }
     };
 }

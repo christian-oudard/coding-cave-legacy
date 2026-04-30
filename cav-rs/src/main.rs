@@ -187,6 +187,9 @@ fn main() {
 }
 
 fn run() -> Result<()> {
+    // Anchor verbose log timestamps to process start.
+    let _ = config::log_prefix();
+
     // Rewrite argv: bare `cav` -> `cav agent`; handle -v stripping.
     let raw: Vec<String> = std::env::args().collect();
     let argv = preprocess_args(raw);

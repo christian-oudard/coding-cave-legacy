@@ -6,12 +6,11 @@
 #
 #   files/      — fully materialized HM home file tree (no store symlinks)
 #   home-path/  — symlink to HM's merged home.path buildEnv
-#   env.sh      — exports for HM's home.sessionVariables
+#   env.json    — JSON object of HM's home.sessionVariables (cav reads it
+#                 and applies entries via --setenv before exec)
 #
-# The sandbox entry script copies files/ into $HOME and adds
-# home-path/bin to PATH. Real files are required because the cave's
-# persistent home survives across sessions but the nix store overlay
-# does not.
+# Real files are required because the cave's persistent home survives
+# across sessions but the nix store overlay does not.
 
 { nixpkgs, home-manager }:
 
@@ -39,10 +38,9 @@ let
         ];
       };
 
-      sessionVarsFile = pkgs.writeText "cave-env.sh"
-        (pkgs.lib.concatStringsSep "\n"
-          (pkgs.lib.mapAttrsToList
-            (k: v: "export ${k}=${pkgs.lib.escapeShellArg (toString v)}")
+      sessionVarsFile = pkgs.writeText "cave-env.json"
+        (builtins.toJSON
+          (pkgs.lib.mapAttrs (_: v: toString v)
             hmEval.config.home.sessionVariables));
 
     in
@@ -50,7 +48,7 @@ let
       mkdir -p $out/files
       rsync -rltL --chmod=u+rwX,go=rX ${hmEval.config.home-files}/ $out/files/
       ln -s ${hmEval.config.home.path} $out/home-path
-      cp ${sessionVarsFile} $out/env.sh
+      cp ${sessionVarsFile} $out/env.json
     '';
 
 in {
