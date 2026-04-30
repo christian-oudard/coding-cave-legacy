@@ -21,6 +21,8 @@ pub struct BuildConfig {
     pub home_manager_url: String,
     #[serde(rename = "codingCaveUrl")]
     pub coding_cave_url: String,
+    #[serde(rename = "caveSourceHash")]
+    pub cave_source_hash: String,
 }
 
 impl BuildConfig {

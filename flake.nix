@@ -64,6 +64,17 @@
 
           sandbox = import ./lib/sandbox.nix { inherit pkgs nixpkgs cavSeccompGen; };
 
+          # Hash of the cave-side files that mkCaveEnv actually consumes.
+          # Used by user_env::compute_hash to decide when to rebuild the
+          # cave's user-env. Replaces a `path:${self}` URL — that one
+          # changed on every commit to the cav repo and forced a rebuild
+          # even when no relevant nix file had moved.
+          caveSourceHash = builtins.hashString "sha256" (
+            builtins.hashFile "sha256" (root + "/lib/mkCaveEnv.nix")
+            + builtins.hashFile "sha256" (root + "/modules/cave-system.nix")
+            + builtins.hashFile "sha256" (root + "/modules/claude-code.nix")
+          );
+
           buildConfig = builtins.toJSON {
             version = self.shortRev or "dev";
             versionDate = toString (self.lastModified or 0);
@@ -73,6 +84,7 @@
             claudeCodeNixUrl = "path:${claude-code}";
             homeManagerUrl = "path:${home-manager}";
             codingCaveUrl = "path:${self}";
+            inherit caveSourceHash;
           };
 
           mkCav = { profile ? "release" }:

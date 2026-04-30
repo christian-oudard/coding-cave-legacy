@@ -27,28 +27,59 @@ fn hash_file() -> PathBuf {
     config::data_dir().join("user-env.hash")
 }
 
-fn compute_hash(cave_nix_content: Option<&str>, sibling_files: &[(String, String)]) -> String {
+/// Pure hash function: includes only inputs that meaningfully affect the
+/// user-env build output. Flake-input URLs catch upstream version bumps
+/// in cav itself; `cave_source_hash` (computed by Nix at cav-build time
+/// over the cave-side files mkCaveEnv consumes) catches edits to
+/// mkCaveEnv.nix or the cave modules. `flake_lock` catches `cav env
+/// update` bumping inputs in the user-env's own flake.lock — without it,
+/// build(false) after update would skip and the update wouldn't apply.
+fn compute_hash_pure(
+    nixpkgs_url: &str,
+    claude_code_url: &str,
+    home_manager_url: &str,
+    cave_source_hash: &str,
+    flake_lock: &str,
+    cave_nix_content: Option<&str>,
+    sibling_files: &[(String, String)],
+) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
-    let build = constants::build();
-    let parts = [
-        build.nixpkgs_url.as_str(),
-        build.claude_code_nix_url.as_str(),
-        build.home_manager_url.as_str(),
-        build.coding_cave_url.as_str(),
-        cave_nix_content.unwrap_or(""),
-    ];
     let mut hasher = DefaultHasher::new();
-    for part in &parts {
+    for part in [
+        nixpkgs_url,
+        claude_code_url,
+        home_manager_url,
+        cave_source_hash,
+        flake_lock,
+        cave_nix_content.unwrap_or(""),
+    ] {
         part.hash(&mut hasher);
     }
-    let mut sorted_siblings: Vec<&(String, String)> = sibling_files.iter().collect();
-    sorted_siblings.sort_by(|a, b| a.0.cmp(&b.0));
-    for (name, content) in &sorted_siblings {
+    let mut sorted: Vec<&(String, String)> = sibling_files.iter().collect();
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    for (name, content) in &sorted {
         name.hash(&mut hasher);
         content.hash(&mut hasher);
     }
     format!("{:x}", hasher.finish())
+}
+
+fn read_flake_lock() -> String {
+    std::fs::read_to_string(user_env_dir().join("flake.lock")).unwrap_or_default()
+}
+
+fn compute_hash(cave_nix_content: Option<&str>, sibling_files: &[(String, String)]) -> String {
+    let build = constants::build();
+    compute_hash_pure(
+        &build.nixpkgs_url,
+        &build.claude_code_nix_url,
+        &build.home_manager_url,
+        &build.cave_source_hash,
+        &read_flake_lock(),
+        cave_nix_content,
+        sibling_files,
+    )
 }
 
 fn needs_build(cave_nix_content: Option<&str>, sibling_files: &[(String, String)]) -> bool {
@@ -365,4 +396,123 @@ pub fn default_cave_nix() -> Result<String> {
 }
 "#
     .to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compute_hash_pure;
+
+    #[derive(Clone)]
+    struct Args {
+        nixpkgs: String,
+        claude_code: String,
+        home_manager: String,
+        cave_source: String,
+        flake_lock: String,
+        cave_nix: Option<String>,
+        siblings: Vec<(String, String)>,
+    }
+
+    fn baseline() -> Args {
+        Args {
+            nixpkgs: "path:/nix/store/aaa-nixpkgs".into(),
+            claude_code: "path:/nix/store/bbb-claude-code".into(),
+            home_manager: "path:/nix/store/ccc-home-manager".into(),
+            cave_source: "deadbeef".into(),
+            flake_lock: r#"{"nodes":{},"version":7}"#.into(),
+            cave_nix: Some("{ /* cave.nix */ }".into()),
+            siblings: vec![("util.nix".into(), "x = 1;".into())],
+        }
+    }
+
+    fn hash(a: &Args) -> String {
+        compute_hash_pure(
+            &a.nixpkgs,
+            &a.claude_code,
+            &a.home_manager,
+            &a.cave_source,
+            &a.flake_lock,
+            a.cave_nix.as_deref(),
+            &a.siblings,
+        )
+    }
+
+    #[test]
+    fn same_inputs_produce_same_hash() {
+        let a = baseline();
+        assert_eq!(hash(&a), hash(&a));
+    }
+
+    #[test]
+    fn changing_cave_source_hash_changes_output() {
+        let a = baseline();
+        let mut b = a.clone();
+        b.cave_source = "feedface".into();
+        assert_ne!(hash(&a), hash(&b));
+    }
+
+    #[test]
+    fn changing_flake_lock_changes_output() {
+        let a = baseline();
+        let mut b = a.clone();
+        b.flake_lock = r#"{"nodes":{"x":{}},"version":7}"#.into();
+        assert_ne!(hash(&a), hash(&b));
+    }
+
+    #[test]
+    fn changing_nixpkgs_url_changes_output() {
+        let a = baseline();
+        let mut b = a.clone();
+        b.nixpkgs = "path:/nix/store/zzz-nixpkgs".into();
+        assert_ne!(hash(&a), hash(&b));
+    }
+
+    #[test]
+    fn changing_cave_nix_content_changes_output() {
+        let a = baseline();
+        let mut b = a.clone();
+        b.cave_nix = Some("{ /* edited */ }".into());
+        assert_ne!(hash(&a), hash(&b));
+    }
+
+    #[test]
+    fn missing_cave_nix_distinct_from_empty_string() {
+        // None and Some("") collapse to the same hash (both go through
+        // unwrap_or("")). A non-empty value must differ from both.
+        let mut a = baseline();
+        a.cave_nix = None;
+        let mut b = a.clone();
+        b.cave_nix = Some(String::new());
+        assert_eq!(hash(&a), hash(&b));
+        let mut c = a.clone();
+        c.cave_nix = Some("anything".into());
+        assert_ne!(hash(&a), hash(&c));
+    }
+
+    #[test]
+    fn sibling_order_does_not_matter() {
+        let mut a = baseline();
+        a.siblings = vec![("a.nix".into(), "x".into()), ("b.nix".into(), "y".into())];
+        let mut b = a.clone();
+        b.siblings = vec![("b.nix".into(), "y".into()), ("a.nix".into(), "x".into())];
+        assert_eq!(hash(&a), hash(&b));
+    }
+
+    #[test]
+    fn sibling_content_change_changes_output() {
+        let mut a = baseline();
+        a.siblings = vec![("k.nix".into(), "old".into())];
+        let mut b = a.clone();
+        b.siblings = vec![("k.nix".into(), "new".into())];
+        assert_ne!(hash(&a), hash(&b));
+    }
+
+    #[test]
+    fn sibling_rename_changes_output() {
+        let mut a = baseline();
+        a.siblings = vec![("k.nix".into(), "x".into())];
+        let mut b = a.clone();
+        b.siblings = vec![("renamed.nix".into(), "x".into())];
+        assert_ne!(hash(&a), hash(&b));
+    }
 }
