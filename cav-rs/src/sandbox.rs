@@ -2217,12 +2217,35 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
     crate::log_info!("waiting for sandbox namespace setup (pid {})", proc.id());
     let mut sync_buf = [0u8; 1];
     let n = rustix::io::read(&sync_r, &mut sync_buf).unwrap_or(0);
-    drop(sync_r);
     if n == 0 {
         let _ = proc.kill();
         bail!("sandbox child died during namespace setup");
     }
     crate::log_info!("namespace ready");
+
+    // The supervisor reports bwrap's PID on the same pipe right after it
+    // spawns bwrap. Spawn a thread to read it asynchronously: the firewall
+    // and slirp setup below need to run before bwrap is actually up.
+    let agent_id_for_thread = agent_id.clone();
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 32];
+        let mut total = 0;
+        while total < buf.len() {
+            let n = rustix::io::read(&sync_r, &mut buf[total..]).unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            total += n;
+            if buf[..total].contains(&b'\n') {
+                break;
+            }
+        }
+        if let Ok(s) = std::str::from_utf8(&buf[..total]) {
+            if let Ok(pid) = s.trim().parse::<u32>() {
+                let _ = registry::set_inner_pid(&agent_id_for_thread, pid);
+            }
+        }
+    });
 
     crate::log_info!("applying firewall");
     let mut allowed = vec![daemon_port, CRINJ_PORT];

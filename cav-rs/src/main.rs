@@ -15,6 +15,7 @@ mod push;
 mod reject;
 mod review;
 mod sandbox;
+mod shell;
 mod status;
 mod supervisor;
 mod user_env;
@@ -136,6 +137,14 @@ enum Cmd {
     /// Fetch and checkout an agent branch for review
     Review {
         agent_id: Option<String>,
+    },
+    /// Enter a running agent's namespace (interactive or one-shot)
+    Shell {
+        /// Agent ID to enter (default: only running agent in the project)
+        agent_id: Option<String>,
+        /// Command to run non-interactively (after --)
+        #[arg(last = true)]
+        cmd: Vec<String>,
     },
     /// Retarget an agent to deliver to a different branch
     Checkout {
@@ -375,6 +384,21 @@ fn run() -> Result<()> {
                 None => auto_pick_agent_id(&base, "review")?,
             };
             review::review(&base, &aid)
+        }
+        Cmd::Shell { agent_id, cmd } => {
+            let base = find_repo_root()?;
+            require_init(&base)?;
+            let aid = match agent_id {
+                Some(s) => {
+                    let a = parse_agent_id(&s);
+                    if !config::is_agent_id(&a) {
+                        bail!("Invalid agent ID '{s}'. Use a number (e.g. 3).");
+                    }
+                    Some(a)
+                }
+                None => None,
+            };
+            shell::enter(&base, aid.as_deref(), &cmd)
         }
         Cmd::Checkout { branch, agent_id } => {
             let base = find_repo_root()?;

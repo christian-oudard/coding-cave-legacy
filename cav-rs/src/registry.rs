@@ -60,6 +60,9 @@ fn open() -> Result<Connection> {
                 db.execute_batch(&format!("ALTER TABLE agents DROP COLUMN {dead};"))?;
             }
         }
+        if !cols.iter().any(|c| c == "inner_pid") {
+            db.execute_batch("ALTER TABLE agents ADD COLUMN inner_pid INTEGER;")?;
+        }
     }
     Ok(db)
 }
@@ -120,7 +123,7 @@ fn sweep_dead_pids(db: &Connection, ts: f64) -> Result<()> {
         if !is_pid_alive(pid) {
             let exited = estimate_exit_time(&slug, sid.as_deref(), ts);
             db.execute(
-                "UPDATE agents SET exited_at = ?1, host_pid = NULL, cave_pid = NULL \
+                "UPDATE agents SET exited_at = ?1, host_pid = NULL, cave_pid = NULL, inner_pid = NULL \
                  WHERE agent_id = ?2",
                 params![exited, aid],
             )?;
@@ -237,7 +240,7 @@ pub fn is_agent_running(agent_id: &str) -> Result<bool> {
             }
             let exited = estimate_exit_time(&slug, sid.as_deref(), now());
             db.execute(
-                "UPDATE agents SET exited_at = ?1, host_pid = NULL, cave_pid = NULL \
+                "UPDATE agents SET exited_at = ?1, host_pid = NULL, cave_pid = NULL, inner_pid = NULL \
                  WHERE agent_id = ?2",
                 params![exited, agent_id],
             )?;
@@ -328,7 +331,7 @@ pub fn continue_agent_id(base: &Path, agent_id: Option<&str>) -> Result<Option<S
             _ => {}
         }
         db.execute(
-            "UPDATE agents SET host_pid = ?1, cave_pid = NULL, \
+            "UPDATE agents SET host_pid = ?1, cave_pid = NULL, inner_pid = NULL, \
              started_at = ?2, exited_at = NULL WHERE agent_id = ?3",
             params![pid, ts, aid],
         )?;
@@ -352,7 +355,7 @@ pub fn continue_agent_id(base: &Path, agent_id: Option<&str>) -> Result<Option<S
         }
         Some(aid) => {
             db.execute(
-                "UPDATE agents SET host_pid = ?1, cave_pid = NULL, \
+                "UPDATE agents SET host_pid = ?1, cave_pid = NULL, inner_pid = NULL, \
                  started_at = ?2, exited_at = NULL WHERE agent_id = ?3",
                 params![pid, ts, aid],
             )?;
@@ -423,7 +426,7 @@ pub fn resolve_continue(
 pub fn mark_agent_exited(agent_id: &str) -> Result<()> {
     let db = open()?;
     db.execute(
-        "UPDATE agents SET exited_at = ?1, host_pid = NULL, cave_pid = NULL \
+        "UPDATE agents SET exited_at = ?1, host_pid = NULL, cave_pid = NULL, inner_pid = NULL \
          WHERE agent_id = ?2",
         params![now(), agent_id],
     )?;
@@ -437,6 +440,26 @@ pub fn set_cave_pid(agent_id: &str, pid: u32) -> Result<()> {
         params![pid, agent_id],
     )?;
     Ok(())
+}
+
+pub fn set_inner_pid(agent_id: &str, pid: u32) -> Result<()> {
+    let db = open()?;
+    db.execute(
+        "UPDATE agents SET inner_pid = ?1 WHERE agent_id = ?2",
+        params![pid, agent_id],
+    )?;
+    Ok(())
+}
+
+pub fn inner_pid(agent_id: &str) -> Result<Option<u32>> {
+    let db = open()?;
+    Ok(db
+        .query_row(
+            "SELECT inner_pid FROM agents WHERE agent_id = ?1",
+            params![agent_id],
+            |row| row.get::<_, Option<u32>>(0),
+        )
+        .unwrap_or(None))
 }
 
 pub fn cave_pid(agent_id: &str) -> Result<Option<u32>> {

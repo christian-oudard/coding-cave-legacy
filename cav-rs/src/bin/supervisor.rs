@@ -38,8 +38,12 @@ use rustix::mount::{mount, unmount, MountFlags, UnmountFlags};
 use rustix::pipe::pipe;
 use rustix::termios::{isatty, tcgetattr, tcsetattr, OptionalActions, SpecialCodeIndex};
 
-fn signal_parent(fd: OwnedFd) {
-    let _ = write(&fd, b"1");
+fn signal_parent(fd: &OwnedFd) {
+    let _ = write(fd, b"1");
+}
+
+fn report_bwrap_pid(fd: &OwnedFd, pid: u32) {
+    let _ = write(fd, format!("{pid}\n").as_bytes());
 }
 
 fn is_nix_lock_file(path: &str) -> bool {
@@ -201,11 +205,15 @@ fn main() {
 
     log_phase("started");
 
-    // Signal parent: namespace exists
-    if sync_fd_raw >= 0 {
-        let sync_fd = unsafe { OwnedFd::from_raw_fd(sync_fd_raw) };
-        signal_parent(sync_fd);
-    }
+    // Signal parent: namespace exists. Keep the fd open so we can report
+    // bwrap's PID once it spawns.
+    let sync_fd: Option<OwnedFd> = if sync_fd_raw >= 0 {
+        let fd = unsafe { OwnedFd::from_raw_fd(sync_fd_raw) };
+        signal_parent(&fd);
+        Some(fd)
+    } else {
+        None
+    };
 
     // Shadow host lock files before overlay mount
     if !upper.is_empty() {
@@ -238,14 +246,26 @@ fn main() {
         eprintln!("supervisor: no command given");
         1
     } else {
-        match Command::new(&argv[0]).args(&argv[1..]).status() {
-            Ok(s) => s.code().unwrap_or(1),
+        match Command::new(&argv[0]).args(&argv[1..]).spawn() {
+            Ok(mut child) => {
+                if let Some(ref fd) = sync_fd {
+                    report_bwrap_pid(fd, child.id());
+                }
+                match child.wait() {
+                    Ok(s) => s.code().unwrap_or(1),
+                    Err(e) => {
+                        eprintln!("supervisor: wait failed: {e}");
+                        1
+                    }
+                }
+            }
             Err(e) => {
                 eprintln!("supervisor: exec failed: {e}");
                 1
             }
         }
     };
+    drop(sync_fd);
 
     // Cleanup
     if let Some(restore) = restore_tty {
