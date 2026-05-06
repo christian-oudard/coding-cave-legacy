@@ -309,6 +309,21 @@ fn build_bwrap_argv(
         "--bind".to_string(), cave_home.clone(), "/home/cave-coder".to_string(),
     ]);
 
+    // Shared package cache pool. Each tool's cache subdir is redirected
+    // here from cave.nix via env vars (CARGO_HOME=/cache/cargo,
+    // XDG_CACHE_HOME=/cache/xdg, etc.). Hardlink-mode installs from
+    // these caches into per-agent venvs avoid copying for popular
+    // packages (e.g., one torch on disk for all agents). Source path
+    // comes from CODING_CAVE_CACHES_DIR (set in run_agent) so tests
+    // don't have to mutate global env to control resolution.
+    if let Some(caches_dir) = env.get("CODING_CAVE_CACHES_DIR") {
+        args.extend([
+            "--bind".to_string(),
+            caches_dir.clone(),
+            "/cache".to_string(),
+        ]);
+    }
+
     let claude_json = PathBuf::from(&cave_home).join(".claude.json");
     if !claude_json.exists() && !cfg.dot_claude_json_default.is_empty() {
         let _ = std::fs::copy(&cfg.dot_claude_json_default, &claude_json);
@@ -1254,13 +1269,11 @@ fn seed_claude_config(home: &Path, project_slug_str: &str, comms: bool) {
     }
 }
 
-fn nix_overlay_dirs(home: &Path, agent_id: &str) -> (PathBuf, PathBuf, PathBuf) {
-    let base = home
-        .join(".local")
-        .join("share")
-        .join("coding-cave")
-        .join("nix-overlay")
-        .join(format!("agent-{agent_id}"));
+/// Per-agent overlay paths. Lives under data_dir, never under any cave's
+/// home, so one agent cannot reach another's overlay state via the home
+/// bind.
+fn nix_overlay_dirs_in(data_dir: &Path, agent_id: &str) -> (PathBuf, PathBuf, PathBuf) {
+    let base = data_dir.join("agents").join(agent_id).join("nix-overlay");
     let (upper, work, merged) = (base.join("upper"), base.join("work"), base.join("merged"));
     for d in [&upper, &work, &merged] {
         let _ = std::fs::create_dir_all(d);
@@ -1268,17 +1281,96 @@ fn nix_overlay_dirs(home: &Path, agent_id: &str) -> (PathBuf, PathBuf, PathBuf) 
     (upper, work, merged)
 }
 
-fn migrate_shared_overlay(home: &Path, agent_id: &str) {
-    let root = home
+fn nix_overlay_dirs(agent_id: &str) -> (PathBuf, PathBuf, PathBuf) {
+    nix_overlay_dirs_in(&config::data_dir(), agent_id)
+}
+
+/// Move overlay state from older layouts into the current per-agent layout.
+/// Two legacy locations are recognized:
+///   1. `<home>/.local/share/coding-cave/nix-overlay/shared/`
+///   2. `<home>/.local/share/coding-cave/nix-overlay/agent-<id>/`
+/// Both are renamed to `<data_dir>/agents/<id>/nix-overlay/`.
+fn migrate_overlay_layout_in(data_dir: &Path, home: &Path, agent_id: &str) {
+    let target = data_dir.join("agents").join(agent_id).join("nix-overlay");
+    if target.exists() {
+        return;
+    }
+    let in_home_root = home
         .join(".local")
         .join("share")
         .join("coding-cave")
         .join("nix-overlay");
-    let legacy = root.join("shared");
-    let target = root.join(format!("agent-{agent_id}"));
-    if legacy.is_dir() && !target.exists() {
-        let _ = std::fs::rename(&legacy, &target);
+    let legacy_per_agent = in_home_root.join(format!("agent-{agent_id}"));
+    let legacy_shared = in_home_root.join("shared");
+    let source = if legacy_per_agent.is_dir() {
+        Some(legacy_per_agent)
+    } else if legacy_shared.is_dir() {
+        Some(legacy_shared)
+    } else {
+        None
+    };
+    if let Some(src) = source {
+        if let Some(parent) = target.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::rename(&src, &target);
     }
+}
+
+fn migrate_overlay_layout(home: &Path, agent_id: &str) {
+    migrate_overlay_layout_in(&config::data_dir(), home, agent_id);
+}
+
+/// On first launch under per-agent home layout, copy this agent's
+/// session log out of the legacy shared home so `claude --resume`
+/// still finds it. Other state (file-history, settings.json, plugins,
+/// statusline.sh, etc.) gets re-laid-down by the cave.nix entry script
+/// or rebuilt on demand, so we don't try to migrate it.
+fn migrate_session_to_per_agent_home(
+    legacy_home: &Path,
+    target_home: &Path,
+    slug: &str,
+    session_id: Option<&str>,
+) {
+    let Some(sid) = session_id else { return };
+    if !legacy_home.is_dir() {
+        return;
+    }
+    let target_projects_dir = config::claude_project_dir(slug, Some(target_home));
+    let target_jsonl = target_projects_dir.join(format!("{sid}.jsonl"));
+    if target_jsonl.exists() {
+        return;
+    }
+    let legacy_projects_dir = config::claude_project_dir(slug, Some(legacy_home));
+    let legacy_jsonl = legacy_projects_dir.join(format!("{sid}.jsonl"));
+    if !legacy_jsonl.is_file() {
+        return;
+    }
+    let _ = std::fs::create_dir_all(&target_projects_dir);
+    if std::fs::copy(&legacy_jsonl, &target_jsonl).is_err() {
+        return;
+    }
+    // Some Claude Code versions write a sidecar dir <session_id>/ next
+    // to the JSONL with extra session state.
+    let legacy_sidecar = legacy_projects_dir.join(sid);
+    if legacy_sidecar.is_dir() {
+        let _ = copy_dir_recursive(&legacy_sidecar, &target_projects_dir.join(sid));
+    }
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
 }
 
 fn rm_store_path(path: &Path) {
@@ -1309,8 +1401,8 @@ fn chmod_tree(path: &Path) -> Result<()> {
 }
 
 fn setup_nix_overlay(home: &Path, agent_id: &str) -> String {
-    migrate_shared_overlay(home, agent_id);
-    let (upper, work, merged) = nix_overlay_dirs(home, agent_id);
+    migrate_overlay_layout(home, agent_id);
+    let (upper, work, merged) = nix_overlay_dirs(agent_id);
     // Clean stale upper entries
     let host_names: std::collections::HashSet<String> = std::fs::read_dir("/nix/store")
         .map(|d| d.flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect())
@@ -1341,7 +1433,7 @@ fn setup_nix_overlay(home: &Path, agent_id: &str) -> String {
     merged.to_string_lossy().to_string()
 }
 
-fn seed_nix_db(home: &Path, agent_id: &str, merged_path: &str) -> Option<PathBuf> {
+fn seed_nix_db(_home: &Path, agent_id: &str, merged_path: &str) -> Option<PathBuf> {
     use rusqlite::{Connection, params};
 
     let parent_db = Path::new("/nix/var/nix/db/db.sqlite");
@@ -1349,12 +1441,10 @@ fn seed_nix_db(home: &Path, agent_id: &str, merged_path: &str) -> Option<PathBuf
         return None;
     }
 
-    let db_dir = home
-        .join(".local")
-        .join("share")
-        .join("coding-cave")
+    let db_dir = config::data_dir()
+        .join("agents")
+        .join(agent_id)
         .join("nix-overlay")
-        .join(format!("agent-{agent_id}"))
         .join("db");
     let _ = std::fs::create_dir_all(&db_dir);
     let cave_db = db_dir.join("db.sqlite");
@@ -1979,6 +2069,19 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
 
     let home = launch_home(&agent_name);
     std::fs::create_dir_all(&home)?;
+    // Shared content-addressable package cache pool. All caves at this
+    // data_dir level (host agents siblings, or subcaves of one parent)
+    // share a single pool, dedup'd via tools' built-in CAS + hardlinks.
+    let caches_dir = config::data_dir().join("caches");
+    std::fs::create_dir_all(&caches_dir)?;
+    if !inside_cave() {
+        let legacy = config::persistent_home();
+        if legacy != home && legacy.is_dir() {
+            for (_, _, s) in &workspaces {
+                migrate_session_to_per_agent_home(&legacy, &home, s, session_id.as_deref());
+            }
+        }
+    }
     for (_, _, s) in &workspaces {
         seed_claude_config(&home, s, comms);
     }
@@ -2126,6 +2229,10 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
         env.insert("CODING_CAVE_NIX_MERGED".to_string(), nix_merged.clone());
     }
     env.insert("CODING_CAVE_HOME".to_string(), home.to_string_lossy().to_string());
+    env.insert(
+        "CODING_CAVE_CACHES_DIR".to_string(),
+        caches_dir.to_string_lossy().to_string(),
+    );
     env.insert("CODING_CAVE_WORKSPACES".to_string(), ws_paths);
     env.insert("CODING_CAVE_SHARED_REPOS".to_string(), shared_repos_str);
     env.insert("CODING_CAVE_AGENT_NAME".to_string(), agent_name.clone());
@@ -2284,7 +2391,7 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
         sync_w.as_raw_fd().to_string(),
     );
     if !inside_cave() {
-        let (upper, work, merged_pb) = nix_overlay_dirs(&home, &agent_id);
+        let (upper, work, merged_pb) = nix_overlay_dirs(&agent_id);
         env.insert(
             "CODING_CAVE_NS_OVERLAY_MERGED".to_string(),
             merged_pb.to_string_lossy().to_string(),
@@ -2593,5 +2700,295 @@ mod tests {
         fs::write(f.ws.join("file"), "modified\n").unwrap();
         git(&["stash", "push", "-m", "wip"], &f.ws);
         assert!(!is_trivially_clean(&f.workspaces(), "1"));
+    }
+
+    use super::{migrate_overlay_layout_in, migrate_session_to_per_agent_home, nix_overlay_dirs_in};
+    use std::path::Path;
+
+    #[test]
+    fn overlay_dirs_resolve_outside_home() {
+        // Overlay must live under data_dir/agents/<id>/, not inside any
+        // .local/share/coding-cave/home/ tree. Otherwise the home bind
+        // exposes one agent's overlay to siblings.
+        let tmp = std::env::temp_dir()
+            .join(format!("cav-overlay-{}-{}", std::process::id(), "outside"));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let (upper, work, merged) = nix_overlay_dirs_in(&tmp, "5");
+        let expected_base = tmp.join("agents").join("5").join("nix-overlay");
+        assert_eq!(upper, expected_base.join("upper"));
+        assert_eq!(work, expected_base.join("work"));
+        assert_eq!(merged, expected_base.join("merged"));
+        assert!(upper.is_dir());
+        assert!(work.is_dir());
+        assert!(merged.is_dir());
+        // No path component should be `home` — that's the bind that
+        // would expose us to other agents.
+        for d in [&upper, &work, &merged] {
+            for c in d.components() {
+                let s = c.as_os_str().to_string_lossy();
+                assert_ne!(s, "home", "overlay path leaks into shared home: {d:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn agents_are_isolated_from_each_other() {
+        let tmp = std::env::temp_dir()
+            .join(format!("cav-overlay-{}-{}", std::process::id(), "isolated"));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let (upper_a, _, _) = nix_overlay_dirs_in(&tmp, "1");
+        let (upper_b, _, _) = nix_overlay_dirs_in(&tmp, "2");
+        assert_ne!(upper_a, upper_b);
+        // Neither path should contain the other.
+        assert!(!upper_a.starts_with(&upper_b));
+        assert!(!upper_b.starts_with(&upper_a));
+    }
+
+    #[test]
+    fn migrate_from_legacy_per_agent_path() {
+        // Legacy: <home>/.local/share/coding-cave/nix-overlay/agent-3/
+        // Target: <data>/agents/3/nix-overlay/
+        let tmp = std::env::temp_dir()
+            .join(format!("cav-overlay-{}-{}", std::process::id(), "legacy-pa"));
+        let _ = fs::remove_dir_all(&tmp);
+        let data = tmp.join("data");
+        let home = tmp.join("home");
+        let legacy = home.join(".local/share/coding-cave/nix-overlay/agent-3");
+        let upper = legacy.join("upper");
+        fs::create_dir_all(&upper).unwrap();
+        fs::write(upper.join("marker"), "preserved").unwrap();
+
+        migrate_overlay_layout_in(&data, &home, "3");
+
+        let new_upper = data.join("agents/3/nix-overlay/upper");
+        assert!(new_upper.is_dir(), "new layout missing");
+        assert_eq!(
+            fs::read_to_string(new_upper.join("marker")).unwrap(),
+            "preserved",
+            "marker file did not survive migration"
+        );
+        assert!(!legacy.exists(), "legacy dir not cleaned up");
+    }
+
+    #[test]
+    fn migrate_from_legacy_shared_path() {
+        // Even older layout: <home>/.../nix-overlay/shared/
+        let tmp = std::env::temp_dir()
+            .join(format!("cav-overlay-{}-{}", std::process::id(), "legacy-sh"));
+        let _ = fs::remove_dir_all(&tmp);
+        let data = tmp.join("data");
+        let home = tmp.join("home");
+        let legacy = home.join(".local/share/coding-cave/nix-overlay/shared");
+        fs::create_dir_all(&legacy.join("upper")).unwrap();
+        fs::write(legacy.join("upper/marker"), "shared-preserved").unwrap();
+
+        migrate_overlay_layout_in(&data, &home, "7");
+
+        let new_upper = data.join("agents/7/nix-overlay/upper");
+        assert_eq!(
+            fs::read_to_string(new_upper.join("marker")).unwrap(),
+            "shared-preserved"
+        );
+    }
+
+    #[test]
+    fn migrate_skips_when_target_exists() {
+        // If the new layout already has data, migration must not overwrite.
+        let tmp = std::env::temp_dir()
+            .join(format!("cav-overlay-{}-{}", std::process::id(), "skip"));
+        let _ = fs::remove_dir_all(&tmp);
+        let data = tmp.join("data");
+        let home = tmp.join("home");
+        let legacy = home.join(".local/share/coding-cave/nix-overlay/agent-1");
+        fs::create_dir_all(&legacy.join("upper")).unwrap();
+        fs::write(legacy.join("upper/marker"), "legacy").unwrap();
+
+        let new_upper = data.join("agents/1/nix-overlay/upper");
+        fs::create_dir_all(&new_upper).unwrap();
+        fs::write(new_upper.join("marker"), "current").unwrap();
+
+        migrate_overlay_layout_in(&data, &home, "1");
+
+        assert_eq!(fs::read_to_string(new_upper.join("marker")).unwrap(), "current");
+        assert!(legacy.exists(), "legacy preserved when target exists");
+    }
+
+    #[test]
+    fn migrate_noop_when_no_legacy() {
+        let tmp = std::env::temp_dir()
+            .join(format!("cav-overlay-{}-{}", std::process::id(), "noop"));
+        let _ = fs::remove_dir_all(&tmp);
+        let data = tmp.join("data");
+        let home = tmp.join("home");
+        // No legacy paths exist.
+        migrate_overlay_layout_in(&data, &home, "9");
+        // Migration is a no-op; new layout is created on demand by
+        // nix_overlay_dirs_in, not by migrate.
+        assert!(!data.join("agents/9").exists());
+    }
+
+    fn session_migration_setup(name: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let tmp = std::env::temp_dir()
+            .join(format!("cav-session-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        let legacy = tmp.join("legacy-home");
+        let target = tmp.join("target-home");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        (tmp, legacy, target)
+    }
+
+    fn write_session(home: &Path, slug: &str, sid: &str, body: &str) -> PathBuf {
+        let dir = crate::config::claude_project_dir(slug, Some(home));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{sid}.jsonl"));
+        fs::write(&path, body).unwrap();
+        path
+    }
+
+    #[test]
+    fn session_migrates_jsonl_into_per_agent_home() {
+        let (_tmp, legacy, target) = session_migration_setup("jsonl");
+        let sid = "abc-123";
+        let slug = "demo";
+        write_session(&legacy, slug, sid, "session-content");
+
+        migrate_session_to_per_agent_home(&legacy, &target, slug, Some(sid));
+
+        let migrated = crate::config::claude_project_dir(slug, Some(&target))
+            .join(format!("{sid}.jsonl"));
+        assert!(migrated.is_file());
+        assert_eq!(fs::read_to_string(&migrated).unwrap(), "session-content");
+    }
+
+    #[test]
+    fn session_migrates_sidecar_dir() {
+        let (_tmp, legacy, target) = session_migration_setup("sidecar");
+        let sid = "with-sidecar";
+        let slug = "demo";
+        write_session(&legacy, slug, sid, "content");
+        let sidecar = crate::config::claude_project_dir(slug, Some(&legacy)).join(sid);
+        fs::create_dir_all(sidecar.join("nested")).unwrap();
+        fs::write(sidecar.join("inner"), "x").unwrap();
+        fs::write(sidecar.join("nested/deep"), "y").unwrap();
+
+        migrate_session_to_per_agent_home(&legacy, &target, slug, Some(sid));
+
+        let target_sidecar = crate::config::claude_project_dir(slug, Some(&target)).join(sid);
+        assert!(target_sidecar.is_dir());
+        assert_eq!(fs::read_to_string(target_sidecar.join("inner")).unwrap(), "x");
+        assert_eq!(fs::read_to_string(target_sidecar.join("nested/deep")).unwrap(), "y");
+    }
+
+    #[test]
+    fn session_skips_when_target_already_has_jsonl() {
+        let (_tmp, legacy, target) = session_migration_setup("skip");
+        let sid = "preexisting";
+        let slug = "demo";
+        write_session(&legacy, slug, sid, "legacy-version");
+        write_session(&target, slug, sid, "target-version");
+
+        migrate_session_to_per_agent_home(&legacy, &target, slug, Some(sid));
+
+        let target_jsonl = crate::config::claude_project_dir(slug, Some(&target))
+            .join(format!("{sid}.jsonl"));
+        assert_eq!(fs::read_to_string(&target_jsonl).unwrap(), "target-version");
+    }
+
+    #[test]
+    fn session_noop_without_session_id() {
+        let (_tmp, legacy, target) = session_migration_setup("noid");
+        let slug = "demo";
+        // Even if legacy has random sessions, no specific id means
+        // we have nothing to copy.
+        write_session(&legacy, slug, "some-uuid", "x");
+
+        migrate_session_to_per_agent_home(&legacy, &target, slug, None);
+
+        assert!(!crate::config::claude_project_dir(slug, Some(&target)).is_dir());
+    }
+
+    #[test]
+    fn session_noop_when_legacy_missing() {
+        let tmp = std::env::temp_dir()
+            .join(format!("cav-session-{}-{}", std::process::id(), "missing"));
+        let _ = fs::remove_dir_all(&tmp);
+        let legacy = tmp.join("legacy");
+        let target = tmp.join("target");
+        fs::create_dir_all(&target).unwrap();
+        // legacy/ does not exist.
+
+        migrate_session_to_per_agent_home(&legacy, &target, "demo", Some("any-sid"));
+
+        assert!(!crate::config::claude_project_dir("demo", Some(&target)).is_dir());
+    }
+
+    #[test]
+    fn session_skips_when_legacy_lacks_this_jsonl() {
+        // Legacy home exists but doesn't have this agent's session
+        // (e.g., another agent started fresh after the migration).
+        let (_tmp, legacy, target) = session_migration_setup("absent");
+        let slug = "demo";
+
+        migrate_session_to_per_agent_home(&legacy, &target, slug, Some("not-there"));
+
+        assert!(!crate::config::claude_project_dir(slug, Some(&target)).is_dir());
+    }
+
+    use std::collections::HashMap;
+
+    fn argv_contains_bind(argv: &[String], dest: &str) -> Option<String> {
+        // Walk for `--bind <src> <dest>` triples.
+        for trip in argv.windows(3) {
+            if trip[0] == "--bind" && trip[2] == dest {
+                return Some(trip[1].clone());
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn argv_emits_shared_cache_bind() {
+        let cfg = super::SandboxConfig::default();
+        let mut env = HashMap::new();
+        env.insert("CODING_CAVE_HOME".to_string(), "/some/home".to_string());
+        env.insert(
+            "CODING_CAVE_CACHES_DIR".to_string(),
+            "/host/path/to/caches".to_string(),
+        );
+        let argv = super::build_bwrap_argv(&cfg, &env, &[], -1);
+        let cache_src = argv_contains_bind(&argv, "/cache")
+            .expect("argv must include --bind <src> /cache");
+        assert_eq!(cache_src, "/host/path/to/caches");
+    }
+
+    #[test]
+    fn argv_omits_cache_bind_when_caches_dir_unset() {
+        // Pre-cache-pool callers (older entry points) shouldn't get a
+        // dangling /cache bind referring to a path that doesn't exist.
+        let cfg = super::SandboxConfig::default();
+        let mut env = HashMap::new();
+        env.insert("CODING_CAVE_HOME".to_string(), "/some/home".to_string());
+        let argv = super::build_bwrap_argv(&cfg, &env, &[], -1);
+        assert!(argv_contains_bind(&argv, "/cache").is_none());
+    }
+
+    #[test]
+    fn argv_has_distinct_cache_and_home_binds() {
+        let cfg = super::SandboxConfig::default();
+        let mut env = HashMap::new();
+        env.insert("CODING_CAVE_HOME".to_string(), "/host/agents/4/home".to_string());
+        env.insert(
+            "CODING_CAVE_CACHES_DIR".to_string(),
+            "/host/caches".to_string(),
+        );
+        let argv = super::build_bwrap_argv(&cfg, &env, &[], -1);
+        let home_src = argv_contains_bind(&argv, "/home/cave-coder")
+            .expect("home bind missing");
+        let cache_src = argv_contains_bind(&argv, "/cache").expect("cache bind missing");
+        assert_eq!(home_src, "/host/agents/4/home");
+        assert_eq!(cache_src, "/host/caches");
     }
 }

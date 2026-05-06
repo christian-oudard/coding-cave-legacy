@@ -22,6 +22,23 @@
     coreutils bash nix git gnupg gnugrep gnused jq
   ];
 
+  # Redirect language package caches to the shared /cache pool. cav binds
+  # ~/.local/share/coding-cave/caches/ → /cache rw across all caves at
+  # the same data_dir level, so one copy of a package on disk serves
+  # every agent. Tools that honor XDG_CACHE_HOME (uv, pip, yarn,
+  # composer, go-build, ruff, etc.) pick up the redirect via the XDG
+  # var; the rest get explicit per-tool vars below. Override any of
+  # these in cave.nix if a particular tool misbehaves with a shared
+  # cache.
+  home.sessionVariables = {
+    XDG_CACHE_HOME    = "/cache/xdg";
+    CARGO_HOME        = "/cache/cargo";
+    npm_config_cache  = "/cache/npm";
+    PNPM_STORE_PATH   = "/cache/pnpm";
+    GOMODCACHE        = "/cache/go-mod";
+    GRADLE_USER_HOME  = "/cache/gradle";
+  };
+
   coding-cave.claude-code = {
     enable = lib.mkDefault true;
     extraSettings = {

@@ -522,6 +522,54 @@ pub fn all_agent_ids(project: Option<&str>) -> Result<Vec<String>> {
 
 // -- Project registry --
 
+/// Reconstruct missing agent rows by scanning worktrees/<slug>/<id>/ on
+/// disk. The filesystem is the source of truth for which agents exist;
+/// the registry is a cache. Returns the number of rows inserted.
+///
+/// Reconstructed rows are marked exited (live state — pid, session_id,
+/// started_at — is meaningless after the registry was lost, since any
+/// agents that were running have crashed). cav agent allocates a fresh
+/// session UUID on next launch via continue_agent_id.
+pub fn rebuild_agents_from_filesystem(base: &Path) -> Result<usize> {
+    let slug = config::project_slug(base);
+    let worktrees_root = config::data_dir().join("worktrees").join(&slug);
+    if !worktrees_root.is_dir() {
+        return Ok(0);
+    }
+
+    let known: std::collections::HashSet<String> =
+        all_agent_ids(Some(&slug))?.into_iter().collect();
+    let db = open()?;
+    let now_ts = now();
+    let mut inserted = 0usize;
+
+    for entry in std::fs::read_dir(&worktrees_root)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let aid = entry.file_name().to_string_lossy().to_string();
+        if !config::is_agent_id(&aid) {
+            continue;
+        }
+        if known.contains(&aid) {
+            continue;
+        }
+        // No conflict on agent_id (other projects can't share PRIMARY KEY),
+        // but we may discover agents that were registered to this slug then
+        // had the registry wiped. Use OR IGNORE so we don't clobber a
+        // concurrent insert from another process.
+        db.execute(
+            "INSERT OR IGNORE INTO agents \
+             (agent_id, project, host_pid, started_at, exited_at, session_id) \
+             VALUES (?1, ?2, NULL, ?3, ?3, NULL)",
+            params![aid, slug, now_ts],
+        )?;
+        inserted += 1;
+    }
+    Ok(inserted)
+}
+
 pub fn register_project(base: &Path) -> Result<String> {
     let slug = config::project_slug(base);
     let path = base.canonicalize()?.to_string_lossy().to_string();

@@ -173,6 +173,13 @@ pub fn init(path: &Path, reinitialize: bool) -> Result<()> {
     if is_bare_repo(&shared) {
         if !reinitialize {
             registry::register_project(&base)?;
+            let recovered = registry::rebuild_agents_from_filesystem(&base).unwrap_or(0);
+            if recovered > 0 {
+                println!(
+                    "Recovered {recovered} agent row{} from worktrees/.",
+                    if recovered == 1 { "" } else { "s" }
+                );
+            }
             println!("Coding Cave already initialized at {}", cav.display());
             return Ok(());
         }
@@ -192,6 +199,7 @@ pub fn init(path: &Path, reinitialize: bool) -> Result<()> {
             false,
         )?;
         registry::register_project(&base)?;
+        let _ = registry::rebuild_agents_from_filesystem(&base);
         workspace::reconfigure(&base)?;
         warn_dirty(&base);
         publish_bases(&base)?;

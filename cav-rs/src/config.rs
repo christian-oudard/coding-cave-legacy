@@ -57,6 +57,17 @@ pub fn shared_repo_path(base: &Path) -> PathBuf {
 
 // -- Data dir paths --
 
+/// Per-agent home directory on the host. Lives outside the legacy
+/// shared home/ so one agent's cave cannot reach another's via the
+/// home bind.
+pub fn agent_home(agent_id: &str) -> PathBuf {
+    data_dir().join("agents").join(agent_id).join("home")
+}
+
+/// Legacy shared home. Pre-per-agent layouts kept registry, sessions,
+/// and overlay state here, all bind-mounted into every cave wholesale.
+/// Retained as a fallback for code paths that haven't been migrated to
+/// per-agent resolution yet.
 pub fn persistent_home() -> PathBuf {
     data_dir().join("home")
 }
@@ -65,8 +76,21 @@ pub fn launch_home(agent_name: &str) -> PathBuf {
     if inside_cave() {
         data_dir().join("subcave-homes").join(agent_name)
     } else {
-        persistent_home()
+        match agent_id_from_name(agent_name) {
+            Some(aid) => agent_home(&aid),
+            None => persistent_home(),
+        }
     }
+}
+
+/// Extract the agent id from a launch/display name. Format is
+/// `<slug>@<id>` optionally followed by ` (parent ...)`. Splits on the
+/// first `@` so a parent name embedded in the lineage suffix doesn't
+/// hijack the result.
+fn agent_id_from_name(agent_name: &str) -> Option<String> {
+    let after_first_at = agent_name.split_once('@').map(|(_, after)| after)?;
+    let aid: String = after_first_at.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if aid.is_empty() { None } else { Some(aid) }
 }
 
 pub fn worktree_dir(slug: &str, agent_id: &str) -> PathBuf {
@@ -216,4 +240,92 @@ fn check_alternates(ws: &Path) -> anyhow::Result<()> {
          Run: cav init --reinitialize",
         alt.display()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_id_extracts_from_simple_name() {
+        assert_eq!(agent_id_from_name("project@5"), Some("5".to_string()));
+        assert_eq!(agent_id_from_name("coding-cave@12"), Some("12".to_string()));
+    }
+
+    #[test]
+    fn agent_id_ignores_lineage_suffix() {
+        // Inside a subcave the launch name carries a "(parent ...)"
+        // suffix containing another @<id>. Must read the first @<id>,
+        // not the parent's.
+        assert_eq!(
+            agent_id_from_name("child@2 (parent project@1)"),
+            Some("2".to_string())
+        );
+        assert_eq!(
+            agent_id_from_name("a@7 (parent b@3 (parent c@1))"),
+            Some("7".to_string())
+        );
+    }
+
+    #[test]
+    fn agent_id_rejects_non_numeric() {
+        assert_eq!(agent_id_from_name("noatsign"), None);
+        assert_eq!(agent_id_from_name("project@abc"), None);
+        assert_eq!(agent_id_from_name(""), None);
+    }
+
+    #[test]
+    fn host_launch_home_is_per_agent() {
+        // For host launches (CODING_CAVE_VERSION unset), launch_home
+        // must resolve to data_dir/agents/<id>/home so each agent has
+        // its own backing dir.
+        let tmp = std::env::temp_dir()
+            .join(format!("cav-cfg-{}-host", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let key = "CODING_CAVE_DATA_DIR";
+        let saved = std::env::var(key).ok();
+        // SAFETY: tests run single-threaded by default, but if the test
+        // harness opts into parallel the env mutation can race with
+        // other tests that read CODING_CAVE_DATA_DIR. Acceptable here
+        // because no other test in this crate touches that var.
+        unsafe {
+            std::env::set_var(key, &tmp);
+            std::env::remove_var("CODING_CAVE_VERSION");
+        }
+        let h = launch_home("project@4");
+        unsafe {
+            match saved {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+        assert_eq!(h, tmp.join("agents").join("4").join("home"));
+    }
+
+    #[test]
+    fn agents_get_distinct_homes() {
+        // Critical invariant: two agents must not share a home dir.
+        let tmp = std::env::temp_dir()
+            .join(format!("cav-cfg-{}-distinct", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let key = "CODING_CAVE_DATA_DIR";
+        let saved = std::env::var(key).ok();
+        unsafe {
+            std::env::set_var(key, &tmp);
+            std::env::remove_var("CODING_CAVE_VERSION");
+        }
+        let h1 = launch_home("project@1");
+        let h2 = launch_home("project@2");
+        unsafe {
+            match saved {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+        assert_ne!(h1, h2);
+        assert!(!h1.starts_with(&h2));
+        assert!(!h2.starts_with(&h1));
+    }
 }

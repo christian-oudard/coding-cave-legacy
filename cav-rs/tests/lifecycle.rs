@@ -1232,3 +1232,182 @@ fn partial_approve_prints_remaining_count() {
         "should mention remaining commits: {combined}"
     );
 }
+
+// --- registry rebuild from filesystem ---
+
+fn slug_of(p: &Project) -> String {
+    p.dir
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_lowercase()
+        .replace(
+            |c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-',
+            "-",
+        )
+}
+
+fn registry_has_agent(p: &Project, agent_id: &str) -> bool {
+    let db = p.data_dir.join("coding-cave.db");
+    if !db.is_file() {
+        return false;
+    }
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.query_row(
+        "SELECT 1 FROM agents WHERE agent_id = ?1",
+        rusqlite::params![agent_id],
+        |_| Ok(()),
+    )
+    .is_ok()
+}
+
+#[test]
+fn init_repairs_missing_agent_rows_from_worktrees() {
+    // Simulate a wiped registry: the worktree dir for an agent exists
+    // on disk but no row in the agents table. cav init must
+    // re-register that agent from the filesystem.
+    let p = Project::new("rebuild-agents");
+    let slug = slug_of(&p);
+
+    // Plant orphan worktree dirs with agent ids 7 and 12. cav init has
+    // not seen these agents.
+    let wts = p.data_dir.join("worktrees").join(&slug);
+    fs::create_dir_all(wts.join("7")).unwrap();
+    fs::create_dir_all(wts.join("12")).unwrap();
+    // Also a non-agent-id entry that must be ignored.
+    fs::create_dir_all(wts.join("not-a-number")).unwrap();
+
+    assert!(!registry_has_agent(&p, "7"));
+    assert!(!registry_has_agent(&p, "12"));
+
+    // Idempotent re-init should detect and re-register the orphans.
+    let out = p.cav(&["init", p.dir.to_str().unwrap()]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "init failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        combined.contains("Recovered 2 agent rows"),
+        "expected recovery banner, got: {combined}"
+    );
+
+    assert!(registry_has_agent(&p, "7"));
+    assert!(registry_has_agent(&p, "12"));
+    assert!(!registry_has_agent(&p, "not-a-number"));
+}
+
+#[test]
+fn init_no_op_when_registry_already_matches_worktrees() {
+    // If every worktree dir already has a registry row, init should
+    // not announce any recovery.
+    let p = Project::new("rebuild-noop");
+    let slug = slug_of(&p);
+
+    // Plant worktree dirs and pre-insert matching rows directly so we
+    // know there's nothing for rebuild to find.
+    let wts = p.data_dir.join("worktrees").join(&slug);
+    fs::create_dir_all(wts.join("3")).unwrap();
+    p.register_agent("3");
+    assert!(registry_has_agent(&p, "3"));
+
+    let out = p.cav(&["init", p.dir.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(0));
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !combined.contains("Recovered"),
+        "no recovery expected when registry matches: {combined}"
+    );
+    assert!(registry_has_agent(&p, "3"));
+}
+
+#[test]
+fn sessions_list_finds_per_agent_jsonls() {
+    // Plant fake per-agent .claude/projects/ trees and verify
+    // `cav sessions list` reports each agent's session UUIDs.
+    let p = Project::new("sessions-list");
+
+    // Agent 3 owns one session in coding-cave.
+    let agent3 = p.data_dir.join("agents/3/home/.claude/projects/-projects-foo");
+    fs::create_dir_all(&agent3).unwrap();
+    fs::write(agent3.join("aaaaaaaa-1111.jsonl"), "session-3").unwrap();
+
+    // Agent 7 owns two sessions.
+    let agent7 = p.data_dir.join("agents/7/home/.claude/projects/-projects-foo");
+    fs::create_dir_all(&agent7).unwrap();
+    fs::write(agent7.join("bbbbbbbb-2222.jsonl"), "session-7a").unwrap();
+    fs::write(agent7.join("cccccccc-3333.jsonl"), "session-7b").unwrap();
+
+    let out = p.cav(&["sessions", "list"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "sessions list failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("aaaaaaaa-1111"), "missing agent 3 session: {stdout}");
+    assert!(stdout.contains("bbbbbbbb-2222"), "missing agent 7 session A: {stdout}");
+    assert!(stdout.contains("cccccccc-3333"), "missing agent 7 session B: {stdout}");
+}
+
+#[test]
+fn sessions_list_filters_by_agent() {
+    let p = Project::new("sessions-filter");
+
+    let agent3 = p.data_dir.join("agents/3/home/.claude/projects/-projects-foo");
+    fs::create_dir_all(&agent3).unwrap();
+    fs::write(agent3.join("aaaaaaaa-1111.jsonl"), "x").unwrap();
+
+    let agent7 = p.data_dir.join("agents/7/home/.claude/projects/-projects-foo");
+    fs::create_dir_all(&agent7).unwrap();
+    fs::write(agent7.join("bbbbbbbb-2222.jsonl"), "y").unwrap();
+
+    let out = p.cav(&["sessions", "list", "--agent", "3"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("aaaaaaaa-1111"), "agent 3 row missing: {stdout}");
+    assert!(!stdout.contains("bbbbbbbb-2222"), "agent 7 row leaked: {stdout}");
+}
+
+#[test]
+fn sessions_list_handles_empty() {
+    // Fresh data_dir: no agents/, sessions list should print "No sessions
+    // found." and exit clean.
+    let p = Project::new("sessions-empty");
+    let out = p.cav(&["sessions", "list"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("No sessions found"),
+        "unexpected output: {stdout}"
+    );
+}
+
+#[test]
+fn init_rebuild_skips_when_no_worktrees_dir() {
+    // Fresh project before any agent has run: worktrees/<slug>/ doesn't
+    // exist yet. Rebuild must be a clean no-op (no error, no recovery
+    // banner) so init stays fast on every project.
+    let p = Project::new("rebuild-none");
+    let slug = slug_of(&p);
+    assert!(!p.data_dir.join("worktrees").join(&slug).exists());
+
+    let out = p.cav(&["init", p.dir.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(0));
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!combined.contains("Recovered"));
+}

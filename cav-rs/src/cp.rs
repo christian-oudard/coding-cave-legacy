@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
 
-use crate::config::{self, persistent_home, worktree_dir};
+use crate::config::{self, worktree_dir};
 use crate::registry;
 
 pub fn cp(srcs: Vec<String>, dest: String, recursive: bool, force: bool) -> Result<()> {
@@ -141,7 +141,13 @@ fn resolve_cave_path(spec: &str, is_dest: bool) -> Result<Option<PathBuf>> {
     };
 
     if path.starts_with("~/") || path == "~" {
-        let home = persistent_home();
+        // ~/ inside the cave is /home/cave-coder, which is the agent's
+        // per-agent home on the host. Resolve to that agent's home dir.
+        let aid = match &agent_id {
+            Some(a) => a.clone(),
+            None => worktree_for_slug(&slug, None)?.1,
+        };
+        let home = config::agent_home(&aid);
         let rel = if path == "~" { "" } else { &path[2..] };
         let result = normalize(&home, rel);
         check_in_dir(&result, &home, is_dest)?;
