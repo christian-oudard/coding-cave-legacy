@@ -142,6 +142,7 @@ Copies files between the host and a cave agent worktree, or to cave persistent h
 - `<slug>:<path>` - a path in some agent's worktree
 - `<slug>@<n>:<path>` - the working tree for agent N.
 - `cave:<path>` - auto-detect the project slug from current project directory
+- `cave@<n>:<path>` or `@<n>:<path>` - auto-detect the project slug, agent N
 
 Direction is determined by which path has the `cave:` prefix. If the destination has a cave prefix, copies host files into the worktree. If the source has a cave prefix, copies from the worktree to the host. Multiple sources can be specified, similar to the `cp` command.
 

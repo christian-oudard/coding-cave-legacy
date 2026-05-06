@@ -124,8 +124,7 @@ fn resolve_cave_path(spec: &str, is_dest: bool) -> Result<Option<PathBuf>> {
 
     let (slug, agent_id) = if prefix.contains('@') {
         let (s, id_str) = prefix.rsplit_once('@').unwrap();
-        let slug = if s == "cave" {
-            // Auto-detect slug
+        let slug = if s == "cave" || s.is_empty() {
             detect_slug()?
         } else {
             s.to_string()
@@ -160,12 +159,8 @@ fn resolve_cave_path(spec: &str, is_dest: bool) -> Result<Option<PathBuf>> {
         }
         // Cave-internal absolute path via /proc/<pid>/root
         let (cave_root, _) = cave_root_for_slug(&slug, agent_id.as_deref())?;
-        let rel = std::fs::canonicalize(format!("/{path}"))
-            .unwrap_or_else(|_| PathBuf::from(&path))
-            .to_string_lossy()
-            .trim_start_matches('/')
-            .to_string();
-        let result = if rel.is_empty() { cave_root.clone() } else { cave_root.join(&rel) };
+        let rel = path.trim_start_matches('/');
+        let result = if rel.is_empty() { cave_root } else { cave_root.join(rel) };
         return Ok(Some(result));
     }
 
