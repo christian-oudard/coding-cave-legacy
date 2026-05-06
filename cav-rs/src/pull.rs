@@ -174,7 +174,7 @@ fn pull_cave_self(base: &Path, local_branch: &str, agent_id: &str, force: bool) 
     Ok(())
 }
 
-fn sync_agent_to_shared(base: &Path, slug: &str, dev_branch: &str, agent_id: &str) {
+pub(crate) fn sync_agent_to_shared(base: &Path, slug: &str, dev_branch: &str, agent_id: &str) {
     let ws = worktree_dir(slug, agent_id);
     if !ws.exists() {
         return;

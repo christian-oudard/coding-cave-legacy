@@ -6,6 +6,7 @@ use anyhow::{bail, Result};
 use crate::config::{self, parse_dev_branch, resolve_base};
 use crate::constants::CAVE_SHARED_REMOTE;
 use crate::git;
+use crate::pull;
 use crate::registry;
 
 pub fn review(base: &Path, agent_id: &str) -> Result<()> {
@@ -28,6 +29,20 @@ pub fn review(base: &Path, agent_id: &str) -> Result<()> {
     if candidates.is_empty() {
         bail!("No agent branch found for agent {agent_id}.");
     }
+
+    // Pull the agent's worktree commits into the cave so review reflects
+    // anything the agent committed but hasn't pushed yet.
+    let slug = config::project_slug(base);
+    for branch in &candidates {
+        pull::sync_agent_to_shared(base, &slug, branch, agent_id);
+    }
+    git::git(
+        &["fetch", "--prune", CAVE_SHARED_REMOTE],
+        Some(base),
+        true,
+        verbose,
+        verbose,
+    )?;
 
     // Prefer branches with unapproved commits.
     let mut pending: Vec<(String, String, Vec<String>)> = vec![];
