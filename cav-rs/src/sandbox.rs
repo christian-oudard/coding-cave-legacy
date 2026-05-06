@@ -1373,6 +1373,75 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Encode an absolute path the way Claude Code does for project session
+/// dirs: replace every non-alphanumeric character with `-`.
+fn encode_claude_project(path: &str) -> String {
+    path.chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
+/// Mirror this agent's session JSONL into the host user's
+/// ~/.claude/projects/ via a hardlink. Same inode, two paths: writes
+/// from the in-cave Claude Code show up immediately under the host's
+/// normal session location so `claude --resume <uuid>` and any session
+/// browser on the host both see live agent state without copying.
+///
+/// The cave's encoded project dir keys off `/projects/<slug>` (where
+/// the cave runs Claude Code). The host's encoded dir keys off the
+/// project's actual host path (where the user runs Claude Code on the
+/// host). Both paths reference the same inode, so the encoding mismatch
+/// is fine.
+fn sync_session_to_host_at(
+    per_agent_home: &Path,
+    host_home: &Path,
+    slug: &str,
+    project_host_path: &str,
+    session_id: &str,
+) -> std::io::Result<()> {
+    let per_agent_dir = config::claude_project_dir(slug, Some(per_agent_home));
+    let per_agent_jsonl = per_agent_dir.join(format!("{session_id}.jsonl"));
+    let host_dir = host_home
+        .join(".claude")
+        .join("projects")
+        .join(encode_claude_project(project_host_path));
+    let host_jsonl = host_dir.join(format!("{session_id}.jsonl"));
+
+    std::fs::create_dir_all(&per_agent_dir)?;
+    std::fs::create_dir_all(&host_dir)?;
+
+    // Pre-create the per-agent file so the hardlink target exists.
+    // Claude Code's session writer uses O_APPEND|O_CREAT, which is
+    // happy with an existing empty file.
+    if !per_agent_jsonl.exists() {
+        let _ = std::fs::File::create(&per_agent_jsonl)?;
+    }
+
+    if host_jsonl.exists() {
+        // Already linked or a host-side session collided on the UUID.
+        // Either way, leave the host alone — overwriting a real
+        // host-side session would be worse than skipping.
+        return Ok(());
+    }
+    std::fs::hard_link(&per_agent_jsonl, &host_jsonl)?;
+    Ok(())
+}
+
+fn sync_session_to_host(
+    per_agent_home: &Path,
+    slug: &str,
+    project_host_path: &Path,
+    session_id: &str,
+) {
+    let _ = sync_session_to_host_at(
+        per_agent_home,
+        &host_home(),
+        slug,
+        &project_host_path.to_string_lossy(),
+        session_id,
+    );
+}
+
 fn rm_store_path(path: &Path) {
     if path.is_symlink() || !path.is_dir() {
         if let Some(parent) = path.parent() {
@@ -2081,6 +2150,17 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
                 migrate_session_to_per_agent_home(&legacy, &home, s, session_id.as_deref());
             }
         }
+        // Mirror per-agent session JSONLs into host's ~/.claude/projects/
+        // via hardlink. Lets the host user's Claude Code see all agents'
+        // sessions in their normal session browser. Skipped for
+        // subcaves: their parent already aggregates them.
+        if let Some(sid) = session_id.as_deref() {
+            for (_, _, s) in &workspaces {
+                if let Some(project_path) = registry::project_path(s).ok().flatten() {
+                    sync_session_to_host(&home, s, &PathBuf::from(project_path), sid);
+                }
+            }
+        }
     }
     for (_, _, s) in &workspaces {
         seed_claude_config(&home, s, comms);
@@ -2702,7 +2782,10 @@ mod tests {
         assert!(!is_trivially_clean(&f.workspaces(), "1"));
     }
 
-    use super::{migrate_overlay_layout_in, migrate_session_to_per_agent_home, nix_overlay_dirs_in};
+    use super::{
+        encode_claude_project, migrate_overlay_layout_in, migrate_session_to_per_agent_home,
+        nix_overlay_dirs_in, sync_session_to_host_at,
+    };
     use std::path::Path;
 
     #[test]
@@ -2990,5 +3073,141 @@ mod tests {
         let cache_src = argv_contains_bind(&argv, "/cache").expect("cache bind missing");
         assert_eq!(home_src, "/host/agents/4/home");
         assert_eq!(cache_src, "/host/caches");
+    }
+
+    fn host_sync_setup(name: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let tmp = std::env::temp_dir()
+            .join(format!("cav-hsync-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        let per_agent = tmp.join("per-agent");
+        let host = tmp.join("host");
+        fs::create_dir_all(&per_agent).unwrap();
+        fs::create_dir_all(&host).unwrap();
+        (tmp, per_agent, host)
+    }
+
+    fn inode_of(p: &Path) -> u64 {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(p).unwrap().ino()
+    }
+
+    #[test]
+    fn host_sync_creates_hardlink_with_shared_inode() {
+        // The whole point of the sync: in-cave Claude Code writing to
+        // its per-agent JSONL must show up at the host's path because
+        // they're the same inode.
+        let (_tmp, per_agent, host) = host_sync_setup("hardlink");
+        let sid = "abc-123";
+        let slug = "demo";
+        let project_path = "/home/user/code/demo";
+
+        sync_session_to_host_at(&per_agent, &host, slug, project_path, sid).unwrap();
+
+        let pa_jsonl = per_agent
+            .join(".claude/projects/-projects-demo")
+            .join(format!("{sid}.jsonl"));
+        let host_jsonl = host
+            .join(".claude/projects")
+            .join(encode_claude_project(project_path))
+            .join(format!("{sid}.jsonl"));
+        assert!(pa_jsonl.is_file());
+        assert!(host_jsonl.is_file());
+        assert_eq!(inode_of(&pa_jsonl), inode_of(&host_jsonl));
+
+        // Writes to one path show up at the other.
+        std::fs::write(&pa_jsonl, "live-content").unwrap();
+        assert_eq!(fs::read_to_string(&host_jsonl).unwrap(), "live-content");
+    }
+
+    #[test]
+    fn host_sync_uses_distinct_encoded_dirs() {
+        // Per-agent dir is encoded from /projects/<slug>; host dir is
+        // encoded from the project's actual host path. Encodings must
+        // not collide so two different projects with the same slug
+        // (different host paths) don't hardlink onto each other.
+        let (_tmp, per_agent, host) = host_sync_setup("encoding");
+        let sid = "zzz";
+        sync_session_to_host_at(
+            &per_agent,
+            &host,
+            "demo",
+            "/home/user/code/demo",
+            sid,
+        )
+        .unwrap();
+        let pa_dir = per_agent.join(".claude/projects/-projects-demo");
+        let host_dir = host.join(".claude/projects/-home-user-code-demo");
+        assert!(pa_dir.is_dir(), "per-agent dir at {}", pa_dir.display());
+        assert!(host_dir.is_dir(), "host dir at {}", host_dir.display());
+    }
+
+    #[test]
+    fn host_sync_idempotent_when_already_linked() {
+        let (_tmp, per_agent, host) = host_sync_setup("idempotent");
+        let sid = "rerun";
+        let slug = "demo";
+        let project_path = "/p/demo";
+
+        sync_session_to_host_at(&per_agent, &host, slug, project_path, sid).unwrap();
+        let host_jsonl = host
+            .join(".claude/projects")
+            .join(encode_claude_project(project_path))
+            .join(format!("{sid}.jsonl"));
+        let first_inode = inode_of(&host_jsonl);
+
+        // Run again. Must succeed and not blow away the existing link.
+        sync_session_to_host_at(&per_agent, &host, slug, project_path, sid).unwrap();
+        assert_eq!(inode_of(&host_jsonl), first_inode);
+    }
+
+    #[test]
+    fn host_sync_preserves_existing_unrelated_host_session() {
+        // Vanishingly rare but possible: a UUID collision with a
+        // pre-existing host-side session that has different content.
+        // We must not clobber it.
+        let (_tmp, per_agent, host) = host_sync_setup("collide");
+        let sid = "collide";
+        let project_path = "/p/demo";
+        let host_dir = host
+            .join(".claude/projects")
+            .join(encode_claude_project(project_path));
+        fs::create_dir_all(&host_dir).unwrap();
+        let host_jsonl = host_dir.join(format!("{sid}.jsonl"));
+        fs::write(&host_jsonl, "host-content-do-not-touch").unwrap();
+        let host_inode = inode_of(&host_jsonl);
+
+        sync_session_to_host_at(&per_agent, &host, "demo", project_path, sid).unwrap();
+
+        assert_eq!(inode_of(&host_jsonl), host_inode);
+        assert_eq!(
+            fs::read_to_string(&host_jsonl).unwrap(),
+            "host-content-do-not-touch"
+        );
+    }
+
+    #[test]
+    fn host_sync_links_existing_per_agent_jsonl() {
+        // Resumed session: the per-agent JSONL already has content.
+        // sync should hardlink (not copy), so the host sees the same
+        // bytes by inode equivalence.
+        let (_tmp, per_agent, host) = host_sync_setup("resume");
+        let sid = "resumed";
+        let project_path = "/p/demo";
+        let pa_dir = per_agent.join(".claude/projects/-projects-demo");
+        fs::create_dir_all(&pa_dir).unwrap();
+        let pa_jsonl = pa_dir.join(format!("{sid}.jsonl"));
+        fs::write(&pa_jsonl, "earlier-conversation").unwrap();
+
+        sync_session_to_host_at(&per_agent, &host, "demo", project_path, sid).unwrap();
+
+        let host_jsonl = host
+            .join(".claude/projects")
+            .join(encode_claude_project(project_path))
+            .join(format!("{sid}.jsonl"));
+        assert_eq!(inode_of(&pa_jsonl), inode_of(&host_jsonl));
+        assert_eq!(
+            fs::read_to_string(&host_jsonl).unwrap(),
+            "earlier-conversation"
+        );
     }
 }

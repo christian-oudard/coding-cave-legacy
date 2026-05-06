@@ -15,7 +15,6 @@ mod push;
 mod reject;
 mod review;
 mod sandbox;
-mod sessions;
 mod shell;
 mod status;
 mod supervisor;
@@ -174,11 +173,6 @@ enum Cmd {
         #[command(subcommand)]
         cmd: EnvCmd,
     },
-    /// List Claude sessions across every cave on this host
-    Sessions {
-        #[command(subcommand)]
-        cmd: SessionsCmd,
-    },
     /// Print shell completion script
     Completion {
         #[arg(value_enum)]
@@ -186,16 +180,6 @@ enum Cmd {
     },
     /// Show version
     Version,
-}
-
-#[derive(Subcommand)]
-enum SessionsCmd {
-    /// Print one row per session (agent, project, modified, size, uuid)
-    List {
-        /// Show only this agent's sessions
-        #[arg(short = 'a', long = "agent", value_name = "AGENT-ID")]
-        agent: Option<String>,
-    },
 }
 
 #[derive(Subcommand)]
@@ -443,13 +427,6 @@ fn run() -> Result<()> {
             EnvCmd::Build { rebuild } => user_env::build(rebuild),
             EnvCmd::Update { input_name } => user_env::update(input_name.as_deref()),
             EnvCmd::Metadata => user_env::metadata(),
-        },
-        Cmd::Sessions { cmd } => match cmd {
-            SessionsCmd::List { agent } => {
-                let entries = sessions::list(agent.as_deref())?;
-                sessions::print_list(&entries);
-                Ok(())
-            }
         },
         Cmd::Completion { shell } => completion::print_completion(shell),
         Cmd::Version => {

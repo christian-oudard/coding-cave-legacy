@@ -1332,68 +1332,6 @@ fn init_no_op_when_registry_already_matches_worktrees() {
 }
 
 #[test]
-fn sessions_list_finds_per_agent_jsonls() {
-    // Plant fake per-agent .claude/projects/ trees and verify
-    // `cav sessions list` reports each agent's session UUIDs.
-    let p = Project::new("sessions-list");
-
-    // Agent 3 owns one session in coding-cave.
-    let agent3 = p.data_dir.join("agents/3/home/.claude/projects/-projects-foo");
-    fs::create_dir_all(&agent3).unwrap();
-    fs::write(agent3.join("aaaaaaaa-1111.jsonl"), "session-3").unwrap();
-
-    // Agent 7 owns two sessions.
-    let agent7 = p.data_dir.join("agents/7/home/.claude/projects/-projects-foo");
-    fs::create_dir_all(&agent7).unwrap();
-    fs::write(agent7.join("bbbbbbbb-2222.jsonl"), "session-7a").unwrap();
-    fs::write(agent7.join("cccccccc-3333.jsonl"), "session-7b").unwrap();
-
-    let out = p.cav(&["sessions", "list"]);
-    assert_eq!(
-        out.status.code(),
-        Some(0),
-        "sessions list failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("aaaaaaaa-1111"), "missing agent 3 session: {stdout}");
-    assert!(stdout.contains("bbbbbbbb-2222"), "missing agent 7 session A: {stdout}");
-    assert!(stdout.contains("cccccccc-3333"), "missing agent 7 session B: {stdout}");
-}
-
-#[test]
-fn sessions_list_filters_by_agent() {
-    let p = Project::new("sessions-filter");
-
-    let agent3 = p.data_dir.join("agents/3/home/.claude/projects/-projects-foo");
-    fs::create_dir_all(&agent3).unwrap();
-    fs::write(agent3.join("aaaaaaaa-1111.jsonl"), "x").unwrap();
-
-    let agent7 = p.data_dir.join("agents/7/home/.claude/projects/-projects-foo");
-    fs::create_dir_all(&agent7).unwrap();
-    fs::write(agent7.join("bbbbbbbb-2222.jsonl"), "y").unwrap();
-
-    let out = p.cav(&["sessions", "list", "--agent", "3"]);
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("aaaaaaaa-1111"), "agent 3 row missing: {stdout}");
-    assert!(!stdout.contains("bbbbbbbb-2222"), "agent 7 row leaked: {stdout}");
-}
-
-#[test]
-fn sessions_list_handles_empty() {
-    // Fresh data_dir: no agents/, sessions list should print "No sessions
-    // found." and exit clean.
-    let p = Project::new("sessions-empty");
-    let out = p.cav(&["sessions", "list"]);
-    assert_eq!(out.status.code(), Some(0));
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        stdout.contains("No sessions found"),
-        "unexpected output: {stdout}"
-    );
-}
-
-#[test]
 fn init_rebuild_skips_when_no_worktrees_dir() {
     // Fresh project before any agent has run: worktrees/<slug>/ doesn't
     // exist yet. Rebuild must be a clean no-op (no error, no recovery

@@ -134,25 +134,31 @@ are stub "exited" entries.
 ## Session log management
 
 `.claude/projects/*.jsonl` lives under per-agent home, so it's only
-visible to that agent. Cross-cave discoverability comes through cav,
-not the filesystem:
+*writable* from within the owning agent's cave. Cross-cave **read**
+visibility on the host comes through hardlinks, not a separate cav
+subcommand: at every agent launch, the per-agent JSONL is hardlinked
+into the host user's `~/.claude/projects/<host-encoded>/<sid>.jsonl`.
+Same inode, two paths — writes from the in-cave Claude Code show up
+immediately at the host's normal session location.
 
-- `cav sessions list [--agent <id>]` — host-side scan of
-  `agents/*/home/.claude/projects/<encoded>/*.jsonl`, prints
-  `(agent_id, session_uuid, last_modified, first_user_message)`.
-- `cav resume <uuid>` — looks up which agent owns the uuid, launches
-  that agent's cave with `--session-id <uuid>` (existing path at
-  `cav-rs/src/sandbox.rs:821`).
+The encoding diverges between the two paths:
+- Cave path: `<per-agent-home>/.claude/projects/-projects-<slug>/<sid>.jsonl`
+  (encoded from the cave's working dir `/projects/<slug>`).
+- Host path: `~/.claude/projects/<encoded-host-project-path>/<sid>.jsonl`
+  (encoded from the project's actual host path).
 
-`cav remove-agent` archives sessions before removing rather than
-deleting:
+Both reference the same inode, so the encoding mismatch is fine and
+each side's Claude Code sees the session in the form it expects.
 
-```
-mv agents/<id>/home/.claude/projects/  sessions-archive/<id>-<ts>/projects/
-```
+Cross-agent **destruction** is still prevented because each agent only
+sees its own per-agent dir from inside its own cave. The host user can
+delete a host-side hardlink (just unlinks one ref; the per-agent file
+stays). On a UUID collision with a pre-existing host-side session, the
+sync skips silently rather than clobbering.
 
-The archive is host-only, never bound into any cave. The user can grep
-across all archives at the host shell.
+Existing `cav agent --resume <uuid>` already accepts session UUIDs;
+the host's Claude Code session browser shows everything via the
+hardlinks, so no separate `cav sessions list` is needed.
 
 ## `rm -rf /` failure analysis
 
