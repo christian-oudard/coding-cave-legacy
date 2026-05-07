@@ -58,6 +58,9 @@ fn open() -> Result<Connection> {
         if !cols.iter().any(|c| c == "host_ports") {
             db.execute_batch("ALTER TABLE agents ADD COLUMN host_ports TEXT;")?;
         }
+        if !cols.iter().any(|c| c == "host_devices") {
+            db.execute_batch("ALTER TABLE agents ADD COLUMN host_devices TEXT;")?;
+        }
         if !cols.iter().any(|c| c == "comms") {
             db.execute_batch("ALTER TABLE agents ADD COLUMN comms INTEGER;")?;
         }
@@ -202,6 +205,7 @@ pub fn save_agent_launch_opts(
     agent_id: &str,
     extra_slugs: &[String],
     host_ports: Option<&[u16]>,
+    host_devices: Option<&[String]>,
     comms: bool,
 ) -> Result<()> {
     let db = open()?;
@@ -217,32 +221,43 @@ pub fn save_agent_launch_opts(
             serde_json::to_string(p).ok()
         }
     });
+    let devices = host_devices.and_then(|d| {
+        if d.is_empty() {
+            None
+        } else {
+            serde_json::to_string(d).ok()
+        }
+    });
     db.execute(
-        "UPDATE agents SET extra_projects = ?1, host_ports = ?2, comms = ?3 \
-         WHERE agent_id = ?4",
-        params![extra, ports, comms as i64, agent_id],
+        "UPDATE agents SET extra_projects = ?1, host_ports = ?2, host_devices = ?3, comms = ?4 \
+         WHERE agent_id = ?5",
+        params![extra, ports, devices, comms as i64, agent_id],
     )?;
     Ok(())
 }
 
-pub fn read_agent_launch_opts(agent_id: &str) -> Result<(Vec<String>, Vec<u16>, bool)> {
+pub fn read_agent_launch_opts(
+    agent_id: &str,
+) -> Result<(Vec<String>, Vec<u16>, Vec<String>, bool)> {
     let db = open()?;
     let row = db
         .query_row(
-            "SELECT extra_projects, host_ports, comms FROM agents WHERE agent_id = ?1",
+            "SELECT extra_projects, host_ports, host_devices, comms \
+             FROM agents WHERE agent_id = ?1",
             params![agent_id],
             |row| {
                 Ok((
                     row.get::<_, Option<String>>(0)?,
                     row.get::<_, Option<String>>(1)?,
-                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
                 ))
             },
         )
         .ok();
     match row {
-        None => Ok((vec![], vec![], false)),
-        Some((extra, ports, comms)) => {
+        None => Ok((vec![], vec![], vec![], false)),
+        Some((extra, ports, devices, comms)) => {
             let slugs = extra
                 .as_deref()
                 .and_then(|s| serde_json::from_str(s).ok())
@@ -251,7 +266,11 @@ pub fn read_agent_launch_opts(agent_id: &str) -> Result<(Vec<String>, Vec<u16>, 
                 .as_deref()
                 .and_then(|s| serde_json::from_str(s).ok())
                 .unwrap_or_default();
-            Ok((slugs, port_vec, comms.unwrap_or(0) != 0))
+            let device_vec = devices
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or_default();
+            Ok((slugs, port_vec, device_vec, comms.unwrap_or(0) != 0))
         }
     }
 }

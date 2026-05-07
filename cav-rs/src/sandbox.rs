@@ -67,6 +67,171 @@ fn write_resolv_conf(dns_server: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Validate user-supplied --dev paths. `--dev-bind` would mount any host path
+/// onto any cave path, so we restrict to char/block device nodes under /dev.
+/// `metadata` follows symlinks, so stable names like
+/// /dev/serial/by-id/usb-...-if00 are accepted when they resolve to a real
+/// device node.
+fn validate_host_devices(paths: Vec<String>) -> Result<Vec<String>> {
+    use std::os::unix::fs::FileTypeExt;
+    let mut out = Vec::with_capacity(paths.len());
+    for p in paths {
+        let path = Path::new(&p);
+        if !path.is_absolute() || !path.starts_with("/dev/") {
+            bail!("--dev path must be absolute and under /dev/: {p}");
+        }
+        let md = std::fs::metadata(path)
+            .map_err(|e| anyhow::anyhow!("--dev path {p}: {e}"))?;
+        let ft = md.file_type();
+        if !ft.is_char_device() && !ft.is_block_device() {
+            bail!("--dev path is not a char or block device: {p}");
+        }
+        out.push(p);
+    }
+    Ok(out)
+}
+
+/// Resolve the GID we should adopt as primary so the cave's user-namespace
+/// mapping passes through device group ownership.
+///
+/// bwrap creates a user_ns whose gid_map has one entry: inner-gid →
+/// caller's primary gid. Any other host gid renders as `nogroup` (65534)
+/// inside, so the cave-coder user can't satisfy mode-660 group checks on
+/// bind-mounted devices unless our primary gid IS the device's owning gid.
+/// We engineer that by `setresgid`'ing to the device's group before exec'ing
+/// bwrap; the kernel allows this for groups in our supplementary set.
+///
+/// Returns `Some(gid)` when one or more devices share an owning group we
+/// can adopt; `None` when no devices were requested.
+fn device_passthrough_gid(host_devices: &[String]) -> Result<Option<u32>> {
+    use std::os::unix::fs::MetadataExt;
+    let Some(first) = host_devices.first() else {
+        return Ok(None);
+    };
+    let target = std::fs::metadata(first)?.gid();
+    for d in &host_devices[1..] {
+        let g = std::fs::metadata(d)?.gid();
+        if g != target {
+            bail!(
+                "--dev paths must share an owning group; got gid {target} for {first} but gid {g} for {d}"
+            );
+        }
+    }
+    if !host_user_in_group(target)? {
+        bail!(
+            "host user is not in group with gid {target} (owner of {first}); \
+             add yourself with `sudo usermod -aG <group> $USER` and log back in"
+        );
+    }
+    Ok(Some(target))
+}
+
+fn host_user_in_group(target: u32) -> Result<bool> {
+    let cur = unsafe { libc::getgid() };
+    if cur == target {
+        return Ok(true);
+    }
+    let n = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
+    if n < 0 {
+        bail!("getgroups: {}", std::io::Error::last_os_error());
+    }
+    let mut buf: Vec<libc::gid_t> = vec![0; n as usize];
+    let n = unsafe { libc::getgroups(buf.len() as i32, buf.as_mut_ptr()) };
+    if n < 0 {
+        bail!("getgroups: {}", std::io::Error::last_os_error());
+    }
+    buf.truncate(n as usize);
+    Ok(buf.iter().any(|&g| g == target))
+}
+
+#[cfg(test)]
+mod validate_host_devices_tests {
+    use super::validate_host_devices;
+
+    #[test]
+    fn accepts_char_device() {
+        let v = validate_host_devices(vec!["/dev/null".to_string()]).unwrap();
+        assert_eq!(v, vec!["/dev/null".to_string()]);
+    }
+
+    #[test]
+    fn accepts_multiple_devices() {
+        let v = validate_host_devices(vec![
+            "/dev/null".to_string(),
+            "/dev/zero".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(v.len(), 2);
+    }
+
+    #[test]
+    fn rejects_relative_path() {
+        let e = validate_host_devices(vec!["dev/null".to_string()]).unwrap_err();
+        assert!(e.to_string().contains("absolute and under /dev/"));
+    }
+
+    #[test]
+    fn rejects_path_outside_dev() {
+        let e = validate_host_devices(vec!["/etc/passwd".to_string()]).unwrap_err();
+        assert!(e.to_string().contains("absolute and under /dev/"));
+    }
+
+    #[test]
+    fn rejects_devil_path() {
+        // Component-wise prefix check: /devil must not match /dev/.
+        let e = validate_host_devices(vec!["/devil/foo".to_string()]).unwrap_err();
+        assert!(e.to_string().contains("absolute and under /dev/"));
+    }
+
+    #[test]
+    fn rejects_directory_under_dev() {
+        // /dev itself is a directory, not a device node. Prevents users from
+        // binding the entire host devtmpfs into the cave.
+        let e = validate_host_devices(vec!["/dev".to_string()]).unwrap_err();
+        assert!(e.to_string().contains("not a char or block device"));
+    }
+
+    #[test]
+    fn rejects_missing_path() {
+        let e = validate_host_devices(vec![
+            "/dev/__cav_nonexistent_xyz123".to_string(),
+        ])
+        .unwrap_err();
+        assert!(e.to_string().contains("--dev path"));
+    }
+}
+
+#[cfg(test)]
+mod device_passthrough_gid_tests {
+    use super::device_passthrough_gid;
+    use std::os::unix::fs::MetadataExt;
+
+    #[test]
+    fn empty_returns_none() {
+        assert_eq!(device_passthrough_gid(&[]).unwrap(), None);
+    }
+
+    #[test]
+    fn mismatched_gids_bail() {
+        // Different host environments map /dev gids differently (notably,
+        // inside an unprivileged user_ns they all collapse to 65534). Skip
+        // when /dev/null and /dev/tty are indistinguishable so the test is
+        // meaningful only where the kernel actually exposes their gids.
+        let g0 = std::fs::metadata("/dev/null").unwrap().gid();
+        let g1 = std::fs::metadata("/dev/tty").unwrap().gid();
+        if g0 == g1 {
+            eprintln!("skip: /dev/null and /dev/tty share gid {g0} in this env");
+            return;
+        }
+        let e = device_passthrough_gid(&[
+            "/dev/null".to_string(),
+            "/dev/tty".to_string(),
+        ])
+        .unwrap_err();
+        assert!(e.to_string().contains("must share an owning group"));
+    }
+}
+
 fn temp_file(prefix: &str) -> Result<PathBuf> {
     let tmp = std::env::temp_dir();
     for i in 0..10000 {
@@ -126,6 +291,16 @@ fn build_bwrap_argv(
             "/dev/net/tun".to_string(),
             "/dev/net/tun".to_string(),
         ]);
+    }
+
+    if let Some(list) = env.get("CODING_CAVE_HOST_DEVICES") {
+        for dev in list.split(':').filter(|s| !s.is_empty()) {
+            args.extend([
+                "--dev-bind".to_string(),
+                dev.to_string(),
+                dev.to_string(),
+            ]);
+        }
     }
 
     let cave_home = env.get("CODING_CAVE_HOME").cloned().unwrap_or_default();
@@ -1591,6 +1766,7 @@ pub struct RunAgentOpts {
     pub resume_agent: Option<String>,
     pub extra_projects: Vec<String>,
     pub host_ports: Vec<u16>,
+    pub host_devices: Vec<String>,
     pub comms: bool,
     pub prompt: Option<String>,
 }
@@ -1602,6 +1778,7 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
         resume_agent,
         extra_projects,
         host_ports,
+        host_devices,
         comms,
         prompt,
     } = opts;
@@ -1643,9 +1820,9 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
 
     let agent_name = registry::display_name(&base, &agent_id);
 
-    // On resume, inherit extras/ports/comms from last launch unless user overrode.
-    let (extra_projects, host_ports, comms) = if resuming_launch {
-        let (saved_slugs, saved_ports, saved_comms) =
+    // On resume, inherit extras/ports/devices/comms from last launch unless user overrode.
+    let (extra_projects, host_ports, host_devices, comms) = if resuming_launch {
+        let (saved_slugs, saved_ports, saved_devices, saved_comms) =
             registry::read_agent_launch_opts(&agent_id)?;
         let extras = if extra_projects.is_empty() && !saved_slugs.is_empty() {
             saved_slugs
@@ -1656,17 +1833,28 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
             extra_projects
         };
         let ports = if host_ports.is_empty() { saved_ports } else { host_ports };
+        let devices = if host_devices.is_empty() { saved_devices } else { host_devices };
         let c = if comms { true } else { saved_comms };
-        (extras, ports, c)
+        (extras, ports, devices, c)
     } else {
-        (extra_projects, host_ports, comms)
+        (extra_projects, host_ports, host_devices, comms)
     };
+    // Re-validate every launch (including resume): catches devices that have
+    // been unplugged since the previous launch, and a tampered registry DB.
+    let host_devices = validate_host_devices(host_devices)?;
+    let device_gid = device_passthrough_gid(&host_devices)?;
 
     let extra_slugs: Vec<String> = extra_projects
         .iter()
         .map(|p| project_slug(&PathBuf::from(p)))
         .collect();
-    registry::save_agent_launch_opts(&agent_id, &extra_slugs, Some(&host_ports), comms)?;
+    registry::save_agent_launch_opts(
+        &agent_id,
+        &extra_slugs,
+        Some(&host_ports),
+        Some(&host_devices),
+        comms,
+    )?;
 
     // Create isolated workspace clones for the agent
     crate::log_info!("preparing workspaces...");
@@ -1839,6 +2027,12 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
         );
     }
     env.insert("CODING_CAVE_DNS_SERVER".to_string(), SLIRP_DNS.to_string());
+    if !host_devices.is_empty() {
+        env.insert(
+            "CODING_CAVE_HOST_DEVICES".to_string(),
+            host_devices.join(":"),
+        );
+    }
 
     let parent_lineage = std::env::var("CODING_CAVE_LINEAGE").unwrap_or_default();
     let parent_agent = std::env::var("CODING_CAVE_AGENT_NAME").unwrap_or_default();
@@ -2027,6 +2221,18 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
     }
     if let Ok(bc) = std::env::var("CODING_CAVE_BUILD_CONFIG") {
         proc_cmd.env("CODING_CAVE_BUILD_CONFIG", bc);
+    }
+
+    if let Some(gid) = device_gid {
+        // setresgid before spawn so the unshare child (and bwrap inside it)
+        // inherits this gid. unshare's --map-group=0 then maps inner gid 0
+        // → host gid <target>, and bwrap's nested gid_map carries that
+        // through, so mode-660 group bits on the bind-mounted device grant
+        // access inside the cave.
+        let r = unsafe { libc::setresgid(gid, gid, gid) };
+        if r != 0 {
+            bail!("setresgid({gid}): {}", std::io::Error::last_os_error());
+        }
     }
 
     crate::log_info!("launching sandbox...");

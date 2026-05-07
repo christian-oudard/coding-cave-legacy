@@ -70,6 +70,9 @@ enum Cmd {
         /// Expose a host TCP port inside the cave (repeatable)
         #[arg(long = "port", value_name = "PORT", action = clap::ArgAction::Append)]
         host_ports: Vec<u16>,
+        /// Bind a host device into the cave (repeatable, must be under /dev)
+        #[arg(short = 'd', long = "dev", value_name = "PATH", action = clap::ArgAction::Append)]
+        host_devices: Vec<String>,
         /// Enable inter-agent communication (send_message tool + channel events)
         #[arg(long = "comms")]
         comms: bool,
@@ -202,6 +205,7 @@ fn run() -> Result<()> {
         resume_agent: None,
         extra_projects: vec![],
         host_ports: vec![],
+        host_devices: vec![],
         comms: false,
         prompt: None,
     }) {
@@ -213,6 +217,7 @@ fn run() -> Result<()> {
             resume_agent,
             extra_projects,
             host_ports,
+            host_devices,
             comms,
             prompt,
         } => {
@@ -230,6 +235,7 @@ fn run() -> Result<()> {
                 resume_agent,
                 extra_projects: extras,
                 host_ports,
+                host_devices,
                 comms,
                 prompt,
             })

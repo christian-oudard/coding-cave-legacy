@@ -8,6 +8,7 @@ CREATE TABLE agents (
     exited_at REAL,
     extra_projects TEXT,
     host_ports TEXT,
+    host_devices TEXT,
     comms INTEGER
 );
 
