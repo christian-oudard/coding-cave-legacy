@@ -74,7 +74,7 @@ The cave environment is configured by `~/.config/coding-cave/cave.nix`. This is 
 
 Adds a project to the coding-cave registry. Sets up the shared bare repo, and branch protection hooks. A valid project is a git repository with at least one commit, because only committed work is shared with the agent.
 
-### `cav agent [-c,--continue | -r,--resume <agent_id/session_id>] [-p,--project <project_slug>] [--port <port>] [--comms]`
+### `cav agent [-c,--continue | -r,--resume <agent_id/session_id>] [-p,--project <project_slug>] [--port <port>] [-d,--dev <path>] [--comms]`
 
 Launches a Claude Code CLI agent in a coding-cave session. Auto-assigns a numeric ID. There are no agent ID duplicates among running agents or stopped agents with unmerged work.
 
@@ -83,6 +83,8 @@ Continue the most recently exited session with `--continue`. Continue arbitrary 
 Allow access to multiple projects with the `--project` flag (repeatable).
 
 With `--port`, expose a host TCP port inside the cave (repeatable). The agent can reach it at `10.0.2.2:<port>`.
+
+With `--dev`, bind-mount a host device node (e.g. `/dev/nvidia0`) into the cave (repeatable). The path must be under `/dev/` and refer to a char or block device. All paths must share an owning group, and the host user must be a member of that group.
 
 With `--comms`, enable inter-agent communication: the agent gets a `send_message` tool for messaging other agents and receives their messages as channel events. Off by default.
 
