@@ -55,14 +55,10 @@ fn open() -> Result<Connection> {
     } else {
         let cols: Vec<String> =
             collect_rows(&db, "PRAGMA table_info(agents)", |row| row.get::<_, String>(1))?;
-        if !cols.iter().any(|c| c == "host_ports") {
-            db.execute_batch("ALTER TABLE agents ADD COLUMN host_ports TEXT;")?;
-        }
-        if !cols.iter().any(|c| c == "host_devices") {
-            db.execute_batch("ALTER TABLE agents ADD COLUMN host_devices TEXT;")?;
-        }
-        if !cols.iter().any(|c| c == "comms") {
-            db.execute_batch("ALTER TABLE agents ADD COLUMN comms INTEGER;")?;
+        for dead in ["host_ports", "host_devices", "comms", "inner_pid"] {
+            if cols.iter().any(|c| c == dead) {
+                db.execute_batch(&format!("ALTER TABLE agents DROP COLUMN {dead};"))?;
+            }
         }
     }
     Ok(db)
@@ -199,80 +195,20 @@ pub fn read_session_id(agent_id: &str) -> Result<Option<String>> {
         .flatten())
 }
 
-// -- Launch options --
+// -- Extra projects --
 
-pub fn save_agent_launch_opts(
-    agent_id: &str,
-    extra_slugs: &[String],
-    host_ports: Option<&[u16]>,
-    host_devices: Option<&[String]>,
-    comms: bool,
-) -> Result<()> {
+pub fn save_agent_extras(agent_id: &str, extra_slugs: &[String]) -> Result<()> {
     let db = open()?;
     let extra = if extra_slugs.is_empty() {
         None
     } else {
         Some(serde_json::to_string(extra_slugs)?)
     };
-    let ports = host_ports.and_then(|p| {
-        if p.is_empty() {
-            None
-        } else {
-            serde_json::to_string(p).ok()
-        }
-    });
-    let devices = host_devices.and_then(|d| {
-        if d.is_empty() {
-            None
-        } else {
-            serde_json::to_string(d).ok()
-        }
-    });
     db.execute(
-        "UPDATE agents SET extra_projects = ?1, host_ports = ?2, host_devices = ?3, comms = ?4 \
-         WHERE agent_id = ?5",
-        params![extra, ports, devices, comms as i64, agent_id],
+        "UPDATE agents SET extra_projects = ?1 WHERE agent_id = ?2",
+        params![extra, agent_id],
     )?;
     Ok(())
-}
-
-pub fn read_agent_launch_opts(
-    agent_id: &str,
-) -> Result<(Vec<String>, Vec<u16>, Vec<String>, bool)> {
-    let db = open()?;
-    let row = db
-        .query_row(
-            "SELECT extra_projects, host_ports, host_devices, comms \
-             FROM agents WHERE agent_id = ?1",
-            params![agent_id],
-            |row| {
-                Ok((
-                    row.get::<_, Option<String>>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, Option<i64>>(3)?,
-                ))
-            },
-        )
-        .ok();
-    match row {
-        None => Ok((vec![], vec![], vec![], false)),
-        Some((extra, ports, devices, comms)) => {
-            let slugs = extra
-                .as_deref()
-                .and_then(|s| serde_json::from_str(s).ok())
-                .unwrap_or_default();
-            let port_vec = ports
-                .as_deref()
-                .and_then(|s| serde_json::from_str(s).ok())
-                .unwrap_or_default();
-            let device_vec = devices
-                .as_deref()
-                .and_then(|s| serde_json::from_str(s).ok())
-                .unwrap_or_default();
-            Ok((slugs, port_vec, device_vec, comms.unwrap_or(0) != 0))
-        }
-    }
 }
 
 // -- Agent lifecycle --

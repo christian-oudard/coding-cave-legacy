@@ -6,10 +6,7 @@ CREATE TABLE agents (
     cave_pid INTEGER,
     started_at REAL,
     exited_at REAL,
-    extra_projects TEXT,
-    host_ports TEXT,
-    host_devices TEXT,
-    comms INTEGER
+    extra_projects TEXT
 );
 
 CREATE TABLE projects (

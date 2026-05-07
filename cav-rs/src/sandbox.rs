@@ -1786,7 +1786,6 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
 
     // Resolve the agent session BEFORE loading sandbox config so error paths
     // (missing agent, empty -c, etc.) don't trip on missing build config.
-    let resuming_launch = continue_agent || resume_agent.is_some();
     let (agent_id, session_id, resuming) = if continue_agent {
         let rc = registry::resolve_continue(&base, None)?;
         (rc.agent_id, Some(rc.session_id), rc.resuming)
@@ -1820,27 +1819,6 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
 
     let agent_name = registry::display_name(&base, &agent_id);
 
-    // On resume, inherit extras/ports/devices/comms from last launch unless user overrode.
-    let (extra_projects, host_ports, host_devices, comms) = if resuming_launch {
-        let (saved_slugs, saved_ports, saved_devices, saved_comms) =
-            registry::read_agent_launch_opts(&agent_id)?;
-        let extras = if extra_projects.is_empty() && !saved_slugs.is_empty() {
-            saved_slugs
-                .iter()
-                .filter_map(|s| registry::project_path(s).ok().flatten())
-                .collect::<Vec<String>>()
-        } else {
-            extra_projects
-        };
-        let ports = if host_ports.is_empty() { saved_ports } else { host_ports };
-        let devices = if host_devices.is_empty() { saved_devices } else { host_devices };
-        let c = if comms { true } else { saved_comms };
-        (extras, ports, devices, c)
-    } else {
-        (extra_projects, host_ports, host_devices, comms)
-    };
-    // Re-validate every launch (including resume): catches devices that have
-    // been unplugged since the previous launch, and a tampered registry DB.
     let host_devices = validate_host_devices(host_devices)?;
     let device_gid = device_passthrough_gid(&host_devices)?;
 
@@ -1848,13 +1826,7 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
         .iter()
         .map(|p| project_slug(&PathBuf::from(p)))
         .collect();
-    registry::save_agent_launch_opts(
-        &agent_id,
-        &extra_slugs,
-        Some(&host_ports),
-        Some(&host_devices),
-        comms,
-    )?;
+    registry::save_agent_extras(&agent_id, &extra_slugs)?;
 
     // Create isolated workspace clones for the agent
     crate::log_info!("preparing workspaces...");

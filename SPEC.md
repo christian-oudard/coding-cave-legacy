@@ -86,8 +86,6 @@ With `--port`, expose a host TCP port inside the cave (repeatable). The agent ca
 
 With `--comms`, enable inter-agent communication: the agent gets a `send_message` tool for messaging other agents and receives their messages as channel events. Off by default.
 
-Extra projects, ports, and `--comms` are persisted across `--continue`/`--resume`. Passing a flag on resume replaces its saved value; omitting it inherits the prior launch.
-
 All caves are recursive. Agents can launch sub-caves for testing coding-cave features.
 
 ### `cav approve [agent-id] [--commit <SHA>]`
