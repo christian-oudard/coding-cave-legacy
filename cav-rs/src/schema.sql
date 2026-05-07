@@ -4,7 +4,6 @@ CREATE TABLE agents (
     session_id TEXT UNIQUE,
     host_pid INTEGER,
     cave_pid INTEGER,
-    inner_pid INTEGER,
     started_at REAL,
     exited_at REAL,
     extra_projects TEXT

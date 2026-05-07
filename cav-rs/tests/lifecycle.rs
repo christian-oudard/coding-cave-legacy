@@ -54,8 +54,7 @@ impl Project {
                  cave_pid INTEGER,\
                  started_at REAL,\
                  exited_at REAL,\
-                 extra_projects TEXT,\
-                 host_ports TEXT);",
+                 extra_projects TEXT);",
         )
         .unwrap();
         conn.execute(
@@ -1030,8 +1029,7 @@ fn dead_pid_sweep_uses_session_mtime_for_exit_time() {
              cave_pid INTEGER,\
              started_at REAL,\
              exited_at REAL,\
-             extra_projects TEXT,\
-             host_ports TEXT);",
+             extra_projects TEXT);",
     )
     .unwrap();
     conn.execute(

@@ -35,7 +35,7 @@ pub fn enter(
     }
 
     if interactive {
-        eprintln!("Entering cave {name} (pid {target_pid})...");
+        eprintln!("Entering cave {name}...");
     }
 
     // Move our own cwd to / so nsenter's pre-namespace open(".") succeeds
@@ -51,19 +51,13 @@ pub fn enter(
     // its env (e.g. a daemon that did env_clear before fork).
     let cave_env = find_cave_env(target_pid).unwrap_or_default();
 
-    let mut nsenter_args: Vec<String> = vec![
-        "--preserve-credentials".to_string(),
-        format!("--target={target_pid}"),
-        "--mount".to_string(),
-        "--user".to_string(),
-        "--net".to_string(),
-        "--".to_string(),
-        "/bin/bash".to_string(),
-        "-c".to_string(),
-    ];
-
     let inner = if interactive {
-        format!("cd {project_path} && exec /bin/bash --login")
+        // Honor $SHELL from the cave's env (sourced from the agent's
+        // /proc/<pid>/environ above) so a user who set
+        // `home.sessionVariables.SHELL = "${pkgs.zsh}/bin/zsh"` in cave.nix
+        // gets zsh. Falls back to /bin/bash when SHELL is unset. `-l` works
+        // as a login flag for bash, zsh, and fish.
+        format!("cd {project_path} && exec \"${{SHELL:-/bin/bash}}\" -l")
     } else {
         let joined = cmd.iter()
             .map(|s| shell_quote(s))
@@ -71,7 +65,7 @@ pub fn enter(
             .join(" ");
         format!("cd {project_path} && exec {joined}")
     };
-    nsenter_args.push(inner);
+    let target_arg = format!("--target={target_pid}");
 
     // Resolve nsenter's absolute path BEFORE env_clear: Command::exec()
     // mutates the calling process's env in-place before execvp, so a
@@ -91,7 +85,23 @@ pub fn enter(
             cmd_builder.env(k, v);
         }
     }
-    let err = cmd_builder.args(&nsenter_args).exec();
+    // --pid is required: without it our shell stays in cav's outer pid ns
+    // while /proc is mounted for the cave's inner pid ns, so /proc/self
+    // resolves to nothing and tools like direnv (readlink /proc/self/exe)
+    // break. Joining --pid aligns /proc with our pid.
+    cmd_builder.args([
+        "--preserve-credentials",
+        &target_arg,
+        "--mount",
+        "--user",
+        "--net",
+        "--pid",
+        "--",
+        "/bin/bash",
+        "-c",
+        &inner,
+    ]);
+    let err = cmd_builder.exec();
     bail!("Failed to exec nsenter: {err}");
 }
 
@@ -132,25 +142,25 @@ fn read_environ(pid: u32) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Returns (agent_id, target_pid). target_pid is the bwrap-side inner pid
-/// when the supervisor recorded one; otherwise the outer cave_pid as a
-/// fallback (only the outer mount ns is reachable in that case).
+/// Returns (agent_id, target_pid). The supervisor lives in its own pid ns,
+/// so it can't report a host-visible pid for bwrap. We walk the proc tree
+/// from cav's pid ns instead and pick the first descendant whose mount
+/// namespace differs from the outer unshare process. That's the sandboxed
+/// target.
 fn resolve_agent_pid(base: &Path, slug: &str, agent_id: Option<&str>) -> Result<(String, u32)> {
     let aid = match agent_id {
         Some(aid) => aid.to_string(),
         None => pick_running_agent(base, slug)?,
     };
-
-    if let Some(pid) = registry::inner_pid(&aid)? {
-        return Ok((aid, pid));
-    }
-    // Legacy caves (started before inner_pid tracking) don't have it recorded.
-    // The supervisor only writes bwrap's pid for caves started under the new
-    // binary. Walk the process tree once to find bwrap (the first descendant
-    // whose mount namespace differs from the outer unshare process's).
     let cave_pid = registry::cave_pid(&aid)?
         .ok_or_else(|| anyhow::anyhow!("No cave pid for agent {aid}. Is it running?"))?;
-    let pid = find_inner_pid(cave_pid).unwrap_or(cave_pid);
+    let pid = find_inner_pid(cave_pid).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Cannot find sandboxed target inside cave (pid {cave_pid}): no descendant \
+             has a different mount namespace. The cave may still be initializing or \
+             may have crashed during setup."
+        )
+    })?;
     Ok((aid, pid))
 }
 

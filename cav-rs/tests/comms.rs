@@ -43,7 +43,15 @@ impl BrokerProcess {
 
     fn connect(&self) -> (UnixStream, BufReader<UnixStream>) {
         let w = UnixStream::connect(&self.sock).unwrap();
-        let r = BufReader::new(w.try_clone().unwrap());
+        // Cap blocking reads so a deadlocked test fails in seconds rather
+        // than hanging cargo forever. The broker replies in microseconds
+        // under normal conditions; 5s is an order of magnitude over that
+        // even on a heavily loaded host.
+        let reader_stream = w.try_clone().unwrap();
+        reader_stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let r = BufReader::new(reader_stream);
         (w, r)
     }
 }
@@ -64,7 +72,9 @@ fn send(stream: &UnixStream, msg: &Value) {
 
 fn recv(reader: &mut BufReader<UnixStream>) -> Value {
     let mut line = String::new();
-    reader.read_line(&mut line).unwrap();
+    reader
+        .read_line(&mut line)
+        .expect("recv timed out or socket closed; expected broker reply");
     serde_json::from_str(line.trim()).unwrap()
 }
 
@@ -116,14 +126,23 @@ fn broker_acks_no_listener() {
 fn broker_reregister_replaces_writer() {
     let broker = BrokerProcess::start();
 
-    let (wa1, _ra1) = broker.connect(); // first connection for agent "1"
-    let (wa2, mut ra2) = broker.connect(); // second connection — will replace
+    let (wa1, mut ra1) = broker.connect(); // first connection for agent "1"
+    let (wa2, mut ra2) = broker.connect(); // second connection, will replace
     let (ws, mut rs) = broker.connect();
 
+    // The broker handles each connection in its own thread, so registrations
+    // from wa1 and wa2 are racy in arrival order. Force a happens-before by
+    // probing through each connection after its register: when the probe
+    // ack returns, that connection's prior register has been processed.
     register(&wa1, "1");
-    register(&wa2, "1"); // replaces wa1
-    register(&ws, "2");
+    send(&wa1, &json!({"to": "999", "body": "probe"}));
+    recv(&mut ra1); // no_listener ack, discarded
 
+    register(&wa2, "1"); // replaces wa1
+    send(&wa2, &json!({"to": "999", "body": "probe"}));
+    recv(&mut ra2); // no_listener ack, discarded
+
+    register(&ws, "2");
     send(&ws, &json!({"to": "1", "body": "new only"}));
 
     let ack = recv(&mut rs);

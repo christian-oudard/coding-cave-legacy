@@ -42,9 +42,12 @@ fn signal_parent(fd: &OwnedFd) {
     let _ = write(fd, b"1");
 }
 
-fn report_bwrap_pid(fd: &OwnedFd, pid: u32) {
-    let _ = write(fd, format!("{pid}\n").as_bytes());
-}
+// CAUTION: this binary runs as PID 1 inside `unshare --pid --fork`'s new pid
+// namespace. Any pid returned by `Command::id()` (or any libc call here) is
+// in *that* namespace, not the host's. Don't pipe such pids back to cav for
+// host-side use (e.g. nsenter), or they'll resolve to unrelated host
+// processes (kernel threads at low pids), and setns will fail with EPERM.
+// cav resolves the sandboxed target by walking /proc from its own pid ns.
 
 fn is_nix_lock_file(path: &str) -> bool {
     match fs::metadata(path) {
@@ -205,15 +208,12 @@ fn main() {
 
     log_phase("started");
 
-    // Signal parent: namespace exists. Keep the fd open so we can report
-    // bwrap's PID once it spawns.
-    let sync_fd: Option<OwnedFd> = if sync_fd_raw >= 0 {
+    // Signal parent: namespace exists.
+    if sync_fd_raw >= 0 {
         let fd = unsafe { OwnedFd::from_raw_fd(sync_fd_raw) };
         signal_parent(&fd);
-        Some(fd)
-    } else {
-        None
-    };
+        drop(fd);
+    }
 
     // Shadow host lock files before overlay mount
     if !upper.is_empty() {
@@ -248,9 +248,6 @@ fn main() {
     } else {
         match Command::new(&argv[0]).args(&argv[1..]).spawn() {
             Ok(mut child) => {
-                if let Some(ref fd) = sync_fd {
-                    report_bwrap_pid(fd, child.id());
-                }
                 match child.wait() {
                     Ok(s) => s.code().unwrap_or(1),
                     Err(e) => {
@@ -265,7 +262,6 @@ fn main() {
             }
         }
     };
-    drop(sync_fd);
 
     // Cleanup
     if let Some(restore) = restore_tty {

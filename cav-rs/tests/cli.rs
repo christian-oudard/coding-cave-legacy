@@ -7,26 +7,36 @@ const CAV: &str = env!("CARGO_BIN_EXE_cav");
 
 struct TestRepo {
     dir: PathBuf,
+    data_dir: PathBuf,
 }
 
 impl TestRepo {
     fn new(name: &str) -> Self {
-        let dir = std::env::temp_dir()
-            .join(format!("cav-cli-test-{}-{}", std::process::id(), name));
+        // Each test gets a unique data dir so concurrent `cargo test` runs
+        // don't share the same registry.db. The pid-only suffix in the old
+        // path collided across tests within one binary because the harness
+        // runs them in parallel under one process.
+        let uniq = format!("{}-{}", std::process::id(), name);
+        let dir = std::env::temp_dir().join(format!("cav-cli-test-{uniq}"));
+        let data_dir = std::env::temp_dir().join(format!("cav-cli-data-{uniq}"));
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&data_dir);
         fs::create_dir_all(&dir).unwrap();
+        fs::create_dir_all(&data_dir).unwrap();
         git(&["init", "-b", "main"], &dir);
         git(&["config", "user.email", "test@test.com"], &dir);
         git(&["config", "user.name", "Test"], &dir);
         fs::write(dir.join("README.md"), "# test\n").unwrap();
         git(&["add", "README.md"], &dir);
         git(&["commit", "-m", "init"], &dir);
-        Self { dir }
+        Self { dir, data_dir }
     }
 
     fn cav(&self, args: &[&str]) -> Output {
         Command::new(CAV)
             .args(args)
             .current_dir(&self.dir)
+            .env("CODING_CAVE_DATA_DIR", &self.data_dir)
             .env_remove("CODING_CAVE_VERSION")
             .env_remove("CODING_CAVE_AGENT_ID")
             .output()
@@ -37,6 +47,7 @@ impl TestRepo {
 impl Drop for TestRepo {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.dir);
+        let _ = fs::remove_dir_all(&self.data_dir);
     }
 }
 
