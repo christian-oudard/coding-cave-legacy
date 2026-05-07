@@ -4,6 +4,7 @@ use std::os::fd::{AsRawFd, IntoRawFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
@@ -673,25 +674,59 @@ fn start_crinj() -> Result<Option<std::process::Child>> {
         let _ = std::fs::File::create(&rules);
     }
     let _ = std::fs::create_dir_all(config::data_dir());
-    // Redirect stderr to a log file; piping without a reader would wedge
-    // crinj once the 64 KB pipe buffer fills.
     let log_path = config::data_dir().join("crinj.log");
-    let log_file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)?;
-    let proc = Command::new("crinj")
+    let mut proc = Command::new("crinj")
         .args(["--port", &CRINJ_PORT.to_string(), "--allow-empty-rules"])
         .stdout(Stdio::null())
-        .stderr(Stdio::from(log_file))
+        .stderr(Stdio::piped())
         .spawn()?;
+
+    // Drain stderr in a thread: required to keep crinj from wedging when
+    // its 64 KB pipe buffer fills, and lets us both tee to crinj.log and
+    // capture this session's bytes for a startup-failure bail message.
+    let mut stderr = proc.stderr.take().expect("piped stderr");
+    let captured: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let captured_thread = Arc::clone(&captured);
+    let drain = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut log = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&log_path)
+            .ok();
+        let mut chunk = [0u8; 4096];
+        loop {
+            match stderr.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if let Some(f) = log.as_mut() {
+                        let _ = f.write_all(&chunk[..n]);
+                    }
+                    if let Ok(mut c) = captured_thread.lock() {
+                        c.extend_from_slice(&chunk[..n]);
+                    }
+                }
+            }
+        }
+    });
 
     let start = Instant::now();
     let deadline = start + Duration::from_secs(5);
+    let mut drain = Some(drain);
     loop {
         if crinj_listening() {
             crate::log_debug!("crinj ready after {:.1}s", start.elapsed().as_secs_f64());
             break;
+        }
+        if let Some(status) = proc.try_wait()? {
+            // Wait for the drain to flush; the pipe closes when crinj exits.
+            if let Some(h) = drain.take() {
+                let _ = h.join();
+            }
+            let buf = captured.lock().unwrap();
+            let text = String::from_utf8_lossy(&buf);
+            bail!("crinj exited with {status} during startup:\n{}", text.trim_end());
         }
         if Instant::now() > deadline {
             bail!("crinj failed to start within 5s");
