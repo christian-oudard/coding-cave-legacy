@@ -98,7 +98,7 @@ With `--commit SHA`, approve only up to that commit (partial approval). The dev 
 
 ### `cav reject [agent-id]`
 
-Rejects the tip commit of the current base branch. Must be run from a base branch. This means undoing the approval that got it into the base branch in the first place: running `git reset --hard` on the host repo base branch to remove the commit, and ensuring that it exists as the tip of the agent's branch, for both host and agent. If the agent has exited and their branch is gone, a running agent with no unmerged commits is required to give the rejected commits a place to go.
+Rejects the tip commit of the current base branch. Must be run from a base branch. This undoes the approval that got the commits into the base branch in the first place: rolling back the base branch on host and shared remote, and deleting the approval record. The agent's dev branch is not touched by reject. Reject is blocked when the target agent's dev branch has diverged from where main will be after the rollback — that is, the dev branch is neither a fast-forward target from the new base nor at-or-behind it. The block directs the operator to have the agent rebase their branch onto the new base (the common case), or run `cav remove-agent` to discard the dev branch entirely. If the original agent has been removed from the registry, a different agent must be specified.
 
 ### `cav pull [--force]`
 

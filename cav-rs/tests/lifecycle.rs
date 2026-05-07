@@ -1,8 +1,4 @@
 /// Integration tests for branch lifecycle across approve/reject.
-///
-/// Verifies that full approve tears down the agent branch on both host and
-/// shared remote, that reject reconstructs it, and that partial approval
-/// leaves the branch untouched.
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -46,13 +42,7 @@ impl Project {
     /// accepts it. Mirrors what `cav agent` does on sandbox launch, without
     /// requiring the sandbox.
     fn register_agent(&self, agent_id: &str) {
-        let slug = self
-            .dir
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .to_lowercase()
-            .replace(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-', "-");
+        let slug = self.slug();
         let db_path = self.data_dir.join("coding-cave.db");
         let conn = rusqlite::Connection::open(&db_path).unwrap();
         conn.execute_batch(
@@ -111,6 +101,22 @@ impl Project {
         self.dir.join(".coding-cave").join("cave-shared.git")
     }
 
+    fn slug(&self) -> String {
+        self.dir
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_lowercase()
+            .replace(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-', "-")
+    }
+
+    fn worktree_dir(&self, agent_id: &str) -> PathBuf {
+        self.data_dir
+            .join("worktrees")
+            .join(self.slug())
+            .join(agent_id)
+    }
+
     fn shared_has_ref(&self, ref_name: &str) -> bool {
         Command::new("git")
             .args(["rev-parse", "--verify", ref_name])
@@ -136,10 +142,6 @@ impl Project {
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false)
-    }
-
-    fn sha(&self, ref_name: &str) -> String {
-        git_out(&["rev-parse", ref_name], &self.dir)
     }
 
     fn shared_sha(&self, ref_name: &str) -> String {
@@ -306,18 +308,16 @@ fn partial_approve_preserves_agent_branch() {
     );
 }
 
-// --- Reject recreates state ---
+// --- Reject rolls back main; agent's dev branch is left to the agent ---
 
 #[test]
-fn reject_after_full_approve_restores_branches() {
+fn reject_after_full_approve_recreates_branch_at_rejected_tip() {
     let p = Project::new("reject-full");
     p.register_agent("1");
     let approved_tip = p.push_agent_commits("1", "main", &[("a.txt", "A\n")]);
     let pre_approve_base = p.shared_sha("refs/heads/main");
 
-    let out = p.cav(&["approve", "-y", "1"]);
-    assert_eq!(out.status.code(), Some(0));
-    // Post-approve: base advanced.
+    assert_eq!(p.cav(&["approve", "-y", "1"]).status.code(), Some(0));
     assert_eq!(p.shared_sha("refs/heads/main"), approved_tip);
     assert!(!p.shared_has_ref("refs/heads/agent-1/main"));
 
@@ -329,32 +329,21 @@ fn reject_after_full_approve_restores_branches() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    assert!(
-        p.shared_has_ref("refs/heads/agent-1/main"),
-        "shared agent branch must be restored"
-    );
-    assert_eq!(
-        p.shared_sha("refs/heads/agent-1/main"),
-        approved_tip,
-        "restored branch points to pre-rollback tip"
-    );
-    assert!(
-        p.host_has_local_branch("agent-1/main"),
-        "local host agent branch must be recreated"
-    );
-    assert_eq!(
-        p.sha("refs/heads/agent-1/main"),
-        approved_tip,
-        "local branch matches restored shared branch"
-    );
     assert_eq!(
         p.shared_sha("refs/heads/main"),
         pre_approve_base,
         "base rolled back"
     );
+    assert_eq!(
+        p.shared_sha("refs/heads/agent-1/main"),
+        approved_tip,
+        "agent's dev branch recreated at the rejected tip"
+    );
+    assert!(
+        p.host_has_local_branch("agent-1/main"),
+        "host's local branch ref recreated to track cave"
+    );
 }
-
-// --- Reject uses registry membership, not process state ---
 
 #[test]
 fn reject_allows_non_running_agent_id() {
@@ -363,11 +352,9 @@ fn reject_allows_non_running_agent_id() {
     // for a running process (exited_at is set, host_pid NULL below).
     let p = Project::new("reject-nonrunning");
     p.register_agent("1");
-    let approved_tip = p.push_agent_commits("1", "main", &[("a.txt", "A\n")]);
+    let _ = p.push_agent_commits("1", "main", &[("a.txt", "A\n")]);
     let _ = p.cav(&["approve", "-y", "1"]);
 
-    // Rejecting without -a should find the recorded approval and succeed
-    // (even though no agent-1 sandbox was ever running in this test).
     let out = p.cav(&["reject", "-y"]);
     assert_eq!(
         out.status.code(),
@@ -375,45 +362,32 @@ fn reject_allows_non_running_agent_id() {
         "reject without running agent: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    // And the state is restored, same as any other reject.
-    assert!(p.shared_has_ref("refs/heads/agent-1/main"));
-    assert_eq!(
-        p.shared_sha("refs/heads/agent-1/main"),
-        approved_tip,
-    );
 }
 
-// --- Re-approve after reject round-trips cleanly ---
-
 #[test]
-fn approve_reject_approve_cycle() {
+fn approve_reject_recreates_dev_branch_for_torn_down_agent() {
     let p = Project::new("cycle");
     p.register_agent("1");
     let tip = p.push_agent_commits("1", "main", &[("a.txt", "A\n")]);
 
-    assert_eq!(
-        p.cav(&["approve", "-y", "1"]).status.code(),
-        Some(0)
-    );
+    assert_eq!(p.cav(&["approve", "-y", "1"]).status.code(), Some(0));
     assert!(!p.shared_has_ref("refs/heads/agent-1/main"));
 
     assert_eq!(p.cav(&["reject", "-y"]).status.code(), Some(0));
-    assert!(p.shared_has_ref("refs/heads/agent-1/main"));
+    // Reject recreated the dev branch at the rejected tip so the agent
+    // can continue iterating on the work.
     assert_eq!(p.shared_sha("refs/heads/agent-1/main"), tip);
-
-    assert_eq!(
-        p.cav(&["approve", "-y", "1"]).status.code(),
-        Some(0)
-    );
-    assert_eq!(p.shared_sha("refs/heads/main"), tip);
-    assert!(!p.shared_has_ref("refs/heads/agent-1/main"));
-    assert!(!p.host_has_local_branch("agent-1/main"));
+    assert!(p.host_has_local_branch("agent-1/main"));
 }
 
-// --- Partial approve then reject rolls back base and preserves agent branch ---
+// --- Reject with built-on-top branch proceeds (the FF-from-new-main case) ---
 
 #[test]
-fn reject_after_partial_approve_restores_state() {
+fn reject_after_partial_approve_proceeds() {
+    // Partial approve of A leaves agent-1/main at B (B built on A on init).
+    // After rejecting A, main = init. B is still a descendant of init, so
+    // approve later can FF main forward to B. Reject is allowed; agent's
+    // branch is left untouched.
     let p = Project::new("partial-reject");
     p.register_agent("1");
     let tip = p.push_agent_commits(
@@ -421,54 +395,407 @@ fn reject_after_partial_approve_restores_state() {
         "main",
         &[("a.txt", "A\n"), ("b.txt", "B\n")],
     );
-    let original_base = p.shared_sha("refs/heads/main");
     let first = git_out(&["rev-parse", &format!("{tip}^")], &p.dir);
+    let init = p.shared_sha("refs/heads/main");
 
-    // Partial approve: base advances to first commit, agent branch survives at tip.
-    let out = p.cav(&["approve", "-y", "1", "--commit", &first]);
     assert_eq!(
-        out.status.code(),
-        Some(0),
-        "partial approve failed: {}",
-        String::from_utf8_lossy(&out.stderr)
+        p.cav(&["approve", "-y", "1", "--commit", &first]).status.code(),
+        Some(0)
     );
-    assert_eq!(p.shared_sha("refs/heads/main"), first);
-    assert_eq!(p.shared_sha("refs/heads/agent-1/main"), tip);
 
-    // Reject undoes the partial approval.
     let out = p.cav(&["reject", "-y"]);
     assert_eq!(
         out.status.code(),
         Some(0),
-        "reject after partial approve failed: {}",
+        "reject should proceed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
 
-    assert_eq!(
-        p.shared_sha("refs/heads/main"),
-        original_base,
-        "base must roll back to pre-approval sha"
-    );
-    assert!(
-        p.shared_has_ref("refs/heads/agent-1/main"),
-        "agent branch must remain"
-    );
+    assert_eq!(p.shared_sha("refs/heads/main"), init, "main rolled back");
     assert_eq!(
         p.shared_sha("refs/heads/agent-1/main"),
         tip,
-        "agent branch tip preserved at full dev tip"
+        "agent's branch left as-is"
     );
-    assert!(
-        p.host_has_local_branch("agent-1/main"),
-        "local host agent branch must exist"
-    );
+}
 
-    // Approval record must be gone: a second reject with no approvals should fail.
+#[test]
+fn reject_proceeds_when_original_agent_was_gc_d() {
+    // After the original committer's registry row was reaped, full approve
+    // had also torn down their dev branch. Reject still works: there's no
+    // branch left to FF-check, so no block fires.
+    let p = Project::new("reject-removed");
+    p.register_agent("1");
+    let tip_a = p.push_agent_commits("1", "main", &[("a.txt", "A\n")]);
+    let pre_a = p.shared_sha("refs/heads/main");
+    assert_eq!(p.cav(&["approve", "-y", "1"]).status.code(), Some(0));
+    assert_eq!(p.shared_sha("refs/heads/main"), tip_a);
+
+    let db_path = p.data_dir.join("coding-cave.db");
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    conn.execute("DELETE FROM agents WHERE agent_id = '1'", [])
+        .unwrap();
+
     let out = p.cav(&["reject", "-y"]);
-    assert_ne!(
+    assert_eq!(
         out.status.code(),
         Some(0),
-        "second reject should fail since approval was deleted"
+        "reject should proceed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(p.shared_sha("refs/heads/main"), pre_a);
+}
+
+#[test]
+fn reject_explicit_agent_id_errors_when_not_in_registry() {
+    // Typo protection: explicit `cav reject <id>` validates the id exists.
+    let p = Project::new("reject-explicit-typo");
+    p.register_agent("1");
+    let _ = p.push_agent_commits("1", "main", &[("a.txt", "A\n")]);
+    assert_eq!(p.cav(&["approve", "-y", "1"]).status.code(), Some(0));
+
+    let out = p.cav(&["reject", "-y", "9999"]);
+    assert_ne!(out.status.code(), Some(0));
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        err.contains("Agent 9999 not found in registry"),
+        "expected typo-protection error, got: {err}"
+    );
+}
+
+#[test]
+fn reject_blocks_when_agent_branch_diverged_from_new_main() {
+    // Agent's branch is on a totally separate history (orphan commit) so
+    // it shares no FF-able relationship with the rolled-back main. Reject
+    // must block and direct the operator to have the agent rebase.
+    let p = Project::new("reject-diverged");
+    p.register_agent("1");
+
+    let tip_a = p.push_agent_commits("1", "main", &[("a.txt", "A\n")]);
+    assert_eq!(p.cav(&["approve", "-y", "1"]).status.code(), Some(0));
+
+    // Create a parentless commit and point cave/agent-1/main at it.
+    let tree = git_out(&["write-tree"], &p.dir);
+    let orphan = git_out(&["commit-tree", &tree, "-m", "orphan"], &p.dir);
+    git(
+        &["push", "cave", &format!("{orphan}:refs/heads/agent-1/main")],
+        &p.dir,
+    );
+    git(&["fetch", "cave"], &p.dir);
+
+    let out = p.cav(&["reject", "-y"]);
+    assert_ne!(out.status.code(), Some(0), "reject should be blocked");
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        err.contains("diverged from where main will be"),
+        "expected divergence explanation, got: {err}"
+    );
+    assert!(
+        err.contains("git rebase"),
+        "expected rebase guidance, got: {err}"
+    );
+
+    // Nothing changed: main still at the approved tip, branch still orphan.
+    assert_eq!(p.shared_sha("refs/heads/main"), tip_a);
+    assert_eq!(p.shared_sha("refs/heads/agent-1/main"), orphan);
+}
+
+#[test]
+fn reject_proceeds_when_agent_branch_is_unrelated() {
+    // Setup: agent commits A, gets approved, then re-creates their branch
+    // at a sibling commit W that doesn't include A in its history.
+    let p = Project::new("reject-unrelated");
+    p.register_agent("1");
+
+    let tip_a = p.push_agent_commits("1", "main", &[("a.txt", "A\n")]);
+    let pre_a = git_out(&["rev-parse", &format!("{tip_a}^")], &p.dir);
+    assert_eq!(p.cav(&["approve", "-y", "1"]).status.code(), Some(0));
+
+    git(&["checkout", "-B", "tmp-w", &pre_a], &p.dir);
+    fs::write(p.dir.join("w.txt"), "W\n").unwrap();
+    git(&["add", "w.txt"], &p.dir);
+    git(&["commit", "-m", "agent 1: w"], &p.dir);
+    let tip_w = git_out(&["rev-parse", "HEAD"], &p.dir);
+    git(&["push", "cave", "tmp-w:refs/heads/agent-1/main"], &p.dir);
+    git(&["checkout", "main"], &p.dir);
+    git(&["fetch", "cave"], &p.dir);
+
+    let out = p.cav(&["reject", "-y"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "reject should proceed when branch is on a sibling: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(p.shared_sha("refs/heads/main"), pre_a);
+    assert_eq!(
+        p.shared_sha("refs/heads/agent-1/main"),
+        tip_w,
+        "agent's branch must be left as-is"
+    );
+}
+
+#[test]
+fn reject_proceeds_when_agent_branch_is_at_or_behind_new_base() {
+    // Agent's branch is at an ancestor of cave/main (already merged by the
+    // reconciler's lights). At reject time the reconciler deletes the
+    // branch, so the cutoff sees no branch to check; the Create case
+    // then recreates the branch at the rejected tip.
+    let p = Project::new("reject-behind");
+    p.register_agent("1");
+
+    let tip_a = p.push_agent_commits("1", "main", &[("a.txt", "A\n")]);
+    let pre_a = git_out(&["rev-parse", &format!("{tip_a}^")], &p.dir);
+    assert_eq!(p.cav(&["approve", "-y", "1"]).status.code(), Some(0));
+
+    git(
+        &["push", "cave", &format!("{pre_a}:refs/heads/agent-1/main")],
+        &p.dir,
+    );
+    git(&["fetch", "cave"], &p.dir);
+
+    let out = p.cav(&["reject", "-y"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "reject should proceed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(p.shared_sha("refs/heads/main"), pre_a);
+    assert_eq!(
+        p.shared_sha("refs/heads/agent-1/main"),
+        tip_a,
+        "Create case recreated the branch at the rejected tip"
+    );
+}
+
+#[test]
+fn reject_retries_successfully_after_agent_rebases_away_divergence() {
+    // Once-blocked reject can retry after the agent rebases their branch.
+    // Verifies the approval row is preserved on the blocked reject so retry
+    // sees the same approval, and that the FF check passes after the agent
+    // moves their branch onto the rolled-back main.
+    let p = Project::new("reject-retry-after-rebase");
+    p.register_agent("1");
+
+    let tip_a = p.push_agent_commits("1", "main", &[("a.txt", "A\n")]);
+    let pre_a = git_out(&["rev-parse", &format!("{tip_a}^")], &p.dir);
+    assert_eq!(p.cav(&["approve", "-y", "1"]).status.code(), Some(0));
+
+    // Diverged state: parentless orphan on agent-1/main.
+    let tree = git_out(&["write-tree"], &p.dir);
+    let orphan = git_out(&["commit-tree", &tree, "-m", "orphan"], &p.dir);
+    git(
+        &["push", "cave", &format!("{orphan}:refs/heads/agent-1/main")],
+        &p.dir,
+    );
+    git(&["fetch", "cave"], &p.dir);
+
+    // First attempt is blocked; nothing changed.
+    let out = p.cav(&["reject", "-y"]);
+    assert_ne!(out.status.code(), Some(0));
+    assert_eq!(p.shared_sha("refs/heads/main"), tip_a);
+    assert_eq!(p.shared_sha("refs/heads/agent-1/main"), orphan);
+
+    // Agent rebases their branch onto pre_a (the future main).
+    git(
+        &["push", "-f", "cave", &format!("{pre_a}:refs/heads/agent-1/main")],
+        &p.dir,
+    );
+    git(&["fetch", "cave"], &p.dir);
+
+    // Retry succeeds.
+    let out = p.cav(&["reject", "-y"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "retry should succeed after rebase: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(p.shared_sha("refs/heads/main"), pre_a);
+}
+
+// --- Pull's FF-only sync protects host-side rewrites ---
+
+#[test]
+fn pull_does_not_overwrite_cave_when_worktree_diverged() {
+    // After a host-side rewrite of cave/agent-N/main (e.g. via cav reject),
+    // the agent's worktree may still hold the pre-rewrite tip. The host's
+    // sync_agent_to_shared must not force-push that stale tip back over
+    // cave's new state.
+    let p = Project::new("pull-divergent");
+    p.register_agent("1");
+
+    // Worktree main = V (unrelated to anything on host).
+    let ws = p.worktree_dir("1");
+    fs::create_dir_all(&ws).unwrap();
+    git(&["init", "-b", "main"], &ws);
+    git(&["config", "user.email", "test@test.com"], &ws);
+    git(&["config", "user.name", "Test"], &ws);
+    fs::write(ws.join("v.txt"), "V\n").unwrap();
+    git(&["add", "v.txt"], &ws);
+    git(&["commit", "-m", "v"], &ws);
+    let tip_v = git_out(&["rev-parse", "HEAD"], &ws);
+
+    // Cave/agent-1/main = W (different commit).
+    git(&["checkout", "-B", "tmp-w"], &p.dir);
+    fs::write(p.dir.join("w.txt"), "W\n").unwrap();
+    git(&["add", "w.txt"], &p.dir);
+    git(&["commit", "-m", "w"], &p.dir);
+    let tip_w = git_out(&["rev-parse", "HEAD"], &p.dir);
+    git(&["push", "cave", "tmp-w:refs/heads/agent-1/main"], &p.dir);
+    git(&["fetch", "cave"], &p.dir);
+    git(&["checkout", "-B", "agent-1/main", "cave/agent-1/main"], &p.dir);
+
+    let out = p.cav(&["pull"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "pull failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert_eq!(
+        p.shared_sha("refs/heads/agent-1/main"),
+        tip_w,
+        "FF-only sync must keep cave at W, not overwrite with worktree's V"
+    );
+    assert_eq!(git_out(&["rev-parse", "main"], &ws), tip_v);
+}
+
+/// Helper: clone cave's bare repo into the worktree-dir for `agent_id` and
+/// check out `main`, matching the shape `cav agent` would produce.
+fn seed_agent_worktree(p: &Project, agent_id: &str) {
+    let ws = p.worktree_dir(agent_id);
+    fs::create_dir_all(&ws).unwrap();
+    git(&["init", "-q", "-b", "main"], &ws);
+    git(&["config", "user.email", "test@test.com"], &ws);
+    git(&["config", "user.name", "Test"], &ws);
+    git(
+        &[
+            "remote",
+            "add",
+            "host-cave",
+            p.shared().to_str().unwrap(),
+        ],
+        &ws,
+    );
+    git(&["fetch", "-q", "host-cave"], &ws);
+    git(&["checkout", "-q", "-B", "main", "host-cave/main"], &ws);
+}
+
+/// Helper: simulate the agent making a commit in their worktree and
+/// pushing it to cave/agent-N/main (host-side push, host-cave remote).
+fn agent_commit_and_push(p: &Project, agent_id: &str, file: &str, content: &str) -> String {
+    let ws = p.worktree_dir(agent_id);
+    fs::write(ws.join(file), content).unwrap();
+    git(&["add", file], &ws);
+    git(
+        &["commit", "-m", &format!("agent {agent_id}: {file}")],
+        &ws,
+    );
+    let tip = git_out(&["rev-parse", "HEAD"], &ws);
+    git(
+        &[
+            "push",
+            "-f",
+            "host-cave",
+            &format!("main:refs/heads/agent-{agent_id}/main"),
+        ],
+        &ws,
+    );
+    tip
+}
+
+/// Returns true if `ancestor` is an ancestor of `descendant` within `cwd`.
+fn is_ancestor(ancestor: &str, descendant: &str, cwd: &Path) -> bool {
+    Command::new("git")
+        .args(["merge-base", "--is-ancestor", ancestor, descendant])
+        .current_dir(cwd)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+#[test]
+fn reject_drops_rejected_commits_from_secondary_agent_worktrees() {
+    // Scenario:
+    //   1. agent 1 commits CA, doesn't get approved (touches a.txt).
+    //   2. agent 2 commits CB (touches b.txt — no conflict with CA),
+    //      cav approve advances main to CB and auto-rebases agent 1 on
+    //      top of CB. Agent 1's worktree main is now CB + CA'.
+    //   3. cav reject CB. main rolls back to before_CB. Agent 1's
+    //      worktree is left at CB + CA' — still containing the rejected
+    //      commit.
+    //   4. agent 2 amends CB into CB' that touches the same file as CA
+    //      (a.txt with different content).
+    //   5. cav approve agent 2 — main FFs to CB' and auto-rebases agent 1
+    //      onto CB'. CA' replays a.txt creation but CB' already created
+    //      a.txt, so the rebase conflicts.
+    //
+    // Test asserts the desired behavior: step 5 produces no rebase
+    // conflict. Currently fails because cav reject doesn't run the
+    // equivalent of approve's rebase_agents step (which would have
+    // dropped CB from agent 1's history at step 3).
+    let p = Project::new("reject-secondary-rebase");
+    p.register_agent("1");
+    p.register_agent("2");
+    seed_agent_worktree(&p, "1");
+    seed_agent_worktree(&p, "2");
+
+    // Step 1: agent 1 commits CA (creates a.txt).
+    let tip_ca = agent_commit_and_push(&p, "1", "a.txt", "A\n");
+
+    // Step 2: agent 2 commits CB (creates b.txt, doesn't conflict with CA).
+    let tip_cb = agent_commit_and_push(&p, "2", "b.txt", "B\n");
+    assert_eq!(p.cav(&["approve", "-y", "2"]).status.code(), Some(0));
+    assert_eq!(p.shared_sha("refs/heads/main"), tip_cb);
+
+    // Approve auto-rebased agent 1's worktree onto CB.
+    let ws_a = p.worktree_dir("1");
+    assert!(
+        is_ancestor(&tip_cb, "HEAD", &ws_a),
+        "expected agent 1's worktree to be rebased onto CB after approve"
+    );
+    assert!(ws_a.join("a.txt").exists(), "agent 1 still has its work");
+
+    // Step 3: reject CB. With the fix, agent 1's worktree gets the
+    // rejected commits dropped via rebase --onto. Their work content
+    // (a.txt) is preserved.
+    assert_eq!(p.cav(&["reject", "-y"]).status.code(), Some(0));
+    assert!(
+        ws_a.join("a.txt").exists(),
+        "agent 1's CA work content (a.txt) must survive reject"
+    );
+
+    // Step 4: agent 2 amends CB into CB'. CB' touches the same file CB
+    // touched (b.txt) but with different content — so replaying CB on
+    // top of CB' will conflict. CA is on a different file (a.txt) and
+    // would NOT conflict if CB were dropped from agent 1's history.
+    let ws_b = p.worktree_dir("2");
+    git(&["reset", "--hard", "host-cave/main"], &ws_b);
+    fs::write(ws_b.join("b.txt"), "B-amended\n").unwrap();
+    git(&["add", "b.txt"], &ws_b);
+    git(&["commit", "-m", "agent 2: amended (touches b.txt)"], &ws_b);
+    git(
+        &["push", "-f", "host-cave", "main:refs/heads/agent-2/main"],
+        &ws_b,
+    );
+
+    // Step 5: approve agent 2's amended commit. The auto-rebase of
+    // agent 1 onto CB' should succeed cleanly.
+    let out = p.cav(&["approve", "-y", "2"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "approve should succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stdout.contains("conflicts") && !stderr.contains("conflicts"),
+        "expected clean rebase of agent 1's worktree, got conflicts:\nstdout: {stdout}\nstderr: {stderr}"
     );
 }
 

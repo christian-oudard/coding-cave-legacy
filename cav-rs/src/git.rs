@@ -169,6 +169,17 @@ pub fn has_merge_base(ref_a: &str, ref_b: &str, cwd: Option<&Path>) -> bool {
     .unwrap_or(false)
 }
 
+pub fn is_ancestor(ancestor: &str, descendant: &str, cwd: Option<&Path>) -> bool {
+    git(
+        &["merge-base", "--is-ancestor", ancestor, descendant],
+        cwd,
+        false,
+        true,
+        false,
+    )
+    .is_ok()
+}
+
 pub fn cherry_undelivered(
     upstream: &str,
     head: &str,
@@ -199,10 +210,13 @@ pub fn commit_timestamp(ref_name: &str, cwd: Option<&Path>) -> Option<f64> {
 }
 
 pub fn update_agent_tip(shared: &Path, branch: &str) -> Result<()> {
-    let rev_ref = format!("refs/heads/{branch}");
-    let sha = git_output(&["rev-parse", &rev_ref], Some(shared))?;
+    let sha = git_output(&["rev-parse", &format!("refs/heads/{branch}")], Some(shared))?;
+    update_agent_tip_to(shared, branch, &sha)
+}
+
+pub fn update_agent_tip_to(shared: &Path, branch: &str, sha: &str) -> Result<()> {
     let tip_ref = format!("refs/cav/agent-tip/{branch}");
-    git(&["update-ref", &tip_ref, &sha], Some(shared), false, true, false)?;
+    git(&["update-ref", &tip_ref, sha], Some(shared), false, true, false)?;
     Ok(())
 }
 

@@ -11,28 +11,24 @@ use crate::registry;
 
 pub fn review(base: &Path, agent_id: &str) -> Result<()> {
     let verbose = config::verbose() >= 1;
-    git::git(
-        &["fetch", "--prune", CAVE_SHARED_REMOTE],
-        Some(base),
-        true,
-        verbose,
-        verbose,
-    )?;
+    let slug = config::project_slug(base);
+    let shared = config::shared_repo_path(base);
 
-    // Gather all dev branches for this agent.
-    let all_branches = git::remote_branches(CAVE_SHARED_REMOTE, Some(base))?;
-    let candidates: Vec<String> = all_branches
-        .into_iter()
+    let bare_branches = git::git_output(
+        &["for-each-ref", "--format=%(refname:short)", "refs/heads/"],
+        Some(&shared),
+    )
+    .unwrap_or_default();
+    let candidates: Vec<String> = bare_branches
+        .lines()
         .filter(|b| parse_dev_branch(b).is_some_and(|(_, aid)| aid == agent_id))
+        .map(str::to_string)
         .collect();
 
     if candidates.is_empty() {
         bail!("No agent branch found for agent {agent_id}.");
     }
 
-    // Pull the agent's worktree commits into the cave so review reflects
-    // anything the agent committed but hasn't pushed yet.
-    let slug = config::project_slug(base);
     for branch in &candidates {
         pull::sync_agent_to_shared(base, &slug, branch, agent_id);
     }

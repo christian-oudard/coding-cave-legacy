@@ -162,7 +162,6 @@ fn pull_cave_self(base: &Path, local_branch: &str, agent_id: &str, force: bool) 
         );
     }
 
-    let verbose = config::verbose() >= 1;
     git::git(
         &["reset", "--hard", &remote_dev],
         Some(base),
@@ -184,38 +183,72 @@ pub(crate) fn sync_agent_to_shared(base: &Path, slug: &str, dev_branch: &str, ag
         return;
     }
 
-    let mut local_ref = None;
-    for candidate in &[dev_branch.to_string(), resolve_base(dev_branch.to_string())] {
-        let ok = git::git(
-            &["rev-parse", "--verify", &format!("refs/heads/{candidate}")],
-            Some(&ws),
-            false,
-            true,
-            false,
-        )
-        .is_ok();
-        if ok {
-            local_ref = Some(candidate.clone());
-            break;
-        }
-    }
-    let local_ref = match local_ref {
-        Some(r) => r,
-        None => return,
+    let local_ref = [dev_branch.to_string(), resolve_base(dev_branch.to_string())]
+        .into_iter()
+        .find(|c| {
+            git::git(
+                &["rev-parse", "--verify", &format!("refs/heads/{c}")],
+                Some(&ws),
+                false,
+                true,
+                false,
+            )
+            .is_ok()
+        });
+    let Some(local_ref) = local_ref else { return };
+
+    let Ok(local_sha) =
+        git::git_output(&["rev-parse", &format!("refs/heads/{local_ref}")], Some(&ws))
+    else {
+        return;
     };
 
-    let refspec = format!("+refs/heads/{local_ref}:refs/heads/{dev_branch}");
+    let dest = format!("refs/heads/{dev_branch}");
+    let cave_sha = git::git_output(&["rev-parse", &dest], Some(&shared)).ok();
+    if cave_sha.as_deref() == Some(local_sha.as_str()) {
+        return;
+    }
+
+    // Stage the worktree's tip into shared so we can ancestor-check it,
+    // then skip promotion if cave's tip isn't an ancestor (e.g. cave was
+    // rewritten by cav reject and we must not clobber that).
+    let staging = format!("refs/cav/sync-tmp/{dev_branch}");
+    let staging_refspec = format!("+refs/heads/{local_ref}:{staging}");
     if git::git(
-        &["fetch", &ws.to_string_lossy(), &refspec],
+        &["fetch", &ws.to_string_lossy(), &staging_refspec],
         Some(&shared),
         false,
         true,
         false,
     )
-    .is_ok()
+    .is_err()
     {
-        git::update_agent_tip(&shared, dev_branch).ok();
+        return;
     }
+
+    let promote = match cave_sha.as_deref() {
+        None => true,
+        Some(c) => git::is_ancestor(c, &local_sha, Some(&shared)),
+    };
+    if promote {
+        git::git(
+            &["update-ref", &dest, &local_sha],
+            Some(&shared),
+            false,
+            true,
+            false,
+        )
+        .ok();
+        git::update_agent_tip_to(&shared, dev_branch, &local_sha).ok();
+    }
+    git::git(
+        &["update-ref", "-d", &staging],
+        Some(&shared),
+        false,
+        true,
+        false,
+    )
+    .ok();
 }
 
 fn show_ahead(base: &Path, remote_base: &str, remote_dev: &str, base_name: &str) {

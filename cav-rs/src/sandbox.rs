@@ -1733,15 +1733,7 @@ pub fn reconcile_merged_dev_branches(base: &Path, verbose: bool) {
         {
             continue;
         }
-        let merged = git::git(
-            &["merge-base", "--is-ancestor", &remote_dev, &remote_base],
-            Some(base),
-            false,
-            true,
-            false,
-        )
-        .is_ok();
-        if !merged {
+        if !git::is_ancestor(&remote_dev, &remote_base, Some(base)) {
             continue;
         }
         git::git(&["branch", "-D", &rb], Some(&shared), false, true, false).ok();

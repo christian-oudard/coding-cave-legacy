@@ -159,15 +159,7 @@ pub fn approve(
         if bs == dev_tip {
             bail!("No commits to approve for agent {resolved_agent_id} in {slug}.");
         }
-        let ancestor_ok = git::git(
-            &["merge-base", "--is-ancestor", bs, &dev_tip],
-            Some(base),
-            false,
-            true,
-            false,
-        )
-        .is_ok();
-        if !ancestor_ok {
+        if !git::is_ancestor(bs, &dev_tip, Some(base)) {
             bail!(
                 "Cannot approve: {branch} is not a fast-forward from {base_name}.\n\
                  The agent must rebase onto {base_name} first."

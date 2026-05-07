@@ -92,7 +92,15 @@ enum Cmd {
         #[arg(short = 'c', long = "commit", value_name = "SHA")]
         commit: Option<String>,
     },
-    /// Reject approved commits from base branch
+    /// Reject approved commits from base branch.
+    ///
+    /// Rolls main back to before the rejected commit chain and deletes
+    /// the approval. Other agents whose worktree branches contain the
+    /// rejected commits get those commits dropped via rebase --onto.
+    /// If the target agent's dev branch was torn down by approve, it is
+    /// recreated at the rejected tip so the agent can continue.
+    /// Pass an explicit AGENT-ID when the original committer has been
+    /// gc'd to route the recreated branch to a different agent.
     Reject {
         #[arg(value_name = "AGENT-ID")]
         args: Vec<String>,

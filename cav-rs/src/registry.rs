@@ -641,7 +641,7 @@ pub fn lookup_approval_by_after(
     let db = open()?;
     let row = db
         .query_row(
-            "SELECT id, agent_id, before_sha, after_sha FROM approvals \
+            "SELECT id, agent_id, before_sha, after_sha, approved_at FROM approvals \
              WHERE project = ?1 AND shared_branch = ?2 AND after_sha = ?3",
             params![project, shared_branch, after_sha],
             |row| {
@@ -650,18 +650,33 @@ pub fn lookup_approval_by_after(
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
+                    row.get::<_, f64>(4)?,
                 ))
             },
         )
         .ok();
-    Ok(row.map(|(id, agent_id, before_sha, after_sha)| {
-        serde_json::json!({
-            "id": id,
-            "agent_id": agent_id,
-            "before_sha": before_sha,
-            "after_sha": after_sha,
-        })
-    }))
+    Ok(
+        row.map(|(id, agent_id, before_sha, after_sha, approved_at)| {
+            serde_json::json!({
+                "id": id,
+                "agent_id": agent_id,
+                "before_sha": before_sha,
+                "after_sha": after_sha,
+                "approved_at": approved_at,
+            })
+        }),
+    )
+}
+
+pub fn agent_started_at(agent_id: &str) -> Result<Option<f64>> {
+    let db = open()?;
+    Ok(db
+        .query_row(
+            "SELECT started_at FROM agents WHERE agent_id = ?1",
+            params![agent_id],
+            |row| row.get::<_, f64>(0),
+        )
+        .ok())
 }
 
 pub fn agent_has_approvals(agent_id: &str) -> Result<bool> {
