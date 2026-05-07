@@ -1,27 +1,51 @@
 # Per-agent isolation
 
+## Status
+
+Three commits shipped on top of the cav shell baseline:
+
+```
+Read-only peer-session view across caves
+Hardlink per-agent session JSONLs into host's ~/.claude/projects/
+Isolate per-agent home; share a single package cache pool
+```
+
+| Threat | Status |
+|---|---|
+| Cross-agent read of session JSONLs | closed |
+| Cross-agent tamper of session JSONLs | closed |
+| Cross-agent overlay tampering / planted store paths | closed |
+| `rm -rf` reaching other agents' homes/overlays/worktrees | closed |
+| Registry destruction (single-agent reach) | closed |
+| Host UI visibility for agent sessions | provided |
+| Cross-cave session reading by agents (read-only) | provided |
+| Pollution of host `.claude/` from a malicious agent | bounded |
+| Cache poisoning via shared rw `/cache` | **deferred** — see "Known open issue" |
+
+105 tests passing on the rebased branch (64 unit + 19 hook + 22 lifecycle).
+
 ## Problem
 
-Every host agent's cave currently bind-mounts a single shared
+Before this work, every host agent's cave bind-mounted a single shared
 `~/.local/share/coding-cave/home/` directory wholesale onto
-`/home/cave-coder/`. That directory contains:
+`/home/cave-coder/`. That directory contained:
 
 - `coding-cave.db` (the cross-cave registry)
 - `nix-overlay/agent-<N>/` (every host agent's nix overlay upperdir)
 - `.claude/projects/*.jsonl` (every agent's session transcripts)
 - caches, dotfiles, gnupg trust, etc.
 
-Because all eight host agents share the same backing directory, any one of
-them can:
+Because all eight host agents shared the same backing directory, any one
+of them could:
 
 - Read every other agent's plaintext session transcripts.
 - Tamper with another agent's nix overlay upperdir while it's running,
-  causing live build corruption and an integrity hole (planted store paths
-  that nix would otherwise vouch for).
-- Destroy the registry, every agent's overlay state, and every session log
-  with a single `rm -rf`.
+  causing live build corruption and an integrity hole (planted store
+  paths that nix would otherwise vouch for).
+- Destroy the registry, every agent's overlay state, and every session
+  log with a single `rm -rf`.
 
-The bind itself is too coarse. The directory below it is mixing six
+The bind itself was too coarse. The directory below it was mixing six
 different concerns under one rule.
 
 ## Design
@@ -52,22 +76,20 @@ rule.
 │       └── merged/                 # bound rw → /nix/store
 ├── worktrees/<slug>/<id>/          # bound rw → /projects/<slug>
 ├── caches/                         # bound rw → /cache (shared across agents)
-└── sessions-archive/<id>-<ts>/     # cav remove-agent moves sessions here
+└── sessions/<slug>/<sid>.jsonl     # peer-aggregator (hardlinks); ro source
 ```
 
 ## bwrap binds (in cav-rs/src/sandbox.rs)
 
 ```
---bind  agents/<id>/home/                       /home/cave-coder
---bind  agents/<id>/nix-overlay/merged          /nix/store
---bind  worktrees/<slug>/<id>/                  /projects/<slug>
---bind  caches/                                 /cache
---ro-bind <project>/.coding-cave/cave-shared.git
-                                  /projects/<slug>/.coding-cave/host-cave-shared.git
+--bind        agents/<id>/home/                       /home/cave-coder
+--bind        agents/<id>/nix-overlay/merged          /nix/store
+--bind        worktrees/<slug>/<id>/                  /projects/<slug>
+--bind        caches/                                 /cache             (shared rw)
+--ro-bind-try sessions/<slug>/                        /home/cave-coder/.claude/peer-sessions/<slug>/
+--ro-bind     <project>/.coding-cave/cave-shared.git  /projects/<slug>/.coding-cave/host-cave-shared.git
++ existing per-feature ro-binds (gitconfig, gnupg, crinj-ca, broker socket, etc.)
 ```
-
-Plus existing per-feature ro-binds for gitconfig, gnupg pubring, gnupg
-agent socket, crinj CA, broker socket, etc.
 
 ## Cache strategy
 
@@ -83,21 +105,12 @@ home.sessionVariables = {
   PNPM_STORE_PATH   = "/cache/pnpm";
   GOMODCACHE        = "/cache/go-mod";
   GRADLE_USER_HOME  = "/cache/gradle";
-  ELAN_HOME         = "/cache/elan";
 };
 ```
 
 New tool: one line in cave.nix; no Rust change.
 
-### Why shared rw caches are acceptable
-
-Caches contain content-addressable bytes verified by each tool at install
-time. A rogue `rm -rf /cache/` forces redownload from upstream on the
-next install. Existing venvs keep working because their installed files
-are hardlinks (uv `--link-mode=clone|hardlink`, pnpm CAS), and inode
-references survive an unlink in the cache directory.
-
-For one popular package across many agents:
+For one popular package across many agents, with the cache populated:
 
 - Network: one upstream download, ever.
 - Disk: one copy on the host, regardless of agent count.
@@ -105,13 +118,9 @@ For one popular package across many agents:
 - RAM at runtime: kernel page cache deduplicates by inode.
 
 A 3 GB torch install across 8 agents costs 3 GB of host disk total, not
-24 GB.
-
-### Same filesystem requirement
-
-Hardlinks don't cross filesystems. `caches/` and `worktrees/<slug>/<id>/`
-must be on the same physical FS for hardlink installs to work. They are
-by default (siblings under `~/.local/share/coding-cave/`).
+24 GB. Hardlinks require `caches/` and `worktrees/<slug>/<id>/` to be
+on the same physical FS; they are by default (siblings under
+`~/.local/share/coding-cave/`).
 
 ## Registry as a derivable cache
 
@@ -120,8 +129,7 @@ not bound into any cave. It's treated as a cache, not the source of
 truth. The filesystem under `agents/<id>/` and `worktrees/<slug>/<id>/`
 is authoritative.
 
-`cav init` (extending commit `103cb27`) reconstructs missing rows from
-filesystem state:
+`cav init` reconstructs missing rows from filesystem state:
 
 - Project rows: from `worktrees/<slug>/` existing.
 - Agent rows: stub entries for any `agents/<id>/` dir not represented.
@@ -152,24 +160,19 @@ read every other agent's session for that project but writes through
 the bound path return EROFS. The owning agent retains rw access via
 its per-agent path because that bind is rw.
 
-Properties:
+### Access matrix per agent A
 
-- **Read-write own session.** The per-agent rw bind is unchanged.
-- **Read-only other agents'.** No writable path exists from a cave to
-  another agent's inode. The peer-aggregator mount is ro at the kernel
-  level; mode bits don't matter.
-- **Host UI visibility.** Hardlink into `~/.claude/projects/<host-encoded>/`
-  means the host user's normal Claude Code session browser lists
-  every agent's session for that project alongside the user's own.
-- **Host-user sessions excluded from peer view.** The peer-aggregator
-  is populated only by cav at agent launch. Host-user sessions for the
-  same project are visible to the host user but not to peer agents.
-- **Live updates.** Bind mounts pass through directory changes. New
-  agent sessions appear in running caves' `peer-sessions/` without
-  restart.
-- **No clobber on UUID collision.** If a host-side session has the
-  same UUID (vanishingly improbable), the sync skips rather than
-  overwriting.
+| Path inside cave | A's session | Other agents' | Host user's |
+|---|---|---|---|
+| `~/.claude/projects/-projects-<slug>/<sid>.jsonl` (rw bind) | rw | unreachable | unreachable |
+| `~/.claude/peer-sessions/<slug>/<sid>.jsonl` (ro mount) | ro | ro | not present |
+
+Cross-agent **destruction** is prevented because each agent only sees
+its own per-agent dir from inside its own cave, and the peer-aggregator
+mount is ro at the kernel level. The host user can delete a host-side
+hardlink (just unlinks one ref; the per-agent file stays). On a UUID
+collision with a pre-existing host-side session, the sync skips
+silently rather than clobbering.
 
 The encoding diverges between cave and host because Claude Code keys
 its project dir off the working directory at startup. Inside the cave
@@ -177,6 +180,10 @@ that's `/projects/<slug>`; on the host it's the project's actual
 location. Both names reference the same inode, so each side sees the
 session in the form it expects. The peer-aggregator avoids encoding
 entirely, keying directly off the project slug.
+
+Existing `cav agent --resume <uuid>` already accepts session UUIDs;
+the host's Claude Code session browser shows everything via the
+hardlinks, so no separate `cav sessions list` is needed.
 
 ## `rm -rf /` failure analysis
 
@@ -202,73 +209,61 @@ rebuilds, worktree recreates from `cave-shared.git`. The only
 unrecoverable loss is uncommitted work in this agent's worktree, which
 is fundamental.
 
-## Implementation order
-
-Each step is a separate PR, ordered by dependency and value.
-
-1. **Relocate nix overlay upperdir.** Change `nix_overlay_dirs()` and
-   `migrate_shared_overlay()` in `cav-rs/src/sandbox.rs:900,914` to
-   resolve from `config::data_dir()` directly. Closes the cross-agent
-   overlay tampering hole. Smallest change, biggest immediate
-   integrity win.
-
-2. **Per-agent home bind.** Change `launch_home()` in
-   `cav-rs/src/config.rs:64` to return
-   `data_dir().join("agents").join(agent_name).join("home")` for the
-   host case. Update the bind in `sandbox.rs:134`. One-shot migration
-   moves existing shared `home/` content into `agents/<id>/home/` per
-   agent or discards what cave.nix can repopulate.
-
-3. **Shared `/cache/` bind.** Add `--bind caches/ /cache` in
-   `sandbox.rs`. Update example/template `cave.nix` to set
-   `XDG_CACHE_HOME` and per-tool cache env vars.
-
-4. **Registry self-heal.** Extend `cav init`'s registry repair to
-   reconstruct agent rows from `agents/*/` and `worktrees/*/<id>/`.
-
-5. **Session commands.** Add `cav sessions list` and `cav resume <uuid>`,
-   plus archive-on-remove behavior in `cav remove-agent`.
-
 ## Migration
 
-One-time, run by `cav` on first launch under the new layout:
+On first launch under the new layout, each agent:
 
-```
-for agent_id in <list of host agents>:
-  mkdir -p agents/<id>/home
-  mv home/.local/share/coding-cave/nix-overlay/agent-<id>  agents/<id>/nix-overlay
-  # split per-agent slice of .claude/ from shared home
-  mkdir -p agents/<id>/home/.claude/projects
-  mv home/.claude/projects/<encoded>/<this-agent's-uuids>.jsonl ...
-  # everything else (dotfiles, caches, etc.) is regenerated by cave.nix on next launch
-```
+1. Creates its per-agent home dir at `agents/<id>/home/`.
+2. Migrates its session JSONL out of the legacy shared home so
+   `claude --resume` keeps working.
+3. Migrates its nix overlay upperdir out of the legacy
+   `<home>/.local/share/coding-cave/nix-overlay/agent-<id>/` location
+   to `agents/<id>/nix-overlay/`.
+
+Other state (file-history, plugins, settings.json, statusline.sh,
+caches) gets re-laid-down by the cave.nix entry script or rebuilt on
+demand, so it doesn't need explicit migration. The legacy `home/`
+directory is left in place for the user to remove once all agents
+have migrated.
 
 Existing agents need to be stopped before migration to avoid corrupting
 in-flight overlay state. Future runs see the new layout and skip
 migration.
 
+## Tests
+
+105 passing on the rebased branch:
+
+- 64 unit (`cargo test --bin cav`)
+- 19 hook integration (`cargo test --test hook`)
+- 22 lifecycle integration (`cargo test --test lifecycle`)
+
+Coverage includes: overlay relocation, agent-id parsing for launch
+home, session JSONL migration from legacy shared home, hardlink sync
+to host's `~/.claude/projects/`, peer-aggregator hardlinks, per-slug
+ro-bind argv emission, registry rebuild from worktrees.
+
 ## Known open issue
 
-- **Cache poisoning via shared rw `/cache`.** A confused or
-  prompt-injected agent can overwrite cached wheels/crates/tarballs
-  with crafted bytes between one agent's first download and another's
-  install. Tools' content-hash verification catches the typical case
-  on read, but verification isn't uniformly aggressive across tools,
-  and mutable index/metadata files (cargo registry index, npm
-  `_cacache/index-v5/`) are not hash-protected at all.
+**Cache poisoning via shared rw `/cache`.** A confused or
+prompt-injected agent can overwrite cached wheels/crates/tarballs with
+crafted bytes between one agent's first download and another's
+install. Tools' content-hash verification catches the typical case on
+read, but verification isn't uniformly aggressive across tools, and
+mutable index/metadata files (cargo registry index, npm
+`_cacache/index-v5/`) are not hash-protected at all.
 
-  The intended fix is an HTTP caching proxy in crinj. Each agent
-  gets its own per-agent on-disk caches; the proxy is the only
-  thing that writes to a shared host-side cache; agents can no
-  longer poison each other because they don't share storage.
-  Trade-off: per-agent disk usage instead of one-copy-per-host on
-  disk for popular packages, plus proportionally more RAM (no
-  cross-agent kernel page-cache dedup).
+The intended fix is an HTTP caching proxy in crinj. Each agent gets
+its own per-agent on-disk caches; the proxy is the only thing that
+writes to a shared host-side cache; agents can no longer poison each
+other because they don't share storage. Trade-off: per-agent disk
+usage instead of one-copy-per-host on disk for popular packages, plus
+proportionally more RAM (no cross-agent kernel page-cache dedup).
 
-  Deferred. The current shared rw `/cache` is shipped knowingly to
-  preserve the disk-and-RAM dedup wins from the squashed commit;
-  the proxy is the next planned change once the rest of the
-  isolation work has been exercised in practice.
+Deferred. The current shared rw `/cache` is shipped knowingly to
+preserve the disk-and-RAM dedup wins from the squashed commit; the
+proxy is the next planned change once the rest of the isolation work
+has been exercised in practice.
 
 ## Other things considered, not pursued
 
@@ -283,3 +278,18 @@ migration.
 - **Cache snapshots.** btrfs/zfs snapshot of `caches/` is cheap
   insurance against accidents, but the failure mode it protects
   against is "shared cache wiped" which is already just bandwidth.
+
+- **Promote nix overlay upper to host `/nix/store`.** Not currently
+  needed; would require coordinating with host's nix DB. Worth
+  revisiting only if agents are seen repeatedly rebuilding the same
+  store paths in their uppers.
+
+- **`cav sessions list` CLI.** Dropped. Host's normal Claude Code
+  session browser sees every agent's session via the host hardlinks,
+  so a separate listing command was redundant.
+
+- **`cav remove-agent` archive-on-removal.** Discussed; sessions
+  currently get unlinked along with the per-agent dir, but their
+  inodes survive via the host hardlinks (and via the peer-aggregator
+  hardlink) so the data isn't actually gone. Not implemented as an
+  explicit archive step.
