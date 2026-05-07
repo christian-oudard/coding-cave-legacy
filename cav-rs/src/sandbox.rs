@@ -350,6 +350,26 @@ fn build_bwrap_argv(
         }
     }
 
+    // Read-only peer-session aggregator: every agent's session JSONLs
+    // for this project, hardlinked under data_dir/sessions/<slug>/.
+    // Mounted ro so an agent can read sibling sessions but cannot
+    // truncate/delete/overwrite them. Per-slug bind keeps cross-project
+    // sessions out of view. ro-bind-try in case sessions/<slug>/
+    // doesn't exist yet (no agent has launched for this project).
+    if let Some(peer_root) = env.get("CODING_CAVE_PEER_SESSIONS_ROOT") {
+        for slug in slugs.iter() {
+            if slug.is_empty() {
+                continue;
+            }
+            let src = format!("{peer_root}/{slug}");
+            args.extend([
+                "--ro-bind-try".to_string(),
+                src,
+                format!("/home/cave-coder/.claude/peer-sessions/{slug}"),
+            ]);
+        }
+    }
+
     let shared: Vec<&str> = env
         .get("CODING_CAVE_SHARED_REPOS")
         .map(|s| s.as_str())
@@ -1442,6 +1462,46 @@ fn sync_session_to_host(
     );
 }
 
+/// Hardlink this agent's session JSONL into a host-side aggregator
+/// directory that's bound read-only into every other agent's cave.
+/// Same inode as the per-agent rw path, but writes through the bound
+/// `peer-sessions/` mount get EROFS because the mount is ro. Excludes
+/// the host user's own sessions: only agent-launched sessions land
+/// here, so peer agents don't see host-side coding.
+fn link_session_to_peer_aggregator_at(
+    per_agent_home: &Path,
+    peer_aggregator_root: &Path,
+    slug: &str,
+    session_id: &str,
+) -> std::io::Result<()> {
+    let per_agent_dir = config::claude_project_dir(slug, Some(per_agent_home));
+    let per_agent_jsonl = per_agent_dir.join(format!("{session_id}.jsonl"));
+    let peer_dir = peer_aggregator_root.join(slug);
+    let peer_jsonl = peer_dir.join(format!("{session_id}.jsonl"));
+
+    std::fs::create_dir_all(&per_agent_dir)?;
+    std::fs::create_dir_all(&peer_dir)?;
+
+    if !per_agent_jsonl.exists() {
+        let _ = std::fs::File::create(&per_agent_jsonl)?;
+    }
+
+    if peer_jsonl.exists() {
+        return Ok(()); // already linked from a prior launch
+    }
+    std::fs::hard_link(&per_agent_jsonl, &peer_jsonl)?;
+    Ok(())
+}
+
+fn link_session_to_peer_aggregator(
+    per_agent_home: &Path,
+    slug: &str,
+    session_id: &str,
+) {
+    let root = config::data_dir().join("sessions");
+    let _ = link_session_to_peer_aggregator_at(per_agent_home, &root, slug, session_id);
+}
+
 fn rm_store_path(path: &Path) {
     if path.is_symlink() || !path.is_dir() {
         if let Some(parent) = path.parent() {
@@ -2154,11 +2214,18 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
         // via hardlink. Lets the host user's Claude Code see all agents'
         // sessions in their normal session browser. Skipped for
         // subcaves: their parent already aggregates them.
+        //
+        // Also hardlink into the agent-only peer aggregator at
+        // data_dir/sessions/<slug>/. That dir gets ro-bound into every
+        // cave at /home/cave-coder/.claude/peer-sessions/<slug>/, so
+        // agents can read each other's sessions but the ro mount blocks
+        // writes. Aggregator excludes host-user sessions.
         if let Some(sid) = session_id.as_deref() {
             for (_, _, s) in &workspaces {
                 if let Some(project_path) = registry::project_path(s).ok().flatten() {
                     sync_session_to_host(&home, s, &PathBuf::from(project_path), sid);
                 }
+                link_session_to_peer_aggregator(&home, s, sid);
             }
         }
     }
@@ -2312,6 +2379,10 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
     env.insert(
         "CODING_CAVE_CACHES_DIR".to_string(),
         caches_dir.to_string_lossy().to_string(),
+    );
+    env.insert(
+        "CODING_CAVE_PEER_SESSIONS_ROOT".to_string(),
+        config::data_dir().join("sessions").to_string_lossy().to_string(),
     );
     env.insert("CODING_CAVE_WORKSPACES".to_string(), ws_paths);
     env.insert("CODING_CAVE_SHARED_REPOS".to_string(), shared_repos_str);
@@ -2783,8 +2854,8 @@ mod tests {
     }
 
     use super::{
-        encode_claude_project, migrate_overlay_layout_in, migrate_session_to_per_agent_home,
-        nix_overlay_dirs_in, sync_session_to_host_at,
+        encode_claude_project, link_session_to_peer_aggregator_at, migrate_overlay_layout_in,
+        migrate_session_to_per_agent_home, nix_overlay_dirs_in, sync_session_to_host_at,
     };
     use std::path::Path;
 
@@ -3209,5 +3280,130 @@ mod tests {
             fs::read_to_string(&host_jsonl).unwrap(),
             "earlier-conversation"
         );
+    }
+
+    fn peer_setup(name: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let tmp = std::env::temp_dir()
+            .join(format!("cav-peer-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        let per_agent = tmp.join("per-agent");
+        let peer_root = tmp.join("peer-root");
+        fs::create_dir_all(&per_agent).unwrap();
+        fs::create_dir_all(&peer_root).unwrap();
+        (tmp, per_agent, peer_root)
+    }
+
+    #[test]
+    fn peer_aggregator_creates_hardlink_with_shared_inode() {
+        // The per-agent JSONL and the peer aggregator entry must
+        // reference the same inode, so the agent's writes show up
+        // through the (later ro-bound) aggregator path.
+        let (_tmp, per_agent, peer_root) = peer_setup("hardlink");
+        let sid = "abc-123";
+        let slug = "demo";
+
+        link_session_to_peer_aggregator_at(&per_agent, &peer_root, slug, sid).unwrap();
+
+        let pa_jsonl = per_agent
+            .join(".claude/projects/-projects-demo")
+            .join(format!("{sid}.jsonl"));
+        let peer_jsonl = peer_root.join(slug).join(format!("{sid}.jsonl"));
+        assert!(pa_jsonl.is_file());
+        assert!(peer_jsonl.is_file());
+        assert_eq!(inode_of(&pa_jsonl), inode_of(&peer_jsonl));
+
+        // Agent's append (via per-agent path) shows up at the aggregator.
+        fs::write(&pa_jsonl, "agent-append").unwrap();
+        assert_eq!(fs::read_to_string(&peer_jsonl).unwrap(), "agent-append");
+    }
+
+    #[test]
+    fn peer_aggregator_segregates_by_slug() {
+        // Two different projects must not share a peer-sessions dir,
+        // since each cave's ro-bind is keyed per-slug.
+        let (_tmp, per_agent, peer_root) = peer_setup("segregate");
+        link_session_to_peer_aggregator_at(&per_agent, &peer_root, "alpha", "s1").unwrap();
+        // Set up a second per-agent home for clarity (different project).
+        let per_agent_b = per_agent.parent().unwrap().join("per-agent-b");
+        fs::create_dir_all(&per_agent_b).unwrap();
+        link_session_to_peer_aggregator_at(&per_agent_b, &peer_root, "beta", "s2").unwrap();
+
+        assert!(peer_root.join("alpha/s1.jsonl").is_file());
+        assert!(peer_root.join("beta/s2.jsonl").is_file());
+        assert!(!peer_root.join("alpha/s2.jsonl").exists());
+        assert!(!peer_root.join("beta/s1.jsonl").exists());
+    }
+
+    #[test]
+    fn peer_aggregator_idempotent() {
+        let (_tmp, per_agent, peer_root) = peer_setup("idempotent");
+        link_session_to_peer_aggregator_at(&per_agent, &peer_root, "demo", "x").unwrap();
+        let peer_jsonl = peer_root.join("demo/x.jsonl");
+        let inode_before = inode_of(&peer_jsonl);
+        link_session_to_peer_aggregator_at(&per_agent, &peer_root, "demo", "x").unwrap();
+        assert_eq!(inode_of(&peer_jsonl), inode_before);
+    }
+
+    #[test]
+    fn argv_emits_peer_sessions_ro_bind_per_slug() {
+        // Each project slug gets its own ro-bind-try at
+        // /home/cave-coder/.claude/peer-sessions/<slug>/. Multiple
+        // workspaces emit multiple binds.
+        let cfg = super::SandboxConfig::default();
+        let mut env = HashMap::new();
+        env.insert("CODING_CAVE_HOME".to_string(), "/h/agents/3/home".to_string());
+        env.insert(
+            "CODING_CAVE_PEER_SESSIONS_ROOT".to_string(),
+            "/h/sessions".to_string(),
+        );
+        env.insert(
+            "CODING_CAVE_PROJECT_SLUGS".to_string(),
+            "alpha:beta".to_string(),
+        );
+        env.insert(
+            "CODING_CAVE_WORKSPACES".to_string(),
+            "/h/wt/alpha:/h/wt/beta".to_string(),
+        );
+        let argv = super::build_bwrap_argv(&cfg, &env, &[], -1);
+
+        // Bwrap uses --ro-bind-try; assert the (flag, src, dst) triple.
+        let mut found_alpha = false;
+        let mut found_beta = false;
+        for trip in argv.windows(3) {
+            if trip[0] == "--ro-bind-try" {
+                if trip[1] == "/h/sessions/alpha"
+                    && trip[2] == "/home/cave-coder/.claude/peer-sessions/alpha"
+                {
+                    found_alpha = true;
+                }
+                if trip[1] == "/h/sessions/beta"
+                    && trip[2] == "/home/cave-coder/.claude/peer-sessions/beta"
+                {
+                    found_beta = true;
+                }
+            }
+        }
+        assert!(found_alpha, "missing alpha peer-sessions bind in {argv:?}");
+        assert!(found_beta, "missing beta peer-sessions bind in {argv:?}");
+    }
+
+    #[test]
+    fn argv_omits_peer_sessions_when_root_unset() {
+        // Old-style launches (no CODING_CAVE_PEER_SESSIONS_ROOT in env)
+        // shouldn't emit a peer-sessions bind that would point at an
+        // unresolvable path.
+        let cfg = super::SandboxConfig::default();
+        let mut env = HashMap::new();
+        env.insert("CODING_CAVE_HOME".to_string(), "/h".to_string());
+        env.insert("CODING_CAVE_PROJECT_SLUGS".to_string(), "demo".to_string());
+        let argv = super::build_bwrap_argv(&cfg, &env, &[], -1);
+        for trip in argv.windows(3) {
+            if trip[0] == "--ro-bind-try" {
+                assert!(
+                    !trip[2].starts_with("/home/cave-coder/.claude/peer-sessions"),
+                    "unexpected peer-sessions bind"
+                );
+            }
+        }
     }
 }

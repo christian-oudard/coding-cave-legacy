@@ -134,31 +134,49 @@ are stub "exited" entries.
 ## Session log management
 
 `.claude/projects/*.jsonl` lives under per-agent home, so it's only
-*writable* from within the owning agent's cave. Cross-cave **read**
-visibility on the host comes through hardlinks, not a separate cav
-subcommand: at every agent launch, the per-agent JSONL is hardlinked
-into the host user's `~/.claude/projects/<host-encoded>/<sid>.jsonl`.
-Same inode, two paths — writes from the in-cave Claude Code show up
-immediately at the host's normal session location.
+*writable* from within the owning agent's cave. Three hardlinks point
+at the same inode, providing the matrix of access rights:
 
-The encoding diverges between the two paths:
-- Cave path: `<per-agent-home>/.claude/projects/-projects-<slug>/<sid>.jsonl`
-  (encoded from the cave's working dir `/projects/<slug>`).
-- Host path: `~/.claude/projects/<encoded-host-project-path>/<sid>.jsonl`
-  (encoded from the project's actual host path).
+```
+agents/<id>/home/.claude/projects/-projects-<slug>/<sid>.jsonl
+                                                                 ↑ rw  (per-agent home bind)
+~christian/.claude/projects/<encoded-host-path>/<sid>.jsonl
+                                                                 ↑ host user's normal Claude Code UI
+~christian/.local/share/coding-cave/sessions/<slug>/<sid>.jsonl
+                                                                 ↑ peer-aggregator (agent-only)
+```
 
-Both reference the same inode, so the encoding mismatch is fine and
-each side's Claude Code sees the session in the form it expects.
+The peer-aggregator is ro-bound into every cave at
+`/home/cave-coder/.claude/peer-sessions/<slug>/`, so each agent can
+read every other agent's session for that project but writes through
+the bound path return EROFS. The owning agent retains rw access via
+its per-agent path because that bind is rw.
 
-Cross-agent **destruction** is still prevented because each agent only
-sees its own per-agent dir from inside its own cave. The host user can
-delete a host-side hardlink (just unlinks one ref; the per-agent file
-stays). On a UUID collision with a pre-existing host-side session, the
-sync skips silently rather than clobbering.
+Properties:
 
-Existing `cav agent --resume <uuid>` already accepts session UUIDs;
-the host's Claude Code session browser shows everything via the
-hardlinks, so no separate `cav sessions list` is needed.
+- **Read-write own session.** The per-agent rw bind is unchanged.
+- **Read-only other agents'.** No writable path exists from a cave to
+  another agent's inode. The peer-aggregator mount is ro at the kernel
+  level; mode bits don't matter.
+- **Host UI visibility.** Hardlink into `~/.claude/projects/<host-encoded>/`
+  means the host user's normal Claude Code session browser lists
+  every agent's session for that project alongside the user's own.
+- **Host-user sessions excluded from peer view.** The peer-aggregator
+  is populated only by cav at agent launch. Host-user sessions for the
+  same project are visible to the host user but not to peer agents.
+- **Live updates.** Bind mounts pass through directory changes. New
+  agent sessions appear in running caves' `peer-sessions/` without
+  restart.
+- **No clobber on UUID collision.** If a host-side session has the
+  same UUID (vanishingly improbable), the sync skips rather than
+  overwriting.
+
+The encoding diverges between cave and host because Claude Code keys
+its project dir off the working directory at startup. Inside the cave
+that's `/projects/<slug>`; on the host it's the project's actual
+location. Both names reference the same inode, so each side sees the
+session in the form it expects. The peer-aggregator avoids encoding
+entirely, keying directly off the project slug.
 
 ## `rm -rf /` failure analysis
 
@@ -229,18 +247,34 @@ Existing agents need to be stopped before migration to avoid corrupting
 in-flight overlay state. Future runs see the new layout and skip
 migration.
 
-## Out of scope
+## Known open issue
 
-- **Per-tool overlayfs caches.** Considered and rejected. CAS-shaped
-  tools work, but pnpm hardlinks and cargo's mutable git index don't
-  overlay cleanly. Shared rw `/cache/` with hardlinks gets the same
-  dedup with no per-tool engineering and an acceptable failure mode.
+- **Cache poisoning via shared rw `/cache`.** A confused or
+  prompt-injected agent can overwrite cached wheels/crates/tarballs
+  with crafted bytes between one agent's first download and another's
+  install. Tools' content-hash verification catches the typical case
+  on read, but verification isn't uniformly aggressive across tools,
+  and mutable index/metadata files (cargo registry index, npm
+  `_cacache/index-v5/`) are not hash-protected at all.
 
-- **HTTP caching proxy in crinj.** Not needed. Once `/cache/uv/` is
-  populated, the next install hardlinks from cache; no network. Proxy
-  helps only for cold-cache concurrent fetches and offline dev. Defer
-  until evidence demands it; crinj is already on the request path so
-  retrofitting is incremental.
+  The intended fix is an HTTP caching proxy in crinj. Each agent
+  gets its own per-agent on-disk caches; the proxy is the only
+  thing that writes to a shared host-side cache; agents can no
+  longer poison each other because they don't share storage.
+  Trade-off: per-agent disk usage instead of one-copy-per-host on
+  disk for popular packages, plus proportionally more RAM (no
+  cross-agent kernel page-cache dedup).
+
+  Deferred. The current shared rw `/cache` is shipped knowingly to
+  preserve the disk-and-RAM dedup wins from the squashed commit;
+  the proxy is the next planned change once the rest of the
+  isolation work has been exercised in practice.
+
+## Other things considered, not pursued
+
+- **Per-tool overlayfs caches.** CAS-shaped tools work, but pnpm
+  hardlinks and cargo's mutable git index don't overlay cleanly.
+  The proxy approach is cleaner if we want integrity.
 
 - **Per-agent UIDs.** The mount-namespace separation we get from
   per-agent binds is sufficient because the dangerous data simply
