@@ -55,7 +55,7 @@ fn open() -> Result<Connection> {
     } else {
         let cols: Vec<String> =
             collect_rows(&db, "PRAGMA table_info(agents)", |row| row.get::<_, String>(1))?;
-        for dead in ["host_ports", "host_devices", "comms", "inner_pid"] {
+        for dead in ["host_ports", "host_devices", "comms"] {
             if cols.iter().any(|c| c == dead) {
                 db.execute_batch(&format!("ALTER TABLE agents DROP COLUMN {dead};"))?;
             }
