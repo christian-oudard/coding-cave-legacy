@@ -232,16 +232,60 @@ migration.
 
 ## Tests
 
-105 passing on the rebased branch:
+120 passing:
 
-- 64 unit (`cargo test --bin cav`)
+- 70 unit (`cargo test --bin cav`)
 - 19 hook integration (`cargo test --test hook`)
-- 22 lifecycle integration (`cargo test --test lifecycle`)
+- 31 lifecycle integration (`cargo test --test lifecycle`)
 
 Coverage includes: overlay relocation, agent-id parsing for launch
 home, session JSONL migration from legacy shared home, hardlink sync
 to host's `~/.claude/projects/`, peer-aggregator hardlinks, per-slug
 ro-bind argv emission, registry rebuild from worktrees.
+
+### Launch-state invariant
+
+The session-sync code has a contract that's not obvious from reading
+the function alone but is critical: **the cave-internal JSONL path
+that Claude Code will write to must NOT exist before Claude launches.**
+Claude treats an existing `~/.claude/projects/<encoded>/<sid>.jsonl`
+as proof the session is in use and refuses to start with "Session ID
+X is already in use."
+
+An earlier draft of the session-sync work pre-created an empty JSONL
+at the per-agent path so it had a hardlink target. That broke every
+fresh agent launch and shipped because the unit tests verified the
+hardlink mechanics in isolation, never the launch-state invariant.
+
+The current tests in `cav-rs/src/sandbox.rs::tests` enforce the
+contract directly:
+
+- `host_sync_does_not_pre_create_jsonl_for_fresh_session`
+- `peer_aggregator_does_not_pre_create_jsonl`
+- `launch_state_invariant_no_session_jsonl_at_cave_internal_path`
+
+The third runs the same call sequence `run_agent` does for a fresh
+launch (sync + peer-aggregator linking) and asserts no JSONL exists
+at the cave-internal path afterward. It would have caught the
+pre-create regression.
+
+The deferred linking — sync runs at agent exit instead of launch —
+is covered by `pending_sync_links_jsonl_after_claude_writes`,
+`pending_sync_handles_missing_per_agent_dir`, and
+`pending_sync_links_multiple_jsonls`.
+
+### Test gap
+
+End-to-end smoke testing (actually running `cav agent` and watching
+it boot a real Claude session) is not currently in the cargo test
+suite because subcave spawning is broken when invoked from inside an
+agent cave (nested-namespace bug, separate from this work). The
+launch-state invariant test substitutes for this by asserting the
+file-system state Claude would observe at launch time.
+
+A real smoke test that invokes `cav agent --prompt 'echo done'`
+end-to-end would belong in `tests/smoke.rs` once subcaves work, or
+can be run on the host as a manual release-validation step.
 
 ## Known open issue
 

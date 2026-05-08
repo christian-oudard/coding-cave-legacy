@@ -1356,12 +1356,12 @@ fn migrate_session_to_per_agent_home(
     if !legacy_home.is_dir() {
         return;
     }
-    let target_projects_dir = config::claude_project_dir(slug, Some(target_home));
+    let target_projects_dir = crate::config::claude_project_dir(slug, Some(target_home));
     let target_jsonl = target_projects_dir.join(format!("{sid}.jsonl"));
     if target_jsonl.exists() {
         return;
     }
-    let legacy_projects_dir = config::claude_project_dir(slug, Some(legacy_home));
+    let legacy_projects_dir = crate::config::claude_project_dir(slug, Some(legacy_home));
     let legacy_jsonl = legacy_projects_dir.join(format!("{sid}.jsonl"));
     if !legacy_jsonl.is_file() {
         return;
@@ -1419,29 +1419,35 @@ fn sync_session_to_host_at(
     project_host_path: &str,
     session_id: &str,
 ) -> std::io::Result<()> {
-    let per_agent_dir = config::claude_project_dir(slug, Some(per_agent_home));
+    let per_agent_dir = crate::config::claude_project_dir(slug, Some(per_agent_home));
     let per_agent_jsonl = per_agent_dir.join(format!("{session_id}.jsonl"));
+
+    // CONTRACT: the per-agent JSONL must NOT exist when this function
+    // returns for a fresh session. Claude Code's session writer treats
+    // an existing JSONL at /home/cave-coder/.claude/projects/<encoded>/<sid>.jsonl
+    // as proof the session is already in use, and refuses to launch
+    // with "Session ID X is already in use." Pre-creating it (even
+    // empty) breaks every fresh agent launch.
+    //
+    // For fresh sessions: do nothing. The host hardlink gets created
+    // later (at agent exit) by sync_pending_sessions_at, walking the
+    // per-agent dir for JSONLs Claude has actually written.
+    //
+    // For resumed sessions where the per-agent JSONL already exists:
+    // hardlink it to the host's path so the host's Claude Code session
+    // browser sees it.
+    if !per_agent_jsonl.is_file() {
+        return Ok(());
+    }
+
     let host_dir = host_home
         .join(".claude")
         .join("projects")
         .join(encode_claude_project(project_host_path));
-    let host_jsonl = host_dir.join(format!("{session_id}.jsonl"));
-
-    std::fs::create_dir_all(&per_agent_dir)?;
     std::fs::create_dir_all(&host_dir)?;
-
-    // Pre-create the per-agent file so the hardlink target exists.
-    // Claude Code's session writer uses O_APPEND|O_CREAT, which is
-    // happy with an existing empty file.
-    if !per_agent_jsonl.exists() {
-        let _ = std::fs::File::create(&per_agent_jsonl)?;
-    }
-
+    let host_jsonl = host_dir.join(format!("{session_id}.jsonl"));
     if host_jsonl.exists() {
-        // Already linked or a host-side session collided on the UUID.
-        // Either way, leave the host alone — overwriting a real
-        // host-side session would be worse than skipping.
-        return Ok(());
+        return Ok(()); // already linked, or a UUID collision with host-user session
     }
     std::fs::hard_link(&per_agent_jsonl, &host_jsonl)?;
     Ok(())
@@ -1474,20 +1480,20 @@ fn link_session_to_peer_aggregator_at(
     slug: &str,
     session_id: &str,
 ) -> std::io::Result<()> {
-    let per_agent_dir = config::claude_project_dir(slug, Some(per_agent_home));
+    let per_agent_dir = crate::config::claude_project_dir(slug, Some(per_agent_home));
     let per_agent_jsonl = per_agent_dir.join(format!("{session_id}.jsonl"));
-    let peer_dir = peer_aggregator_root.join(slug);
-    let peer_jsonl = peer_dir.join(format!("{session_id}.jsonl"));
 
-    std::fs::create_dir_all(&per_agent_dir)?;
-    std::fs::create_dir_all(&peer_dir)?;
-
-    if !per_agent_jsonl.exists() {
-        let _ = std::fs::File::create(&per_agent_jsonl)?;
+    // Same contract as sync_session_to_host_at: must not pre-create the
+    // per-agent JSONL or Claude Code refuses to start.
+    if !per_agent_jsonl.is_file() {
+        return Ok(());
     }
 
+    let peer_dir = peer_aggregator_root.join(slug);
+    std::fs::create_dir_all(&peer_dir)?;
+    let peer_jsonl = peer_dir.join(format!("{session_id}.jsonl"));
     if peer_jsonl.exists() {
-        return Ok(()); // already linked from a prior launch
+        return Ok(());
     }
     std::fs::hard_link(&per_agent_jsonl, &peer_jsonl)?;
     Ok(())
@@ -1500,6 +1506,62 @@ fn link_session_to_peer_aggregator(
 ) {
     let root = config::data_dir().join("sessions");
     let _ = link_session_to_peer_aggregator_at(per_agent_home, &root, slug, session_id);
+}
+
+/// At agent exit, walk the per-agent .claude/projects/<slug-encoded>/
+/// directory and ensure every JSONL Claude has actually written is
+/// hardlinked into the host's ~/.claude/projects/<host-encoded>/ and
+/// the peer aggregator at data_dir/sessions/<slug>/. This is the
+/// deferred half of the sync: at launch time we can't pre-create the
+/// JSONL (Claude refuses to start), so we link it after the fact.
+fn sync_pending_sessions_at(
+    per_agent_home: &Path,
+    host_home: &Path,
+    peer_aggregator_root: &Path,
+    slug: &str,
+    project_host_path: &str,
+) -> std::io::Result<()> {
+    let per_agent_dir = crate::config::claude_project_dir(slug, Some(per_agent_home));
+    let entries = match std::fs::read_dir(&per_agent_dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|e| e != "jsonl") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+        let _ = sync_session_to_host_at(
+            per_agent_home,
+            host_home,
+            slug,
+            project_host_path,
+            stem,
+        );
+        let _ = link_session_to_peer_aggregator_at(
+            per_agent_home,
+            peer_aggregator_root,
+            slug,
+            stem,
+        );
+    }
+    Ok(())
+}
+
+fn sync_pending_sessions(
+    per_agent_home: &Path,
+    slug: &str,
+    project_host_path: &Path,
+) {
+    let _ = sync_pending_sessions_at(
+        per_agent_home,
+        &host_home(),
+        &config::data_dir().join("sessions"),
+        slug,
+        &project_host_path.to_string_lossy(),
+    );
 }
 
 fn rm_store_path(path: &Path) {
@@ -2677,6 +2739,19 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
     } else {
         teardown_agent(&base, &workspaces, &agent_id);
     }
+
+    // Sync any session JSONLs Claude wrote during the run into host's
+    // ~/.claude/projects/ and the peer aggregator. Deferred to exit
+    // because pre-creating these at launch would trip Claude's
+    // "Session ID is already in use" check.
+    if !inside_cave() && agent_id_survives {
+        for (_, _, s) in &workspaces {
+            if let Some(project_path) = registry::project_path(s).ok().flatten() {
+                sync_pending_sessions(&home, s, &PathBuf::from(project_path));
+            }
+        }
+    }
+
     if actual_sid.is_some() {
         print_resume_hints(&agent_id, actual_sid.as_deref(), !agent_id_survives);
     }
@@ -3162,54 +3237,85 @@ mod tests {
         std::fs::metadata(p).unwrap().ino()
     }
 
+    /// Simulate what Claude Code does on first write: create the
+    /// per-agent JSONL with content. Tests use this to set up the
+    /// "post-launch" state that sync now expects to see.
+    fn simulate_claude_wrote(per_agent: &Path, slug: &str, sid: &str, content: &str) -> PathBuf {
+        let pa_dir = crate::config::claude_project_dir(slug, Some(per_agent));
+        fs::create_dir_all(&pa_dir).unwrap();
+        let pa_jsonl = pa_dir.join(format!("{sid}.jsonl"));
+        fs::write(&pa_jsonl, content).unwrap();
+        pa_jsonl
+    }
+
     #[test]
-    fn host_sync_creates_hardlink_with_shared_inode() {
-        // The whole point of the sync: in-cave Claude Code writing to
-        // its per-agent JSONL must show up at the host's path because
-        // they're the same inode.
-        let (_tmp, per_agent, host) = host_sync_setup("hardlink");
-        let sid = "abc-123";
+    fn host_sync_does_not_pre_create_jsonl_for_fresh_session() {
+        // CONTRACT: Claude Code refuses to start with --session-id <X>
+        // when the per-agent JSONL already exists ("Session ID X is
+        // already in use"). sync_session_to_host_at must therefore not
+        // pre-create the file. Regression test for the launch-blocker
+        // bug shipped by an earlier version of this commit.
+        let (_tmp, per_agent, host) = host_sync_setup("no-pre-create");
+        let sid = "fresh-uuid";
         let slug = "demo";
-        let project_path = "/home/user/code/demo";
+        let project_path = "/p/demo";
 
         sync_session_to_host_at(&per_agent, &host, slug, project_path, sid).unwrap();
 
         let pa_jsonl = per_agent
             .join(".claude/projects/-projects-demo")
             .join(format!("{sid}.jsonl"));
+        assert!(
+            !pa_jsonl.exists(),
+            "per-agent JSONL must not be pre-created; Claude Code refuses to launch otherwise"
+        );
         let host_jsonl = host
             .join(".claude/projects")
             .join(encode_claude_project(project_path))
             .join(format!("{sid}.jsonl"));
-        assert!(pa_jsonl.is_file());
+        assert!(
+            !host_jsonl.exists(),
+            "host hardlink must not exist for a fresh session; deferred until exit sync"
+        );
+    }
+
+    #[test]
+    fn host_sync_creates_hardlink_with_shared_inode() {
+        // After Claude has written the session JSONL, sync hardlinks it
+        // to the host's path. Same inode, two paths, writes propagate.
+        let (_tmp, per_agent, host) = host_sync_setup("hardlink");
+        let sid = "abc-123";
+        let slug = "demo";
+        let project_path = "/home/user/code/demo";
+        let pa_jsonl = simulate_claude_wrote(&per_agent, slug, sid, "session-bytes");
+
+        sync_session_to_host_at(&per_agent, &host, slug, project_path, sid).unwrap();
+
+        let host_jsonl = host
+            .join(".claude/projects")
+            .join(encode_claude_project(project_path))
+            .join(format!("{sid}.jsonl"));
         assert!(host_jsonl.is_file());
         assert_eq!(inode_of(&pa_jsonl), inode_of(&host_jsonl));
 
-        // Writes to one path show up at the other.
-        std::fs::write(&pa_jsonl, "live-content").unwrap();
-        assert_eq!(fs::read_to_string(&host_jsonl).unwrap(), "live-content");
+        // Live propagation via shared inode.
+        fs::write(&pa_jsonl, "later-bytes").unwrap();
+        assert_eq!(fs::read_to_string(&host_jsonl).unwrap(), "later-bytes");
     }
 
     #[test]
     fn host_sync_uses_distinct_encoded_dirs() {
         // Per-agent dir is encoded from /projects/<slug>; host dir is
         // encoded from the project's actual host path. Encodings must
-        // not collide so two different projects with the same slug
-        // (different host paths) don't hardlink onto each other.
+        // not collide.
         let (_tmp, per_agent, host) = host_sync_setup("encoding");
         let sid = "zzz";
-        sync_session_to_host_at(
-            &per_agent,
-            &host,
-            "demo",
-            "/home/user/code/demo",
-            sid,
-        )
-        .unwrap();
-        let pa_dir = per_agent.join(".claude/projects/-projects-demo");
-        let host_dir = host.join(".claude/projects/-home-user-code-demo");
-        assert!(pa_dir.is_dir(), "per-agent dir at {}", pa_dir.display());
-        assert!(host_dir.is_dir(), "host dir at {}", host_dir.display());
+        simulate_claude_wrote(&per_agent, "demo", sid, "x");
+
+        sync_session_to_host_at(&per_agent, &host, "demo", "/home/user/code/demo", sid).unwrap();
+
+        assert!(per_agent.join(".claude/projects/-projects-demo").is_dir());
+        assert!(host.join(".claude/projects/-home-user-code-demo").is_dir());
     }
 
     #[test]
@@ -3218,6 +3324,7 @@ mod tests {
         let sid = "rerun";
         let slug = "demo";
         let project_path = "/p/demo";
+        simulate_claude_wrote(&per_agent, slug, sid, "x");
 
         sync_session_to_host_at(&per_agent, &host, slug, project_path, sid).unwrap();
         let host_jsonl = host
@@ -3226,7 +3333,6 @@ mod tests {
             .join(format!("{sid}.jsonl"));
         let first_inode = inode_of(&host_jsonl);
 
-        // Run again. Must succeed and not blow away the existing link.
         sync_session_to_host_at(&per_agent, &host, slug, project_path, sid).unwrap();
         assert_eq!(inode_of(&host_jsonl), first_inode);
     }
@@ -3239,6 +3345,7 @@ mod tests {
         let (_tmp, per_agent, host) = host_sync_setup("collide");
         let sid = "collide";
         let project_path = "/p/demo";
+        simulate_claude_wrote(&per_agent, "demo", sid, "agent-content");
         let host_dir = host
             .join(".claude/projects")
             .join(encode_claude_project(project_path));
@@ -3264,10 +3371,7 @@ mod tests {
         let (_tmp, per_agent, host) = host_sync_setup("resume");
         let sid = "resumed";
         let project_path = "/p/demo";
-        let pa_dir = per_agent.join(".claude/projects/-projects-demo");
-        fs::create_dir_all(&pa_dir).unwrap();
-        let pa_jsonl = pa_dir.join(format!("{sid}.jsonl"));
-        fs::write(&pa_jsonl, "earlier-conversation").unwrap();
+        let pa_jsonl = simulate_claude_wrote(&per_agent, "demo", sid, "earlier-conversation");
 
         sync_session_to_host_at(&per_agent, &host, "demo", project_path, sid).unwrap();
 
@@ -3294,12 +3398,11 @@ mod tests {
     }
 
     #[test]
-    fn peer_aggregator_creates_hardlink_with_shared_inode() {
-        // The per-agent JSONL and the peer aggregator entry must
-        // reference the same inode, so the agent's writes show up
-        // through the (later ro-bound) aggregator path.
-        let (_tmp, per_agent, peer_root) = peer_setup("hardlink");
-        let sid = "abc-123";
+    fn peer_aggregator_does_not_pre_create_jsonl() {
+        // Same contract as host sync: pre-creation breaks Claude.
+        // Regression for the launch-blocker bug.
+        let (_tmp, per_agent, peer_root) = peer_setup("no-pre-create");
+        let sid = "fresh-uuid";
         let slug = "demo";
 
         link_session_to_peer_aggregator_at(&per_agent, &peer_root, slug, sid).unwrap();
@@ -3307,25 +3410,38 @@ mod tests {
         let pa_jsonl = per_agent
             .join(".claude/projects/-projects-demo")
             .join(format!("{sid}.jsonl"));
+        assert!(
+            !pa_jsonl.exists(),
+            "peer-aggregator linking must not pre-create the per-agent JSONL"
+        );
+        assert!(!peer_root.join(slug).join(format!("{sid}.jsonl")).exists());
+    }
+
+    #[test]
+    fn peer_aggregator_creates_hardlink_with_shared_inode() {
+        let (_tmp, per_agent, peer_root) = peer_setup("hardlink");
+        let sid = "abc-123";
+        let slug = "demo";
+        let pa_jsonl = simulate_claude_wrote(&per_agent, slug, sid, "session-bytes");
+
+        link_session_to_peer_aggregator_at(&per_agent, &peer_root, slug, sid).unwrap();
+
         let peer_jsonl = peer_root.join(slug).join(format!("{sid}.jsonl"));
-        assert!(pa_jsonl.is_file());
         assert!(peer_jsonl.is_file());
         assert_eq!(inode_of(&pa_jsonl), inode_of(&peer_jsonl));
 
-        // Agent's append (via per-agent path) shows up at the aggregator.
         fs::write(&pa_jsonl, "agent-append").unwrap();
         assert_eq!(fs::read_to_string(&peer_jsonl).unwrap(), "agent-append");
     }
 
     #[test]
     fn peer_aggregator_segregates_by_slug() {
-        // Two different projects must not share a peer-sessions dir,
-        // since each cave's ro-bind is keyed per-slug.
         let (_tmp, per_agent, peer_root) = peer_setup("segregate");
+        simulate_claude_wrote(&per_agent, "alpha", "s1", "x");
         link_session_to_peer_aggregator_at(&per_agent, &peer_root, "alpha", "s1").unwrap();
-        // Set up a second per-agent home for clarity (different project).
         let per_agent_b = per_agent.parent().unwrap().join("per-agent-b");
         fs::create_dir_all(&per_agent_b).unwrap();
+        simulate_claude_wrote(&per_agent_b, "beta", "s2", "y");
         link_session_to_peer_aggregator_at(&per_agent_b, &peer_root, "beta", "s2").unwrap();
 
         assert!(peer_root.join("alpha/s1.jsonl").is_file());
@@ -3337,6 +3453,7 @@ mod tests {
     #[test]
     fn peer_aggregator_idempotent() {
         let (_tmp, per_agent, peer_root) = peer_setup("idempotent");
+        simulate_claude_wrote(&per_agent, "demo", "x", "content");
         link_session_to_peer_aggregator_at(&per_agent, &peer_root, "demo", "x").unwrap();
         let peer_jsonl = peer_root.join("demo/x.jsonl");
         let inode_before = inode_of(&peer_jsonl);
@@ -3405,5 +3522,114 @@ mod tests {
                 );
             }
         }
+    }
+
+    use super::sync_pending_sessions_at;
+
+    #[test]
+    fn launch_state_invariant_no_session_jsonl_at_cave_internal_path() {
+        // The full launch-state assertion that should have caught the
+        // pre-create regression: after cav does ALL its launch-time
+        // session-related setup (per-agent home creation, host sync,
+        // peer aggregator), the cave-internal path that Claude Code
+        // will write to MUST NOT exist. Otherwise Claude refuses to
+        // launch with "Session ID X is already in use."
+        //
+        // This test exercises the same call sequence run_agent uses
+        // for fresh sessions, mirroring sandbox.rs:run_agent.
+        let tmp = std::env::temp_dir()
+            .join(format!("cav-launch-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        let per_agent_home = tmp.join("agents/3/home");
+        let host_home = tmp.join("host");
+        let peer_root = tmp.join("sessions");
+        fs::create_dir_all(&per_agent_home).unwrap();
+        fs::create_dir_all(&host_home).unwrap();
+        fs::create_dir_all(&peer_root).unwrap();
+        let slug = "workroot";
+        let project_path = "/home/user/code/workroot";
+        let sid = "fresh-session-uuid";
+
+        // Same call sequence run_agent makes for a fresh launch.
+        sync_session_to_host_at(&per_agent_home, &host_home, slug, project_path, sid).unwrap();
+        link_session_to_peer_aggregator_at(&per_agent_home, &peer_root, slug, sid).unwrap();
+
+        let cave_internal = crate::config::claude_project_dir(slug, Some(&per_agent_home))
+            .join(format!("{sid}.jsonl"));
+        assert!(
+            !cave_internal.exists(),
+            "INVARIANT VIOLATED: launch prep created a JSONL at {} \
+             which Claude Code will interpret as 'Session ID is already in use'",
+            cave_internal.display()
+        );
+    }
+
+    #[test]
+    fn pending_sync_links_jsonl_after_claude_writes() {
+        // The deferred half of the sync: after Claude has actually
+        // written the JSONL, sync_pending_sessions_at picks it up and
+        // creates the host + peer hardlinks.
+        let (_tmp, per_agent, host) = host_sync_setup("pending");
+        let peer_root = host.parent().unwrap().join("peer-root");
+        fs::create_dir_all(&peer_root).unwrap();
+        let slug = "demo";
+        let project_path = "/p/demo";
+        let sid = "post-launch";
+        let pa_jsonl = simulate_claude_wrote(&per_agent, slug, sid, "claude-bytes");
+
+        sync_pending_sessions_at(&per_agent, &host, &peer_root, slug, project_path).unwrap();
+
+        let host_jsonl = host
+            .join(".claude/projects")
+            .join(encode_claude_project(project_path))
+            .join(format!("{sid}.jsonl"));
+        let peer_jsonl = peer_root.join(slug).join(format!("{sid}.jsonl"));
+        assert!(host_jsonl.is_file(), "host hardlink missing after pending sync");
+        assert!(peer_jsonl.is_file(), "peer hardlink missing after pending sync");
+        assert_eq!(inode_of(&pa_jsonl), inode_of(&host_jsonl));
+        assert_eq!(inode_of(&pa_jsonl), inode_of(&peer_jsonl));
+    }
+
+    #[test]
+    fn pending_sync_handles_missing_per_agent_dir() {
+        // Fresh agent that exited before Claude ever wrote a session
+        // JSONL: the per-agent .claude/projects/ dir doesn't exist.
+        // Pending sync must be a clean no-op, not an error.
+        let (_tmp, per_agent, host) = host_sync_setup("missing");
+        let peer_root = host.parent().unwrap().join("peer-root-missing");
+        fs::create_dir_all(&peer_root).unwrap();
+
+        sync_pending_sessions_at(&per_agent, &host, &peer_root, "demo", "/p/demo").unwrap();
+    }
+
+    #[test]
+    fn pending_sync_links_multiple_jsonls() {
+        // Long-running agent that produced several session files
+        // (e.g., Claude was relaunched mid-cave). All pending JSONLs
+        // get linked.
+        let (_tmp, per_agent, host) = host_sync_setup("many");
+        let peer_root = host.parent().unwrap().join("peer-root-many");
+        fs::create_dir_all(&peer_root).unwrap();
+        let slug = "demo";
+        let project_path = "/p/demo";
+        simulate_claude_wrote(&per_agent, slug, "sid-a", "a");
+        simulate_claude_wrote(&per_agent, slug, "sid-b", "b");
+        simulate_claude_wrote(&per_agent, slug, "sid-c", "c");
+        // Drop a non-jsonl into the dir to make sure we ignore it.
+        let pa_dir = crate::config::claude_project_dir(slug, Some(&per_agent));
+        fs::write(pa_dir.join("README.md"), "not-a-session").unwrap();
+
+        sync_pending_sessions_at(&per_agent, &host, &peer_root, slug, project_path).unwrap();
+
+        let host_dir = host
+            .join(".claude/projects")
+            .join(encode_claude_project(project_path));
+        assert!(host_dir.join("sid-a.jsonl").is_file());
+        assert!(host_dir.join("sid-b.jsonl").is_file());
+        assert!(host_dir.join("sid-c.jsonl").is_file());
+        assert!(!host_dir.join("README.md").exists());
+        assert!(peer_root.join(format!("{slug}/sid-a.jsonl")).is_file());
+        assert!(peer_root.join(format!("{slug}/sid-b.jsonl")).is_file());
+        assert!(peer_root.join(format!("{slug}/sid-c.jsonl")).is_file());
     }
 }
