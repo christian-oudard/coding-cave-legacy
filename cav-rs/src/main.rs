@@ -239,6 +239,10 @@ fn run() -> Result<()> {
             comms,
             prompt,
         } => {
+            // May re-exec via `sg <group>` if the device's owning gid is
+            // only in our supplementary set; must run before any
+            // side-effecting state (registry, daemon) is touched.
+            sandbox::ensure_egid_for_devices(&host_devices)?;
             let base = find_repo_root()?;
             require_init(&base)?;
             let extras = extra_projects

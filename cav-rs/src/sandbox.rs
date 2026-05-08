@@ -100,7 +100,10 @@ fn validate_host_devices(paths: Vec<String>) -> Result<Vec<String>> {
 /// inside, so the cave-coder user can't satisfy mode-660 group checks on
 /// bind-mounted devices unless our primary gid IS the device's owning gid.
 /// We engineer that by `setresgid`'ing to the device's group before exec'ing
-/// bwrap; the kernel allows this for groups in our supplementary set.
+/// bwrap. setresgid is gated on the target being one of {real, effective,
+/// saved} gid for unprivileged callers — supplementary group membership
+/// alone is not enough — so cav re-execs itself under `sg` up front (see
+/// `ensure_egid_for_devices`) when the target gid isn't already settable.
 ///
 /// Returns `Some(gid)` when one or more devices share an owning group we
 /// can adopt; `None` when no devices were requested.
@@ -143,6 +146,97 @@ fn host_user_in_group(target: u32) -> Result<bool> {
     }
     buf.truncate(n as usize);
     Ok(buf.iter().any(|&g| g == target))
+}
+
+/// If --dev devices require an egid we can't reach via `setresgid`, re-exec
+/// cav under `sg <group> -c <cmd>` so the new process has that gid as its
+/// primary. setresgid only accepts a target in {real, effective, saved}
+/// gid for unprivileged callers; supplementary group membership is not
+/// enough. `sg` (set-uid root, from shadow-utils) is the standard
+/// system-provided way to adopt a supplementary group as primary.
+///
+/// On the re-exec branch this function does not return.
+pub fn ensure_egid_for_devices(host_devices: &[String]) -> Result<()> {
+    if host_devices.is_empty() {
+        return Ok(());
+    }
+    let validated = validate_host_devices(host_devices.to_vec())?;
+    let Some(target) = device_passthrough_gid(&validated)? else {
+        return Ok(());
+    };
+
+    let (rgid, egid, sgid) = current_resgids();
+    if target == rgid || target == egid || target == sgid {
+        return Ok(());
+    }
+
+    let group_name = lookup_group_name(target)
+        .ok_or_else(|| anyhow::anyhow!("no /etc/group entry for gid {target}"))?;
+    let sg_path = which_in_path("sg").ok_or_else(|| {
+        anyhow::anyhow!(
+            "'sg' not found in PATH; install shadow-utils so cav can adopt \
+             group '{group_name}' (gid {target}) as its primary gid"
+        )
+    })?;
+
+    let exe = std::env::current_exe()
+        .map_err(|e| anyhow::anyhow!("current_exe: {e}"))?;
+    let mut shell_cmd = sh_quote(&exe.to_string_lossy());
+    for arg in std::env::args().skip(1) {
+        shell_cmd.push(' ');
+        shell_cmd.push_str(&sh_quote(&arg));
+    }
+
+    use std::os::unix::process::CommandExt;
+    let err = Command::new(&sg_path)
+        .arg(&group_name)
+        .arg("-c")
+        .arg(&shell_cmd)
+        .exec();
+    Err(anyhow::anyhow!("exec {}: {err}", sg_path.display()))
+}
+
+fn current_resgids() -> (libc::gid_t, libc::gid_t, libc::gid_t) {
+    let mut r: libc::gid_t = 0;
+    let mut e: libc::gid_t = 0;
+    let mut s: libc::gid_t = 0;
+    unsafe { libc::getresgid(&mut r, &mut e, &mut s) };
+    (r, e, s)
+}
+
+fn lookup_group_name(gid: libc::gid_t) -> Option<String> {
+    use std::ffi::CStr;
+    let g = unsafe { libc::getgrgid(gid) };
+    if g.is_null() {
+        return None;
+    }
+    let name = unsafe { CStr::from_ptr((*g).gr_name) };
+    Some(name.to_string_lossy().into_owned())
+}
+
+fn which_in_path(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn sh_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        if c == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
 }
 
 #[cfg(test)]
@@ -230,6 +324,38 @@ mod device_passthrough_gid_tests {
         ])
         .unwrap_err();
         assert!(e.to_string().contains("must share an owning group"));
+    }
+}
+
+#[cfg(test)]
+mod sh_quote_tests {
+    use super::sh_quote;
+
+    #[test]
+    fn plain_word() {
+        assert_eq!(sh_quote("foo"), "'foo'");
+    }
+
+    #[test]
+    fn embedded_space() {
+        assert_eq!(sh_quote("a b"), "'a b'");
+    }
+
+    #[test]
+    fn embedded_single_quote() {
+        // POSIX: end the quote, escape the literal ', re-open the quote.
+        assert_eq!(sh_quote("it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn shell_metacharacters_are_inert() {
+        let s = "$(rm -rf /); `whoami` && echo *";
+        let q = sh_quote(s);
+        // Every metacharacter is inside a single-quoted segment, so the
+        // shell sees them as literal.
+        assert!(q.starts_with('\''));
+        assert!(q.ends_with('\''));
+        assert!(!q.contains("''"));
     }
 }
 
