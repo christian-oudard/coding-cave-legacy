@@ -305,55 +305,75 @@ fn do_build(user_env: &Path) -> Option<PathBuf> {
     }
 }
 
-fn read_sibling_files() -> Vec<(String, String)> {
-    let cave_nix = cave_nix_path();
-    if !cave_nix.exists() {
-        return vec![];
-    }
-    let src_dir = match cave_nix.parent() {
-        Some(d) => d.to_path_buf(),
-        None => return vec![],
-    };
-    if !src_dir.is_dir() {
-        return vec![];
-    }
-    let cave_nix_name = cave_nix.file_name().unwrap_or_default().to_os_string();
-    let mut files = vec![];
-    if let Ok(entries) = std::fs::read_dir(&src_dir) {
-        for entry in entries.flatten() {
-            if entry.file_name() == cave_nix_name {
-                continue;
-            }
-            let path = entry.path();
-            if path.is_file() && path.extension().is_some_and(|e| e == "nix") {
-                if let Ok(content) = std::fs::read_to_string(&path) {
-                    files.push((entry.file_name().to_string_lossy().to_string(), content));
-                }
-            }
-        }
-    }
-    files
-}
-
 pub fn build(force: bool) -> Result<()> {
-    let cave_nix = cave_nix_path();
-    let cave_nix_content = if cave_nix.exists() {
-        std::fs::read_to_string(&cave_nix).ok()
-    } else {
-        None
-    };
-    let sibling_files = read_sibling_files();
+    // prepare() unconditionally so the user-env dir is ready for the
+    // path: input refresh below. It's cheap (file copies + one nix-eval
+    // + flake.nix write); the heavy work is in do_build.
+    let (content, siblings) = prepare()?;
 
-    if !force && !needs_build(cave_nix_content.as_deref(), &sibling_files) {
+    // Re-pin every `path:` input before the skip check, so a user who
+    // edited a file inside one of their pinned source dirs (e.g.
+    // dotfiles/nixos-config/modules/) doesn't have to remember
+    // `cav env update <name>`. nix flake update for path: inputs is
+    // silent when nothing changed and prints a standard diff when it did,
+    // so the common case adds no noise. github:/git+ssh: inputs are
+    // deliberately untouched: rebuilding shouldn't trigger heavy upstream
+    // pulls (nixpkgs, claude-code, ...) without an explicit
+    // `cav env update <name>`.
+    refresh_path_inputs()?;
+
+    if !force && !needs_build(content.as_deref(), &siblings) {
         return Ok(());
     }
 
     crate::log_info!("building user env");
-    let (content, siblings) = prepare()?;
     if do_build(&user_env_dir()).is_some() {
         let hash = compute_hash(content.as_deref(), &siblings);
         std::fs::write(hash_file(), hash)?;
     }
+    Ok(())
+}
+
+fn refresh_path_inputs() -> Result<()> {
+    let user_env = user_env_dir();
+    if !user_env.join("flake.lock").exists() {
+        return Ok(()); // first build; nix will resolve from scratch
+    }
+    let cave_nix_dest = user_env.join("cave.nix");
+    if !cave_nix_dest.exists() {
+        return Ok(());
+    }
+    let user_inputs = extract_user_inputs(&cave_nix_dest);
+    let names: Vec<String> = match user_inputs {
+        serde_json::Value::Object(map) => map
+            .into_iter()
+            .filter(|(name, _)| !SYSTEM_INPUT_NAMES.contains(&name.as_str()))
+            .filter_map(|(name, spec)| {
+                let url = match &spec {
+                    serde_json::Value::String(s) => Some(s.clone()),
+                    serde_json::Value::Object(o) => o
+                        .get("url")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    _ => None,
+                };
+                url.filter(|u| u.starts_with("path:"))
+                    .map(|_| name)
+            })
+            .collect(),
+        _ => vec![],
+    };
+    if names.is_empty() {
+        return Ok(());
+    }
+    let mut cmd = Command::new("nix");
+    cmd.args(["flake", "update"]).current_dir(&user_env);
+    for n in &names {
+        cmd.arg(n);
+    }
+    cmd.stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::inherit());
+    let _ = cmd.status();
     Ok(())
 }
 
