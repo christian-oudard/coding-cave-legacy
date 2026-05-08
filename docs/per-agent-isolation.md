@@ -82,12 +82,11 @@ rule.
 ## bwrap binds (in cav-rs/src/sandbox.rs)
 
 ```
---bind        agents/<id>/home/                       /home/cave-coder
---bind        agents/<id>/nix-overlay/merged          /nix/store
---bind        worktrees/<slug>/<id>/                  /projects/<slug>
---bind        caches/                                 /cache             (shared rw)
---ro-bind-try sessions/<slug>/                        /home/cave-coder/.claude/peer-sessions/<slug>/
---ro-bind     <project>/.coding-cave/cave-shared.git  /projects/<slug>/.coding-cave/host-cave-shared.git
+--bind    agents/<id>/home/                       /home/cave-coder
+--bind    agents/<id>/nix-overlay/merged          /nix/store
+--bind    worktrees/<slug>/<id>/                  /projects/<slug>
+--bind    caches/                                 /cache             (shared rw)
+--ro-bind <project>/.coding-cave/cave-shared.git  /projects/<slug>/.coding-cave/host-cave-shared.git
 + existing per-feature ro-binds (gitconfig, gnupg, crinj-ca, broker socket, etc.)
 ```
 
@@ -141,49 +140,48 @@ are stub "exited" entries.
 
 ## Session log management
 
-`.claude/projects/*.jsonl` lives under per-agent home, so it's only
-*writable* from within the owning agent's cave. Three hardlinks point
-at the same inode, providing the matrix of access rights:
+The host-side aggregator at `~/.local/share/coding-cave/sessions/<slug>/`
+is the canonical store of every session JSONL across all agents for a
+project. Two operations connect it to per-agent caves:
 
-```
-agents/<id>/home/.claude/projects/-projects-<slug>/<sid>.jsonl
-                                                                 ↑ rw  (per-agent home bind)
-~christian/.claude/projects/<encoded-host-path>/<sid>.jsonl
-                                                                 ↑ host user's normal Claude Code UI
-~christian/.local/share/coding-cave/sessions/<slug>/<sid>.jsonl
-                                                                 ↑ peer-aggregator (agent-only)
-```
+**At launch** (`run_agent` in `cav-rs/src/sandbox.rs`):
+- *Bulk migration* (one-time): on first launch under per-agent layout,
+  any JSONL in the legacy shared `home/.claude/projects/<encoded>/` is
+  hardlinked into the aggregator at `sessions/<slug>/`. Subsequent
+  launches skip files already present.
+- *Per-agent import*: every JSONL in `sessions/<slug>/` is **copied**
+  (genuine copy, separate inode) into the agent's
+  `agents/<id>/home/.claude/projects/-projects-<slug>/`, skipping files
+  that already exist locally. So each agent's `/resume` lists every
+  project session, but modifications to a peer's session via `/resume`
+  fork into the agent's local copy without corrupting the original.
+- *Sync resumed sessions*: if the launch is a resume and the per-agent
+  JSONL already exists, hardlink it to the host's
+  `~/.claude/projects/<host-encoded>/<sid>.jsonl` (so the host's
+  Claude Code UI reflects ongoing writes) and to the aggregator (so
+  other agents see it on their next import).
 
-The peer-aggregator is ro-bound into every cave at
-`/home/cave-coder/.claude/peer-sessions/<slug>/`, so each agent can
-read every other agent's session for that project but writes through
-the bound path return EROFS. The owning agent retains rw access via
-its per-agent path because that bind is rw.
+**At exit** (`sync_pending_sessions`): walks the agent's
+`.claude/projects/-projects-<slug>/` and hardlinks any new sessions
+Claude wrote during the run into both the host's `~/.claude/projects/`
+and the aggregator. Deferred to exit because pre-creating the per-agent
+JSONL at launch would trip Claude Code's "Session ID is already in use"
+check (regression that shipped in an earlier draft of this work).
 
-### Access matrix per agent A
+Net result:
+- Each agent's `/resume` sees every project session.
+- Each agent has rw access only to its own per-agent files. Modifications
+  to peers' sessions are local forks and never propagate back to the
+  aggregator.
+- The host user's `~/.claude/projects/<host-encoded>/` accumulates
+  hardlinks for every agent's session — host-side Claude Code lists
+  them in its normal session browser.
+- A UUID collision with a pre-existing host-side session is detected
+  on hardlink and skipped (`exists()` check), so the host user's own
+  sessions cannot be clobbered.
 
-| Path inside cave | A's session | Other agents' | Host user's |
-|---|---|---|---|
-| `~/.claude/projects/-projects-<slug>/<sid>.jsonl` (rw bind) | rw | unreachable | unreachable |
-| `~/.claude/peer-sessions/<slug>/<sid>.jsonl` (ro mount) | ro | ro | not present |
-
-Cross-agent **destruction** is prevented because each agent only sees
-its own per-agent dir from inside its own cave, and the peer-aggregator
-mount is ro at the kernel level. The host user can delete a host-side
-hardlink (just unlinks one ref; the per-agent file stays). On a UUID
-collision with a pre-existing host-side session, the sync skips
-silently rather than clobbering.
-
-The encoding diverges between cave and host because Claude Code keys
-its project dir off the working directory at startup. Inside the cave
-that's `/projects/<slug>`; on the host it's the project's actual
-location. Both names reference the same inode, so each side sees the
-session in the form it expects. The peer-aggregator avoids encoding
-entirely, keying directly off the project slug.
-
-Existing `cav agent --resume <uuid>` already accepts session UUIDs;
-the host's Claude Code session browser shows everything via the
-hardlinks, so no separate `cav sessions list` is needed.
+`cav agent --resume <uuid>` accepts session UUIDs and routes to the
+right agent via `registry::find_agent_by_session`.
 
 ## `rm -rf /` failure analysis
 
@@ -232,16 +230,17 @@ migration.
 
 ## Tests
 
-120 passing:
+125 passing:
 
-- 70 unit (`cargo test --bin cav`)
+- 75 unit (`cargo test --bin cav`)
 - 19 hook integration (`cargo test --test hook`)
 - 31 lifecycle integration (`cargo test --test lifecycle`)
 
 Coverage includes: overlay relocation, agent-id parsing for launch
 home, session JSONL migration from legacy shared home, hardlink sync
-to host's `~/.claude/projects/`, peer-aggregator hardlinks, per-slug
-ro-bind argv emission, registry rebuild from worktrees.
+to host's `~/.claude/projects/`, peer-aggregator hardlinks, registry
+rebuild from worktrees, deferred sync at agent exit, bulk legacy
+migration, peer-session import (copy semantics, fork preservation).
 
 ### Launch-state invariant
 
@@ -265,27 +264,30 @@ contract directly:
 - `launch_state_invariant_no_session_jsonl_at_cave_internal_path`
 
 The third runs the same call sequence `run_agent` does for a fresh
-launch (sync + peer-aggregator linking) and asserts no JSONL exists
-at the cave-internal path afterward. It would have caught the
-pre-create regression.
+launch and asserts no JSONL exists at the cave-internal path
+afterward. It would have caught the pre-create regression.
 
 The deferred linking — sync runs at agent exit instead of launch —
 is covered by `pending_sync_links_jsonl_after_claude_writes`,
 `pending_sync_handles_missing_per_agent_dir`, and
 `pending_sync_links_multiple_jsonls`.
 
+The peer-session import (which keeps `/resume` working under per-agent
+layout) is covered by `import_creates_local_copies_with_separate_inodes`,
+`import_skips_existing_local_files`, `bulk_migrate_legacy_uses_hardlinks_when_possible`,
+and `launch_makes_resume_see_peer_sessions`.
+
 ### Test gap
 
-End-to-end smoke testing (actually running `cav agent` and watching
-it boot a real Claude session) is not currently in the cargo test
-suite because subcave spawning is broken when invoked from inside an
-agent cave (nested-namespace bug, separate from this work). The
-launch-state invariant test substitutes for this by asserting the
-file-system state Claude would observe at launch time.
-
-A real smoke test that invokes `cav agent --prompt 'echo done'`
-end-to-end would belong in `tests/smoke.rs` once subcaves work, or
-can be run on the host as a manual release-validation step.
+End-to-end smoke testing (running `cav agent --prompt` and checking
+the agent boots a Claude session that completes) is not yet in the
+cargo suite. Subcaves do work — `cav init` inside a cave plus
+`cav agent --prompt '<text>'` produces a Claude that runs, prints,
+and exits cleanly — so the infrastructure to add this is present;
+just no test wired up. An earlier draft of this doc claimed subcaves
+were broken; that was a misdiagnosis from a malformed test (no
+`cav init` inside the cave, no `--prompt`). Subcave-based smoke
+tests would have caught the "Session ID is already in use" bug.
 
 ## Known open issue
 

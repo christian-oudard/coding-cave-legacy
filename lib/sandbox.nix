@@ -144,7 +144,6 @@ let
     "--unsetenv" "CODING_CAVE_NIX_MERGED"
     "--unsetenv" "CODING_CAVE_HOME"
     "--unsetenv" "CODING_CAVE_CACHES_DIR"
-    "--unsetenv" "CODING_CAVE_PEER_SESSIONS_ROOT"
     "--unsetenv" "CODING_CAVE_WORKSPACES"
     "--unsetenv" "CODING_CAVE_SHARED_REPOS"
     "--unsetenv" "CODING_CAVE_HOST_HOME"

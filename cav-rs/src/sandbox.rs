@@ -350,26 +350,6 @@ fn build_bwrap_argv(
         }
     }
 
-    // Read-only peer-session aggregator: every agent's session JSONLs
-    // for this project, hardlinked under data_dir/sessions/<slug>/.
-    // Mounted ro so an agent can read sibling sessions but cannot
-    // truncate/delete/overwrite them. Per-slug bind keeps cross-project
-    // sessions out of view. ro-bind-try in case sessions/<slug>/
-    // doesn't exist yet (no agent has launched for this project).
-    if let Some(peer_root) = env.get("CODING_CAVE_PEER_SESSIONS_ROOT") {
-        for slug in slugs.iter() {
-            if slug.is_empty() {
-                continue;
-            }
-            let src = format!("{peer_root}/{slug}");
-            args.extend([
-                "--ro-bind-try".to_string(),
-                src,
-                format!("/home/cave-coder/.claude/peer-sessions/{slug}"),
-            ]);
-        }
-    }
-
     let shared: Vec<&str> = env
         .get("CODING_CAVE_SHARED_REPOS")
         .map(|s| s.as_str())
@@ -1508,6 +1488,90 @@ fn link_session_to_peer_aggregator(
     let _ = link_session_to_peer_aggregator_at(per_agent_home, &root, slug, session_id);
 }
 
+/// One-time migration of every JSONL from the legacy shared home into
+/// the host-side aggregator at data_dir/sessions/<slug>/. Hardlinks
+/// where same-FS, falls back to copy. Each agent's per-launch
+/// import_peer_sessions then surfaces them under its own
+/// .claude/projects/ so /resume works.
+fn bulk_migrate_legacy_sessions_to_aggregator_at(
+    legacy_home: &Path,
+    aggregator_root: &Path,
+    slug: &str,
+) -> std::io::Result<usize> {
+    let legacy_dir = crate::config::claude_project_dir(slug, Some(legacy_home));
+    if !legacy_dir.is_dir() {
+        return Ok(0);
+    }
+    let target_dir = aggregator_root.join(slug);
+    std::fs::create_dir_all(&target_dir)?;
+    let mut moved = 0;
+    for entry in std::fs::read_dir(&legacy_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().is_none_or(|e| e != "jsonl") {
+            continue;
+        }
+        let target = target_dir.join(entry.file_name());
+        if target.exists() {
+            continue;
+        }
+        if std::fs::hard_link(&path, &target).is_ok() {
+            moved += 1;
+            continue;
+        }
+        if std::fs::copy(&path, &target).is_ok() {
+            moved += 1;
+        }
+    }
+    Ok(moved)
+}
+
+fn bulk_migrate_legacy_sessions_to_aggregator(legacy_home: &Path, slug: &str) {
+    let root = crate::config::data_dir().join("sessions");
+    let _ = bulk_migrate_legacy_sessions_to_aggregator_at(legacy_home, &root, slug);
+}
+
+/// At each launch, copy every session JSONL from the host-side
+/// aggregator into the agent's per-agent .claude/projects/<encoded>/.
+/// Genuine copies (not hardlinks): if this agent /resume's a peer's
+/// session and modifies it, the modifications are a local fork and
+/// don't propagate to the original. Existing per-agent files are left
+/// alone, so the agent's own active session and any local forks
+/// from prior launches survive.
+fn import_peer_sessions_at(
+    per_agent_home: &Path,
+    aggregator_root: &Path,
+    slug: &str,
+) -> std::io::Result<usize> {
+    let source_dir = aggregator_root.join(slug);
+    if !source_dir.is_dir() {
+        return Ok(0);
+    }
+    let target_dir = crate::config::claude_project_dir(slug, Some(per_agent_home));
+    std::fs::create_dir_all(&target_dir)?;
+    let mut imported = 0;
+    for entry in std::fs::read_dir(&source_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().is_none_or(|e| e != "jsonl") {
+            continue;
+        }
+        let target = target_dir.join(entry.file_name());
+        if target.exists() {
+            continue;
+        }
+        if std::fs::copy(&path, &target).is_ok() {
+            imported += 1;
+        }
+    }
+    Ok(imported)
+}
+
+fn import_peer_sessions(per_agent_home: &Path, slug: &str) {
+    let root = crate::config::data_dir().join("sessions");
+    let _ = import_peer_sessions_at(per_agent_home, &root, slug);
+}
+
 /// At agent exit, walk the per-agent .claude/projects/<slug-encoded>/
 /// directory and ensure every JSONL Claude has actually written is
 /// hardlinked into the host's ~/.claude/projects/<host-encoded>/ and
@@ -2269,19 +2333,32 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
         let legacy = config::persistent_home();
         if legacy != home && legacy.is_dir() {
             for (_, _, s) in &workspaces {
+                // Migrate the agent's CURRENT session JSONL so resume keeps
+                // working under the new layout.
                 migrate_session_to_per_agent_home(&legacy, &home, s, session_id.as_deref());
+                // Bulk-migrate ALL legacy session JSONLs into the host-side
+                // aggregator. One-time on the first launch under per-agent
+                // layout; subsequent launches are no-ops for files already
+                // present. Each agent's import_peer_sessions then surfaces
+                // them under .claude/projects/ for /resume.
+                bulk_migrate_legacy_sessions_to_aggregator(&legacy, s);
             }
         }
-        // Mirror per-agent session JSONLs into host's ~/.claude/projects/
-        // via hardlink. Lets the host user's Claude Code see all agents'
-        // sessions in their normal session browser. Skipped for
-        // subcaves: their parent already aggregates them.
-        //
-        // Also hardlink into the agent-only peer aggregator at
-        // data_dir/sessions/<slug>/. That dir gets ro-bound into every
-        // cave at /home/cave-coder/.claude/peer-sessions/<slug>/, so
-        // agents can read each other's sessions but the ro mount blocks
-        // writes. Aggregator excludes host-user sessions.
+        // Copy every session in data_dir/sessions/<slug>/ into this
+        // agent's .claude/projects/-projects-<slug>/ so Claude /resume
+        // sees the project's full conversation history. Skip-if-exists
+        // preserves the agent's own active session and any local forks
+        // from prior launches. Genuine copies (not hardlinks): if the
+        // agent /resume's a peer's session and modifies it, the changes
+        // are a local fork and don't corrupt the original.
+        for (_, _, s) in &workspaces {
+            import_peer_sessions(&home, s);
+        }
+        // For resumed sessions, mirror the JSONL into host's
+        // ~/.claude/projects/ and the aggregator immediately. For fresh
+        // sessions both calls are no-ops; the corresponding hardlinks
+        // get created at agent exit by sync_pending_sessions, after
+        // Claude has written the file.
         if let Some(sid) = session_id.as_deref() {
             for (_, _, s) in &workspaces {
                 if let Some(project_path) = registry::project_path(s).ok().flatten() {
@@ -2441,10 +2518,6 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
     env.insert(
         "CODING_CAVE_CACHES_DIR".to_string(),
         caches_dir.to_string_lossy().to_string(),
-    );
-    env.insert(
-        "CODING_CAVE_PEER_SESSIONS_ROOT".to_string(),
-        config::data_dir().join("sessions").to_string_lossy().to_string(),
     );
     env.insert("CODING_CAVE_WORKSPACES".to_string(), ws_paths);
     env.insert("CODING_CAVE_SHARED_REPOS".to_string(), shared_repos_str);
@@ -3461,70 +3534,177 @@ mod tests {
         assert_eq!(inode_of(&peer_jsonl), inode_before);
     }
 
-    #[test]
-    fn argv_emits_peer_sessions_ro_bind_per_slug() {
-        // Each project slug gets its own ro-bind-try at
-        // /home/cave-coder/.claude/peer-sessions/<slug>/. Multiple
-        // workspaces emit multiple binds.
-        let cfg = super::SandboxConfig::default();
-        let mut env = HashMap::new();
-        env.insert("CODING_CAVE_HOME".to_string(), "/h/agents/3/home".to_string());
-        env.insert(
-            "CODING_CAVE_PEER_SESSIONS_ROOT".to_string(),
-            "/h/sessions".to_string(),
-        );
-        env.insert(
-            "CODING_CAVE_PROJECT_SLUGS".to_string(),
-            "alpha:beta".to_string(),
-        );
-        env.insert(
-            "CODING_CAVE_WORKSPACES".to_string(),
-            "/h/wt/alpha:/h/wt/beta".to_string(),
-        );
-        let argv = super::build_bwrap_argv(&cfg, &env, &[], -1);
+    use super::{
+        bulk_migrate_legacy_sessions_to_aggregator_at, import_peer_sessions_at,
+        sync_pending_sessions_at,
+    };
 
-        // Bwrap uses --ro-bind-try; assert the (flag, src, dst) triple.
-        let mut found_alpha = false;
-        let mut found_beta = false;
-        for trip in argv.windows(3) {
-            if trip[0] == "--ro-bind-try" {
-                if trip[1] == "/h/sessions/alpha"
-                    && trip[2] == "/home/cave-coder/.claude/peer-sessions/alpha"
-                {
-                    found_alpha = true;
-                }
-                if trip[1] == "/h/sessions/beta"
-                    && trip[2] == "/home/cave-coder/.claude/peer-sessions/beta"
-                {
-                    found_beta = true;
-                }
-            }
-        }
-        assert!(found_alpha, "missing alpha peer-sessions bind in {argv:?}");
-        assert!(found_beta, "missing beta peer-sessions bind in {argv:?}");
+    #[test]
+    fn import_creates_local_copies_with_separate_inodes() {
+        // Each agent's per-agent .claude/projects/-projects-<slug>/ gets
+        // a COPY of every aggregator JSONL (separate inode), so writes
+        // through Claude /resume don't propagate back to the original.
+        let tmp = std::env::temp_dir()
+            .join(format!("cav-import-{}-copies", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        let agg_root = tmp.join("agg");
+        let per_agent = tmp.join("agent-3");
+        fs::create_dir_all(&agg_root.join("demo")).unwrap();
+        fs::create_dir_all(&per_agent).unwrap();
+        let agg_jsonl = agg_root.join("demo/peer-session.jsonl");
+        fs::write(&agg_jsonl, "peer-content").unwrap();
+
+        let n = import_peer_sessions_at(&per_agent, &agg_root, "demo").unwrap();
+        assert_eq!(n, 1);
+
+        let local = per_agent
+            .join(".claude/projects/-projects-demo/peer-session.jsonl");
+        assert!(local.is_file());
+        assert_eq!(fs::read_to_string(&local).unwrap(), "peer-content");
+        assert_ne!(
+            inode_of(&agg_jsonl),
+            inode_of(&local),
+            "import must produce a separate inode (copy, not hardlink) so /resume forks don't propagate"
+        );
     }
 
     #[test]
-    fn argv_omits_peer_sessions_when_root_unset() {
-        // Old-style launches (no CODING_CAVE_PEER_SESSIONS_ROOT in env)
-        // shouldn't emit a peer-sessions bind that would point at an
-        // unresolvable path.
-        let cfg = super::SandboxConfig::default();
-        let mut env = HashMap::new();
-        env.insert("CODING_CAVE_HOME".to_string(), "/h".to_string());
-        env.insert("CODING_CAVE_PROJECT_SLUGS".to_string(), "demo".to_string());
-        let argv = super::build_bwrap_argv(&cfg, &env, &[], -1);
-        for trip in argv.windows(3) {
-            if trip[0] == "--ro-bind-try" {
-                assert!(
-                    !trip[2].starts_with("/home/cave-coder/.claude/peer-sessions"),
-                    "unexpected peer-sessions bind"
-                );
-            }
-        }
+    fn import_skips_existing_local_files() {
+        // Local fork from a prior launch must survive re-import: the
+        // aggregator could have a pristine version, but the agent's
+        // local copy with their own /resume modifications is what
+        // matters.
+        let tmp = std::env::temp_dir()
+            .join(format!("cav-import-{}-skip", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        let agg_root = tmp.join("agg");
+        let per_agent = tmp.join("agent");
+        fs::create_dir_all(&agg_root.join("demo")).unwrap();
+        let pa_dir = per_agent.join(".claude/projects/-projects-demo");
+        fs::create_dir_all(&pa_dir).unwrap();
+        fs::write(&agg_root.join("demo/x.jsonl"), "pristine").unwrap();
+        fs::write(&pa_dir.join("x.jsonl"), "local-fork-with-edits").unwrap();
+
+        import_peer_sessions_at(&per_agent, &agg_root, "demo").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&pa_dir.join("x.jsonl")).unwrap(),
+            "local-fork-with-edits"
+        );
     }
 
-    use super::sync_pending_sessions_at;
+    #[test]
+    fn import_handles_missing_aggregator_dir() {
+        let tmp = std::env::temp_dir()
+            .join(format!("cav-import-{}-missing", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        let per_agent = tmp.join("agent");
+        fs::create_dir_all(&per_agent).unwrap();
+        let n = import_peer_sessions_at(&per_agent, &tmp.join("nope"), "demo").unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn import_only_jsonl_files() {
+        let tmp = std::env::temp_dir()
+            .join(format!("cav-import-{}-filter", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        let agg_root = tmp.join("agg");
+        let per_agent = tmp.join("agent");
+        fs::create_dir_all(&agg_root.join("demo")).unwrap();
+        fs::create_dir_all(&per_agent).unwrap();
+        fs::write(&agg_root.join("demo/keep.jsonl"), "keep").unwrap();
+        fs::write(&agg_root.join("demo/skip.txt"), "skip").unwrap();
+
+        import_peer_sessions_at(&per_agent, &agg_root, "demo").unwrap();
+
+        let pa_dir = per_agent.join(".claude/projects/-projects-demo");
+        assert!(pa_dir.join("keep.jsonl").is_file());
+        assert!(!pa_dir.join("skip.txt").exists());
+    }
+
+    #[test]
+    fn bulk_migrate_legacy_uses_hardlinks_when_same_fs() {
+        // One-time migration into the aggregator: hardlink, not copy,
+        // so the same inode is canonical across both places during the
+        // transition.
+        let tmp = std::env::temp_dir()
+            .join(format!("cav-bulk-{}-hardlink", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        let legacy = tmp.join("legacy-home");
+        let agg_root = tmp.join("agg");
+        let legacy_dir = legacy.join(".claude/projects/-projects-demo");
+        fs::create_dir_all(&legacy_dir).unwrap();
+        let legacy_jsonl = legacy_dir.join("a.jsonl");
+        fs::write(&legacy_jsonl, "old-session").unwrap();
+
+        let n = bulk_migrate_legacy_sessions_to_aggregator_at(&legacy, &agg_root, "demo").unwrap();
+        assert_eq!(n, 1);
+
+        let migrated = agg_root.join("demo/a.jsonl");
+        assert_eq!(inode_of(&legacy_jsonl), inode_of(&migrated));
+    }
+
+    #[test]
+    fn bulk_migrate_legacy_skips_already_migrated() {
+        // Re-running migration must not clobber previously-migrated
+        // entries (which may have diverged via further agent activity).
+        let tmp = std::env::temp_dir()
+            .join(format!("cav-bulk-{}-skip", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        let legacy = tmp.join("legacy");
+        let agg_root = tmp.join("agg");
+        let legacy_dir = legacy.join(".claude/projects/-projects-demo");
+        fs::create_dir_all(&legacy_dir).unwrap();
+        fs::create_dir_all(&agg_root.join("demo")).unwrap();
+        fs::write(&legacy_dir.join("a.jsonl"), "legacy").unwrap();
+        fs::write(&agg_root.join("demo/a.jsonl"), "newer").unwrap();
+
+        bulk_migrate_legacy_sessions_to_aggregator_at(&legacy, &agg_root, "demo").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&agg_root.join("demo/a.jsonl")).unwrap(),
+            "newer"
+        );
+    }
+
+    #[test]
+    fn launch_makes_resume_see_peer_sessions() {
+        // The /resume regression: after cav prepares a per-agent home,
+        // /resume must see every project session, not just the agent's
+        // own. Mirrors what run_agent does at launch — bulk migrate +
+        // import — and asserts the agent sees the peer JSONLs.
+        let tmp = std::env::temp_dir()
+            .join(format!("cav-resume-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        let legacy = tmp.join("legacy-home");
+        let agg_root = tmp.join("data/sessions");
+        let per_agent = tmp.join("agents/3/home");
+        fs::create_dir_all(&legacy.join(".claude/projects/-projects-demo")).unwrap();
+        fs::create_dir_all(&agg_root).unwrap();
+        fs::create_dir_all(&per_agent).unwrap();
+        // Two pre-existing legacy sessions from before isolation.
+        fs::write(
+            &legacy.join(".claude/projects/-projects-demo/old-1.jsonl"),
+            "history-1",
+        )
+        .unwrap();
+        fs::write(
+            &legacy.join(".claude/projects/-projects-demo/old-2.jsonl"),
+            "history-2",
+        )
+        .unwrap();
+
+        // Same call sequence run_agent makes.
+        bulk_migrate_legacy_sessions_to_aggregator_at(&legacy, &agg_root, "demo").unwrap();
+        import_peer_sessions_at(&per_agent, &agg_root, "demo").unwrap();
+
+        // /resume looks at this dir; must contain both historical
+        // sessions for them to appear in the resume list.
+        let pa_dir = per_agent.join(".claude/projects/-projects-demo");
+        assert!(pa_dir.join("old-1.jsonl").is_file(), "old-1 missing — /resume would not see it");
+        assert!(pa_dir.join("old-2.jsonl").is_file(), "old-2 missing — /resume would not see it");
+    }
 
     #[test]
     fn launch_state_invariant_no_session_jsonl_at_cave_internal_path() {
