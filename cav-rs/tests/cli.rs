@@ -210,6 +210,105 @@ fn init_creates_shared_repo_and_hook() {
     );
 }
 
+fn run_empty_init_agent_flow(default_branch: &str, name_suffix: &str) {
+    // Empty repo with `default_branch` as the unborn HEAD. cav init must
+    // succeed without fabricating a commit. The agent then makes the very
+    // first commit on its dev branch and pushes it to the shared remote.
+    // The host fetches and verifies the dev branch is reachable.
+    let uniq = format!("{}-{}", std::process::id(), name_suffix);
+    let dir = std::env::temp_dir().join(format!("cav-cli-test-{uniq}"));
+    let data_dir = std::env::temp_dir().join(format!("cav-cli-data-{uniq}"));
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&data_dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::create_dir_all(&data_dir).unwrap();
+    git(&["init", "-b", default_branch], &dir);
+    git(&["config", "user.email", "test@test.com"], &dir);
+    git(&["config", "user.name", "Test"], &dir);
+
+    let init_out = Command::new(CAV)
+        .args(["init", dir.to_str().unwrap()])
+        .env("CODING_CAVE_DATA_DIR", &data_dir)
+        .env_remove("CODING_CAVE_VERSION")
+        .env_remove("CODING_CAVE_AGENT_ID")
+        .output()
+        .expect("cav binary not found");
+    assert_eq!(init_out.status.code(), Some(0), "stderr: {}", stderr(&init_out));
+
+    let head_check = Command::new("git")
+        .args(["rev-parse", "--verify", "HEAD"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(
+        !head_check.status.success(),
+        "cav init must not fabricate a commit; HEAD should remain unborn"
+    );
+
+    // Simulate the agent workspace: clone shared, checkout orphan default
+    // branch, make the first commit, push as agent-1/<default_branch>.
+    let shared = dir.join(".coding-cave").join("cave-shared.git");
+    let agent_ws = std::env::temp_dir().join(format!("cav-cli-agent-{uniq}"));
+    let _ = fs::remove_dir_all(&agent_ws);
+    git(
+        &[
+            "clone",
+            "--shared",
+            shared.to_str().unwrap(),
+            agent_ws.to_str().unwrap(),
+        ],
+        &dir,
+    );
+    git(&["config", "user.email", "agent@test.com"], &agent_ws);
+    git(&["config", "user.name", "Agent"], &agent_ws);
+    git(&["checkout", "--orphan", default_branch], &agent_ws);
+    fs::write(agent_ws.join("first.txt"), "hello\n").unwrap();
+    git(&["add", "first.txt"], &agent_ws);
+    git(&["commit", "-m", "first commit"], &agent_ws);
+    let agent_sha = git_out(&["rev-parse", "HEAD"], &agent_ws);
+
+    let dev_branch = format!("agent-1/{default_branch}");
+    agent_push(
+        &[
+            "push",
+            shared.to_str().unwrap(),
+            &format!("{default_branch}:refs/heads/{dev_branch}"),
+        ],
+        &agent_ws,
+        "1",
+    );
+
+    // Shared repo must now have the agent's first commit on the dev branch.
+    let shared_sha = git_out(&["rev-parse", &dev_branch], &shared);
+    assert_eq!(
+        shared_sha, agent_sha,
+        "shared repo must have the agent's first commit on {dev_branch}"
+    );
+
+    // Host can fetch the dev branch from the cave remote (this is the first
+    // ref that ever existed in the system).
+    git(&["fetch", "cave"], &dir);
+    let host_sha = git_out(&["rev-parse", &format!("cave/{dev_branch}")], &dir);
+    assert_eq!(
+        host_sha, agent_sha,
+        "host repo must see the agent's first commit via the cave remote"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&agent_ws);
+    let _ = fs::remove_dir_all(&data_dir);
+}
+
+#[test]
+fn empty_init_then_agent_first_commit_main() {
+    run_empty_init_agent_flow("main", "empty-init-main");
+}
+
+#[test]
+fn empty_init_then_agent_first_commit_master() {
+    run_empty_init_agent_flow("master", "empty-init-master");
+}
+
 #[test]
 fn init_idempotent() {
     let repo = TestRepo::new("init-idempotent");

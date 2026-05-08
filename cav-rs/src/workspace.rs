@@ -125,12 +125,7 @@ pub fn create(base: &Path, agent_id: &str) -> Result<(PathBuf, PathBuf)> {
     }
 
     let empty = repo_is_empty(base);
-    let base_name = if empty {
-        "main".to_string()
-    } else {
-        let user_branch = git::current_branch(Some(base))?;
-        resolve_base(user_branch)
-    };
+    let base_name = resolve_base(git::current_branch(Some(base))?);
 
     if base_name == "HEAD" {
         bail!(

@@ -34,16 +34,6 @@ fn install_hooks(shared: &Path) -> Result<()> {
     Ok(())
 }
 
-fn require_commits(base: &Path) -> Result<()> {
-    let ok = git::git(&["rev-parse", "HEAD"], Some(base), false, true, false).is_ok();
-    if !ok {
-        bail!(
-            "No commits yet. Commit your files first:\n  git add -A && git commit -m 'Initial commit'"
-        );
-    }
-    Ok(())
-}
-
 fn warn_dirty(base: &Path) {
     let dirty = git::git_output(
         &["status", "--porcelain", "--ignore-submodules"],
@@ -203,7 +193,6 @@ pub fn init(path: &Path, reinitialize: bool) -> Result<()> {
         )?;
         registry::register_project(&base)?;
         workspace::reconfigure(&base)?;
-        require_commits(&base)?;
         warn_dirty(&base);
         publish_bases(&base)?;
         println!("Coding Cave reinitialized at {}", cav.display());
@@ -230,8 +219,6 @@ pub fn init(path: &Path, reinitialize: bool) -> Result<()> {
              Remove it first: git remote remove {CAVE_SHARED_REMOTE}"
         );
     }
-
-    require_commits(&base)?;
 
     std::fs::create_dir_all(&cav)?;
     git::git(
