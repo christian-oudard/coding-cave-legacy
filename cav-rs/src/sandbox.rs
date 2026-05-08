@@ -2098,7 +2098,14 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
         .join(":");
 
     let mut env: HashMap<String, String> = HashMap::new();
-    for var in &["TERM", "COLORTERM", "TZ"] {
+    for var in &[
+        "TERM",
+        "COLORTERM",
+        "TZ",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+    ] {
         if let Ok(v) = std::env::var(var) {
             env.insert(var.to_string(), v);
         }
@@ -2308,6 +2315,12 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
     // the host pid-ns as defence-in-depth; bwrap handles the agent's pid-ns
     // separately via --unshare-pid. --fork is required so the exec'd target
     // becomes PID 1 of the new namespace.
+    //
+    // --mount-proc remounts /proc inside the new mount+pid ns. Without it,
+    // /proc inside supervisor is the parent's procfs (cave's pid view), so
+    // bwrap's namespace_ids_read(child_pid) opens /proc/<bwrap-pid-ns-pid>
+    // against the wrong /proc. In a nested cave that usually means ENOENT and
+    // bwrap dies before applying the seccomp/firewall.
     let mut ns_cmd: Vec<String> = vec![
         unshare_bin,
         "--user".to_string(),
@@ -2315,6 +2328,7 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
         "--mount".to_string(),
         "--pid".to_string(),
         "--fork".to_string(),
+        "--mount-proc".to_string(),
         "--map-user=0".to_string(),
         "--map-group=0".to_string(),
         "--".to_string(),
