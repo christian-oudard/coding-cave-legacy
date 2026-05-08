@@ -39,6 +39,14 @@ path = "src/bin/broker.rs"
 name = "cav-channel-server"
 path = "src/bin/channel_server.rs"
 
+[[bin]]
+name = "cav-package-manager"
+path = "src/bin/package_manager.rs"
+
+[[bin]]
+name = "cav-package-client"
+path = "src/bin/package_client.rs"
+
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
