@@ -535,6 +535,13 @@ fn looks_like_hash(s: &str) -> bool {
 }
 
 fn approve_reject_base(agent_id: Option<&str>) -> Result<PathBuf> {
+    // Prefer the CWD's repo when the user is inside one. The registry lookup
+    // is only a fallback for `cav approve <id>` invoked from outside any
+    // project: otherwise it would chase the agent's home project even when
+    // the same agent ID has pending work in the project the user is in.
+    if let Ok(root) = git::repo_root(None) {
+        return Ok(PathBuf::from(root));
+    }
     if let Some(aid) = agent_id {
         if let Some(slug) = registry::agent_project(aid) {
             if let Some(p) = registry::project_path(&slug)? {

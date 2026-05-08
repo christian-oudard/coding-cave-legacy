@@ -308,6 +308,47 @@ fn partial_approve_preserves_agent_branch() {
     );
 }
 
+#[test]
+fn approve_uses_cwd_when_agent_registered_to_other_project() {
+    // Regression: approve_reject_base used to look up the agent's home project
+    // in the registry and operate there, ignoring the user's CWD. That broke
+    // approving an agent's commits from a project where the same agent ID had
+    // pending work but was registered (in the global registry) to a different
+    // project. CWD must win whenever it's a real coding-cave project.
+    let p = Project::new("approve-cwd-wins");
+    p.push_agent_commits("7", "main", &[("a.txt", "A\n")]);
+
+    // Redirect agent 7 to a "ghost" project pointing to a non-existent path.
+    // With the old behavior, approve would chase that path and fail.
+    let db_path = p.data_dir.join("coding-cave.db");
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let ghost_path = std::env::temp_dir().join("cav-ghost-nonexistent");
+    conn.execute(
+        "INSERT OR REPLACE INTO projects (slug, path) VALUES (?1, ?2)",
+        rusqlite::params!["ghost", ghost_path.to_string_lossy()],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT OR REPLACE INTO agents (agent_id, project, started_at, exited_at) \
+         VALUES (?1, 'ghost', 0, 1)",
+        rusqlite::params!["7"],
+    )
+    .unwrap();
+    drop(conn);
+
+    let out = p.cav(&["approve", "-y", "7"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "approve should use CWD, not chase the ghost project: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !p.shared_has_ref("refs/heads/agent-7/main"),
+        "agent branch should be deleted after full approval in CWD project"
+    );
+}
+
 // --- Reject rolls back main; agent's dev branch is left to the agent ---
 
 #[test]
