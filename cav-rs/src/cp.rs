@@ -18,13 +18,14 @@ pub fn cp(srcs: Vec<String>, dest: String, recursive: bool, force: bool) -> Resu
 
     // Pre-resolve ALL src cave paths before any prompting so we only ask for
     // agent selection once, even when there are multiple sources.
-    let resolved_srcs: Vec<Option<PathBuf>> = srcs.iter()
+    let resolved_srcs: Vec<Option<ResolvedCave>> = srcs.iter()
         .map(|s| resolve_cave_path(s, false))
         .collect::<Result<_>>()?;
 
-    let dest_path = resolve_cave_path(&dest, true)?;
+    let dest_resolved = resolve_cave_path(&dest, true)?;
 
-    if let Some(dp) = dest_path {
+    if let Some(dr) = dest_resolved.as_ref() {
+        let dp = &dr.path;
         // host -> cave
         if let Some(parent) = dp.parent() {
             std::fs::create_dir_all(parent)?;
@@ -32,6 +33,7 @@ pub fn cp(srcs: Vec<String>, dest: String, recursive: bool, force: bool) -> Resu
         if srcs.len() > 1 && !dp.is_dir() {
             bail!("cp: base '{}': not a directory", dest);
         }
+        let dest_qual = qualify_spec(&dest, dest_resolved.as_ref());
         for src in &srcs {
             let src_obj = PathBuf::from(src).canonicalize()
                 .unwrap_or_else(|_| PathBuf::from(src));
@@ -61,7 +63,7 @@ pub fn cp(srcs: Vec<String>, dest: String, recursive: bool, force: bool) -> Resu
                 copy_nofollow(&src_obj, &base)?;
                 copy_stat(&src_obj, &base);
             }
-            eprintln!("  {src} -> {dest}");
+            eprintln!("  {src} -> {dest_qual}");
         }
     } else if resolved_srcs.iter().any(|p| p.is_some()) {
         // cave -> host (use pre-resolved paths)
@@ -72,10 +74,11 @@ pub fn cp(srcs: Vec<String>, dest: String, recursive: bool, force: bool) -> Resu
         if srcs.len() > 1 && !host_dest.is_dir() {
             bail!("cp: base '{}': not a directory", dest);
         }
-        for (src, src_path) in srcs.iter().zip(resolved_srcs.iter()) {
-            let src_path = src_path.as_ref().ok_or_else(|| {
+        for (src, src_resolved) in srcs.iter().zip(resolved_srcs.iter()) {
+            let sr = src_resolved.as_ref().ok_or_else(|| {
                 anyhow::anyhow!("Source not found in cave: {src}")
             })?;
+            let src_path = &sr.path;
             if src_path.is_symlink() {
                 bail!("Refusing to copy symlink from cave: {src}");
             }
@@ -105,7 +108,8 @@ pub fn cp(srcs: Vec<String>, dest: String, recursive: bool, force: bool) -> Resu
                 copy_nofollow(src_path, &base)?;
                 copy_stat(src_path, &base);
             }
-            eprintln!("  {src} -> {dest}");
+            let src_qual = qualify_spec(src, Some(sr));
+            eprintln!("  {src_qual} -> {dest}");
         }
     } else {
         bail!(
@@ -119,8 +123,16 @@ pub fn cp(srcs: Vec<String>, dest: String, recursive: bool, force: bool) -> Resu
     Ok(())
 }
 
-/// Returns Some(host_path) if spec has a cave prefix, else None.
-fn resolve_cave_path(spec: &str, is_dest: bool) -> Result<Option<PathBuf>> {
+struct ResolvedCave {
+    path: PathBuf,
+    slug: String,
+    /// `Some` when the path pins to a specific agent (worktree or live cave).
+    /// `None` for `~` paths, which share a single persistent home across agents.
+    agent_id: Option<String>,
+}
+
+/// Returns Some(ResolvedCave) if spec has a cave prefix, else None.
+fn resolve_cave_path(spec: &str, is_dest: bool) -> Result<Option<ResolvedCave>> {
     if !spec.contains(':') {
         return Ok(None);
     }
@@ -151,29 +163,45 @@ fn resolve_cave_path(spec: &str, is_dest: bool) -> Result<Option<PathBuf>> {
         let rel = if path == "~" { "" } else { &path[2..] };
         let result = normalize(&home, rel);
         check_in_dir(&result, &home, is_dest)?;
-        return Ok(Some(result));
+        return Ok(Some(ResolvedCave { path: result, slug, agent_id: None }));
     }
 
     if path.starts_with('/') {
         let project_prefix = format!("/projects/{slug}");
         if path == project_prefix || path.starts_with(&format!("{project_prefix}/")) {
             let rel = path[project_prefix.len()..].trim_start_matches('/');
-            let (ws, _) = worktree_for_slug(&slug, agent_id.as_deref())?;
+            let (ws, aid) = worktree_for_slug(&slug, agent_id.as_deref())?;
             let result = normalize(&ws, rel);
             check_in_dir(&result, &ws, is_dest)?;
-            return Ok(Some(result));
+            return Ok(Some(ResolvedCave { path: result, slug, agent_id: Some(aid) }));
         }
         // Cave-internal absolute path via /proc/<pid>/root
-        let (cave_root, _) = cave_root_for_slug(&slug, agent_id.as_deref())?;
+        let (cave_root, aid) = cave_root_for_slug(&slug, agent_id.as_deref())?;
         let rel = path.trim_start_matches('/');
         let result = if rel.is_empty() { cave_root } else { cave_root.join(rel) };
-        return Ok(Some(result));
+        return Ok(Some(ResolvedCave { path: result, slug, agent_id: Some(aid) }));
     }
 
-    let (ws, _) = worktree_for_slug(&slug, agent_id.as_deref())?;
+    let (ws, aid) = worktree_for_slug(&slug, agent_id.as_deref())?;
     let result = normalize(&ws, path);
     check_in_dir(&result, &ws, is_dest)?;
-    Ok(Some(result))
+    Ok(Some(ResolvedCave { path: result, slug, agent_id: Some(aid) }))
+}
+
+/// Rewrite the prefix of a cave spec to the fully qualified `slug@agent_id:path`
+/// form (or `slug:path` when the path is not agent-specific, e.g. `~/...`).
+fn qualify_spec(spec: &str, resolved: Option<&ResolvedCave>) -> String {
+    match resolved {
+        Some(r) => {
+            let path = spec.splitn(2, ':').nth(1).unwrap_or("");
+            let qualified = match &r.agent_id {
+                Some(aid) => style::agent_name(&format!("{}@{aid}", r.slug)),
+                None => style::blue(&r.slug),
+            };
+            format!("{qualified}:{path}")
+        }
+        None => spec.to_string(),
+    }
 }
 
 fn detect_slug() -> Result<String> {
@@ -204,9 +232,15 @@ fn infer_agent_from_branch(slug: &str) -> Option<String> {
 }
 
 fn worktree_for_slug(slug: &str, agent_id: Option<&str>) -> Result<(PathBuf, String)> {
-    let inferred = agent_id
-        .map(|s| s.to_string())
-        .or_else(|| infer_agent_from_branch(slug));
+    // Explicit `@N:` from the spec wins. Branch-based inference is only
+    // honored when the inferred agent is currently running — otherwise we'd
+    // silently copy into the worktree of a defunct session just because the
+    // host CWD happens to be checked out on its branch.
+    let inferred = match agent_id {
+        Some(aid) => Some(aid.to_string()),
+        None => infer_agent_from_branch(slug)
+            .filter(|aid| registry::is_agent_running(aid).unwrap_or(false)),
+    };
     if let Some(aid) = inferred {
         let ws = worktree_dir(slug, &aid);
         if !ws.exists() {
@@ -242,6 +276,19 @@ fn worktree_for_slug(slug: &str, agent_id: Option<&str>) -> Result<(PathBuf, Str
             .to_string_lossy()
             .to_string();
         return Ok((candidates[0].clone(), aid));
+    }
+    // Prefer the unique running agent when present, so a single live cave
+    // wins over stale worktrees from stopped sessions.
+    let running: Vec<&PathBuf> = candidates
+        .iter()
+        .filter(|p| {
+            let aid = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+            registry::is_agent_running(&aid).unwrap_or(false)
+        })
+        .collect();
+    if running.len() == 1 {
+        let aid = running[0].file_name().unwrap_or_default().to_string_lossy().to_string();
+        return Ok((running[0].clone(), aid));
     }
     let aids: Vec<String> = candidates
         .iter()
@@ -288,9 +335,14 @@ fn cave_root_for_slug(slug: &str, agent_id: Option<&str>) -> Result<(PathBuf, St
         })
         .collect();
 
-    let inferred = agent_id
-        .map(|s| s.to_string())
-        .or_else(|| infer_agent_from_branch(slug));
+    // Explicit `@N:` from the spec is honored even if the agent is stopped
+    // (we'll error below). Branch-based inference is dropped if the agent
+    // isn't a live cave so we fall through to the running candidates.
+    let inferred = match agent_id {
+        Some(aid) => Some(aid.to_string()),
+        None => infer_agent_from_branch(slug)
+            .filter(|aid| candidates.contains(aid)),
+    };
     let chosen = if let Some(aid) = inferred {
         if !candidates.contains(&aid) {
             bail!(
@@ -415,7 +467,7 @@ fn expand_cave_glob(spec: &str) -> Result<Vec<String>> {
         format!("{prefix}:{static_path}")
     };
     let base_host = match resolve_cave_path(&base_spec, false)? {
-        Some(p) => p,
+        Some(r) => r.path,
         None => return Ok(vec![spec.to_string()]),
     };
     if !base_host.is_dir() {
