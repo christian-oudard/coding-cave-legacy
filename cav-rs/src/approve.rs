@@ -9,6 +9,7 @@ use crate::git;
 use crate::push;
 use crate::registry;
 use crate::sandbox;
+use crate::style;
 
 pub fn approve(
     base: &Path,
@@ -68,12 +69,16 @@ pub fn approve(
 
     if candidates.is_empty() {
         if let Some(aid) = agent_id {
-            bail!("No commits to approve for agent {aid} in {slug}.");
+            bail!(
+                "No commits to approve for agent {} in {}.",
+                style::bold(aid),
+                style::blue(&slug)
+            );
         }
         if has_any_agent_branches {
-            bail!("No unmerged commits to approve in {slug}.");
+            bail!("No unmerged commits to approve in {}.", style::blue(&slug));
         }
-        bail!("No agent branches in {slug}.");
+        bail!("No agent branches in {}.", style::blue(&slug));
     }
 
     // Resolve commit prefix against candidates' pending ranges.
@@ -90,15 +95,23 @@ pub fn approve(
             }
         }
         match matches.len() {
-            0 => bail!("No pending commit matches '{prefix}' in {slug}."),
+            0 => bail!(
+                "No pending commit matches '{}' in {}.",
+                style::yellow(prefix),
+                style::blue(&slug)
+            ),
             1 => {
                 let (cand, sha) = matches.into_iter().next().unwrap();
                 candidates = vec![cand];
                 commit_sha = Some(sha);
             }
             _ => bail!(
-                "Commit prefix '{prefix}' is ambiguous in {slug}.\n\
-                 Specify agent: cav approve <agent-id> -c {prefix}"
+                "Commit prefix '{}' is ambiguous in {}.\n\
+                 Specify agent: {} -c {}",
+                style::yellow(prefix),
+                style::blue(&slug),
+                style::bold_cyan("cav approve <agent-id>"),
+                style::yellow(prefix),
             ),
         }
     }
@@ -157,12 +170,19 @@ pub fn approve(
     if !creating {
         let bs = before_sha.as_deref().unwrap();
         if bs == dev_tip {
-            bail!("No commits to approve for agent {resolved_agent_id} in {slug}.");
+            bail!(
+                "No commits to approve for agent {} in {}.",
+                style::bold(&resolved_agent_id),
+                style::blue(&slug)
+            );
         }
         if !git::is_ancestor(bs, &dev_tip, Some(base)) {
             bail!(
-                "Cannot approve: {branch} is not a fast-forward from {base_name}.\n\
-                 The agent must rebase onto {base_name} first."
+                "Cannot approve: {} is not a fast-forward from {}.\n\
+                 The agent must rebase onto {} first.",
+                style::yellow(&branch),
+                style::yellow(&base_name),
+                style::yellow(&base_name),
             );
         }
     }
@@ -198,17 +218,33 @@ pub fn approve(
         let n = commits.len();
         let total = all_commits.len();
         let word = if total == 1 { "commit" } else { "commits" };
-        println!("\nApproving {n} of {total} {word} from {name} into {slug}/{base_name}:\n");
+        println!(
+            "\nApproving {} of {} {word} from {} into {}/{}:\n",
+            style::bold(&n.to_string()),
+            style::bold(&total.to_string()),
+            style::agent_name(&name),
+            style::blue(&slug),
+            style::yellow(&base_name),
+        );
         for line in &commits {
-            println!("  {line}");
+            println!("  {}", style::commit_line(line));
         }
-        println!("\n  ({remaining} remaining on {branch})");
+        println!(
+            "\n  {}",
+            style::dim(&format!("({remaining} remaining on {branch})"))
+        );
     } else {
         let n = all_commits.len();
         let word = if n == 1 { "commit" } else { "commits" };
-        println!("\n{n} {word} from {name} to merge into {slug}/{base_name}:\n");
+        println!(
+            "\n{} {word} from {} to merge into {}/{}:\n",
+            style::bold(&n.to_string()),
+            style::agent_name(&name),
+            style::blue(&slug),
+            style::yellow(&base_name),
+        );
         for line in &all_commits {
-            println!("  {line}");
+            println!("  {}", style::commit_line(line));
         }
     }
 
@@ -252,12 +288,14 @@ fn pick_candidate(
         let ids: std::collections::BTreeSet<String> =
             candidates.iter().map(|(_, _, aid)| aid.clone()).collect();
         bail!(
-            "Multiple choices in {slug}: agents {}\nSpecify which: cav approve <agent-id>",
-            ids.into_iter().collect::<Vec<_>>().join(", ")
+            "Multiple choices in {}: agents {}\nSpecify which: {}",
+            style::blue(slug),
+            style::bold(&ids.into_iter().collect::<Vec<_>>().join(", ")),
+            style::bold_cyan("cav approve <agent-id>"),
         );
     }
 
-    println!("\nPending work in {slug}:\n");
+    println!("\nPending work in {}:\n", style::blue(slug));
     for (i, (branch, base_name, aid)) in candidates.iter().enumerate() {
         let name = registry::display_name(base, aid);
         let remote_dev = format!("{CAVE_SHARED_REMOTE}/{branch}");
@@ -278,15 +316,14 @@ fn pick_candidate(
         };
         let n = commits.len();
         let word = if n == 1 { "commit" } else { "commits" };
-        println!("  {}) {name} → {base_name}    {n} {word}", i + 1);
-        let show = if n == 4 { 4 } else { 3.min(n) };
-        for line in commits.iter().take(show) {
-            println!("     {line}");
-        }
-        let hidden = n - show;
-        if hidden >= 2 {
-            println!("     ... and {} more", hidden);
-        }
+        println!(
+            "  {}) {} → {}    {} {word}",
+            style::bold(&(i + 1).to_string()),
+            style::agent_name(&name),
+            style::yellow(base_name),
+            style::bold(&n.to_string()),
+        );
+        print!("{}", git::format_commit_list(&commits, "     ", Some(3)));
     }
 
     print!("\nApprove which? [1-{}] ", candidates.len());

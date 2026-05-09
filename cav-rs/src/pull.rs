@@ -5,6 +5,7 @@ use anyhow::{bail, Result};
 use crate::config::{self, inside_cave, parse_dev_branch, resolve_base, self_agent_id, worktree_dir};
 use crate::constants::{CAVE_SHARED_REMOTE, HOST_SHARED_REMOTE};
 use crate::git;
+use crate::style;
 
 pub fn pull(base: &Path, force: bool) -> Result<()> {
     let local_branch = git::current_branch(Some(base))?;
@@ -22,9 +23,11 @@ pub fn pull(base: &Path, force: bool) -> Result<()> {
     let parsed = parse_dev_branch(&local_branch);
     if parsed.is_none() {
         bail!(
-            "Not on a dev branch (current: '{local_branch}').\n\
+            "Not on a dev branch (current: '{}').\n\
              cav pull is only valid on agent branches (e.g. agent-1/main).\n\
-             To review agent changes, run: cav review <agent-id>"
+             To review agent changes, run: {}",
+            style::yellow(&local_branch),
+            style::bold_cyan("cav review <agent-id>"),
         );
     }
     let (base_name, agent_id) = parsed.unwrap();
@@ -45,7 +48,7 @@ pub fn pull(base: &Path, force: bool) -> Result<()> {
     )?;
 
     if git::git_output(&["rev-parse", &remote_dev], Some(base)).is_err() {
-        println!("No remote branch '{remote_dev}'.");
+        println!("No remote branch '{}'.", style::yellow(&remote_dev));
         return Ok(());
     }
 
@@ -102,9 +105,17 @@ pub fn pull(base: &Path, force: bool) -> Result<()> {
         let count = actual_local_only.lines().count();
         let n = if count == 1 { "commit" } else { "commits" };
         bail!(
-            "Local {n} on '{local_branch}' would be overwritten:\n\
-             {actual_local_only}\n\
-             Use 'cav pull --force' to discard them."
+            "Local {} {n} on '{}' would be overwritten:\n\
+             {}\n\
+             Use {} to discard them.",
+            style::bold(&count.to_string()),
+            style::yellow(&local_branch),
+            actual_local_only
+                .lines()
+                .map(style::commit_line)
+                .collect::<Vec<_>>()
+                .join("\n"),
+            style::bold_cyan("cav pull --force"),
         );
     }
 
@@ -115,7 +126,11 @@ pub fn pull(base: &Path, force: bool) -> Result<()> {
         verbose,
         verbose,
     )?;
-    println!("Reset '{local_branch}' to '{remote_dev}'.");
+    println!(
+        "Reset '{}' to '{}'.",
+        style::yellow(&local_branch),
+        style::yellow(&remote_dev),
+    );
     show_ahead(base, &remote_base, &remote_dev, &base_name);
     Ok(())
 }
@@ -135,7 +150,7 @@ fn pull_cave_self(base: &Path, local_branch: &str, agent_id: &str, force: bool) 
     let remote_sha = match git::git_output(&["rev-parse", &remote_dev], Some(base)) {
         Ok(s) => s,
         Err(_) => {
-            println!("No upstream dev ref '{remote_dev}'.");
+            println!("No upstream dev ref '{}'.", style::yellow(&remote_dev));
             return Ok(());
         }
     };
@@ -156,9 +171,17 @@ fn pull_cave_self(base: &Path, local_branch: &str, agent_id: &str, force: bool) 
         let count = local_only.lines().count();
         let n = if count == 1 { "commit" } else { "commits" };
         bail!(
-            "Local {n} on '{local_branch}' would be overwritten:\n\
-             {local_only}\n\
-             Use 'cav pull --force' to discard them."
+            "Local {} {n} on '{}' would be overwritten:\n\
+             {}\n\
+             Use {} to discard them.",
+            style::bold(&count.to_string()),
+            style::yellow(local_branch),
+            local_only
+                .lines()
+                .map(style::commit_line)
+                .collect::<Vec<_>>()
+                .join("\n"),
+            style::bold_cyan("cav pull --force"),
         );
     }
 
@@ -169,7 +192,11 @@ fn pull_cave_self(base: &Path, local_branch: &str, agent_id: &str, force: bool) 
         verbose,
         verbose,
     )?;
-    println!("Reset '{local_branch}' to '{remote_dev}'.");
+    println!(
+        "Reset '{}' to '{}'.",
+        style::yellow(local_branch),
+        style::yellow(&remote_dev),
+    );
     Ok(())
 }
 
@@ -260,7 +287,13 @@ fn show_ahead(base: &Path, remote_base: &str, remote_dev: &str, base_name: &str)
     if !log.is_empty() {
         let count = log.lines().count();
         let n = if count == 1 { "commit" } else { "commits" };
-        println!("{count} {n} ahead of {base_name}:");
-        println!("{log}");
+        println!(
+            "{} {n} ahead of {}:",
+            style::bold(&count.to_string()),
+            style::yellow(base_name),
+        );
+        for line in log.lines() {
+            println!("{}", style::commit_line(line));
+        }
     }
 }

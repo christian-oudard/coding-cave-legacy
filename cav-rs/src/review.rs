@@ -8,6 +8,7 @@ use crate::constants::CAVE_SHARED_REMOTE;
 use crate::git;
 use crate::pull;
 use crate::registry;
+use crate::style;
 
 pub fn review(base: &Path, agent_id: &str) -> Result<()> {
     let verbose = config::verbose() >= 1;
@@ -26,7 +27,7 @@ pub fn review(base: &Path, agent_id: &str) -> Result<()> {
         .collect();
 
     if candidates.is_empty() {
-        bail!("No agent branch found for agent {agent_id}.");
+        bail!("No agent branch found for agent {}.", style::bold(agent_id));
     }
 
     for branch in &candidates {
@@ -95,7 +96,7 @@ pub fn review(base: &Path, agent_id: &str) -> Result<()> {
         )?;
     }
 
-    println!("Checked out {agent_branch}");
+    println!("Checked out {}", style::yellow(&agent_branch));
 
     let log = git::git_output(
         &["log", "--oneline", &format!("{remote_target}..{remote_ref}")],
@@ -105,8 +106,14 @@ pub fn review(base: &Path, agent_id: &str) -> Result<()> {
     if !log.is_empty() {
         let count = log.lines().count();
         let n = if count == 1 { "commit" } else { "commits" };
-        println!("{count} {n} ahead of {target}:");
-        println!("{log}");
+        println!(
+            "{} {n} ahead of {}:",
+            style::bold(&count.to_string()),
+            style::yellow(&target),
+        );
+        for line in log.lines() {
+            println!("{}", style::commit_line(line));
+        }
     }
     Ok(())
 }
@@ -117,12 +124,21 @@ fn pick(
     agent_id: &str,
 ) -> Result<(String, String)> {
     let name = registry::display_name(base, agent_id);
-    println!("\nMultiple branches with pending work for {name}:\n");
+    println!(
+        "\nMultiple branches with pending work for {}:\n",
+        style::agent_name(&name),
+    );
     for (i, (branch, target, lines)) in pending.iter().enumerate() {
         let n = lines.len();
         let word = if n == 1 { "commit" } else { "commits" };
-        println!("  {}) {branch} -> {target}    {n} {word}", i + 1);
-        print!("{}", git::format_commit_list(lines, 3));
+        println!(
+            "  {}) {} -> {}    {} {word}",
+            style::bold(&(i + 1).to_string()),
+            style::yellow(branch),
+            style::yellow(target),
+            style::bold(&n.to_string()),
+        );
+        print!("{}", git::format_commit_list(lines, "  ", Some(3)));
     }
 
     print!("\nReview which? [1-{}] ", pending.len());

@@ -14,42 +14,6 @@ use crate::style;
 
 const MAX_COMMITS_DISPLAY: usize = 3;
 
-fn colorize_commit_line(line: &str) -> String {
-    match line.split_once(' ') {
-        Some((sha, subject)) => format!("{} {subject}", style::yellow(sha)),
-        None => line.to_string(),
-    }
-}
-
-fn colorize_agent_name(name: &str) -> String {
-    match name.rsplit_once('@') {
-        Some((slug, suffix)) => {
-            format!("{}{}", style::blue(slug), style::bold_blue(&format!("@{suffix}")))
-        }
-        None => style::blue(name),
-    }
-}
-
-fn format_commit_block(lines: &[String], ahead: usize, max: Option<usize>) -> String {
-    let show = match max {
-        None => lines.len(),
-        Some(m) => {
-            if ahead == m + 1 { m + 1 } else { m.min(lines.len()) }
-        }
-    };
-    let mut out = String::new();
-    for line in &lines[..show] {
-        out.push_str(&format!("    {}\n", colorize_commit_line(line)));
-    }
-    if max.is_some() {
-        let hidden = ahead - show;
-        if hidden >= 2 {
-            out.push_str(&format!("    {}\n", style::dim(&format!("... and {hidden} more"))));
-        }
-    }
-    out
-}
-
 fn format_age(timestamp: f64) -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -209,17 +173,12 @@ fn show_branch_sync_status(base: &Path) {
 
 fn format_agent(agent: &AgentInfo, max_commits: Option<usize>) -> String {
     let mut out = String::new();
-    let dot = if agent.running {
-        style::bold_green("●")
+    let (dot, state_colored) = if agent.running {
+        (style::bold_green("●"), style::green(&agent.state))
     } else {
-        style::dim("○")
+        (style::dim("○"), style::dim(&agent.state))
     };
-    let state_colored = if agent.running {
-        style::green(&agent.state)
-    } else {
-        style::dim(&agent.state)
-    };
-    let name_colored = colorize_agent_name(&agent.name);
+    let name_colored = style::agent_name(&agent.name);
     let age = if agent.last_activity > 0.0 {
         format!("  {}", style::dim(&format_age(agent.last_activity)))
     } else {
@@ -233,7 +192,7 @@ fn format_agent(agent: &AgentInfo, max_commits: Option<usize>) -> String {
             style::bold(&ahead.to_string()),
             style::yellow(branch),
         ));
-        out.push_str(&format_commit_block(commit_lines, *ahead, max_commits));
+        out.push_str(&git::format_commit_list(commit_lines, "    ", max_commits));
     }
     for ws in &agent.dirty_worktrees {
         // Extract slug from worktree path (data_dir/worktrees/<slug>/<id>)
@@ -495,8 +454,7 @@ pub fn remove_agent(base: &Path, agent_id: &str, yes: bool) -> Result<()> {
                         style::bold_yellow("Warning:"),
                         style::yellow(b),
                     );
-                    let block = format_commit_block(&commits, count, Some(MAX_COMMITS_DISPLAY));
-                    print!("{block}");
+                    print!("{}", git::format_commit_list(&commits, "    ", Some(MAX_COMMITS_DISPLAY)));
                 }
             }
         }
@@ -630,13 +588,12 @@ mod tests {
     }
 
     #[test]
-    fn format_agent_emits_ansi_when_color_forced() {
-        std::env::set_var("CLICOLOR_FORCE", "1");
+    fn format_agent_renders_expected_content() {
+        std::env::set_var("NO_COLOR", "1");
         let agent = sample_agent(true);
         let out = format_agent(&agent, Some(MAX_COMMITS_DISPLAY));
-        assert!(out.contains("\x1b["), "expected ANSI escapes in colored output");
-        assert!(out.contains("demo"));
-        assert!(out.contains("@1"));
+        assert!(!out.contains('\x1b'), "NO_COLOR should suppress escapes");
+        assert!(out.contains("demo@1"));
         assert!(out.contains("agent-1/main"));
         assert!(out.contains("commits on"));
         assert!(out.contains("... and 1 more") || out.contains("Polish error states"));

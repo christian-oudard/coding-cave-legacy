@@ -8,6 +8,7 @@ use anyhow::{bail, Result};
 use crate::config;
 use crate::git;
 use crate::registry;
+use crate::style;
 
 pub fn enter(
     base: &Path,
@@ -26,7 +27,10 @@ pub fn enter(
         match rustix::process::test_kill_process(pid) {
             Ok(()) => {}
             Err(e) if e == rustix::io::Errno::SRCH => {
-                bail!("Cave {name} (pid {target_pid}) is no longer running.");
+                bail!(
+                    "Cave {} (pid {target_pid}) is no longer running.",
+                    style::agent_name(&name),
+                );
             }
             Err(rustix::io::Errno::PERM) => {}
             Err(e) => {
@@ -36,7 +40,7 @@ pub fn enter(
     }
 
     if interactive {
-        eprintln!("Entering cave {name}...");
+        eprintln!("Entering cave {}...", style::agent_name(&name));
     }
 
     // Move our own cwd to / so nsenter's pre-namespace open(".") succeeds
@@ -211,18 +215,25 @@ fn pick_running_agent(base: &Path, slug: &str) -> Result<String> {
             return Ok(aid);
         }
         if ids.contains(&aid) {
-            bail!("Agent {slug}@{aid} (from current branch) is not running.");
+            bail!(
+                "Agent {} (from current branch) is not running.",
+                style::agent_name(&format!("{slug}@{aid}")),
+            );
         }
     }
 
     match running.len() {
-        0 => bail!("No running agents in {slug}.\nStart one with: cav agent"),
+        0 => bail!(
+            "No running agents in {}.\nStart one with: {}",
+            style::blue(slug),
+            style::bold_cyan("cav agent"),
+        ),
         1 => Ok(running.into_iter().next().unwrap()),
         _ => {
-            eprintln!("Multiple running agents in {slug}:");
+            eprintln!("Multiple running agents in {}:", style::blue(slug));
             for aid in &running {
                 let name = registry::display_name(base, aid);
-                eprintln!("  {name}");
+                eprintln!("  {}", style::agent_name(&name));
             }
             eprint!("Agent ID: ");
             io::stderr().flush()?;

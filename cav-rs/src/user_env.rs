@@ -5,6 +5,7 @@ use anyhow::{bail, Result};
 
 use crate::config;
 use crate::constants;
+use crate::style;
 
 fn cave_nix_path() -> PathBuf {
     let host_home = std::env::var("CODING_CAVE_HOST_HOME")
@@ -299,7 +300,7 @@ fn do_build(user_env: &Path) -> Option<PathBuf> {
             Some(out_path)
         }
         _ => {
-            eprintln!("Warning: cave environment build failed.");
+            eprintln!("{} cave environment build failed.", style::bold_yellow("Warning:"));
             None
         }
     }
@@ -389,7 +390,7 @@ pub fn update(input_name: Option<&str>) -> Result<()> {
     if !status.success() {
         bail!("nix flake update failed.");
     }
-    eprintln!("Run 'cav env build' to rebuild with updated inputs.");
+    eprintln!("Run {} to rebuild with updated inputs.", style::bold_cyan("cav env build"));
     Ok(())
 }
 

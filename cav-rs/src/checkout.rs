@@ -8,13 +8,15 @@ use crate::config::{
 };
 use crate::constants::{CAVE_SHARED_REMOTE, HOST_SHARED_REMOTE};
 use crate::git;
+use crate::style;
 use crate::workspace;
 
 pub fn checkout(base: &Path, name: &str, agent_id: Option<&str>) -> Result<()> {
     if parse_dev_branch(name).is_some() {
         bail!(
-            "Cannot use dev branch '{name}' as base.\n\
-             Use a base branch name (e.g. main, develop)."
+            "Cannot use dev branch '{}' as base.\n\
+             Use a base branch name (e.g. main, develop).",
+            style::yellow(name),
         );
     }
 
@@ -28,26 +30,41 @@ pub fn checkout(base: &Path, name: &str, agent_id: Option<&str>) -> Result<()> {
         })?;
         if let Some(explicit) = agent_id {
             if explicit != aid {
-                bail!("This cave is agent {aid}, but targeting agent {explicit}.");
+                bail!(
+                    "This cave is agent {}, but targeting agent {}.",
+                    style::bold(&aid),
+                    style::bold(explicit),
+                );
             }
         }
         let old_base = current.clone();
         if old_base == name {
-            bail!("Agent {aid} already targeting '{name}'.");
+            bail!(
+                "Agent {} already targeting '{}'.",
+                style::bold(&aid),
+                style::yellow(name),
+            );
         }
         let old_branch = dev_branch(&old_base, &aid);
         let new_branch = dev_branch(name, &aid);
         ensure_base_exists(base, name, &old_base, HOST_SHARED_REMOTE)?;
         retarget_local(base, &old_base, name, &old_branch, &new_branch, &aid)?;
-        println!("Retargeted agent {aid}: {old_base} -> {name}");
+        println!(
+            "Retargeted agent {}: {} -> {}",
+            style::bold(&aid),
+            style::yellow(&old_base),
+            style::yellow(name),
+        );
     } else {
         let parsed = parse_dev_branch(&current);
         let (old_base, aid) = if let Some((ob, a)) = parsed {
             if let Some(explicit) = agent_id {
                 if explicit != a {
                     bail!(
-                        "On branch for agent {a}, but targeting agent {explicit}.\n\
-                         Switch to the correct dev branch first."
+                        "On branch for agent {}, but targeting agent {}.\n\
+                         Switch to the correct dev branch first.",
+                        style::bold(&a),
+                        style::bold(explicit),
                     );
                 }
             }
@@ -56,16 +73,28 @@ pub fn checkout(base: &Path, name: &str, agent_id: Option<&str>) -> Result<()> {
             let ob = find_agent_base(base, explicit_aid)?;
             (ob, explicit_aid.to_string())
         } else {
-            bail!("Not on a dev branch, please specify agent id.\nUsage: cav checkout <branch> <agent-id>");
+            bail!(
+                "Not on a dev branch, please specify agent id.\nUsage: {}",
+                style::bold_cyan("cav checkout <branch> <agent-id>"),
+            );
         };
         if old_base == name {
-            bail!("Agent {aid} already targeting '{name}'.");
+            bail!(
+                "Agent {} already targeting '{}'.",
+                style::bold(&aid),
+                style::yellow(name),
+            );
         }
         let old_branch = dev_branch(&old_base, &aid);
         let new_branch = dev_branch(name, &aid);
         ensure_base_exists(base, name, &old_base, CAVE_SHARED_REMOTE)?;
         retarget_remote(base, &old_base, name, &old_branch, &new_branch, &aid)?;
-        println!("Retargeted agent {aid}: {old_base} -> {name}");
+        println!(
+            "Retargeted agent {}: {} -> {}",
+            style::bold(&aid),
+            style::yellow(&old_base),
+            style::yellow(name),
+        );
     }
     Ok(())
 }
@@ -85,15 +114,20 @@ fn find_agent_base(base: &Path, agent_id: &str) -> Result<String> {
         .filter(|b| parse_dev_branch(b).is_some_and(|(_, aid)| aid == agent_id))
         .collect();
     match matches.len() {
-        0 => bail!("No dev branch found for agent {agent_id}."),
+        0 => bail!("No dev branch found for agent {}.", style::bold(agent_id)),
         1 => Ok(parse_dev_branch(&matches[0]).unwrap().0),
         _ => {
-            let list = matches.join(", ");
+            let list = matches
+                .iter()
+                .map(|b| style::yellow(b))
+                .collect::<Vec<_>>()
+                .join(", ");
             bail!(
-                "Agent {agent_id} has multiple dev branches: {list}\n\
+                "Agent {} has multiple dev branches: {list}\n\
                  Check out the branch to retarget first:\n\
-                 \n  git checkout {}",
-                &matches[0]
+                 \n  {}",
+                style::bold(agent_id),
+                style::bold_cyan(&format!("git checkout {}", &matches[0])),
             )
         }
     }
@@ -121,8 +155,13 @@ fn ensure_base_exists(base: &Path, name: &str, old_base: &str, remote: &str) -> 
         return Ok(());
     }
     let old_ref = format!("{remote}/{old_base}");
-    let sha = git::git_output(&["rev-parse", &old_ref], Some(base))
-        .map_err(|_| anyhow::anyhow!("Cannot resolve '{old_ref}' to create '{name}'."))?;
+    let sha = git::git_output(&["rev-parse", &old_ref], Some(base)).map_err(|_| {
+        anyhow::anyhow!(
+            "Cannot resolve '{}' to create '{}'.",
+            style::yellow(&old_ref),
+            style::yellow(name),
+        )
+    })?;
     git::git(
         &["push", remote, &format!("{sha}:refs/heads/{name}")],
         Some(base),

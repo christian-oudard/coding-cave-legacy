@@ -202,7 +202,7 @@ enum EnvCmd {
 
 fn main() {
     if let Err(e) = run() {
-        eprintln!("{e}");
+        eprintln!("{}: {e}", style::bold_red("error"));
         process::exit(1);
     }
 }
@@ -295,7 +295,7 @@ fn run() -> Result<()> {
             if all {
                 let projects = registry::all_projects()?;
                 if projects.is_empty() {
-                    bail!("No registered projects. Run: cav init");
+                    bail!("No registered projects. Run: {}", style::bold_cyan("cav init"));
                 }
                 status::show_all(projects)
             } else {
@@ -304,7 +304,7 @@ fn run() -> Result<()> {
                     if let Ok(base) = find_repo_root() {
                         if !shared_repo_path(&base).exists() {
                             let slug = config::project_slug(&base);
-                            println!("No running agents in {slug}.");
+                            println!("No running agents in {}.", style::blue(&slug));
                             return Ok(());
                         }
                     }
@@ -317,7 +317,7 @@ fn run() -> Result<()> {
             let aid = if let Some(raw) = agent_id {
                 let a = parse_agent_id(&raw);
                 if !config::is_agent_id(&a) {
-                    bail!("Invalid agent ID '{raw}'. Use a number (e.g. 3).");
+                    bail!("Invalid agent ID '{}'. Use a number (e.g. 3).", style::bold(&raw));
                 }
                 a
             } else {
@@ -331,14 +331,19 @@ fn run() -> Result<()> {
                     0 => bail!("No paused agents to remove."),
                     1 => candidates.into_iter().next().unwrap(),
                     _ => bail!(
-                        "Multiple paused agents: {}\nSpecify which: cav remove-agent <agent-id>",
-                        candidates.join(", ")
+                        "Multiple paused agents: {}\nSpecify which: {}",
+                        candidates
+                            .iter()
+                            .map(|a| style::bold(a))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        style::bold_cyan("cav remove-agent <agent-id>"),
                     ),
                 }
             };
             let all_ids = registry::all_agent_ids(None)?;
             if !all_ids.contains(&aid) {
-                bail!("Agent {aid} not found.");
+                bail!("Agent {} not found.", style::bold(&aid));
             }
             let slug = registry::agent_project(&aid);
             let path = slug
@@ -348,17 +353,23 @@ fn run() -> Result<()> {
                 let base = PathBuf::from(p);
                 if !base.is_dir() {
                     registry::remove_agent(&aid)?;
-                    println!("Removed agent {aid} (project directory missing).");
+                    println!(
+                        "Removed agent {} (project directory missing).",
+                        style::bold(&aid),
+                    );
                     return Ok(());
                 }
                 if registry::is_agent_running(&aid)? {
                     let name = registry::display_name(&base, &aid);
-                    bail!("{name} is running. Stop it first.");
+                    bail!("{} is running. Stop it first.", style::agent_name(&name));
                 }
                 status::remove_agent(&base, &aid, yes)
             } else {
                 registry::remove_agent(&aid)?;
-                println!("Removed agent {aid} (project directory missing).");
+                println!(
+                    "Removed agent {} (project directory missing).",
+                    style::bold(&aid),
+                );
                 Ok(())
             }
         }
@@ -366,7 +377,7 @@ fn run() -> Result<()> {
             let projects: std::collections::HashMap<_, _> =
                 registry::all_projects()?.into_iter().collect();
             if !projects.contains_key(&slug) {
-                bail!("No project \"{slug}\" in registry.");
+                bail!("No project \"{}\" in registry.", style::blue(&slug));
             }
             // Refuse if any agents for this project are still running.
             let running: Vec<String> = registry::all_agent_ids(Some(&slug))?
@@ -375,12 +386,17 @@ fn run() -> Result<()> {
                 .collect();
             if !running.is_empty() {
                 bail!(
-                    "Project \"{slug}\" has running agents: {}\nStop them first.",
-                    running.join(", ")
+                    "Project \"{}\" has running agents: {}\nStop them first.",
+                    style::blue(&slug),
+                    running
+                        .iter()
+                        .map(|a| style::bold(a))
+                        .collect::<Vec<_>>()
+                        .join(", "),
                 );
             }
             registry::remove_project(&slug)?;
-            println!("Removed project \"{slug}\".");
+            println!("Removed project \"{}\".", style::blue(&slug));
             Ok(())
         }
         Cmd::Review { agent_id } => {
@@ -390,7 +406,7 @@ fn run() -> Result<()> {
                 Some(s) => {
                     let a = parse_agent_id(&s);
                     if !config::is_agent_id(&a) {
-                        bail!("Invalid agent ID '{s}'. Use a number (e.g. 3).");
+                        bail!("Invalid agent ID '{}'. Use a number (e.g. 3).", style::bold(&s));
                     }
                     a
                 }
@@ -405,7 +421,7 @@ fn run() -> Result<()> {
                 Some(s) => {
                     let a = parse_agent_id(&s);
                     if !config::is_agent_id(&a) {
-                        bail!("Invalid agent ID '{s}'. Use a number (e.g. 3).");
+                        bail!("Invalid agent ID '{}'. Use a number (e.g. 3).", style::bold(&s));
                     }
                     Some(a)
                 }
@@ -422,7 +438,7 @@ fn run() -> Result<()> {
         }
         Cmd::Cp { paths, recursive, force } => {
             if paths.len() < 2 {
-                bail!("Usage: cav cp <src>... <dest>");
+                bail!("Usage: {}", style::bold_cyan("cav cp <src>... <dest>"));
             }
             let srcs = paths[..paths.len() - 1].to_vec();
             let dest = paths.last().unwrap().clone();
@@ -521,14 +537,23 @@ fn parse_single_agent_arg(args: &[String], cmd: &str) -> Result<Option<String>> 
         let candidate = parse_agent_id(arg);
         if config::is_agent_id(&candidate) {
             if let Some(prev) = &agent_id {
-                bail!("Multiple agent IDs given: {prev}, {candidate}");
+                bail!(
+                    "Multiple agent IDs given: {}, {}",
+                    style::bold(prev),
+                    style::bold(&candidate),
+                );
             }
             agent_id = Some(candidate);
         } else if looks_like_hash(arg) {
-            bail!("'{arg}' looks like a commit prefix. Did you mean: cav {cmd} -c {arg}");
+            bail!(
+                "'{}' looks like a commit prefix. Did you mean: {}",
+                style::yellow(arg),
+                style::bold_cyan(&format!("cav {cmd} -c {arg}")),
+            );
         } else {
             bail!(
-                "Unknown argument '{arg}'. Usage: cav {cmd} [agent-id] [-c <commit>]"
+                "Unknown argument '{arg}'. Usage: {}",
+                style::bold_cyan(&format!("cav {cmd} [agent-id] [-c <commit>]")),
             );
         }
     }

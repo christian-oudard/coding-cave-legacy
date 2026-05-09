@@ -246,18 +246,26 @@ pub fn commit_oneline(
 }
 
 
-/// Format a list of commit lines for display, showing up to max items.
-/// If only 1 item would be hidden, shows it too (avoids "... and 1 more").
-pub fn format_commit_list(lines: &[String], max: usize) -> String {
+/// Render a list of "<sha> <subject>" commit lines.
+/// `indent` is prepended to every line. `max` caps the number rendered;
+/// `None` shows them all. The "and N more" tail is suppressed when only
+/// one would be hidden (we just show it).
+pub fn format_commit_list(lines: &[String], indent: &str, max: Option<usize>) -> String {
     let n = lines.len();
-    let show = if n == max + 1 { n } else { max.min(n) };
+    let show = match max {
+        None => n,
+        Some(m) => if n == m + 1 { n } else { m.min(n) },
+    };
     let mut out = String::new();
     for line in &lines[..show] {
-        out.push_str(&format!("  {line}\n"));
+        out.push_str(&format!("{indent}{}\n", crate::style::commit_line(line)));
     }
     let hidden = n - show;
     if hidden >= 2 {
-        out.push_str(&format!("  ... and {hidden} more\n"));
+        out.push_str(&format!(
+            "{indent}{}\n",
+            crate::style::dim(&format!("... and {hidden} more"))
+        ));
     }
     out
 }

@@ -8,13 +8,15 @@ use crate::constants::{CAVE_SHARED_REMOTE, HOST_SHARED_REMOTE};
 use crate::git;
 use crate::registry;
 use crate::sandbox;
+use crate::style;
 
 pub fn reject(base: &Path, agent_id: Option<&str>, yes: bool, commit: Option<&str>) -> Result<()> {
     let branch = git::current_branch(Some(base))?;
     if parse_dev_branch(&branch).is_some() {
         bail!(
-            "Cannot reject from dev branch '{branch}'.\n\
-             Switch to a base branch first (e.g. 'git checkout main')."
+            "Cannot reject from dev branch '{}'.\n\
+             Switch to a base branch first (e.g. 'git checkout main').",
+            style::yellow(&branch)
         );
     }
 
@@ -44,8 +46,9 @@ pub fn reject(base: &Path, agent_id: Option<&str>, yes: bool, commit: Option<&st
         let all_approvals = collect_all_approvals(&slug, &branch, &tip_sha);
         if all_approvals.is_empty() {
             bail!(
-                "No approval record found for the tip of '{branch}'.\n\
-                 Only approved commits can be rejected."
+                "No approval record found for the tip of '{}'.\n\
+                 Only approved commits can be rejected.",
+                style::yellow(&branch)
             );
         }
         if all_approvals.len() > 1 && !yes {
@@ -86,8 +89,9 @@ pub fn reject(base: &Path, agent_id: Option<&str>, yes: bool, commit: Option<&st
     .is_ok();
     if on_origin {
         bail!(
-            "Cannot reject: commits are already on origin/{branch}.\n\
-             Use 'git revert' instead."
+            "Cannot reject: commits are already on {}.\n\
+             Use 'git revert' instead.",
+            style::yellow(&format!("origin/{branch}"))
         );
     }
 
@@ -97,9 +101,13 @@ pub fn reject(base: &Path, agent_id: Option<&str>, yes: bool, commit: Option<&st
         git::commit_oneline(&format!("{before_sha}..{tip_sha}"), None, Some(base))?;
     let n = commits.len();
     let word = if n == 1 { "commit" } else { "commits" };
-    println!("\nRejecting {n} {word} from tip of {branch}:\n");
+    println!(
+        "\nRejecting {} {word} from tip of {}:\n",
+        style::bold(&n.to_string()),
+        style::yellow(&branch),
+    );
     for line in &commits {
-        println!("  {line}");
+        println!("  {}", style::commit_line(line));
     }
 
     block_if_agent_branch_diverged(base, &branch, &base_agent, &before_sha)?;
@@ -339,13 +347,20 @@ fn block_if_agent_branch_diverged(
     let target = registry::display_name(base, agent_id);
     let short_base = &new_base_sha[..8.min(new_base_sha.len())];
     bail!(
-        "{target}'s branch '{ab}' has diverged from where main will be after this reject.\n\
+        "{}'s branch '{}' has diverged from where main will be after this reject.\n\
          The agent must rebase their branch onto the new base first:\n\
          \n\
-         \x20   (in the agent's session) git rebase {short_base}\n\
+         \x20   (in the agent's session) {} {}\n\
          \n\
-         Resolve any conflicts the standard way, then retry 'cav reject'.\n\
-         Alternative: 'cav remove-agent {agent_id}' to discard the dev branch entirely."
+         Resolve any conflicts the standard way, then retry '{}'.\n\
+         Alternative: '{} {}' to discard the dev branch entirely.",
+        style::agent_name(&target),
+        style::yellow(&ab),
+        style::bold_cyan("git rebase"),
+        style::yellow(short_base),
+        style::bold_cyan("cav reject"),
+        style::bold_cyan("cav remove-agent"),
+        style::bold(agent_id),
     );
 }
 
@@ -372,14 +387,19 @@ fn pick_reject(
     base: &Path,
     branch: &str,
 ) -> Result<Vec<serde_json::Value>> {
-    println!("\nApproved commits on {branch} (newest first):\n");
+    println!("\nApproved commits on {} (newest first):\n", style::yellow(branch));
     for (i, approval) in approvals.iter().enumerate() {
         let sha = approval["after_sha"].as_str().unwrap_or("");
         let aid = approval["agent_id"].as_str().unwrap_or("");
         let name = registry::display_name(base, aid);
         let msg = git::git_output(&["log", "--oneline", "-1", sha], Some(base))
             .unwrap_or_default();
-        println!("  {}) {msg}  ({name})", i + 1);
+        println!(
+            "  {}) {}  ({})",
+            style::bold(&(i + 1).to_string()),
+            style::commit_line(&msg),
+            style::agent_name(&name),
+        );
     }
 
     print!(
@@ -404,7 +424,7 @@ fn resolve_reject_target(sha_prefix: &str, tip_sha: &str, base: &Path) -> Result
     let full_sha = git::git_output(&["rev-parse", "--verify", sha_prefix], Some(base))
         .map_err(|_| short_prefix_error(sha_prefix, base))?;
     if !git::is_ancestor(&full_sha, tip_sha, Some(base)) {
-        bail!("Commit {sha_prefix} is not on this branch.");
+        bail!("Commit {} is not on this branch.", style::yellow(sha_prefix));
     }
     Ok(full_sha)
 }
@@ -416,10 +436,11 @@ fn short_prefix_error(sha_prefix: &str, base: &Path) -> anyhow::Error {
     let n = matches.lines().filter(|l| !l.is_empty()).count();
     if n > 1 {
         anyhow::anyhow!(
-            "Commit prefix '{sha_prefix}' is ambiguous ({n} matches). Use a longer prefix."
+            "Commit prefix '{}' is ambiguous ({n} matches). Use a longer prefix.",
+            style::yellow(sha_prefix)
         )
     } else {
-        anyhow::anyhow!("Cannot resolve commit: {sha_prefix}")
+        anyhow::anyhow!("Cannot resolve commit: {}", style::yellow(sha_prefix))
     }
 }
 
@@ -438,7 +459,7 @@ fn collect_approval_chain(
                 anyhow::anyhow!(
                     "No approval record for {}.\n\
                      Cannot reject past unapproved commits.",
-                    &current[..8]
+                    style::yellow(&current[..8])
                 )
             })?;
         let is_target = current == target_sha;
@@ -454,7 +475,7 @@ fn collect_approval_chain(
             bail!(
                 "Commit {} not found in approval chain.\n\
                  Only approved commits can be rejected.",
-                &target_sha[..8]
+                style::yellow(&target_sha[..8])
             );
         }
         current = before;
@@ -469,7 +490,7 @@ fn resolve_target_agent(
     if let Some(aid) = agent_id {
         let all_ids = registry::all_agent_ids(None)?;
         if !all_ids.contains(&aid.to_string()) {
-            bail!("Agent {aid} not found in registry.");
+            bail!("Agent {} not found in registry.", style::bold(aid));
         }
         return Ok(aid.to_string());
     }

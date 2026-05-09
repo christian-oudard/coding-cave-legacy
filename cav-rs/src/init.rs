@@ -7,6 +7,7 @@ use crate::config::{self, inside_cave, parse_dev_branch};
 use crate::constants::{CAVE_SHARED_REMOTE, HOST_SHARED_REMOTE};
 use crate::git;
 use crate::registry;
+use crate::style;
 use crate::workspace;
 
 fn install_hooks(shared: &Path) -> Result<()> {
@@ -46,7 +47,9 @@ fn warn_dirty(base: &Path) {
         .collect();
     if !filtered.is_empty() {
         eprintln!(
-            "Warning: uncommitted changes will not be visible to agents. Commit them first, or use 'cav cp' to copy files in later.\n"
+            "{} uncommitted changes will not be visible to agents. Commit them first, or use {} to copy files in later.\n",
+            style::bold_yellow("Warning:"),
+            style::bold_cyan("cav cp"),
         );
     }
 }
@@ -144,9 +147,9 @@ pub fn init(path: &Path, reinitialize: bool) -> Result<()> {
         if root_path != base && !base.join(".git").exists() {
             bail!(
                 "This directory is inside an existing git repo at {}.\n\
-                 Run 'cav init {}' to initialize there instead.",
+                 Run {} to initialize there instead.",
                 root_path.display(),
-                root_path.display()
+                style::bold_cyan(&format!("cav init {}", root_path.display())),
             );
         }
     }
@@ -204,8 +207,10 @@ pub fn init(path: &Path, reinitialize: bool) -> Result<()> {
     .is_ok()
     {
         bail!(
-            "Remote '{CAVE_SHARED_REMOTE}' already exists.\n\
-             Remove it first: git remote remove {CAVE_SHARED_REMOTE}"
+            "Remote '{}' already exists.\n\
+             Remove it first: {}",
+            style::yellow(CAVE_SHARED_REMOTE),
+            style::bold_cyan(&format!("git remote remove {CAVE_SHARED_REMOTE}")),
         );
     }
 

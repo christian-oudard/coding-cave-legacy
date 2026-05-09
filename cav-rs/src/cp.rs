@@ -6,6 +6,7 @@ use anyhow::{bail, Result};
 use crate::config::{self, persistent_home, worktree_dir};
 use crate::git;
 use crate::registry;
+use crate::style;
 
 pub fn cp(srcs: Vec<String>, dest: String, recursive: bool, force: bool) -> Result<()> {
     // Expand globs in cave specs
@@ -109,8 +110,10 @@ pub fn cp(srcs: Vec<String>, dest: String, recursive: bool, force: bool) -> Resu
     } else {
         bail!(
             "One of source or destination must use a cave path prefix.\n\
-             cav cp <file>... <slug>:<path>        host -> project worktree\n\
-             cav cp <slug>:<path> <dest>           project worktree -> host"
+             {}        host -> project worktree\n\
+             {}           project worktree -> host",
+            style::bold_cyan("cav cp <file>... <slug>:<path>"),
+            style::bold_cyan("cav cp <slug>:<path> <dest>"),
         );
     }
     Ok(())
@@ -135,7 +138,9 @@ fn resolve_cave_path(spec: &str, is_dest: bool) -> Result<Option<PathBuf>> {
         (detect_slug()?, None)
     } else if prefix.chars().all(|c| c.is_ascii_digit()) && !prefix.is_empty() {
         bail!(
-            "Use cave@{prefix}:{path} to specify agent {prefix}, not bare {prefix}:{path}."
+            "Use {} to specify agent {}, not bare {prefix}:{path}.",
+            style::bold_cyan(&format!("cave@{prefix}:{path}")),
+            style::bold(prefix),
         );
     } else {
         (prefix.to_string(), None)
@@ -205,13 +210,13 @@ fn worktree_for_slug(slug: &str, agent_id: Option<&str>) -> Result<(PathBuf, Str
     if let Some(aid) = inferred {
         let ws = worktree_dir(slug, &aid);
         if !ws.exists() {
-            bail!("No worktree found for {slug}@{aid}.");
+            bail!("No worktree found for {}.", style::agent_name(&format!("{slug}@{aid}")));
         }
         return Ok((ws, aid));
     }
     let slug_dir = config::data_dir().join("worktrees").join(slug);
     if !slug_dir.is_dir() {
-        bail!("No worktrees found for project '{slug}'.");
+        bail!("No worktrees found for project '{}'.", style::blue(slug));
     }
     let registered: std::collections::HashSet<String> =
         registry::all_agent_ids(Some(slug))?.into_iter().collect();
@@ -228,7 +233,7 @@ fn worktree_for_slug(slug: &str, agent_id: Option<&str>) -> Result<(PathBuf, Str
             .unwrap_or(u32::MAX)
     });
     if candidates.is_empty() {
-        bail!("No worktrees found for project '{slug}'.");
+        bail!("No worktrees found for project '{}'.", style::blue(slug));
     }
     if candidates.len() == 1 {
         let aid = candidates[0]
@@ -248,10 +253,19 @@ fn worktree_for_slug(slug: &str, agent_id: Option<&str>) -> Result<(PathBuf, Str
 }
 
 fn pick_agent_prompt(slug: &str, agent_ids: &[String]) -> Result<String> {
-    eprintln!("Multiple agents for '{slug}':");
+    eprintln!("Multiple agents for '{}':", style::blue(slug));
     for aid in agent_ids {
-        let state = if registry::is_agent_running(aid).unwrap_or(false) { "running" } else { "exited" };
-        eprintln!("  {aid}) {slug}@{aid}  [{state}]");
+        let running = registry::is_agent_running(aid).unwrap_or(false);
+        let state = if running {
+            style::green("running")
+        } else {
+            style::dim("exited")
+        };
+        eprintln!(
+            "  {}) {}  [{state}]",
+            style::bold(aid),
+            style::agent_name(&format!("{slug}@{aid}")),
+        );
     }
     eprint!("Agent: ");
     io::stderr().flush()?;

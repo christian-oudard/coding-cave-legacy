@@ -6,6 +6,7 @@ use crate::config::{self, dev_branch, inside_cave, parse_dev_branch, resolve_bas
 use crate::constants::{CAVE_SHARED_REMOTE, HOST_SHARED_REMOTE};
 use crate::git;
 use crate::registry;
+use crate::style;
 
 pub fn push(base: &Path, force: bool) -> Result<()> {
     let branch = git::current_branch(Some(base))?;
@@ -21,8 +22,10 @@ pub fn push(base: &Path, force: bool) -> Result<()> {
         {
             bail!(
                 "Rebase in progress. Complete or abort it before pushing:\n\
-                   git rebase --continue\n\
-                   git rebase --abort"
+                   {}\n\
+                   {}",
+                style::bold_cyan("git rebase --continue"),
+                style::bold_cyan("git rebase --abort"),
             );
         }
         bail!("Detached HEAD. Check out a branch before pushing.");
@@ -44,7 +47,11 @@ pub fn push(base: &Path, force: bool) -> Result<()> {
         Err(e) => {
             eprintln!("{e}");
             if !force {
-                eprintln!("\n  cav push --force                # overwrite shared remote with local branch");
+                eprintln!(
+                    "\n  {}                {}",
+                    style::bold_cyan("cav push --force"),
+                    style::dim("# overwrite shared remote with local branch"),
+                );
             }
             std::process::exit(1);
         }
@@ -53,9 +60,9 @@ pub fn push(base: &Path, force: bool) -> Result<()> {
                 if up_to_date {
                     println!("Already up to date.");
                 } else if force {
-                    println!("Force-pushed {branch} to shared remote.");
+                    println!("Force-pushed {} to shared remote.", style::yellow(&branch));
                 } else {
-                    println!("Pushed {branch} to shared remote.");
+                    println!("Pushed {} to shared remote.", style::yellow(&branch));
                 }
             }
             for note in notes {
@@ -277,7 +284,9 @@ fn rebase_agents(base: &Path, base_branch: &str) -> Vec<String> {
         if !rebase_ok {
             git::git(&["rebase", "--abort"], Some(&ws), false, true, false).ok();
             notes.push(format!(
-                "Note: rebase of {dev} onto {base_branch} failed (conflicts). Agent must resolve them."
+                "Note: rebase of {} onto {} failed (conflicts). Agent must resolve them.",
+                style::yellow(&dev),
+                style::yellow(base_branch),
             ));
             continue;
         }
@@ -294,7 +303,11 @@ fn rebase_agents(base: &Path, base_branch: &str) -> Vec<String> {
         )
         .ok();
         git::update_agent_tip(&shared, &dev).ok();
-        notes.push(format!("Rebased {dev} onto {base_branch}."));
+        notes.push(format!(
+            "Rebased {} onto {}.",
+            style::yellow(&dev),
+            style::yellow(base_branch),
+        ));
     }
     notes
 }

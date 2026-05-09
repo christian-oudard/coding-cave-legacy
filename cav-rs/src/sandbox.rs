@@ -13,7 +13,7 @@ use serde::Deserialize;
 
 use crate::config::{self, inside_cave, parse_dev_branch, project_slug, shared_repo_path};
 use crate::constants::{self, CAVE_SHARED_REMOTE, HOST_SHARED_REMOTE};
-use crate::{daemon, git, registry, user_env, workspace};
+use crate::{daemon, git, registry, style, user_env, workspace};
 
 const SLIRP_DNS: &str = "10.0.2.3";
 const SLIRP_GATEWAY: &str = "10.0.2.2";
@@ -966,7 +966,7 @@ fn print_crinj_session_warnings(state: &CrinjState) {
     let plural = if alerts.len() == 1 { "" } else { "s" };
     eprintln!(
         "crinj logged {} alert{plural} this session:",
-        alerts.len()
+        style::bold(&alerts.len().to_string()),
     );
     for a in alerts {
         eprintln!("  {a}");
@@ -1620,7 +1620,7 @@ fn seed_nix_db(home: &Path, agent_id: &str, merged_path: &str) -> Option<PathBuf
     })();
 
     if let Err(e) = result {
-        eprintln!("Warning: nix DB seed failed: {e}");
+        eprintln!("{} nix DB seed failed: {e}", style::bold_yellow("Warning:"));
     }
 
     if let Some(s) = state {
@@ -1929,10 +1929,10 @@ fn teardown_agent(
 /// canonical, archive-backed form), then the agent-id shortcut.
 fn print_resume_hints(agent_id: &str, session_id: Option<&str>, agent_id_gone: bool) {
     if let Some(sid) = session_id {
-        eprintln!("cav --resume {sid}");
+        eprintln!("{}", style::bold_cyan(&format!("cav --resume {sid}")));
     }
     if !agent_id_gone {
-        eprintln!("cav -r {agent_id}");
+        eprintln!("{}", style::bold_cyan(&format!("cav -r {agent_id}")));
     }
 }
 
@@ -2340,7 +2340,7 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
         let proc = match start_broker() {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("Warning: channel broker failed to start: {e}");
+                eprintln!("{} channel broker failed to start: {e}", style::bold_yellow("Warning:"));
                 None
             }
         };
@@ -2352,7 +2352,7 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
             );
             env.insert("CODING_CAVE_AGENT_ID".to_string(), agent_id.clone());
             if let Err(e) = setup_channel_marketplace(&home) {
-                eprintln!("Warning: channel marketplace setup failed: {e}");
+                eprintln!("{} channel marketplace setup failed: {e}", style::bold_yellow("Warning:"));
             }
         }
         (Some(session), proc, enabled)
