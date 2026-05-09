@@ -112,6 +112,7 @@ let
     "--proc" "/proc"
     "--dev" "/dev"
     "--tmpfs" "/tmp"
+    "--dir" "/tmp/claude"
     "--tmpfs" "/run"
     "--ro-bind" "/nix/store" "/nix/store"
     "--dir" "/bin"
