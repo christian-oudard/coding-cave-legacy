@@ -5,6 +5,7 @@ use anyhow::{bail, Result};
 
 use crate::config::{self, persistent_home, worktree_dir};
 use crate::git;
+use crate::proc_ns::find_inner_pid;
 use crate::registry;
 use crate::style;
 
@@ -362,7 +363,17 @@ fn cave_root_for_slug(slug: &str, agent_id: Option<&str>) -> Result<(PathBuf, St
         pick_agent_prompt(slug, &candidates)?
     };
 
-    let pid = registry::cave_pid(&chosen)?.unwrap();
+    // The registry's cave_pid is unshare's pid; its mount ns is a clone of
+    // the host's, not bwrap's sandboxed view. Walk descendants for one whose
+    // mount ns differs to land in the cave's actual filesystem tree.
+    let outer_pid = registry::cave_pid(&chosen)?.unwrap();
+    let pid = find_inner_pid(outer_pid).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Cannot find sandboxed target inside cave {slug}@{chosen}: no \
+             descendant has a different mount namespace. The cave may still \
+             be initializing or may have crashed during setup."
+        )
+    })?;
     let cave_root = PathBuf::from(format!("/proc/{pid}/root"));
     std::fs::metadata(&cave_root).map_err(|e| {
         anyhow::anyhow!("Cannot reach cave {slug}@{chosen} via /proc: {e}")

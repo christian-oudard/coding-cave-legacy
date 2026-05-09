@@ -10,6 +10,7 @@ mod cp;
 mod daemon;
 mod handler;
 mod init;
+mod proc_ns;
 mod pull;
 mod push;
 mod reject;

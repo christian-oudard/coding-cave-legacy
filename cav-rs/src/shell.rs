@@ -7,6 +7,7 @@ use anyhow::{bail, Result};
 
 use crate::config;
 use crate::git;
+use crate::proc_ns::{find_inner_pid, read_children};
 use crate::registry;
 use crate::style;
 
@@ -167,38 +168,6 @@ fn resolve_agent_pid(base: &Path, slug: &str, agent_id: Option<&str>) -> Result<
         )
     })?;
     Ok((aid, pid))
-}
-
-fn find_inner_pid(outer: u32) -> Option<u32> {
-    let outer_mnt = mnt_inode(outer)?;
-    let mut queue: std::collections::VecDeque<u32> = std::collections::VecDeque::new();
-    queue.push_back(outer);
-    while let Some(pid) = queue.pop_front() {
-        for child in read_children(pid) {
-            if let Some(mnt) = mnt_inode(child) {
-                if mnt != outer_mnt {
-                    return Some(child);
-                }
-            }
-            queue.push_back(child);
-        }
-    }
-    None
-}
-
-fn mnt_inode(pid: u32) -> Option<u64> {
-    use std::os::unix::fs::MetadataExt;
-    std::fs::metadata(format!("/proc/{pid}/ns/mnt"))
-        .ok()
-        .map(|m| m.ino())
-}
-
-fn read_children(pid: u32) -> Vec<u32> {
-    std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children"))
-        .unwrap_or_default()
-        .split_whitespace()
-        .filter_map(|s| s.parse().ok())
-        .collect()
 }
 
 fn pick_running_agent(base: &Path, slug: &str) -> Result<String> {
