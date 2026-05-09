@@ -2,7 +2,6 @@ use std::env;
 use std::path::{Path, PathBuf};
 
 use anyhow::bail;
-use regex::Regex;
 
 use crate::constants::{HOST_SHARED_REPO_DIR, SHARED_REPO_DIR};
 
@@ -27,8 +26,13 @@ pub fn dev_branch(base: &str, agent_id: &str) -> String {
 
 /// Returns (base, agent_id) if the branch is an agent dev branch.
 pub fn parse_dev_branch(branch: &str) -> Option<(String, String)> {
-    let re = Regex::new(r"^agent-(\d+)/(.+)$").unwrap();
-    re.captures(branch).map(|c| (c[2].to_string(), c[1].to_string()))
+    let rest = branch.strip_prefix("agent-")?;
+    let slash = rest.find('/')?;
+    let (id, base) = (&rest[..slash], &rest[slash + 1..]);
+    if id.is_empty() || base.is_empty() || !id.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    Some((base.to_string(), id.to_string()))
 }
 
 pub fn is_agent_id(s: &str) -> bool {
@@ -86,8 +90,18 @@ pub fn project_slug(base: &Path) -> String {
         .unwrap_or_default()
         .to_string_lossy()
         .to_lowercase();
-    let re = Regex::new(r"[^a-z0-9_-]+").unwrap();
-    let slug = re.replace_all(&name, "-").trim_matches('-').to_string();
+    let mut slug = String::with_capacity(name.len());
+    let mut prev_dash = true;
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+            slug.push(c);
+            prev_dash = c == '-';
+        } else if !prev_dash {
+            slug.push('-');
+            prev_dash = true;
+        }
+    }
+    let slug = slug.trim_matches('-').to_string();
     if slug.is_empty() { "project".to_string() } else { slug }
 }
 
@@ -208,4 +222,97 @@ fn check_alternates(ws: &Path) -> anyhow::Result<()> {
          Run: cav init --reinitialize",
         alt.display()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn p(s: &str) -> Option<(String, String)> {
+        parse_dev_branch(s)
+    }
+
+    #[test]
+    fn parse_dev_branch_simple() {
+        assert_eq!(p("agent-1/main"), Some(("main".into(), "1".into())));
+        assert_eq!(p("agent-42/release"), Some(("release".into(), "42".into())));
+    }
+
+    #[test]
+    fn parse_dev_branch_base_with_slashes() {
+        assert_eq!(
+            p("agent-3/feature/foo"),
+            Some(("feature/foo".into(), "3".into())),
+        );
+    }
+
+    #[test]
+    fn parse_dev_branch_nested() {
+        assert_eq!(
+            p("agent-1/agent-2/main"),
+            Some(("agent-2/main".into(), "1".into())),
+        );
+    }
+
+    #[test]
+    fn parse_dev_branch_rejects_non_digit_id() {
+        assert_eq!(p("agent-abc/main"), None);
+        assert_eq!(p("agent-1a/main"), None);
+        assert_eq!(p("agent-/main"), None);
+    }
+
+    #[test]
+    fn parse_dev_branch_rejects_empty_base() {
+        assert_eq!(p("agent-1/"), None);
+    }
+
+    #[test]
+    fn parse_dev_branch_rejects_no_prefix() {
+        assert_eq!(p("main"), None);
+        assert_eq!(p(""), None);
+        assert_eq!(p("agent-1main"), None);
+    }
+
+    fn slug(s: &str) -> String {
+        project_slug(Path::new(s))
+    }
+
+    #[test]
+    fn project_slug_lowercases_and_keeps_allowed_chars() {
+        assert_eq!(slug("MyProject"), "myproject");
+        assert_eq!(slug("a_b-c"), "a_b-c");
+        assert_eq!(slug("repo123"), "repo123");
+    }
+
+    #[test]
+    fn project_slug_collapses_runs_of_invalid_chars() {
+        assert_eq!(slug("My Project"), "my-project");
+        assert_eq!(slug("a@@@b"), "a-b");
+        assert_eq!(slug("a   b   c"), "a-b-c");
+    }
+
+    #[test]
+    fn project_slug_trims_leading_and_trailing_dashes() {
+        assert_eq!(slug("  hello  "), "hello");
+        assert_eq!(slug("---repo---"), "repo");
+        assert_eq!(slug("@@foo@@"), "foo");
+    }
+
+    #[test]
+    fn project_slug_falls_back_when_empty() {
+        assert_eq!(slug(""), "project");
+        assert_eq!(slug("@@@"), "project");
+        assert_eq!(slug("   "), "project");
+    }
+
+    #[test]
+    fn project_slug_strips_non_ascii() {
+        assert_eq!(slug("café"), "caf");
+        assert_eq!(slug("über-cool"), "ber-cool");
+    }
+
+    #[test]
+    fn project_slug_uses_basename_for_full_paths() {
+        assert_eq!(slug("/home/user/My Project"), "my-project");
+    }
 }

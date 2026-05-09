@@ -43,9 +43,8 @@ path = "src/bin/channel_server.rs"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 libc = "0.2"
-rustix = { version = "0.38", features = ["event", "process", "thread", "fs", "mount", "termios", "pipe", "stdio"] }
-regex = "1"
-rusqlite = { version = "0.32", features = ["bundled", "backup"] }
+rustix = { version = "0.38", features = ["event", "process", "fs", "mount", "termios", "pipe", "stdio"] }
+rusqlite = { version = "0.32", features = ["backup"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v4"] }
@@ -53,4 +52,4 @@ clap_complete = "4"
 
 [dev-dependencies]
 libc = "0.2"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.32" }

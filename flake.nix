@@ -46,21 +46,30 @@
             version = "0.1.0";
             inherit src;
             doCheck = false;
-            nativeBuildInputs = [ pkgs.makeWrapper ];
+            nativeBuildInputs = [ pkgs.makeWrapper pkgs.pkg-config ];
+            buildInputs = [ pkgs.sqlite ];
           };
 
-          # Single shared deps derivation: cached when Cargo.lock is unchanged
-          cargoArtifacts = craneLib.buildDepsOnly (commonArgs // { src = depsSrc; });
+          # Per-profile deps derivations. Cached when Cargo.lock is unchanged.
+          # Splitting by profile means cav-debug doesn't have to recompile
+          # every dep in dev mode just because the cache was release-built.
+          mkCargoArtifacts = profile: craneLib.buildDepsOnly (commonArgs // {
+            src = depsSrc;
+            pname = "cav-deps-${profile}";
+            CARGO_PROFILE = profile;
+          });
+          cargoArtifactsRelease = mkCargoArtifacts "release";
+          cargoArtifactsDev = mkCargoArtifacts "dev";
 
           # Build cav-seccomp-gen alone so sandbox.nix can use it without
           # creating a circular dependency (cav -> sandbox -> cav).
-          cavSeccompGen = craneLib.buildPackage {
-            pname = "cav-seccomp-gen";
-            version = "0.1.0";
-            inherit src cargoArtifacts;
-            cargoBuildFlags = [ "--bin" "cav-seccomp-gen" ];
-            doCheck = false;
-          };
+          # Built at dev profile because it runs once at sandbox-build time
+          # to emit a static BPF blob; the optimization level doesn't matter.
+          cavSeccompGen = craneLib.buildPackage (commonArgs // {
+            cargoArtifacts = cargoArtifactsDev;
+            CARGO_PROFILE = "dev";
+            cargoExtraArgs = "--bin cav-seccomp-gen";
+          });
 
           sandbox = import ./lib/sandbox.nix { inherit pkgs nixpkgs cavSeccompGen; };
 
@@ -91,7 +100,9 @@
             # unshare --map-user/--map-group requires util-linux >= 2.39.
             assert pkgs.lib.versionAtLeast pkgs.util-linux.version "2.39";
             craneLib.buildPackage (commonArgs // {
-              inherit cargoArtifacts;
+              cargoArtifacts =
+                if profile == "release" then cargoArtifactsRelease
+                else cargoArtifactsDev;
               CARGO_PROFILE = profile;
 
               postInstall = ''
@@ -121,7 +132,8 @@
           tests = craneLib.cargoTest {
             pname = "cav-tests";
             version = "0.1.0";
-            inherit src cargoArtifacts;
+            inherit src;
+            cargoArtifacts = cargoArtifactsDev;
             nativeBuildInputs = [ pkgs.git pkgs.jq ];
             cargoTestFlags = [
               "--bin" "cav"
@@ -158,6 +170,7 @@
           packages = with pkgs; [
             cargo rustc rustfmt clippy cargo-llvm-cov
             git jq socat iptables util-linux slirp4netns
+            pkg-config sqlite
           ];
           # nixpkgs rustc omits llvm-tools-preview; point cargo-llvm-cov at the
           # version-matched llvm bundled with rustc.
