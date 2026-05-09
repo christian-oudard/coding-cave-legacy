@@ -10,8 +10,25 @@ use crate::constants::CAVE_SHARED_REMOTE;
 use crate::git;
 use crate::registry;
 use crate::sandbox;
+use crate::style;
 
 const MAX_COMMITS_DISPLAY: usize = 3;
+
+fn colorize_commit_line(line: &str) -> String {
+    match line.split_once(' ') {
+        Some((sha, subject)) => format!("{} {subject}", style::yellow(sha)),
+        None => line.to_string(),
+    }
+}
+
+fn colorize_agent_name(name: &str) -> String {
+    match name.rsplit_once('@') {
+        Some((slug, suffix)) => {
+            format!("{}{}", style::blue(slug), style::bold_blue(&format!("@{suffix}")))
+        }
+        None => style::blue(name),
+    }
+}
 
 fn format_commit_block(lines: &[String], ahead: usize, max: Option<usize>) -> String {
     let show = match max {
@@ -22,12 +39,12 @@ fn format_commit_block(lines: &[String], ahead: usize, max: Option<usize>) -> St
     };
     let mut out = String::new();
     for line in &lines[..show] {
-        out.push_str(&format!("    {line}\n"));
+        out.push_str(&format!("    {}\n", colorize_commit_line(line)));
     }
     if max.is_some() {
         let hidden = ahead - show;
         if hidden >= 2 {
-            out.push_str(&format!("    ... and {hidden} more\n"));
+            out.push_str(&format!("    {}\n", style::dim(&format!("... and {hidden} more"))));
         }
     }
     out
@@ -78,7 +95,7 @@ pub fn show(base: &Path, agent_id: Option<&str>) -> Result<()> {
         if let Some(aid) = agent_id {
             println!("No agent {aid} in {slug}.");
         } else {
-            println!("No agents in {slug}. Start one with: cav agent");
+            println!("No agents in {slug}. Start one with: {}", style::bold_cyan("cav agent"));
         }
         return Ok(());
     }
@@ -149,19 +166,26 @@ fn show_branch_sync_status(base: &Path) {
             let local_ahead =
                 git::commits_ahead(&local_branch, &remote_ref, None, Some(base)).unwrap_or(0);
             let is_dev = parse_dev_branch(&local_branch).is_some();
+            let lb = style::yellow(&local_branch);
+            let rr = style::yellow(&remote_ref);
             if behind > 0 && local_ahead > 0 {
                 let nb = if behind == 1 { "commit" } else { "commits" };
                 let na = if local_ahead == 1 { "commit" } else { "commits" };
                 println!(
-                    "{local_branch} and {remote_ref} have diverged,\n\
-                     and have {local_ahead} and {behind} different {na} and {nb} each, respectively.\n"
+                    "{} {lb} and {rr} have diverged,\n\
+                     and have {} and {} different {na} and {nb} each, respectively.\n",
+                    style::bold_yellow("↕"),
+                    style::bold(&local_ahead.to_string()),
+                    style::bold(&behind.to_string()),
                 );
             } else if behind > 0 {
                 let n = if behind == 1 { "commit" } else { "commits" };
                 if is_dev {
                     println!(
-                        "{local_branch} is behind {remote_ref} by {behind} {n}.\n\
-                         Run: cav pull\n"
+                        "{} {lb} is behind {rr} by {} {n}.\n  Run: {}\n",
+                        style::bold_yellow("↓"),
+                        style::bold(&behind.to_string()),
+                        style::bold_cyan("cav pull"),
                     );
                 } else {
                     panic!(
@@ -173,12 +197,56 @@ fn show_branch_sync_status(base: &Path) {
             } else if local_ahead > 0 {
                 let n = if local_ahead == 1 { "commit" } else { "commits" };
                 println!(
-                    "{local_branch} is ahead of {remote_ref} by {local_ahead} {n}.\n\
-                     Run: cav push\n"
+                    "{} {lb} is ahead of {rr} by {} {n}.\n  Run: {}\n",
+                    style::bold_yellow("↑"),
+                    style::bold(&local_ahead.to_string()),
+                    style::bold_cyan("cav push"),
                 );
             }
         }
     }
+}
+
+fn format_agent(agent: &AgentInfo, max_commits: Option<usize>) -> String {
+    let mut out = String::new();
+    let dot = if agent.running {
+        style::bold_green("●")
+    } else {
+        style::dim("○")
+    };
+    let state_colored = if agent.running {
+        style::green(&agent.state)
+    } else {
+        style::dim(&agent.state)
+    };
+    let name_colored = colorize_agent_name(&agent.name);
+    let age = if agent.last_activity > 0.0 {
+        format!("  {}", style::dim(&format_age(agent.last_activity)))
+    } else {
+        String::new()
+    };
+    out.push_str(&format!("{dot} {name_colored}  ({state_colored}){age}\n"));
+    for (branch, ahead, commit_lines) in &agent.unapproved {
+        let n = if *ahead == 1 { "commit" } else { "commits" };
+        out.push_str(&format!(
+            "  {} {n} on {}\n",
+            style::bold(&ahead.to_string()),
+            style::yellow(branch),
+        ));
+        out.push_str(&format_commit_block(commit_lines, *ahead, max_commits));
+    }
+    for ws in &agent.dirty_worktrees {
+        // Extract slug from worktree path (data_dir/worktrees/<slug>/<id>)
+        let label = ws.parent()
+            .and_then(|p| p.file_name())
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| ws.display().to_string());
+        out.push_str(&format!(
+            "  * uncommitted changes in {} working directory\n",
+            style::blue(&label),
+        ));
+    }
+    out
 }
 
 fn print_agents(agents: &[AgentInfo], max_commits: Option<usize>) {
@@ -186,25 +254,7 @@ fn print_agents(agents: &[AgentInfo], max_commits: Option<usize>) {
         if i > 0 {
             println!();
         }
-        let age = if agent.last_activity > 0.0 {
-            format!("  {}", format_age(agent.last_activity))
-        } else {
-            String::new()
-        };
-        println!("{}  ({}){}", agent.name, agent.state, age);
-        for (branch, ahead, commit_lines) in &agent.unapproved {
-            let n = if *ahead == 1 { "commit" } else { "commits" };
-            println!("  {ahead} {n} on {branch}");
-            print!("{}", format_commit_block(commit_lines, *ahead, max_commits));
-        }
-        for ws in &agent.dirty_worktrees {
-            // Extract slug from worktree path (data_dir/worktrees/<slug>/<id>)
-            let label = ws.parent()
-                .and_then(|p| p.file_name())
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_else(|| ws.display().to_string());
-            println!("  uncommitted changes in {label} working directory");
-        }
+        print!("{}", format_agent(agent, max_commits));
     }
 }
 
@@ -253,25 +303,41 @@ pub fn show_all(projects: Vec<(String, String)>) -> Result<()> {
         .collect();
 
     if active.is_empty() && problems.is_empty() && inactive.is_empty() {
-        println!("No agents in any project. Start one with: cav agent");
+        println!("No agents in any project. Start one with: {}", style::bold_cyan("cav agent"));
         return Ok(());
     }
 
     let mut sorted_active = active.clone();
     sorted_active.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
+    let mut first = true;
     for (_, slug, output) in &sorted_active {
-        println!("=== {slug} ===");
+        if !first {
+            println!();
+        }
+        first = false;
+        println!("{}", style::bold_white(&format!("=== {slug} ===")));
         print!("{output}");
     }
     for (slug, message) in &problems {
-        println!("=== {slug} ===");
-        println!("{message}");
+        if !first {
+            println!();
+        }
+        first = false;
+        println!("{}", style::bold_white(&format!("=== {slug} ===")));
+        println!("{}", style::red(message));
     }
     if !inactive.is_empty() {
+        if !first {
+            println!();
+        }
         let mut sorted_inactive: Vec<&str> = inactive.clone();
         sorted_inactive.sort();
-        println!("No running agents in: {}", sorted_inactive.join(", "));
+        println!(
+            "{} {}",
+            style::dim("No running agents in:"),
+            style::dim(&sorted_inactive.join(", ")),
+        );
     }
     Ok(())
 }
@@ -307,24 +373,7 @@ fn capture_status_output(base: &Path) -> Result<(f64, String)> {
         if i > 0 {
             text.push('\n');
         }
-        let age = if agent.last_activity > 0.0 {
-            format!("  {}", format_age(agent.last_activity))
-        } else {
-            String::new()
-        };
-        text.push_str(&format!("{}  ({}){}\n", agent.name, agent.state, age));
-        for (branch, ahead, commit_lines) in &agent.unapproved {
-            let n = if *ahead == 1 { "commit" } else { "commits" };
-            text.push_str(&format!("  {ahead} {n} on {branch}\n"));
-            text.push_str(&format_commit_block(commit_lines, *ahead, Some(MAX_COMMITS_DISPLAY)));
-        }
-        for ws in &agent.dirty_worktrees {
-            let label = ws.parent()
-                .and_then(|p| p.file_name())
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_else(|| ws.display().to_string());
-            text.push_str(&format!("  uncommitted changes in {label} working directory\n"));
-        }
+        text.push_str(&format_agent(agent, Some(MAX_COMMITS_DISPLAY)));
     }
     Ok((ts, text))
 }
@@ -441,7 +490,11 @@ pub fn remove_agent(base: &Path, agent_id: &str, yes: bool) -> Result<()> {
                     needs_confirm = true;
                     let count = commits.len();
                     let n = if count == 1 { "commit" } else { "commits" };
-                    println!("Warning: discarding {count} unapproved {n} on {b}:");
+                    println!(
+                        "{} discarding {count} unapproved {n} on {}:",
+                        style::bold_yellow("Warning:"),
+                        style::yellow(b),
+                    );
                     let block = format_commit_block(&commits, count, Some(MAX_COMMITS_DISPLAY));
                     print!("{block}");
                 }
@@ -464,7 +517,11 @@ pub fn remove_agent(base: &Path, agent_id: &str, yes: bool) -> Result<()> {
         .unwrap_or_default();
         if !st.trim().is_empty() {
             needs_confirm = true;
-            println!("Warning: uncommitted changes in {}", ws.display());
+            println!(
+                "{} uncommitted changes in {}",
+                style::bold_yellow("Warning:"),
+                style::yellow(&ws.display().to_string()),
+            );
         }
     }
 
@@ -542,4 +599,47 @@ pub fn _remove_agent(base: &Path, agent_id: &str, branches: &[String]) -> Result
     }
     registry::remove_agent(agent_id)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_agent(running: bool) -> AgentInfo {
+        AgentInfo {
+            last_activity: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0)
+                - 420.0,
+            name: "demo@1".to_string(),
+            running,
+            state: if running { "running" } else { "stopped" }.to_string(),
+            unapproved: vec![(
+                "agent-1/main".to_string(),
+                4,
+                vec![
+                    "abc1234 Add login form".to_string(),
+                    "def5678 Wire up auth handler".to_string(),
+                    "9012345 Hook up session storage".to_string(),
+                    "6789abc Polish error states".to_string(),
+                ],
+            )],
+            dirty_worktrees: vec![PathBuf::from("/tmp/coding-cave/1")],
+        }
+    }
+
+    #[test]
+    fn format_agent_emits_ansi_when_color_forced() {
+        std::env::set_var("CLICOLOR_FORCE", "1");
+        let agent = sample_agent(true);
+        let out = format_agent(&agent, Some(MAX_COMMITS_DISPLAY));
+        assert!(out.contains("\x1b["), "expected ANSI escapes in colored output");
+        assert!(out.contains("demo"));
+        assert!(out.contains("@1"));
+        assert!(out.contains("agent-1/main"));
+        assert!(out.contains("commits on"));
+        assert!(out.contains("... and 1 more") || out.contains("Polish error states"));
+        assert!(out.contains("uncommitted changes"));
+    }
 }

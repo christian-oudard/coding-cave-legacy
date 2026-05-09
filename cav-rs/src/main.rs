@@ -17,6 +17,7 @@ mod review;
 mod sandbox;
 mod shell;
 mod status;
+mod style;
 mod supervisor;
 mod user_env;
 mod workspace;
