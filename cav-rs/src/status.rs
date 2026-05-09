@@ -56,13 +56,17 @@ pub fn show(base: &Path, agent_id: Option<&str>) -> Result<()> {
         }
         // Inside cave without a cave remote (not yet cav init'd): no sub-agents.
         let slug = config::project_slug(base);
+        println!("{}", style::bold_white(&format!("=== {slug} ===")));
         if let Some(aid) = agent_id {
-            println!("No agent {aid} in {slug}.");
+            println!("No agent {aid}.");
         } else {
-            println!("No agents in {slug}. Start one with: {}", style::bold_cyan("cav agent"));
+            println!("No agents. Start one with: {}", style::bold_cyan("cav agent"));
         }
         return Ok(());
     }
+
+    let slug = config::project_slug(base);
+    println!("{}", style::bold_white(&format!("=== {slug} ===")));
 
     if agent_id.is_none() {
         show_branch_sync_status(base);
@@ -70,7 +74,6 @@ pub fn show(base: &Path, agent_id: Option<&str>) -> Result<()> {
         sandbox::reconcile_merged_dev_branches(base, config::verbose() >= 1);
     }
 
-    let slug = config::project_slug(base);
     let mut registered = registry::all_agent_ids(Some(&slug))?;
     if let Some(aid) = agent_id {
         registered.retain(|a| a == aid);
@@ -82,7 +85,7 @@ pub fn show(base: &Path, agent_id: Option<&str>) -> Result<()> {
         if let Some(aid) = agent_id {
             println!("No agent {aid} in registry.");
         } else {
-            println!("No running agents in {slug}.");
+            println!("No running agents.");
         }
         return Ok(());
     }
@@ -96,7 +99,7 @@ pub fn show(base: &Path, agent_id: Option<&str>) -> Result<()> {
         if let Some(aid) = agent_id {
             println!("No agent {aid} in registry.");
         } else {
-            println!("No running agents in {slug}.");
+            println!("No running agents.");
         }
         return Ok(());
     }

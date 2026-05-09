@@ -304,7 +304,8 @@ fn run() -> Result<()> {
                     if let Ok(base) = find_repo_root() {
                         if !shared_repo_path(&base).exists() {
                             let slug = config::project_slug(&base);
-                            println!("No running agents in {}.", style::blue(&slug));
+                            println!("{}", style::bold_white(&format!("=== {slug} ===")));
+                            println!("No running agents.");
                             return Ok(());
                         }
                     }
