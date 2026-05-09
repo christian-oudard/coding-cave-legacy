@@ -75,6 +75,12 @@ pub fn current_branch(cwd: Option<&Path>) -> Result<String> {
     Ok(detached_branch(cwd).unwrap_or(branch))
 }
 
+/// Returns the agent id when HEAD is on a dev branch like `agent-N/<base>`.
+pub fn current_agent_id(cwd: Option<&Path>) -> Option<String> {
+    let branch = current_branch(cwd).ok()?;
+    crate::config::parse_dev_branch(&branch).map(|(_, aid)| aid)
+}
+
 fn git_operation_in_progress(cwd: Option<&Path>) -> bool {
     let git_dir = match git_output(&["rev-parse", "--git-dir"], cwd) {
         Ok(d) => d,

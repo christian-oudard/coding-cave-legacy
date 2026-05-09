@@ -28,7 +28,7 @@ use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 
 use crate::completion::ShellChoice;
-use crate::config::{inside_cave, parse_dev_branch, shared_repo_path};
+use crate::config::{inside_cave, shared_repo_path};
 use crate::constants::{HOST_SHARED_REPO_DIR};
 
 #[derive(Parser)]
@@ -623,11 +623,7 @@ pub fn resolve_target(
     require_init(&base)?;
 
     if infer_agent && agent_id.is_none() {
-        if let Ok(branch) = git::current_branch(Some(&base)) {
-            if let Some((_, aid)) = parse_dev_branch(&branch) {
-                agent_id = Some(aid);
-            }
-        }
+        agent_id = git::current_agent_id(Some(&base));
     }
 
     Ok((base, agent_id))
@@ -638,10 +634,8 @@ pub fn resolve_target(
 /// agent registered for this project. Bails with a helpful message
 /// when there are zero or multiple candidates.
 fn auto_pick_agent_id(base: &Path, cmd: &str) -> Result<String> {
-    if let Ok(branch) = git::current_branch(Some(base)) {
-        if let Some((_, aid)) = parse_dev_branch(&branch) {
-            return Ok(aid);
-        }
+    if let Some(aid) = git::current_agent_id(Some(base)) {
+        return Ok(aid);
     }
     let slug = config::project_slug(base);
     let ids = registry::all_agent_ids(Some(&slug))?;

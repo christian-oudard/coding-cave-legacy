@@ -6,6 +6,7 @@ use std::process::Command;
 use anyhow::{bail, Result};
 
 use crate::config;
+use crate::git;
 use crate::registry;
 
 pub fn enter(
@@ -202,6 +203,15 @@ fn pick_running_agent(base: &Path, slug: &str) -> Result<String> {
     for aid in &ids {
         if registry::is_agent_running(aid)? {
             running.push(aid.clone());
+        }
+    }
+
+    if let Some(aid) = git::current_agent_id(Some(base)) {
+        if running.contains(&aid) {
+            return Ok(aid);
+        }
+        if ids.contains(&aid) {
+            bail!("Agent {slug}@{aid} (from current branch) is not running.");
         }
     }
 

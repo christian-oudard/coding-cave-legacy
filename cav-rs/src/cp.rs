@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Result};
 
 use crate::config::{self, persistent_home, worktree_dir};
+use crate::git;
 use crate::registry;
 
 pub fn cp(srcs: Vec<String>, dest: String, recursive: bool, force: bool) -> Result<()> {
@@ -171,23 +172,42 @@ fn resolve_cave_path(spec: &str, is_dest: bool) -> Result<Option<PathBuf>> {
 }
 
 fn detect_slug() -> Result<String> {
+    detect_project()?
+        .map(|(slug, _)| slug)
+        .ok_or_else(|| anyhow::anyhow!("CWD is not inside a registered project."))
+}
+
+fn detect_project() -> Result<Option<(String, PathBuf)>> {
     let cwd = std::env::current_dir()?;
     for (slug, path) in registry::all_projects()? {
         let proj = PathBuf::from(&path);
         if cwd == proj || cwd.starts_with(&proj) {
-            return Ok(slug);
+            return Ok(Some((slug, proj)));
         }
     }
-    bail!("CWD is not inside a registered project.")
+    Ok(None)
+}
+
+/// Infer the agent id from the current git branch when CWD is the host
+/// project for `slug` and HEAD is on a dev branch like `agent-N/<base>`.
+fn infer_agent_from_branch(slug: &str) -> Option<String> {
+    let (cwd_slug, proj) = detect_project().ok().flatten()?;
+    if cwd_slug != slug {
+        return None;
+    }
+    git::current_agent_id(Some(&proj))
 }
 
 fn worktree_for_slug(slug: &str, agent_id: Option<&str>) -> Result<(PathBuf, String)> {
-    if let Some(aid) = agent_id {
-        let ws = worktree_dir(slug, aid);
+    let inferred = agent_id
+        .map(|s| s.to_string())
+        .or_else(|| infer_agent_from_branch(slug));
+    if let Some(aid) = inferred {
+        let ws = worktree_dir(slug, &aid);
         if !ws.exists() {
             bail!("No worktree found for {slug}@{aid}.");
         }
-        return Ok((ws, aid.to_string()));
+        return Ok((ws, aid));
     }
     let slug_dir = config::data_dir().join("worktrees").join(slug);
     if !slug_dir.is_dir() {
@@ -254,14 +274,17 @@ fn cave_root_for_slug(slug: &str, agent_id: Option<&str>) -> Result<(PathBuf, St
         })
         .collect();
 
-    let chosen = if let Some(aid) = agent_id {
-        if !candidates.contains(&aid.to_string()) {
+    let inferred = agent_id
+        .map(|s| s.to_string())
+        .or_else(|| infer_agent_from_branch(slug));
+    let chosen = if let Some(aid) = inferred {
+        if !candidates.contains(&aid) {
             bail!(
                 "Agent {slug}@{aid} is not running. Cave-internal absolute paths \
                  require a live cave."
             );
         }
-        aid.to_string()
+        aid
     } else if candidates.is_empty() {
         bail!(
             "No running cave for project '{slug}'. Cave-internal absolute paths \
