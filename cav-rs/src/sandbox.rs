@@ -11,7 +11,7 @@ use anyhow::{bail, Result};
 use rustix::process::Signal;
 use serde::Deserialize;
 
-use crate::config::{self, inside_cave, launch_home, parse_dev_branch, project_slug, shared_repo_path};
+use crate::config::{self, inside_cave, parse_dev_branch, project_slug, shared_repo_path};
 use crate::constants::{self, CAVE_SHARED_REMOTE, HOST_SHARED_REMOTE};
 use crate::{daemon, git, registry, user_env, workspace};
 
@@ -2103,7 +2103,7 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
         workspaces.push((ep_ws, ep_shared, es));
     }
 
-    let home = launch_home(&agent_name);
+    let home = config::persistent_home();
     std::fs::create_dir_all(&home)?;
     for (_, _, s) in &workspaces {
         seed_claude_config(&home, s, comms);
@@ -2274,17 +2274,6 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
             "CODING_CAVE_HOST_DEVICES".to_string(),
             host_devices.join(":"),
         );
-    }
-
-    let parent_lineage = std::env::var("CODING_CAVE_LINEAGE").unwrap_or_default();
-    let parent_agent = std::env::var("CODING_CAVE_AGENT_NAME").unwrap_or_default();
-    if !parent_agent.is_empty() {
-        let lineage = if parent_lineage.is_empty() {
-            parent_agent.clone()
-        } else {
-            format!("{parent_lineage}.{parent_agent}")
-        };
-        env.insert("CODING_CAVE_LINEAGE".to_string(), lineage);
     }
 
     env.extend(host_git_identity());

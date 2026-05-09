@@ -61,14 +61,6 @@ pub fn persistent_home() -> PathBuf {
     data_dir().join("home")
 }
 
-pub fn launch_home(agent_name: &str) -> PathBuf {
-    if inside_cave() {
-        data_dir().join("subcave-homes").join(agent_name)
-    } else {
-        persistent_home()
-    }
-}
-
 pub fn worktree_dir(slug: &str, agent_id: &str) -> PathBuf {
     data_dir().join("worktrees").join(slug).join(agent_id)
 }

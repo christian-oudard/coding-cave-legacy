@@ -134,20 +134,6 @@ pub fn display_name(base: &Path, agent_id: &str) -> String {
     format!("{slug}@{agent_id}")
 }
 
-pub fn launch_name(base: &Path, agent_id: &str) -> String {
-    let name = display_name(base, agent_id);
-    let lineage = std::env::var("CODING_CAVE_LINEAGE").unwrap_or_default();
-    if lineage.is_empty() {
-        name
-    } else {
-        format!("{name} (parent {lineage})")
-    }
-}
-
-pub fn agent_launch_home(base: &Path, agent_id: &str) -> std::path::PathBuf {
-    config::launch_home(&launch_name(base, agent_id))
-}
-
 // -- Session management --
 
 pub fn write_session_id(agent_id: &str, session_id: &str) -> Result<()> {
@@ -393,7 +379,7 @@ pub fn resolve_continue(
     }
 
     let aid = agent_id.unwrap();
-    let home = agent_launch_home(base, &aid);
+    let home = config::persistent_home();
     let session_id = read_session_id(&aid)?;
 
     if let Some(ref sid) = session_id {

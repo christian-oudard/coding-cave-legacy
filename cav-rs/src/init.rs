@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Result};
 
 use crate::config::{self, inside_cave, parse_dev_branch};
-use crate::constants::{CAVE_SHARED_REMOTE, HOST_SHARED_REMOTE, HOST_SHARED_REPO_DIR};
+use crate::constants::{CAVE_SHARED_REMOTE, HOST_SHARED_REMOTE};
 use crate::git;
 use crate::registry;
 use crate::workspace;
@@ -158,17 +158,6 @@ pub fn init(path: &Path, reinitialize: bool) -> Result<()> {
 
     let cav = config::cav_dir(&base);
     let shared = config::shared_repo_path(&base);
-
-    if inside_cave() {
-        let host_shared = cav.join(HOST_SHARED_REPO_DIR);
-        if !host_shared.exists() {
-            bail!(
-                "{} missing. Expected a bind mount from the parent cave. \
-                 Relaunch via 'cav agent' on the host.",
-                host_shared.display()
-            );
-        }
-    }
 
     if is_bare_repo(&shared) {
         if !reinitialize {
