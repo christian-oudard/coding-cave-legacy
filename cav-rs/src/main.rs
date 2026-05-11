@@ -7,6 +7,7 @@ mod approve;
 mod checkout;
 mod completion;
 mod cp;
+mod cp_complete;
 mod daemon;
 mod handler;
 mod init;
@@ -179,6 +180,12 @@ enum Cmd {
     Completion {
         #[arg(value_enum)]
         shell: ShellChoice,
+    },
+    /// Emit completion candidates for `cav cp` (used by shell scripts).
+    #[command(name = "__complete-cp", hide = true)]
+    CompleteCp {
+        #[arg(default_value = "")]
+        word: String,
     },
     /// Show version
     Version,
@@ -452,6 +459,12 @@ fn run() -> Result<()> {
             EnvCmd::Metadata => user_env::metadata(),
         },
         Cmd::Completion { shell } => completion::print_completion(shell),
+        Cmd::CompleteCp { word } => {
+            for c in cp_complete::complete(&word) {
+                println!("{c}");
+            }
+            Ok(())
+        }
         Cmd::Version => {
             let vd = constants::version_date();
             if vd.chars().all(|c| c.is_ascii_digit()) {
