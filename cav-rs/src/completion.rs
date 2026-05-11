@@ -57,11 +57,17 @@ _cav_cp_paths() {
     candidates=(${(f)"$(cav __complete-cp -- "$cur" 2>/dev/null)"})
     local cand
     for cand in "${candidates[@]}"; do
+        local -a addargs
+        addargs=()
         if [[ "$cand" == */ || "$cand" == *: ]]; then
-            compadd -S '' -- "$cand"
-        else
-            compadd -- "$cand"
+            addargs+=(-S '')
         fi
+        if [[ "$cand" != "$cur"* ]]; then
+            # Candidate replaces a longer-than-PREFIX user input (e.g.
+            # `cave:` -> `cave@7:`); -U skips compadd's match check.
+            addargs+=(-U)
+        fi
+        compadd "${addargs[@]}" -- "$cand"
     done
 }
 "#;
@@ -120,6 +126,15 @@ const BASH_CP_ARM: &str = r#"        cav__subcmd__cp)
                 COMPREPLY=()
                 local _cav_c
                 for _cav_c in "${_cav_raw[@]}"; do
+                    # Bash can only replace cur, not back up past it.
+                    # When the candidate doesn't share the pre-cur
+                    # prefix the helper emitted (e.g. user typed the
+                    # `cave` shorthand and the candidate uses the full
+                    # slug name), skip it rather than inserting in the
+                    # wrong place. Type the slug to get the rewrite.
+                    if [[ -n "$_cav_pfx" && "$_cav_c" != "$_cav_pfx"* ]]; then
+                        continue
+                    fi
                     COMPREPLY+=("${_cav_c#$_cav_pfx}")
                 done
                 if [[ "${COMPREPLY[*]}" == */ || "${COMPREPLY[*]}" == *: ]]; then

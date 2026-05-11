@@ -21,8 +21,12 @@ pub fn complete(word: &str) -> Vec<String> {
     }
 }
 
-/// No colon yet: emit cave prefixes (slug:, cave:, cave@N:, slug@N:) and
-/// host paths in the CWD. The user picks one and keeps typing.
+/// No colon yet: emit cave prefixes (slug:, slug@N:) and host paths
+/// in the CWD. The user picks one and keeps typing. Candidates always
+/// use the fully-qualified `<slug>[@N]:` form; if the user typed the
+/// `cave` shorthand we rewrite it to the CWD slug for matching so the
+/// shorthand still tab-completes (the shell wrapper passes `-U`/etc.
+/// so the rewritten candidate replaces the typed word).
 fn complete_top(word: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
 
@@ -33,16 +37,19 @@ fn complete_top(word: &str) -> Vec<String> {
         .collect();
     let cwd_slug = current_project_slug(&projects);
 
-    if let Some(slug) = cwd_slug.as_deref() {
-        push_if_match(&mut out, word, "cave:");
-        for aid in running_agents_in(slug) {
-            push_if_match(&mut out, word, &format!("cave@{aid}:"));
+    let match_word = match cwd_slug.as_deref() {
+        Some(slug) if word == "cave" || word.starts_with("cave@") => {
+            format!("{slug}{}", &word["cave".len()..])
         }
-    }
+        _ => word.to_string(),
+    };
+
     for (slug, _) in &projects {
-        push_if_match(&mut out, word, &format!("{slug}:"));
+        if pick_worktree(slug, None).is_some() {
+            push_if_match(&mut out, &match_word, &format!("{slug}:"));
+        }
         for aid in agents_in(slug) {
-            push_if_match(&mut out, word, &format!("{slug}@{aid}:"));
+            push_if_match(&mut out, &match_word, &format!("{slug}@{aid}:"));
         }
     }
 
@@ -62,8 +69,24 @@ fn complete_cave(word: &str, colon: usize) -> Vec<String> {
         return Vec::new();
     };
 
+    // Always emit the fully-qualified `<slug>[@N]:` form so accepting a
+    // candidate replaces the `cave` shorthand with the canonical name.
+    let qual_prefix = match agent_id.as_deref() {
+        Some(aid) => format!("{slug}@{aid}"),
+        None => slug.clone(),
+    };
+
     let (base_dir, base_str) = match resolve_base(&slug, agent_id.as_deref(), path) {
         Some(v) => v,
+        // If the user typed `cave:` or `slug:` with nothing after, and
+        // the agent is ambiguous, redirect to the `@N`-qualified forms
+        // so they can pick one rather than getting silence.
+        None if path.is_empty() && agent_id.is_none() => {
+            return agents_in(&slug)
+                .into_iter()
+                .map(|aid| format!("{slug}@{aid}:"))
+                .collect();
+        }
         None => return Vec::new(),
     };
 
@@ -94,9 +117,9 @@ fn complete_cave(word: &str, colon: usize) -> Vec<String> {
         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
         let suffix = if is_dir { "/" } else { "" };
         let full = if dir_rel.is_empty() {
-            format!("{prefix}:{base_str}{name}{suffix}")
+            format!("{qual_prefix}:{base_str}{name}{suffix}")
         } else {
-            format!("{prefix}:{base_str}{dir_rel}/{name}{suffix}")
+            format!("{qual_prefix}:{base_str}{dir_rel}/{name}{suffix}")
         };
         out.push(full);
     }
@@ -158,29 +181,36 @@ fn resolve_base(slug: &str, agent_id: Option<&str>, path: &str) -> Option<(PathB
     Some((ws, String::new()))
 }
 
+/// Mirror `cp::worktree_for_slug`'s resolution, minus the prompt: an
+/// explicit `@N` wins, then a running branch-inferred agent, then a
+/// unique candidate, then the unique running agent. Returns `None`
+/// when the real cp command would prompt — completion can't, so it
+/// must decline rather than guess.
 fn pick_worktree(slug: &str, agent_id: Option<&str>) -> Option<PathBuf> {
     if let Some(aid) = agent_id {
         let ws = worktree_dir(slug, aid);
         return ws.is_dir().then_some(ws);
     }
-    // No agent given: prefer the one inferred from the current branch,
-    // then fall back to the lowest-numbered agent so completion still
-    // returns useful candidates when multiple agents exist.
-    let mut registered: Vec<String> = registry::all_agent_ids(Some(slug)).ok()?;
-    if let Some(aid) = inferred_agent_for_slug(slug) {
-        if registered.contains(&aid) {
-            let ws = worktree_dir(slug, &aid);
-            if ws.is_dir() {
-                return Some(ws);
-            }
-        }
+    if let Some(aid) = inferred_agent_for_slug(slug)
+        .filter(|a| registry::is_agent_running(a).unwrap_or(false))
+    {
+        let ws = worktree_dir(slug, &aid);
+        return ws.is_dir().then_some(ws);
     }
-    registered.sort_by_key(|a| a.parse::<u32>().unwrap_or(u32::MAX));
-    for aid in &registered {
-        let ws = worktree_dir(slug, aid);
-        if ws.is_dir() {
-            return Some(ws);
-        }
+    let candidates: Vec<String> = registry::all_agent_ids(Some(slug))
+        .ok()?
+        .into_iter()
+        .filter(|aid| worktree_dir(slug, aid).is_dir())
+        .collect();
+    if candidates.len() == 1 {
+        return Some(worktree_dir(slug, &candidates[0]));
+    }
+    let running: Vec<String> = candidates
+        .into_iter()
+        .filter(|aid| registry::is_agent_running(aid).unwrap_or(false))
+        .collect();
+    if running.len() == 1 {
+        return Some(worktree_dir(slug, &running[0]));
     }
     None
 }
@@ -224,13 +254,6 @@ fn inferred_agent_for_slug(slug: &str) -> Option<String> {
 
 fn agents_in(slug: &str) -> Vec<String> {
     registry::all_agent_ids(Some(slug)).unwrap_or_default()
-}
-
-fn running_agents_in(slug: &str) -> Vec<String> {
-    agents_in(slug)
-        .into_iter()
-        .filter(|a| registry::is_agent_running(a).unwrap_or(false))
-        .collect()
 }
 
 fn host_path_candidates(word: &str) -> Vec<String> {
