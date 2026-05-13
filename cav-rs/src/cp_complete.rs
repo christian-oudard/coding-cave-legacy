@@ -21,12 +21,15 @@ pub fn complete(word: &str) -> Vec<String> {
     }
 }
 
-/// No colon yet: emit cave prefixes (slug:, slug@N:) and host paths
-/// in the CWD. The user picks one and keeps typing. Candidates always
-/// use the fully-qualified `<slug>[@N]:` form; if the user typed the
-/// `cave` shorthand we rewrite it to the CWD slug for matching so the
-/// shorthand still tab-completes (the shell wrapper passes `-U`/etc.
-/// so the rewritten candidate replaces the typed word).
+/// No colon yet: emit cave prefixes (slug@N:) and host paths in the
+/// CWD. The user picks one and keeps typing. Candidates always use
+/// the fully-qualified `<slug>@<aid>:` form so the agent ID lands in
+/// the buffer — bare `<slug>:` would let cp pick silently and the
+/// command would no longer record which agent received the file.
+/// If the user typed the `cave` shorthand we rewrite it to the CWD
+/// slug for matching so the shorthand still tab-completes (the shell
+/// wrapper passes `-U`/etc. so the rewritten candidate replaces the
+/// typed word).
 fn complete_top(word: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
 
@@ -45,17 +48,12 @@ fn complete_top(word: &str) -> Vec<String> {
     };
 
     for (slug, _) in &projects {
-        if pick_worktree(slug, None).is_some() {
-            push_if_match(&mut out, &match_word, &format!("{slug}:"));
-        }
         for aid in agents_in(slug) {
             push_if_match(&mut out, &match_word, &format!("{slug}@{aid}:"));
         }
     }
 
     out.extend(host_path_candidates(word));
-    out.sort();
-    out.dedup();
     out
 }
 
@@ -76,17 +74,20 @@ fn complete_cave(word: &str, colon: usize) -> Vec<String> {
         None => slug.clone(),
     };
 
+    // When the user has typed only `slug:` (no agent ID, no path),
+    // redirect to the `@N`-qualified forms so they pick an agent
+    // explicitly. cp itself would auto-resolve to a unique running
+    // agent silently, but for completion we want the buffer to record
+    // which one — otherwise the command isn't self-documenting.
+    if path.is_empty() && agent_id.is_none() {
+        return agents_in(&slug)
+            .into_iter()
+            .map(|aid| format!("{slug}@{aid}:"))
+            .collect();
+    }
+
     let (base_dir, base_str) = match resolve_base(&slug, agent_id.as_deref(), path) {
         Some(v) => v,
-        // If the user typed `cave:` or `slug:` with nothing after, and
-        // the agent is ambiguous, redirect to the `@N`-qualified forms
-        // so they can pick one rather than getting silence.
-        None if path.is_empty() && agent_id.is_none() => {
-            return agents_in(&slug)
-                .into_iter()
-                .map(|aid| format!("{slug}@{aid}:"))
-                .collect();
-        }
         None => return Vec::new(),
     };
 
@@ -123,7 +124,6 @@ fn complete_cave(word: &str, colon: usize) -> Vec<String> {
         };
         out.push(full);
     }
-    out.sort();
     out
 }
 
@@ -252,11 +252,59 @@ fn inferred_agent_for_slug(slug: &str) -> Option<String> {
     crate::git::current_agent_id(Some(Path::new(&proj.1)))
 }
 
+/// Agents for which a `cav cp <slug>@<id>:` would have somewhere to
+/// write. Filters out registered agents whose worktree was torn down
+/// (e.g. after `cav approve`); those would never produce a valid
+/// destination, so they shouldn't appear in completion.
 fn agents_in(slug: &str) -> Vec<String> {
-    registry::all_agent_ids(Some(slug)).unwrap_or_default()
+    registry::all_agent_ids(Some(slug))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|aid| worktree_dir(slug, aid).is_dir())
+        .collect()
 }
 
 fn host_path_candidates(word: &str) -> Vec<String> {
+    // Resolve the user's typed word to a (real_dir_to_list, prefix_to_emit,
+    // leaf_to_filter_on) triple. The prefix carries `~user/` or `~/` so
+    // candidates keep the form the user typed; the leaf is the partial
+    // filename being matched.
+    let triple = if let Some(tilde) = parse_tilde(word) {
+        match tilde.home {
+            Some(home) => tilde_listing(word, &home, tilde.user_part),
+            // `~` with no trailing slash and no matching user: redirect
+            // to `~/` so completion has somewhere to go.
+            None if !tilde.has_slash => return vec!["~/".to_string()],
+            None => return Vec::new(),
+        }
+    } else {
+        plain_listing(word)
+    };
+    let (listing_dir, prefix, leaf) = triple;
+
+    let entries = match std::fs::read_dir(&listing_dir) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+    let mut out: Vec<String> = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') && !leaf.starts_with('.') {
+            continue;
+        }
+        if !name.starts_with(&leaf) {
+            continue;
+        }
+        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        let suffix = if is_dir { "/" } else { "" };
+        out.push(format!("{prefix}{name}{suffix}"));
+    }
+    out
+}
+
+/// Plain CWD-relative or absolute path: emit the typed dir component
+/// verbatim as the candidate prefix.
+fn plain_listing(word: &str) -> (PathBuf, String, String) {
     let (dir, leaf) = match word.rsplit_once('/') {
         Some((d, l)) => (d, l),
         None => ("", word),
@@ -272,24 +320,75 @@ fn host_path_candidates(word: &str) -> Vec<String> {
     } else {
         (PathBuf::from(dir), format!("{dir}/"))
     };
-    let entries = match std::fs::read_dir(&listing_dir) {
-        Ok(e) => e,
-        Err(_) => return Vec::new(),
+    (listing_dir, prefix, leaf.to_string())
+}
+
+/// Tilde-rooted word: list the real filesystem dir, but emit candidates
+/// with the `~user`/`~` form the user typed.
+fn tilde_listing(word: &str, home: &Path, user_part: &str) -> (PathBuf, String, String) {
+    // Strip the tilde-and-user prefix; whatever remains is the part
+    // under $HOME that the user has typed so far.
+    let typed_prefix = format!("~{user_part}");
+    let rest = word.strip_prefix(&typed_prefix).unwrap_or("");
+    let rest = rest.strip_prefix('/').unwrap_or(rest);
+    let (sub_dir, leaf) = match rest.rsplit_once('/') {
+        Some((d, l)) => (d, l),
+        None => ("", rest),
     };
-    let mut out: Vec<String> = Vec::new();
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with('.') && !leaf.starts_with('.') {
+    let listing_dir = if sub_dir.is_empty() {
+        home.to_path_buf()
+    } else {
+        home.join(sub_dir)
+    };
+    let prefix = if sub_dir.is_empty() {
+        format!("{typed_prefix}/")
+    } else {
+        format!("{typed_prefix}/{sub_dir}/")
+    };
+    (listing_dir, prefix, leaf.to_string())
+}
+
+struct Tilde<'a> {
+    /// The chars between `~` and the first `/`, e.g. "" or "user".
+    user_part: &'a str,
+    has_slash: bool,
+    /// The home dir for `user_part`, or None if no such user exists.
+    home: Option<PathBuf>,
+}
+
+/// Parse a leading `~`, `~/...`, `~user`, or `~user/...`. Returns None
+/// when the word doesn't start with `~`.
+fn parse_tilde(word: &str) -> Option<Tilde<'_>> {
+    let rest = word.strip_prefix('~')?;
+    let (user_part, has_slash) = match rest.find('/') {
+        Some(i) => (&rest[..i], true),
+        None => (rest, false),
+    };
+    let home = if user_part.is_empty() {
+        std::env::var_os("HOME").map(PathBuf::from)
+    } else {
+        passwd_home(user_part)
+    };
+    Some(Tilde { user_part, has_slash, home })
+}
+
+/// Look up `user`'s home directory in /etc/passwd. Lines are
+/// `name:passwd:uid:gid:gecos:home:shell`. Returning None on any
+/// parse/IO failure is fine — caller falls through to "no candidates".
+pub(crate) fn passwd_home(user: &str) -> Option<PathBuf> {
+    let contents = std::fs::read_to_string("/etc/passwd").ok()?;
+    for line in contents.lines() {
+        let mut parts = line.splitn(7, ':');
+        if parts.next()? != user {
             continue;
         }
-        if !name.starts_with(leaf) {
-            continue;
+        let home = parts.nth(4)?;
+        if home.is_empty() {
+            return None;
         }
-        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        let suffix = if is_dir { "/" } else { "" };
-        out.push(format!("{prefix}{name}{suffix}"));
+        return Some(PathBuf::from(home));
     }
-    out
+    None
 }
 
 fn push_if_match(out: &mut Vec<String>, word: &str, candidate: &str) {
@@ -312,6 +411,54 @@ mod tests {
     #[test]
     fn parse_prefix_bare_digits_rejected() {
         assert!(parse_prefix("3").is_none());
+    }
+
+    #[test]
+    fn host_tilde_expands_to_home() {
+        let home = std::env::var("HOME").expect("HOME set in test env");
+        assert!(Path::new(&home).is_dir());
+        // Bare `~`: when $HOME is set we list it (matching `_files`);
+        // emitted candidates keep the `~/` prefix.
+        let bare = host_path_candidates("~");
+        assert!(
+            bare.iter().all(|c| c.starts_with("~/")),
+            "expected `~/` prefix on every candidate, got: {bare:?}"
+        );
+        // `~/` should list $HOME and emit `~/<entry>` candidates.
+        let listed = host_path_candidates("~/");
+        assert!(
+            listed.iter().all(|c| c.starts_with("~/")),
+            "expected `~/` prefix on every candidate, got: {listed:?}"
+        );
+        assert!(!listed.is_empty(), "expected at least one entry under $HOME");
+    }
+
+    #[test]
+    fn host_tilde_user_expands_via_passwd() {
+        // Resolve a user that exists on every system: pull the first
+        // line out of /etc/passwd and use that name. Skip if /etc/passwd
+        // isn't readable (e.g. a stripped-down sandbox).
+        let Ok(passwd) = std::fs::read_to_string("/etc/passwd") else { return };
+        let Some(first) = passwd.lines().find(|l| !l.starts_with('#') && !l.is_empty()) else { return };
+        let mut parts = first.splitn(7, ':');
+        let name = parts.next().unwrap();
+        let home = parts.nth(4).unwrap();
+        if !Path::new(home).is_dir() {
+            return; // user exists but home isn't readable; skip
+        }
+        let listed = host_path_candidates(&format!("~{name}/"));
+        let expected_prefix = format!("~{name}/");
+        assert!(
+            listed.iter().all(|c| c.starts_with(&expected_prefix)),
+            "expected `~{name}/` prefix on every candidate, got: {listed:?}"
+        );
+    }
+
+    #[test]
+    fn host_tilde_unknown_user_returns_empty() {
+        // Pick a name that's vanishingly unlikely to exist.
+        let listed = host_path_candidates("~zzz_no_such_user_zzz/");
+        assert!(listed.is_empty(), "expected no candidates, got: {listed:?}");
     }
 
     #[test]

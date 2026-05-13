@@ -52,22 +52,43 @@ fn inject_zsh(script: &str) -> Result<String> {
 
 const ZSH_HELPER: &str = r#"
 _cav_cp_paths() {
-    local cur="$PREFIX"
+    # Dequote `$PREFIX`. zsh backslash-escapes the `~` when inserting a
+    # tilde candidate, so subsequent tabs arrive as `\~/...`; the helper
+    # only understands the unquoted form.
+    local cur="${(Q)PREFIX}"
+
+    # When the word starts with `~/` or `~user/`, hand that segment to
+    # zsh as IPREFIX (an already-accepted prefix that compadd leaves
+    # alone). Without this, compadd re-quotes the tilde on every
+    # insertion and `cp` ends up with `\~/...` in the buffer instead
+    # of the plain `~/...` that `_files` produces.
+    local tilde=""
+    if [[ "$cur" == "~"*/* ]]; then
+        tilde="${cur%%/*}/"
+        IPREFIX+="$tilde"
+        PREFIX="${cur#$tilde}"
+        cur="$PREFIX"
+    fi
+    local query="$tilde$cur"
+
     local -a candidates
-    candidates=(${(f)"$(cav __complete-cp -- "$cur" 2>/dev/null)"})
+    candidates=(${(f)"$(cav __complete-cp -- "$query" 2>/dev/null)"})
     local cand
     for cand in "${candidates[@]}"; do
         local -a addargs
         addargs=()
-        if [[ "$cand" == */ || "$cand" == *: ]]; then
+        # Strip the same tilde segment from the candidate so compadd
+        # only handles the part after IPREFIX.
+        local body="${cand#$tilde}"
+        if [[ "$body" == */ || "$body" == *: ]]; then
             addargs+=(-S '')
         fi
-        if [[ "$cand" != "$cur"* ]]; then
+        if [[ "$body" != "$cur"* ]]; then
             # Candidate replaces a longer-than-PREFIX user input (e.g.
             # `cave:` -> `cave@7:`); -U skips compadd's match check.
             addargs+=(-U)
         fi
-        compadd "${addargs[@]}" -- "$cand"
+        compadd "${addargs[@]}" -- "$body"
     done
 }
 "#;

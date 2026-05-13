@@ -4,10 +4,35 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Result};
 
 use crate::config::{self, persistent_home, worktree_dir};
+use crate::cp_complete::passwd_home;
 use crate::git;
 use crate::proc_ns::find_inner_pid;
 use crate::registry;
 use crate::style;
+
+/// Expand a leading `~` or `~user` in a host-side path. Shell tilde
+/// expansion normally handles this, but tab completion of `~/...`
+/// inserts a backslash-escaped tilde to suppress reexpansion, so the
+/// shell hands us the literal `~/...` and we have to expand ourselves.
+fn tilde_expand(s: &str) -> PathBuf {
+    let Some(rest) = s.strip_prefix('~') else {
+        return PathBuf::from(s);
+    };
+    let (user, sub) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i + 1..]),
+        None => (rest, ""),
+    };
+    let home = if user.is_empty() {
+        std::env::var_os("HOME").map(PathBuf::from)
+    } else {
+        passwd_home(user)
+    };
+    match home {
+        Some(h) if sub.is_empty() => h,
+        Some(h) => h.join(sub),
+        None => PathBuf::from(s),
+    }
+}
 
 pub fn cp(srcs: Vec<String>, dest: String, recursive: bool, force: bool) -> Result<()> {
     // Expand globs in cave specs
@@ -36,8 +61,8 @@ pub fn cp(srcs: Vec<String>, dest: String, recursive: bool, force: bool) -> Resu
         }
         let dest_qual = qualify_spec(&dest, dest_resolved.as_ref());
         for src in &srcs {
-            let src_obj = PathBuf::from(src).canonicalize()
-                .unwrap_or_else(|_| PathBuf::from(src));
+            let src_obj = tilde_expand(src).canonicalize()
+                .unwrap_or_else(|_| tilde_expand(src));
             if !src_obj.exists() {
                 bail!("Source not found: {src}");
             }
@@ -68,7 +93,7 @@ pub fn cp(srcs: Vec<String>, dest: String, recursive: bool, force: bool) -> Resu
         }
     } else if resolved_srcs.iter().any(|p| p.is_some()) {
         // cave -> host (use pre-resolved paths)
-        let host_dest = PathBuf::from(&dest);
+        let host_dest = tilde_expand(&dest);
         if let Some(parent) = host_dest.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -733,6 +758,28 @@ mod tests {
         assert!(fnmatch_glob("foo?.rs", "foob.rs"));
         assert!(!fnmatch_glob("foo?.rs", "foo.rs"));
         assert!(!fnmatch_glob("foo?.rs", "fooab.rs"));
+    }
+
+    #[test]
+    fn tilde_expand_home() {
+        let home = std::env::var("HOME").expect("HOME set in test env");
+        assert_eq!(tilde_expand("~"), PathBuf::from(&home));
+        assert_eq!(tilde_expand("~/foo/bar"), PathBuf::from(&home).join("foo/bar"));
+    }
+
+    #[test]
+    fn tilde_expand_passes_through_plain_path() {
+        assert_eq!(tilde_expand("/abs/path"), PathBuf::from("/abs/path"));
+        assert_eq!(tilde_expand("rel/path"), PathBuf::from("rel/path"));
+    }
+
+    #[test]
+    fn tilde_expand_unknown_user_is_literal() {
+        // Falls back to the original string when the user doesn't exist.
+        assert_eq!(
+            tilde_expand("~zzz_no_such_user_zzz/foo"),
+            PathBuf::from("~zzz_no_such_user_zzz/foo")
+        );
     }
 
     #[test]
