@@ -191,6 +191,29 @@ enum Cmd {
     Version,
 }
 
+impl Cmd {
+    /// Subcommands that, run inside a cave, would create or operate on a
+    /// subcave. Gated by `require_subcave_opt_in()` so accidental nesting
+    /// can't happen.
+    fn is_subcave_op(&self) -> bool {
+        matches!(
+            self,
+            Cmd::Init { .. }
+                | Cmd::Agent { .. }
+                | Cmd::Approve { .. }
+                | Cmd::Reject { .. }
+                | Cmd::Pull { .. }
+                | Cmd::Push { .. }
+                | Cmd::Status { .. }
+                | Cmd::RemoveAgent { .. }
+                | Cmd::RemoveProject { .. }
+                | Cmd::Review { .. }
+                | Cmd::Shell { .. }
+                | Cmd::Checkout { .. }
+        )
+    }
+}
+
 #[derive(Subcommand)]
 enum EnvCmd {
     /// Rebuild the cave environment from cave.nix
@@ -226,7 +249,7 @@ fn run() -> Result<()> {
     let cli = Cli::parse_from(&argv);
     config::set_verbose(cli.verbose);
 
-    match cli.command.unwrap_or(Cmd::Agent {
+    let cmd = cli.command.unwrap_or(Cmd::Agent {
         continue_agent: false,
         resume_agent: None,
         extra_projects: vec![],
@@ -234,7 +257,11 @@ fn run() -> Result<()> {
         host_devices: vec![],
         comms: false,
         prompt: None,
-    }) {
+    });
+    if cmd.is_subcave_op() {
+        require_subcave_opt_in();
+    }
+    match cmd {
         Cmd::Init { path, reinitialize } => {
             init::init(&PathBuf::from(path), reinitialize)
         }
@@ -601,6 +628,26 @@ fn find_repo_root() -> Result<PathBuf> {
     git::repo_root(None)
         .map(PathBuf::from)
         .map_err(|_| anyhow::anyhow!("Not a git repository. Run: cav init"))
+}
+
+/// Refuse subcave operations unless the user has explicitly opted in.
+/// `cav` inside a cave can only operate on caves *below* itself; running
+/// the same command on the cave you're in or on the host is impossible.
+/// Require an explicit opt-in so accidental subcave creation doesn't
+/// happen when the user meant to act on the parent.
+///
+/// Prints directly to stderr and `process::exit`s rather than returning
+/// an `anyhow::Error`. This deliberately bypasses `main()`'s error
+/// handler (which would prepend a red `error:` prefix) so the message
+/// reads as plain advice, matching the style of `tmux`'s nesting refusal.
+fn require_subcave_opt_in() {
+    if inside_cave() && !config::nested_opt_in() {
+        eprintln!(
+            "Refusing to nest coding-cave sessions by default. \
+             Enable by setting CODING_CAVE_NESTED=1."
+        );
+        process::exit(1);
+    }
 }
 
 fn require_init(base: &Path) -> Result<()> {

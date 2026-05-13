@@ -109,6 +109,13 @@ pub fn inside_cave() -> bool {
     env::var("CODING_CAVE_VERSION").is_ok()
 }
 
+/// User has opted into subcave operations by exporting CODING_CAVE_NESTED.
+/// Required inside a cave to run subcave-affecting subcommands; see
+/// `require_subcave_opt_in` in main.rs for the enforcement.
+pub fn nested_opt_in() -> bool {
+    env::var("CODING_CAVE_NESTED").is_ok()
+}
+
 static VERBOSE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
 pub fn verbose() -> u8 {

@@ -82,10 +82,14 @@ impl Project {
     }
 
     fn cav(&self, args: &[&str]) -> Output {
+        // This suite runs inside a parent cave (the test asserts
+        // CODING_CAVE_VERSION is set) and exercises `cav agent` to spawn a
+        // subcave, so the nesting gate would otherwise refuse.
         Command::new(cav_binary())
             .args(args)
             .current_dir(&self.dir)
             .env("CODING_CAVE_DATA_DIR", &self.data_dir)
+            .env("CODING_CAVE_NESTED", "1")
             .output()
             .expect("cav binary not found")
     }

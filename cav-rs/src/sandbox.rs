@@ -620,23 +620,14 @@ fn extend_runtime_env(args: &mut Vec<String>, env: &HashMap<String, String>) {
     }
 }
 
-fn host_git_identity() -> HashMap<String, String> {
-    let mut env = HashMap::new();
-    let keys = [
-        ("user.name", "CODING_CAVE_GIT_NAME"),
-        ("user.email", "CODING_CAVE_GIT_EMAIL"),
-        ("user.signingkey", "CODING_CAVE_GIT_SIGNINGKEY"),
-        ("commit.gpgsign", "CODING_CAVE_GIT_GPGSIGN"),
-    ];
-    for (key, envvar) in &keys {
-        if let Ok(out) = Command::new("git").args(["config", "--global", key]).output() {
-            let val = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !val.is_empty() {
-                env.insert(envvar.to_string(), val);
-            }
-        }
-    }
-    env
+fn read_git_global(key: &str) -> Option<String> {
+    Command::new("git")
+        .args(["config", "--global", key])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 fn host_gitconfig() -> Option<PathBuf> {
@@ -1706,29 +1697,29 @@ fn write_combined_ca_bundle(home: &Path, os_bundle: &Path, crinj_ca: &Path) -> R
     Ok(())
 }
 
-/// Write a minimal ~/.gitconfig in the cave when the host has no
-/// gitconfig but exposed git identity via env vars (CODING_CAVE_GIT_*).
-/// host_gitconfig() copy already covers the more common case.
+/// Write a minimal ~/.gitconfig in the cave from the host's
+/// `git config --global` values. host_gitconfig() copying the host file
+/// already covers the more common case.
 fn ensure_gitconfig(home: &Path) -> Result<()> {
     let dest = home.join(".gitconfig");
     if dest.exists() {
         return Ok(());
     }
     let mut user = String::new();
-    if let Ok(v) = std::env::var("CODING_CAVE_GIT_NAME") {
+    if let Some(v) = read_git_global("user.name") {
         user.push_str(&format!("\tname = {v}\n"));
     }
-    if let Ok(v) = std::env::var("CODING_CAVE_GIT_EMAIL") {
+    if let Some(v) = read_git_global("user.email") {
         user.push_str(&format!("\temail = {v}\n"));
     }
-    if let Ok(v) = std::env::var("CODING_CAVE_GIT_SIGNINGKEY") {
+    if let Some(v) = read_git_global("user.signingkey") {
         user.push_str(&format!("\tsigningkey = {v}\n"));
     }
     if user.is_empty() {
         return Ok(());
     }
     let mut content = format!("[user]\n{user}");
-    if std::env::var("CODING_CAVE_GIT_GPGSIGN").as_deref() == Ok("true") {
+    if read_git_global("commit.gpgsign").as_deref() == Some("true") {
         content.push_str("[commit]\n\tgpgsign = true\n");
     }
     std::fs::write(&dest, content)?;
@@ -2311,7 +2302,6 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
         );
     }
 
-    env.extend(host_git_identity());
     if let Some(gc) = host_gitconfig() {
         env.insert(
             "CODING_CAVE_GITCONFIG".to_string(),

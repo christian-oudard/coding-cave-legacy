@@ -344,6 +344,8 @@ fn init_in_subdirectory_errors_helpfully() {
     let out = Command::new(CAV)
         .arg("init")
         .current_dir(&subdir)
+        .env_remove("CODING_CAVE_VERSION")
+        .env_remove("CODING_CAVE_AGENT_ID")
         .output()
         .expect("cav binary not found");
     assert_ne!(out.status.code(), Some(0), "should fail in subdirectory");
@@ -484,5 +486,62 @@ fn remove_agent_no_args_with_no_paused_agents_errors_clearly() {
     assert!(
         err.contains("No paused agents"),
         "expected friendly empty-registry error, got: {err}"
+    );
+}
+
+// --- Subcave nesting gate ---
+
+const NEST_REFUSAL: &str =
+    "Refusing to nest coding-cave sessions by default. \
+     Enable by setting CODING_CAVE_NESTED=1.";
+
+/// Run `cav <args>` simulating "inside a cave" (CODING_CAVE_VERSION set).
+/// `nested = Some("1")` opts in; `None` clears CODING_CAVE_NESTED so the
+/// gate fires. No git repo is needed — the gate runs before any repo
+/// lookup.
+fn cav_simulated_cave(args: &[&str], nested: Option<&str>) -> Output {
+    let mut cmd = Command::new(CAV);
+    cmd.args(args)
+        .current_dir(std::env::temp_dir())
+        .env("CODING_CAVE_VERSION", "test");
+    match nested {
+        Some(v) => cmd.env("CODING_CAVE_NESTED", v),
+        None => cmd.env_remove("CODING_CAVE_NESTED"),
+    };
+    cmd.output().expect("cav binary not found")
+}
+
+#[test]
+fn subcave_gate_refuses_when_nested_unset() {
+    let out = cav_simulated_cave(&["status"], None);
+    assert_ne!(out.status.code(), Some(0), "gate should fail the command");
+    let err = stderr(&out);
+    assert_eq!(
+        err.trim(),
+        NEST_REFUSAL,
+        "expected the exact tmux-style refusal, got: {err:?}"
+    );
+}
+
+#[test]
+fn subcave_gate_passes_when_nested_set() {
+    // Command may still fail (no `cav init` ran) but the refusal text
+    // must not appear.
+    let out = cav_simulated_cave(&["status"], Some("1"));
+    let err = stderr(&out);
+    assert!(
+        !err.contains("Refusing to nest"),
+        "gate should not fire when CODING_CAVE_NESTED is set, got: {err}"
+    );
+}
+
+#[test]
+fn subcave_gate_skips_non_subcave_commands() {
+    let out = cav_simulated_cave(&["version"], None);
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    let combined = format!("{}{}", stdout(&out), stderr(&out));
+    assert!(
+        !combined.contains("Refusing to nest"),
+        "gate must not fire on `cav version`, got: {combined}"
     );
 }

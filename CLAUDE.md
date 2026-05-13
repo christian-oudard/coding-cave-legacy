@@ -2,6 +2,18 @@
 
 Coordinates multiple Claude agents working in parallel on a Git project, using Git as the sole coordination mechanism. Each agent runs in a bwrap sandbox with nix packages.
 
+## Cave hierarchy
+
+`cav` only ever operates one level *below* itself. The cave a `cav` instance is running in is its "host cave" — opaque to it, managed by the parent `cav` that spawned it. There is no "operate on the current cave" mode and no "reach back to the host machine" mode; both are physically impossible across the sandbox.
+
+- On the host machine, `cav agent` starts a cave (a child).
+- Inside cave A, `cav agent` starts a subcave (cave B). From B's perspective, A is its host cave.
+- Inside cave A, `cav status` lists subcaves of A — never A itself, never the host machine's caves.
+
+`CODING_CAVE_VERSION` is set inside every cave and is the detection marker for "I'm inside a cave." Its value is the version of the `cav` that opened this cave (the parent's version), not the version of the `cav` binary on PATH here — those can differ if `cav` was rebuilt inside the cave for subcave testing.
+
+Subcave operations (`cav agent`, `cav init`, `cav status`, `cav approve`, etc.) are gated inside a cave: they refuse by default with "Refusing to nest coding-cave sessions by default." To opt in, `export CODING_CAVE_NESTED=1` before running them — required for the cave-integration test tier below.
+
 ## Development
 
 Built in Rust. Use `nix develop --command cargo build` to build locally, or `nix build` for a full release build.

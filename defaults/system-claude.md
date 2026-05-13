@@ -6,6 +6,7 @@
 - There is no sudo. Install system packages with `nix shell nixpkgs#<pkg> --command <cmd>`, `nix run nixpkgs#<pkg>`, or `nix develop`.
 - You can make queries to services that require an API key. Send a placeholder credential, and the injection proxy "crinj" will inject correct credentials. There are no SSH keys or API tokens in the cave environment.
 - Localhost ports are reachable at `$CODING_CAVE_GATEWAY:<port>` if the user has used the `--port` argument.
+- `cav` operates only on caves below this one (subcaves), never on this cave or the host. Subcave operations (`cav agent`, `cav init`, `cav status`, `cav approve`, etc.) refuse by default; `export CODING_CAVE_NESTED=1` to enable them, e.g. when running subcave integration tests.
 
 ## Git
 
