@@ -5,8 +5,25 @@
 - Your home directory at `/home/cave-coder` persists across sessions. However, `~/.claude/` is automatically reset each session. Do not modify any .claude/ directory directly. The Write/Edit tools and Bash mutations (mkdir, rm, rmdir, mv, cp) are blocked by a hook. Reads (Read, ls, cat) work normally. To make changes, run a Python script. The script process bypasses the hook.
 - There is no sudo. Install system packages with `nix shell nixpkgs#<pkg> --command <cmd>`, `nix run nixpkgs#<pkg>`, or `nix develop`.
 - You can make queries to services that require an API key. Send a placeholder credential, and the injection proxy "crinj" will inject correct credentials. There are no SSH keys or API tokens in the cave environment.
-- Localhost ports are reachable at `$CODING_CAVE_GATEWAY:<port>` if the user has used the `--port` argument.
-- `cav` operates only on caves below this one (subcaves), never on this cave or the host. Subcave operations (`cav agent`, `cav init`, `cav status`, `cav approve`, etc.) refuse by default; `export CODING_CAVE_NESTED=1` to enable them, e.g. when running subcave integration tests.
+- Localhost ports are reachable at `$CODING_CAVE_GATEWAY:<port>`. Each port must be enabled by the user with the `--port` argument.
+- You can test coding-cave from within a cave. The `cav` executable works normally, as long as you set the env var `CODING_CAVE_NESTED=1`.
+
+
+## Permissions
+
+You have full permission for most actions. Some actions will stall the session with a permission check, avoid these.
+
+**`rm` / `rmdir` on a critical path.** Triggers when the target is `/`, your home directory exactly, a top-level path (parent is `/` — `/tmp`, `/etc`, `/nix`, etc.), `*`, or anything ending in `/*`. The check inspects the literal command before shell expansion, so `rm -rf /path/*` is flagged just like `rm -rf /path`. Safe forms:
+
+- `rm -rf /path/subdir/` — subdirectory, parent is no longer `/`
+- `find /path -mindepth 1 -delete` — empty in place; `find` is not subject to the check
+
+**Write / Edit on a sensitive path.** Triggers when the basename is one of `.gitconfig` `.gitmodules` `.bashrc` `.bash_profile` `.zshrc` `.zprofile` `.profile` `.ripgreprc` `.mcp.json` `.claude.json`, or any path segment is one of `.git` `.vscode` `.idea` `.claude` `.husky`. Only the Write and Edit tools are checked — Bash output redirection (`>`, `>>`, heredocs, `tee`) bypasses:
+
+    cat > ~/.gitconfig <<'EOF'
+    [user]
+      name = ...
+    EOF
 
 ## Git
 
@@ -14,4 +31,4 @@ Commit your changes any time you finish a task; the user cannot see your changes
 
 ## Messaging
 
-Other agents may be working on the same project in parallel. You can communicate with them via the `send_message` tool. Messages from other agents arrive as `<channel>` events with a `from` attribute containing the sender's agent ID. Use messaging to coordinate, avoid conflicts, or ask questions.
+Other agents may be working in parallel. You can communicate with them via the `send_message` tool. Messages from other agents arrive as `<channel>` events with a `from` attribute containing the sender's agent ID. Use messaging to coordinate, avoid conflicts, or ask questions.
