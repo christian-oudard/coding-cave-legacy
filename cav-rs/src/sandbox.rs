@@ -1926,13 +1926,48 @@ fn teardown_agent(
 /// Print the cav resume commands. Claude already prints its own
 /// "Resume this session with: claude --resume <uuid>" line, so we just
 /// append the cav-flavored alternatives. Session uuid first (the
-/// canonical, archive-backed form), then the agent-id shortcut.
-fn print_resume_hints(agent_id: &str, session_id: Option<&str>, agent_id_gone: bool) {
+/// canonical, archive-backed form), then the agent-id shortcut. The
+/// flag suffix echoes the session-affecting options the user invoked
+/// with, so a copy-pasted resume command reproduces the same mounts.
+fn format_resume_flags(
+    extra_slugs: &[String],
+    host_ports: &[u16],
+    host_devices: &[String],
+    comms: bool,
+) -> String {
+    let mut s = String::new();
+    for slug in extra_slugs {
+        s.push_str(" -p ");
+        s.push_str(&crate::shell::shell_quote(slug));
+    }
+    for port in host_ports {
+        s.push_str(&format!(" --port {port}"));
+    }
+    for dev in host_devices {
+        s.push_str(" -d ");
+        s.push_str(&crate::shell::shell_quote(dev));
+    }
+    if comms {
+        s.push_str(" --comms");
+    }
+    s
+}
+
+fn print_resume_hints(
+    agent_id: &str,
+    session_id: Option<&str>,
+    agent_id_gone: bool,
+    extra_slugs: &[String],
+    host_ports: &[u16],
+    host_devices: &[String],
+    comms: bool,
+) {
+    let suffix = format_resume_flags(extra_slugs, host_ports, host_devices, comms);
     if let Some(sid) = session_id {
-        eprintln!("{}", style::bold_cyan(&format!("cav --resume {sid}")));
+        eprintln!("{}", style::bold_cyan(&format!("cav --resume {sid}{suffix}")));
     }
     if !agent_id_gone {
-        eprintln!("{}", style::bold_cyan(&format!("cav -r {agent_id}")));
+        eprintln!("{}", style::bold_cyan(&format!("cav -r {agent_id}{suffix}")));
     }
 }
 
@@ -2535,7 +2570,15 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
         teardown_agent(&base, &workspaces, &agent_id);
     }
     if actual_sid.is_some() {
-        print_resume_hints(&agent_id, actual_sid.as_deref(), !agent_id_survives);
+        print_resume_hints(
+            &agent_id,
+            actual_sid.as_deref(),
+            !agent_id_survives,
+            &extra_slugs,
+            &host_ports,
+            &host_devices,
+            comms,
+        );
     }
 
     let _ = slirp.kill();
@@ -2564,10 +2607,34 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::is_trivially_clean;
+    use super::{format_resume_flags, is_trivially_clean};
     use std::fs;
     use std::path::PathBuf;
     use std::process::Command;
+
+    #[test]
+    fn resume_flags_empty() {
+        assert_eq!(format_resume_flags(&[], &[], &[], false), "");
+    }
+
+    #[test]
+    fn resume_flags_all_options() {
+        let extras = vec!["coding-cave".to_string(), "other-proj".to_string()];
+        let ports = vec![3000u16, 8080];
+        let devs = vec!["/dev/dri".to_string()];
+        let s = format_resume_flags(&extras, &ports, &devs, true);
+        assert_eq!(
+            s,
+            " -p coding-cave -p other-proj --port 3000 --port 8080 -d /dev/dri --comms"
+        );
+    }
+
+    #[test]
+    fn resume_flags_quotes_spaces() {
+        let extras = vec!["my project".to_string()];
+        let s = format_resume_flags(&extras, &[], &[], false);
+        assert_eq!(s, " -p 'my project'");
+    }
 
     fn git(args: &[&str], dir: &std::path::Path) {
         let out = Command::new("git")
