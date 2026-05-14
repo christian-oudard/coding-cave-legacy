@@ -36,34 +36,18 @@
         "type": "github"
       }
     },
-    "crane_2": {
-      "locked": {
-        "lastModified": 1775236976,
-        "narHash": "sha256-gCgX+AXN7K1gAIEqcLcZHxmC+QoZcwn9m6Z9r2Az+N8=",
-        "owner": "ipetkov",
-        "repo": "crane",
-        "rev": "6c23998526351a53ce734f0ac84940da988ccef1",
-        "type": "github"
-      },
-      "original": {
-        "owner": "ipetkov",
-        "repo": "crane",
-        "type": "github"
-      }
-    },
     "crinj": {
       "inputs": {
-        "crane": "crane_2",
         "nixpkgs": [
           "nixpkgs"
         ]
       },
       "locked": {
-        "lastModified": 1778336962,
-        "narHash": "sha256-cDUYI8CCK/wCN2HqRs38Dddy9dqYbmUpQCh/iRrejHA=",
+        "lastModified": 1778624800,
+        "narHash": "sha256-0zqOov0HauJ4OCihW3PcVrjEb6jdJ2zgCSuvWxPiB2Q=",
         "owner": "christian-oudard",
         "repo": "crinj",
-        "rev": "c3204d72cb86902c6f74dc0fc0e3ed2842af821f",
+        "rev": "8086e691c8d0e21d5e7a76a24f5fb7835b5c1039",
         "type": "github"
       },
       "original": {
