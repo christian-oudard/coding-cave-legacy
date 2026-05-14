@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
 
-use crate::config::{self, persistent_home};
+use crate::config::persistent_home;
 use crate::cp_complete::passwd_home;
 use crate::git;
 use crate::proc_ns::find_inner_pid;
@@ -254,7 +254,7 @@ fn detect_project() -> Result<Option<(String, PathBuf)>> {
 
 /// Infer the agent id from the current git branch when CWD is the host
 /// project for `slug` and HEAD is on a dev branch like `agent-N/<base>`.
-fn infer_agent_from_branch(slug: &str) -> Option<String> {
+pub(crate) fn infer_agent_from_branch(slug: &str) -> Option<String> {
     let (cwd_slug, proj) = detect_project().ok().flatten()?;
     if cwd_slug != slug {
         return None;
@@ -262,72 +262,67 @@ fn infer_agent_from_branch(slug: &str) -> Option<String> {
     git::current_agent_id(Some(&proj))
 }
 
-fn worktree_for_slug(slug: &str, agent_id: Option<&str>) -> Result<(PathBuf, String)> {
-    // Explicit `@N:` from the spec wins. Branch-based inference is only
-    // honored when the inferred agent is currently running — otherwise we'd
-    // silently copy into the worktree of a defunct session just because the
-    // host CWD happens to be checked out on its branch.
-    let inferred = match agent_id {
-        Some(aid) => Some(aid.to_string()),
-        None => infer_agent_from_branch(slug)
-            .filter(|aid| registry::is_agent_running(aid).unwrap_or(false)),
-    };
-    if let Some(aid) = inferred {
+/// Resolve a worktree for `slug` without prompting. Returns `Some` when
+/// resolution is unambiguous — explicit `@N`, branch-inferred running
+/// agent, the unique registered worktree, or the unique running agent.
+/// Returns `None` when the caller would need to prompt or error. Shared
+/// between `cav cp` and tab-completion so the two cannot diverge on
+/// which agent gets picked silently.
+pub(crate) fn resolve_worktree(slug: &str, agent_id: Option<&str>) -> Option<(PathBuf, String)> {
+    if let Some(aid) = agent_id {
+        let ws = worktree_for(slug, aid);
+        return ws.is_dir().then(|| (ws, aid.to_string()));
+    }
+    // Branch-based inference is only honored when the inferred agent is
+    // currently running — otherwise we'd silently target the worktree of
+    // a defunct session just because the host CWD is checked out on its
+    // branch.
+    if let Some(aid) = infer_agent_from_branch(slug)
+        .filter(|a| registry::is_agent_running(a).unwrap_or(false))
+    {
         let ws = worktree_for(slug, &aid);
-        if !ws.exists() {
-            bail!("No worktree found for {}.", style::agent_name(&format!("{slug}@{aid}")));
-        }
-        return Ok((ws, aid));
+        return ws.is_dir().then_some((ws, aid));
     }
-    let slug_dir = config::data_dir().join("worktrees").join(slug);
-    if !slug_dir.is_dir() {
-        bail!("No worktrees found for project '{}'.", style::blue(slug));
-    }
-    let registered: std::collections::HashSet<String> =
-        registry::all_agent_ids(Some(slug))?.into_iter().collect();
-    let mut candidates: Vec<PathBuf> = std::fs::read_dir(&slug_dir)?
-        .flatten()
-        .filter(|e| e.path().is_dir() && registered.contains(&e.file_name().to_string_lossy().to_string()))
-        .map(|e| e.path())
+    let candidates: Vec<String> = registry::all_agent_ids(Some(slug))
+        .ok()?
+        .into_iter()
+        .filter(|aid| worktree_for(slug, aid).is_dir())
         .collect();
-    candidates.sort_by_key(|p| {
-        p.file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .parse::<u32>()
-            .unwrap_or(u32::MAX)
-    });
-    if candidates.is_empty() {
-        bail!("No worktrees found for project '{}'.", style::blue(slug));
-    }
     if candidates.len() == 1 {
-        let aid = candidates[0]
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
-        return Ok((candidates[0].clone(), aid));
+        let aid = candidates.into_iter().next().unwrap();
+        return Some((worktree_for(slug, &aid), aid));
     }
     // Prefer the unique running agent when present, so a single live cave
     // wins over stale worktrees from stopped sessions.
-    let running: Vec<&PathBuf> = candidates
-        .iter()
-        .filter(|p| {
-            let aid = p.file_name().unwrap_or_default().to_string_lossy().to_string();
-            registry::is_agent_running(&aid).unwrap_or(false)
-        })
+    let running: Vec<String> = candidates
+        .into_iter()
+        .filter(|aid| registry::is_agent_running(aid).unwrap_or(false))
         .collect();
     if running.len() == 1 {
-        let aid = running[0].file_name().unwrap_or_default().to_string_lossy().to_string();
-        return Ok((running[0].clone(), aid));
+        let aid = running.into_iter().next().unwrap();
+        return Some((worktree_for(slug, &aid), aid));
     }
-    let aids: Vec<String> = candidates
-        .iter()
-        .map(|p| p.file_name().unwrap_or_default().to_string_lossy().to_string())
+    None
+}
+
+fn worktree_for_slug(slug: &str, agent_id: Option<&str>) -> Result<(PathBuf, String)> {
+    if let Some(r) = resolve_worktree(slug, agent_id) {
+        return Ok(r);
+    }
+    if let Some(aid) = agent_id {
+        bail!("No worktree found for {}.", style::agent_name(&format!("{slug}@{aid}")));
+    }
+    let mut aids: Vec<String> = registry::all_agent_ids(Some(slug))?
+        .into_iter()
+        .filter(|aid| worktree_for(slug, aid).is_dir())
         .collect();
+    if aids.is_empty() {
+        bail!("No worktrees found for project '{}'.", style::blue(slug));
+    }
+    aids.sort_by_key(|a| a.parse::<u32>().unwrap_or(u32::MAX));
     let chosen = pick_agent_prompt(slug, &aids)?;
-    let idx = aids.iter().position(|a| a == &chosen).unwrap();
-    Ok((candidates[idx].clone(), chosen))
+    let ws = worktree_for(slug, &chosen);
+    Ok((ws, chosen))
 }
 
 fn pick_agent_prompt(slug: &str, agent_ids: &[String]) -> Result<String> {

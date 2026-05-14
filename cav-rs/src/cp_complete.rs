@@ -68,13 +68,6 @@ fn complete_cave(word: &str, colon: usize) -> Vec<String> {
         return Vec::new();
     };
 
-    // Always emit the fully-qualified `<slug>[@N]:` form so accepting a
-    // candidate replaces the `cave` shorthand with the canonical name.
-    let qual_prefix = match agent_id.as_deref() {
-        Some(aid) => format!("{slug}@{aid}"),
-        None => slug.clone(),
-    };
-
     // When the user has typed only `slug:` (no agent ID, no path),
     // redirect to the `@N`-qualified forms so they pick an agent
     // explicitly. cp itself would auto-resolve to a unique running
@@ -87,9 +80,18 @@ fn complete_cave(word: &str, colon: usize) -> Vec<String> {
             .collect();
     }
 
-    let (base_dir, base_str) = match resolve_base(&slug, agent_id.as_deref(), path) {
+    let (base_dir, base_str, resolved_aid) = match resolve_base(&slug, agent_id.as_deref(), path) {
         Some(v) => v,
         None => return Vec::new(),
+    };
+
+    // Emit the fully-qualified `<slug>@<aid>:` form so accepting a
+    // candidate records which agent the cp targets. `~/` paths share a
+    // single persistent home across agents, so they stay bare `<slug>:`
+    // (matching `cp::qualify_spec`).
+    let qual_prefix = match resolved_aid.as_deref() {
+        Some(aid) => format!("{slug}@{aid}"),
+        None => slug.clone(),
     };
 
     // Split the remaining path into a directory portion (already typed,
@@ -155,85 +157,56 @@ fn parse_prefix(prefix: &str) -> Option<(String, Option<String>)> {
 /// list. Handles `~/`, `/projects/<slug>/`, plain relative, and
 /// cave-internal absolute paths via `/proc/<pid>/root`.
 ///
-/// Returns `(host_dir, path_consumed)` where `path_consumed` is the
-/// leading portion of `path` that maps to `host_dir`. The caller appends
-/// the rest (a partial filename) when emitting candidates.
-fn resolve_base(slug: &str, agent_id: Option<&str>, path: &str) -> Option<(PathBuf, String)> {
+/// Returns `(host_dir, path_consumed, resolved_agent_id)`. `path_consumed`
+/// is the leading portion of `path` that maps to `host_dir`; the caller
+/// appends the rest (a partial filename) when emitting candidates.
+/// `resolved_agent_id` is the agent the path pins to (`None` for `~/`,
+/// which shares one persistent home across agents).
+fn resolve_base(
+    slug: &str,
+    agent_id: Option<&str>,
+    path: &str,
+) -> Option<(PathBuf, String, Option<String>)> {
     if path == "~" || path.starts_with("~/") {
-        return Some((persistent_home(), "~/".to_string()));
+        return Some((persistent_home(), "~/".to_string(), None));
     }
 
     let project_prefix = format!("/projects/{slug}/");
     if path == project_prefix.trim_end_matches('/') || path.starts_with(&project_prefix) {
-        let ws = pick_worktree(slug, agent_id)?;
-        return Some((ws, project_prefix));
+        let (ws, aid) = crate::cp::resolve_worktree(slug, agent_id)?;
+        return Some((ws, project_prefix, Some(aid)));
     }
 
     if path.starts_with('/') {
-        let pid = pick_running_pid(slug, agent_id)?;
+        let (pid, aid) = pick_running_pid(slug, agent_id)?;
         let cave_root = PathBuf::from(format!("/proc/{pid}/root"));
         if !cave_root.exists() {
             return None;
         }
-        return Some((cave_root, "/".to_string()));
+        return Some((cave_root, "/".to_string(), Some(aid)));
     }
 
-    let ws = pick_worktree(slug, agent_id)?;
-    Some((ws, String::new()))
+    let (ws, aid) = crate::cp::resolve_worktree(slug, agent_id)?;
+    Some((ws, String::new(), Some(aid)))
 }
 
-/// Mirror `cp::worktree_for_slug`'s resolution, minus the prompt: an
-/// explicit `@N` wins, then a running branch-inferred agent, then a
-/// unique candidate, then the unique running agent. Returns `None`
-/// when the real cp command would prompt — completion can't, so it
-/// must decline rather than guess.
-fn pick_worktree(slug: &str, agent_id: Option<&str>) -> Option<PathBuf> {
-    if let Some(aid) = agent_id {
-        let ws = worktree_for(slug, aid);
-        return ws.is_dir().then_some(ws);
-    }
-    if let Some(aid) = inferred_agent_for_slug(slug)
+fn pick_running_pid(slug: &str, agent_id: Option<&str>) -> Option<(u32, String)> {
+    let candidates: Vec<(String, u32)> = registry::all_agent_ids(Some(slug))
+        .ok()?
+        .into_iter()
         .filter(|a| registry::is_agent_running(a).unwrap_or(false))
-    {
-        let ws = worktree_for(slug, &aid);
-        return ws.is_dir().then_some(ws);
-    }
-    let candidates: Vec<String> = registry::all_agent_ids(Some(slug))
-        .ok()?
-        .into_iter()
-        .filter(|aid| worktree_for(slug, aid).is_dir())
+        .filter_map(|a| registry::cave_pid(&a).ok().flatten().map(|pid| (a, pid)))
         .collect();
-    if candidates.len() == 1 {
-        return Some(worktree_for(slug, &candidates[0]));
-    }
-    let running: Vec<String> = candidates
-        .into_iter()
-        .filter(|aid| registry::is_agent_running(aid).unwrap_or(false))
-        .collect();
-    if running.len() == 1 {
-        return Some(worktree_for(slug, &running[0]));
-    }
-    None
-}
-
-fn pick_running_pid(slug: &str, agent_id: Option<&str>) -> Option<u32> {
-    let candidates: Vec<String> = registry::all_agent_ids(Some(slug))
-        .ok()?
-        .into_iter()
-        .filter(|a| {
-            registry::is_agent_running(a).unwrap_or(false)
-                && registry::cave_pid(a).ok().flatten().is_some()
-        })
-        .collect();
-    let chosen = match agent_id {
-        Some(aid) if candidates.iter().any(|c| c == aid) => aid.to_string(),
-        Some(_) => return None,
+    match agent_id {
+        Some(aid) => candidates
+            .into_iter()
+            .find(|(a, _)| a == aid)
+            .map(|(a, pid)| (pid, a)),
         None => match candidates.len() {
-            1 => candidates.into_iter().next().unwrap(),
-            _ => return None,
+            1 => candidates.into_iter().next().map(|(a, pid)| (pid, a)),
+            _ => None,
         },
-    };
-    registry::cave_pid(&chosen).ok().flatten()
+    }
 }
 
 fn current_project_slug(projects: &[(String, String)]) -> Option<String> {
@@ -245,12 +218,6 @@ fn current_project_slug(projects: &[(String, String)]) -> Option<String> {
         }
     }
     None
-}
-
-fn inferred_agent_for_slug(slug: &str) -> Option<String> {
-    let projects = registry::all_projects().ok()?;
-    let proj = projects.iter().find(|(s, _)| s == slug)?;
-    crate::git::current_agent_id(Some(Path::new(&proj.1)))
 }
 
 /// Agents for which a `cav cp <slug>@<id>:` would have somewhere to
