@@ -772,7 +772,7 @@ fn crinj_unregister_session(session: &Path) -> bool {
 }
 
 /// Severity of a crinj log event. Ordering enables `>= Warn` etc.
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum CrinjLevel {
     Other,
     Info,
@@ -804,29 +804,28 @@ struct CrinjState {
 
 /// Render one JSON-formatted crinj log line into a human-readable form.
 /// Falls back to the raw line if it doesn't parse as the expected shape.
+/// crinj uses Go's `log/slog` JSON handler: top-level `time`, `level`, `msg`,
+/// with all structured attributes flat alongside them.
 fn render_crinj_event(line: &str) -> (CrinjLevel, String) {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
         return (CrinjLevel::Other, line.to_string());
     };
-    let level_str = value.get("level").and_then(|v| v.as_str()).unwrap_or("");
+    let Some(map) = value.as_object() else {
+        return (CrinjLevel::Other, line.to_string());
+    };
+    let level_str = map.get("level").and_then(|v| v.as_str()).unwrap_or("");
     let level = CrinjLevel::parse(level_str);
-    let fields = value.get("fields").and_then(|v| v.as_object());
-    let message = fields
-        .and_then(|f| f.get("message"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let message = map.get("msg").and_then(|v| v.as_str()).unwrap_or("");
     let mut extras: Vec<String> = Vec::new();
-    if let Some(map) = fields {
-        for (k, v) in map {
-            if k == "message" {
-                continue;
-            }
-            let rendered = match v {
-                serde_json::Value::String(s) => s.clone(),
-                other => other.to_string(),
-            };
-            extras.push(format!("{k}={rendered}"));
+    for (k, v) in map {
+        if k == "time" || k == "level" || k == "msg" {
+            continue;
         }
+        let rendered = match v {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        extras.push(format!("{k}={rendered}"));
     }
     let pretty = if extras.is_empty() {
         format!("{level_str} {message}")
@@ -834,6 +833,44 @@ fn render_crinj_event(line: &str) -> (CrinjLevel, String) {
         format!("{level_str} {message} ({})", extras.join(", "))
     };
     (level, pretty)
+}
+
+#[cfg(test)]
+mod render_crinj_event_tests {
+    use super::*;
+
+    #[test]
+    fn parses_slog_info_with_attrs() {
+        let line = r#"{"time":"2026-05-14T21:22:01Z","level":"INFO","msg":"starting crinj","data_dir":"/home/foo"}"#;
+        let (level, pretty) = render_crinj_event(line);
+        assert_eq!(level, CrinjLevel::Info);
+        assert_eq!(pretty, "INFO starting crinj (data_dir=/home/foo)");
+    }
+
+    #[test]
+    fn parses_slog_error_with_multiple_attrs() {
+        let line = r#"{"time":"2026-05-14T21:22:01Z","level":"ERROR","msg":"loading config","error":"boom","config":"/x/y.toml"}"#;
+        let (level, pretty) = render_crinj_event(line);
+        assert_eq!(level, CrinjLevel::Error);
+        assert!(pretty.starts_with("ERROR loading config ("));
+        assert!(pretty.contains("error=boom"));
+        assert!(pretty.contains("config=/x/y.toml"));
+    }
+
+    #[test]
+    fn message_only_when_no_extras() {
+        let line = r#"{"time":"t","level":"INFO","msg":"ready"}"#;
+        let (level, pretty) = render_crinj_event(line);
+        assert_eq!(level, CrinjLevel::Info);
+        assert_eq!(pretty, "INFO ready");
+    }
+
+    #[test]
+    fn falls_back_on_non_json() {
+        let (level, pretty) = render_crinj_event("plain text");
+        assert_eq!(level, CrinjLevel::Other);
+        assert_eq!(pretty, "plain text");
+    }
 }
 
 fn start_crinj() -> Result<(Option<std::process::Child>, Option<Arc<CrinjState>>)> {
