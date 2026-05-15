@@ -28,7 +28,3 @@ You have full permission for most actions. Some actions will stall the session w
 ## Git
 
 Commit your changes any time you finish a task; the user cannot see your changes until they are committed. Your commits are automatically pushed to the shared remote at `host-cave`. Commits from the user and other agents come in on `host-cave/<branch>`. To sync with new changes, run `git fetch host-cave && git rebase host-cave/<branch>`. You cannot push to `host-cave/<branch>`, the user must approve your changes and merge them from the host. You can freely amend and squash commits on your branch. To undo commits, use `git reset`; do not add a reversion commit with `git revert`.
-
-## Messaging
-
-Other agents may be working in parallel. You can communicate with them via the `send_message` tool. Messages from other agents arrive as `<channel>` events with a `from` attribute containing the sender's agent ID. Use messaging to coordinate, avoid conflicts, or ask questions.

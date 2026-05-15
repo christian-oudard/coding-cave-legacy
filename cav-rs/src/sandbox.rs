@@ -1666,24 +1666,40 @@ fn merge_user_files(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
-fn append_user_claude_md(home: &Path, host_md: &Path) -> Result<()> {
+fn append_to_claude_md(home: &Path, text: &str) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let dest = home.join(".claude").join("CLAUDE.md");
-    if !dest.exists() || !host_md.exists() {
+    if !dest.exists() {
         return Ok(());
     }
     let m = std::fs::metadata(&dest)?;
     let mut p = m.permissions();
     p.set_mode(p.mode() | 0o200);
     std::fs::set_permissions(&dest, p)?;
-    let mut text = std::fs::read_to_string(&dest)?;
-    if !text.ends_with('\n') {
-        text.push('\n');
+    let mut buf = std::fs::read_to_string(&dest)?;
+    if !buf.ends_with('\n') {
+        buf.push('\n');
     }
-    text.push('\n');
-    text.push_str(&std::fs::read_to_string(host_md)?);
-    std::fs::write(&dest, text)?;
+    buf.push('\n');
+    buf.push_str(text);
+    std::fs::write(&dest, buf)?;
     Ok(())
+}
+
+fn append_user_claude_md(home: &Path, host_md: &Path) -> Result<()> {
+    if !host_md.exists() {
+        return Ok(());
+    }
+    append_to_claude_md(home, &std::fs::read_to_string(host_md)?)
+}
+
+fn append_comms_section(home: &Path, comms: bool) -> Result<()> {
+    let text = if comms {
+        include_str!("../../prompts/comms-on.md")
+    } else {
+        include_str!("../../prompts/comms-off.md")
+    };
+    append_to_claude_md(home, text)
 }
 
 fn write_combined_ca_bundle(home: &Path, os_bundle: &Path, crinj_ca: &Path) -> Result<()> {
@@ -2400,6 +2416,7 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
     if user_claude_md.is_file() {
         append_user_claude_md(&home, &user_claude_md)?;
     }
+    append_comms_section(&home, comms)?;
     if let Some(gc) = host_gitconfig() {
         let _ = std::fs::copy(&gc, home.join(".gitconfig"));
     }

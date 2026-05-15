@@ -46,7 +46,7 @@
       };
       enabledPlugins."cave-messages@cave" = true;
     };
-    memoryFragments = [ ../defaults/system-claude.md ];
+    memoryFragments = [ ../prompts/system.md ];
   };
 
   # Statusline script lives outside HM's normal pipeline because the

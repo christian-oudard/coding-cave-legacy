@@ -38,6 +38,7 @@
             fileset = pkgs.lib.fileset.unions [
               (craneLib.fileset.commonCargoSources root)
               (pkgs.lib.fileset.fileFilter (file: file.hasExt "sql") root)
+              (pkgs.lib.fileset.fileFilter (file: file.hasExt "md") (root + /prompts))
             ];
           };
 
