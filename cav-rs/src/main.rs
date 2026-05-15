@@ -24,6 +24,9 @@ mod supervisor;
 mod user_env;
 mod workspace;
 
+#[cfg(test)]
+mod test_util;
+
 use std::path::{Path, PathBuf};
 use std::process;
 

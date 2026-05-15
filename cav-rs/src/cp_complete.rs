@@ -400,9 +400,11 @@ fn push_if_match(out: &mut Vec<String>, word: &str, candidate: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util::DataDirGuard;
 
     #[test]
     fn complete_top_includes_files_when_word_empty() {
+        let _g = DataDirGuard::new("cpc-top");
         let candidates = complete_top("");
         // Should at least include some entries from CWD.
         assert!(!candidates.is_empty());
@@ -410,6 +412,7 @@ mod tests {
 
     #[test]
     fn parse_prefix_bare_digits_rejected() {
+        let _g = DataDirGuard::new("cpc-parse");
         assert!(parse_prefix("3").is_none());
     }
 
@@ -466,6 +469,7 @@ mod tests {
         // Regression: path equal to `/projects/<slug>` (no trailing
         // slash) used to slice past the end of `path` because the
         // resolved base_str included a trailing `/`.
+        let _g = DataDirGuard::new("cpc-partial");
         let _ = complete("foo:/projects/foo");
         let _ = complete("foo:/projects/foo/");
         let _ = complete("foo:");

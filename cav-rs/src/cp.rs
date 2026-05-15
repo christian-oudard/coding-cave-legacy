@@ -149,6 +149,7 @@ pub fn cp(srcs: Vec<String>, dest: String, recursive: bool, force: bool) -> Resu
     Ok(())
 }
 
+#[cfg_attr(test, derive(Debug))]
 struct ResolvedCave {
     path: PathBuf,
     slug: String,
@@ -166,12 +167,15 @@ fn resolve_cave_path(spec: &str, is_dest: bool) -> Result<Option<ResolvedCave>> 
 
     let (slug, agent_id) = if prefix.contains('@') {
         let (s, id_str) = prefix.rsplit_once('@').unwrap();
-        let slug = if s == "cave" || s.is_empty() {
-            detect_slug()?
-        } else {
-            s.to_string()
-        };
-        (slug, Some(id_str.to_string()))
+        let registry_slug = registry::agent_project(id_str).ok_or_else(|| {
+            anyhow::anyhow!("No registered agent with id '{id_str}'.")
+        })?;
+        if !s.is_empty() && s != "cave" && s != registry_slug {
+            bail!(
+                "Agent {id_str} belongs to project '{registry_slug}', not '{s}'."
+            );
+        }
+        (registry_slug, Some(id_str.to_string()))
     } else if prefix == "cave" {
         (detect_slug()?, None)
     } else if prefix.chars().all(|c| c.is_ascii_digit()) && !prefix.is_empty() {
@@ -791,5 +795,73 @@ mod tests {
         assert!(!fnmatch_glob("[a-z].txt", "A.txt"));
         assert!(fnmatch_glob("[!abc].txt", "d.txt"));
         assert!(!fnmatch_glob("[!abc].txt", "a.txt"));
+    }
+
+    mod resolve_at_n {
+        use super::*;
+        use crate::test_util::DataDirGuard;
+
+        fn register_agent_in(data: &Path, slug: &str) -> String {
+            let base = data.join(slug);
+            fs::create_dir_all(&base).unwrap();
+            registry::acquire_agent_id(&base).unwrap()
+        }
+
+        fn make_worktree(data: &Path, slug: &str, aid: &str) -> PathBuf {
+            let ws = data.join("worktrees").join(slug).join(aid);
+            fs::create_dir_all(&ws).unwrap();
+            ws
+        }
+
+        #[test]
+        fn at_n_resolves_via_registry_not_cwd() {
+            let g = DataDirGuard::new("cp-at-n");
+            let aid = register_agent_in(&g.path, "real-proj");
+            let ws = make_worktree(&g.path, "real-proj", &aid);
+
+            let resolved = resolve_cave_path(&format!("@{aid}:file.txt"), true)
+                .unwrap()
+                .expect("@N should resolve");
+            assert_eq!(resolved.slug, "real-proj");
+            assert!(
+                resolved.path.starts_with(&ws),
+                "{} must land under {}",
+                resolved.path.display(),
+                ws.display(),
+            );
+        }
+
+        #[test]
+        fn slug_mismatch_is_rejected() {
+            // Agent is in real-proj, but the user typed wrong-proj@N.
+            // Even if a stray worktrees/wrong-proj/<aid>/ exists on disk,
+            // we must refuse so cp can never write into an unrelated tree.
+            let g = DataDirGuard::new("cp-mismatch");
+            let aid = register_agent_in(&g.path, "real-proj");
+            make_worktree(&g.path, "real-proj", &aid);
+            let stray = make_worktree(&g.path, "wrong-proj", &aid);
+            fs::write(stray.join("seed"), "stray").unwrap();
+
+            let err = resolve_cave_path(&format!("wrong-proj@{aid}:file.txt"), true)
+                .expect_err("slug mismatch must error");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("real-proj") && msg.contains("wrong-proj"),
+                "error should name both projects, got: {msg}",
+            );
+        }
+
+        #[test]
+        fn unknown_agent_is_rejected() {
+            let g = DataDirGuard::new("cp-no-agent");
+            let _ = register_agent_in(&g.path, "real-proj");
+            // 999 is not registered.
+            let err = resolve_cave_path("@999:file.txt", true)
+                .expect_err("unknown agent must error");
+            assert!(
+                err.to_string().contains("999"),
+                "error should name the missing id, got: {err}",
+            );
+        }
     }
 }
