@@ -364,6 +364,7 @@ fn collect_agent_infos(
     base: &Path,
     by_agent: &HashMap<String, Vec<(String, String)>>,
 ) -> Result<Vec<AgentInfo>> {
+    let base_slug = config::project_slug(base);
     let mut agents = vec![];
     for (aid, branches_list) in by_agent {
         let name = registry::display_name(base, aid);
@@ -392,12 +393,11 @@ fn collect_agent_infos(
             }
         }
         let total_ahead: usize = unapproved.iter().map(|(_, n, _)| n).sum();
+        // Worktree state belongs to the queried project only. An agent's
+        // primary/extras live under their own === headings.
         let mut dirty_worktrees: Vec<PathBuf> = vec![];
-        for slug_s in registry::agent_all_slugs(aid)? {
-            let ws = worktree_dir(&slug_s, aid);
-            if !ws.is_dir() {
-                continue;
-            }
+        let ws = worktree_dir(&base_slug, aid);
+        if ws.is_dir() {
             let st = git::git(
                 &["status", "--porcelain"],
                 Some(&ws),
@@ -410,7 +410,11 @@ fn collect_agent_infos(
             }
         }
         let state = if running { "running" } else { "stopped" }.to_string();
-        if !running && total_ahead == 0 && dirty_worktrees.is_empty() {
+        // A guest agent (primary slug elsewhere) with no commits and a
+        // clean worktree here has nothing to report under this project.
+        let is_primary = registry::agent_project(aid).as_deref() == Some(base_slug.as_str());
+        let has_activity = total_ahead > 0 || !dirty_worktrees.is_empty();
+        if !has_activity && !(running && is_primary) {
             continue;
         }
         agents.push(AgentInfo {
@@ -601,5 +605,109 @@ mod tests {
         assert!(out.contains("commits on"));
         assert!(out.contains("... and 1 more") || out.contains("Polish error states"));
         assert!(out.contains("uncommitted changes"));
+    }
+
+    use std::fs;
+    use std::process::Command;
+    use std::sync::Mutex;
+
+    // Several tests in this crate's binary share process-global state
+    // (CODING_CAVE_DATA_DIR, the SQLite registry it points at). Serialize
+    // any test that mutates that state.
+    static DATA_DIR_LOCK: Mutex<()> = Mutex::new(());
+
+    struct DataDirGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        prev: Option<String>,
+        path: PathBuf,
+    }
+
+    impl DataDirGuard {
+        fn new(label: &str) -> Self {
+            let lock = DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let prev = std::env::var("CODING_CAVE_DATA_DIR").ok();
+            let tmp = std::env::temp_dir();
+            let mut path = PathBuf::new();
+            for i in 0..1000 {
+                let p = tmp.join(format!("cav-status-test-{label}-{i}"));
+                if fs::create_dir(&p).is_ok() {
+                    path = p;
+                    break;
+                }
+            }
+            assert!(!path.as_os_str().is_empty(), "could not allocate tmp dir");
+            std::env::set_var("CODING_CAVE_DATA_DIR", &path);
+            Self { _lock: lock, prev, path }
+        }
+    }
+
+    impl Drop for DataDirGuard {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+            match &self.prev {
+                Some(v) => std::env::set_var("CODING_CAVE_DATA_DIR", v),
+                None => std::env::remove_var("CODING_CAVE_DATA_DIR"),
+            }
+        }
+    }
+
+    fn git_in(repo: &Path, args: &[&str]) {
+        let out = Command::new("git").args(args).current_dir(repo).output().unwrap();
+        assert!(out.status.success(), "git {args:?} failed: {out:?}");
+    }
+
+    fn make_worktree(data: &Path, slug: &str, aid: &str, dirty: bool) -> PathBuf {
+        let ws = data.join("worktrees").join(slug).join(aid);
+        fs::create_dir_all(&ws).unwrap();
+        git_in(&ws, &["init", "-q", "-b", "main"]);
+        git_in(&ws, &["config", "user.email", "t@t"]);
+        git_in(&ws, &["config", "user.name", "T"]);
+        fs::write(ws.join("seed"), "seed\n").unwrap();
+        git_in(&ws, &["add", "seed"]);
+        git_in(&ws, &["commit", "-qm", "seed"]);
+        if dirty {
+            fs::write(ws.join("dirty"), "wip\n").unwrap();
+        }
+        ws
+    }
+
+    #[test]
+    fn dirty_worktree_in_guest_project_does_not_leak_into_host_status() {
+        // Repro of the original bug. Agent 1's primary is "proj-guest";
+        // its proj-guest worktree is dirty. The agent is also registered
+        // with "proj-host" listed as an extra. Its proj-host worktree
+        // exists but is clean.
+        //
+        // Before the fix, `cav status proj-host` surfaced agent 1 with
+        // "uncommitted changes in proj-guest working directory" — leaking
+        // a worktree from another project's directory under the wrong
+        // === heading.
+        let g = DataDirGuard::new("leak");
+        let guest_ws = make_worktree(&g.path, "proj-guest", "1", true);
+        make_worktree(&g.path, "proj-host", "1", false);
+
+        let base_guest = g.path.join("proj-guest");
+        fs::create_dir_all(&base_guest).unwrap();
+        let base_host = g.path.join("proj-host");
+        fs::create_dir_all(&base_host).unwrap();
+
+        let aid = registry::acquire_agent_id(&base_guest).unwrap();
+        registry::save_agent_extras(&aid, &["proj-host".to_string()]).unwrap();
+
+        let by_agent: HashMap<String, Vec<(String, String)>> =
+            [(aid.clone(), vec![])].into_iter().collect();
+
+        let host_agents = collect_agent_infos(&base_host, &by_agent).unwrap();
+        assert!(
+            host_agents.is_empty(),
+            "guest agent with clean worktree on this project must not appear; got {} agent(s)",
+            host_agents.len(),
+        );
+
+        // Sanity check the inverse: from the guest project, the dirty
+        // worktree is reported normally.
+        let guest_agents = collect_agent_infos(&base_guest, &by_agent).unwrap();
+        assert_eq!(guest_agents.len(), 1);
+        assert_eq!(guest_agents[0].dirty_worktrees, vec![guest_ws]);
     }
 }
