@@ -681,6 +681,39 @@ fn require_init(base: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Resolve a project base from explicit agent_id / project_slug args.
+/// Returns `Ok(None)` when neither is given (caller falls back to CWD).
+/// Bails when the args disagree (slug given alongside an agent that lives
+/// elsewhere) or when the named agent isn't registered.
+fn target_base(
+    agent_id: Option<&str>,
+    project_slug: Option<&str>,
+) -> Result<Option<PathBuf>> {
+    let slug = match (project_slug, agent_id) {
+        (Some(s), Some(aid)) => {
+            match registry::agent_project(aid) {
+                Some(reg) if reg != s => bail!(
+                    "Agent {aid} belongs to project '{reg}', not '{s}'."
+                ),
+                None => bail!("No agent {aid} in registry."),
+                _ => {}
+            }
+            s.to_string()
+        }
+        (Some(s), None) => s.to_string(),
+        (None, Some(aid)) => registry::agent_project(aid)
+            .ok_or_else(|| anyhow::anyhow!("No agent {aid} in registry."))?,
+        (None, None) => return Ok(None),
+    };
+    let p = registry::project_path(&slug)?
+        .ok_or_else(|| anyhow::anyhow!("No project '{slug}'. Check spelling or run: cav init"))?;
+    let b = PathBuf::from(p);
+    if !b.is_dir() {
+        bail!("Project '{slug}' path missing: {}", b.display());
+    }
+    Ok(Some(b))
+}
+
 pub fn resolve_target(
     args: &[String],
     infer_agent: bool,
@@ -703,16 +736,9 @@ pub fn resolve_target(
         }
     }
 
-    let base = if let Some(slug) = project_slug {
-        let p = registry::project_path(&slug)?
-            .ok_or_else(|| anyhow::anyhow!("No project '{slug}'. Check spelling or run: cav init"))?;
-        let b = PathBuf::from(p);
-        if !b.is_dir() {
-            bail!("Project '{slug}' path missing: {}", b.display());
-        }
-        b
-    } else {
-        find_repo_root()?
+    let base = match target_base(agent_id.as_deref(), project_slug.as_deref())? {
+        Some(b) => b,
+        None => find_repo_root()?,
     };
 
     require_init(&base)?;
@@ -801,4 +827,58 @@ fn unix_to_ymdhm(secs: u64) -> (u64, u64, u64, u64, u64) {
         mo += 1;
     }
     (y, mo, days + 1, h, min)
+}
+
+#[cfg(test)]
+mod target_base_tests {
+    use super::*;
+    use crate::test_util::DataDirGuard;
+    use std::fs;
+
+    fn register_project_with_agent(data: &Path, slug: &str) -> (PathBuf, String) {
+        let base = data.join(slug);
+        fs::create_dir_all(&base).unwrap();
+        registry::register_project(&base).unwrap();
+        let aid = registry::acquire_agent_id(&base).unwrap();
+        (base, aid)
+    }
+
+    #[test]
+    fn agent_only_redirects_to_agents_project() {
+        // `cav status @N` from anywhere should land on agent N's project.
+        let g = DataDirGuard::new("tb-redirect");
+        let (proj_b, aid) = register_project_with_agent(&g.path, "proj-b");
+        // Also register an unrelated project — the lookup must pick proj-b.
+        let _ = register_project_with_agent(&g.path, "proj-a");
+
+        let base = target_base(Some(&aid), None).unwrap().unwrap();
+        assert_eq!(base.canonicalize().unwrap(), proj_b.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn slug_mismatch_with_agent_is_rejected() {
+        let g = DataDirGuard::new("tb-mismatch");
+        let (_, aid) = register_project_with_agent(&g.path, "proj-b");
+        let _ = register_project_with_agent(&g.path, "proj-a");
+
+        let err = target_base(Some(&aid), Some("proj-a")).expect_err("must error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("proj-b") && msg.contains("proj-a"),
+            "error should name both projects, got: {msg}",
+        );
+    }
+
+    #[test]
+    fn unknown_agent_is_rejected() {
+        let _g = DataDirGuard::new("tb-no-agent");
+        let err = target_base(Some("999"), None).expect_err("must error");
+        assert!(err.to_string().contains("999"), "got: {err}");
+    }
+
+    #[test]
+    fn neither_arg_returns_none() {
+        let _g = DataDirGuard::new("tb-empty");
+        assert!(target_base(None, None).unwrap().is_none());
+    }
 }
