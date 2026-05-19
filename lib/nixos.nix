@@ -71,38 +71,80 @@ nixpkgs.lib.nixosSystem {
 
       boot.kernel.sysctl."kernel.sysrq" = 1;
       systemd.services."serial-getty@ttyS0".enable = false;
-      systemd.services.cave-shell = {
-        description = "cave-vm interactive shell on ttyS0";
-        wantedBy = [ "multi-user.target" ];
-        after = [ "systemd-user-sessions.service" "multi-user.target" ];
-        serviceConfig = {
-          Type = "idle";
-          ExecStart = "${pkgs.util-linux}/bin/runuser -l cave-coder";
-          StandardInput = "tty-force";
-          StandardOutput = "tty";
-          StandardError = "tty";
-          TTYPath = "/dev/ttyS0";
-          TTYReset = "yes";
-          TTYVHangup = "yes";
-          KillMode = "process";
-          IgnoreSIGPIPE = "no";
-          Restart = "no";
-          UtmpIdentifier = "ttyS0";
-          UtmpMode = "user";
-          Environment = "TERM=xterm-256color";
-          # `exit` from the user's shell terminates this unit; ExecStopPost
-          # does a kernel-level poweroff (sysrq 'o') so we bypass the
-          # systemd shutdown teardown — nothing in the cave is
-          # persistence-critical (host /nix/store RO, overlay tmpfs).
-          # Drop the console loglevel to 0 first so the kernel's own
-          # `pr_emerg "Power down"` / `pr_info "Power Off"` lines don't
-          # leak onto the user's terminal during shutdown.
-          ExecStopPost = pkgs.writeShellScript "cave-vm-poweroff" ''
-            ${pkgs.coreutils}/bin/echo 0 > /proc/sys/kernel/printk
-            ${pkgs.coreutils}/bin/echo o > /proc/sysrq-trigger
+      systemd.services.cave-shell =
+        let
+          # Launcher script: if cav wrote the user-env path file before
+          # boot, prepend home-path/bin to PATH, apply env.json vars,
+          # and materialise files/ into the user's home. Then exec zsh
+          # as a login shell. Runs as cave-coder via systemd User=.
+          launcher = pkgs.writeShellScript "cave-shell-launcher" ''
+            set +e
+            user_env_path_file=/home/cave-coder/.cache/coding-cave/cave-vm-userenv-path
+            if [ -f "$user_env_path_file" ]; then
+              user_env=$(${pkgs.coreutils}/bin/cat "$user_env_path_file")
+              if [ -d "$user_env/home-path/bin" ]; then
+                export PATH="$user_env/home-path/bin:$PATH"
+              fi
+              if [ -f "$user_env/env.json" ]; then
+                while IFS= read -r line; do
+                  [ -n "$line" ] && export "$line"
+                done < <(${pkgs.jq}/bin/jq -r 'to_entries[] | "\(.key)=\(.value)"' "$user_env/env.json")
+              fi
+              # Materialise files/ into the user's home (cp -n: don't
+              # overwrite). The user's host home is virtio-fs-mounted
+              # RW, so on first boot this seeds dotfiles declared via
+              # home.file.* in cave.nix.
+              if [ -d "$user_env/files" ]; then
+                ${pkgs.coreutils}/bin/cp -RL --no-clobber \
+                  "$user_env/files/." /home/cave-coder/ 2>/dev/null
+              fi
+            fi
+            exec ${pkgs.zsh}/bin/zsh -l
           '';
+        in {
+          description = "cave-vm interactive shell on ttyS0";
+          wantedBy = [ "multi-user.target" ];
+          after = [ "systemd-user-sessions.service" "multi-user.target" ];
+          serviceConfig = {
+            User = "cave-coder";
+            Group = "users";
+            Type = "idle";
+            ExecStart = launcher;
+            WorkingDirectory = "/home/cave-coder";
+            StandardInput = "tty-force";
+            StandardOutput = "tty";
+            StandardError = "tty";
+            TTYPath = "/dev/ttyS0";
+            TTYReset = "yes";
+            TTYVHangup = "yes";
+            KillMode = "process";
+            IgnoreSIGPIPE = "no";
+            Restart = "no";
+            UtmpIdentifier = "ttyS0";
+            UtmpMode = "user";
+            Environment = [
+              "TERM=xterm-256color"
+              "HOME=/home/cave-coder"
+              "USER=cave-coder"
+              "LOGNAME=cave-coder"
+              "SHELL=${pkgs.zsh}/bin/zsh"
+            ];
+            # `exit` from the user's shell terminates this unit;
+            # ExecStopPost does a kernel-level poweroff (sysrq 'o')
+            # bypassing the systemd shutdown teardown. Console
+            # loglevel drops to 0 first so the kernel's own
+            # `pr_emerg "Power down"` / `pr_info "Power Off"` lines
+            # don't leak onto the user's terminal during shutdown.
+            # The `+` prefix runs this step with full privileges of
+            # the service manager (root), overriding the User=
+            # cave-coder above — required because /proc/sysrq-trigger
+            # is root-only.
+            ExecStopPost = "+${pkgs.writeShellScript "cave-vm-poweroff" ''
+              ${pkgs.coreutils}/bin/echo 0 > /proc/sys/kernel/printk
+              ${pkgs.coreutils}/bin/echo o > /proc/sysrq-trigger
+            ''}";
+          };
         };
-      };
 
       microvm = {
         hypervisor = "cloud-hypervisor";
