@@ -813,13 +813,23 @@ fn resolve_project(path: &str) -> Result<PathBuf> {
 }
 
 fn format_datetime(dt: std::time::SystemTime) -> String {
-    // Simple UTC formatting without chrono dependency
     let secs = dt
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let (y, mo, d, h, min) = unix_to_ymdhm(secs);
-    format!("{y:04}-{mo:02}-{d:02} {h:02}:{min:02}")
+        .unwrap_or(0) as libc::time_t;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::localtime_r(&secs, &mut tm) }.is_null() {
+        let (y, mo, d, h, min) = unix_to_ymdhm(secs as u64);
+        return format!("{y:04}-{mo:02}-{d:02} {h:02}:{min:02}");
+    }
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}",
+        tm.tm_year + 1900,
+        tm.tm_mon + 1,
+        tm.tm_mday,
+        tm.tm_hour,
+        tm.tm_min,
+    )
 }
 
 fn unix_to_ymdhm(secs: u64) -> (u64, u64, u64, u64, u64) {
