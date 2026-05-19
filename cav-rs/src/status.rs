@@ -82,11 +82,7 @@ pub fn show(base: &Path, agent_id: Option<&str>) -> Result<()> {
     let by_agent = build_by_agent(base, &registered)?;
 
     if by_agent.is_empty() {
-        if let Some(aid) = agent_id {
-            println!("No agent {aid} in registry.");
-        } else {
-            println!("No running agents.");
-        }
+        report_no_agent(base, agent_id);
         return Ok(());
     }
 
@@ -96,11 +92,7 @@ pub fn show(base: &Path, agent_id: Option<&str>) -> Result<()> {
     let mut agents = collect_agent_infos(base, &by_agent)?;
 
     if agents.is_empty() {
-        if let Some(aid) = agent_id {
-            println!("No agent {aid} in registry.");
-        } else {
-            println!("No running agents.");
-        }
+        report_no_agent(base, agent_id);
         return Ok(());
     }
 
@@ -115,6 +107,18 @@ pub fn show(base: &Path, agent_id: Option<&str>) -> Result<()> {
 
     print_agents(&agents, max_commits);
     Ok(())
+}
+
+fn report_no_agent(base: &Path, agent_id: Option<&str>) {
+    match agent_id {
+        Some(aid) => {
+            println!("No agent {aid} in registry.");
+            if let Some(hint) = registry::other_project_hint(base, aid) {
+                println!("{hint}");
+            }
+        }
+        None => println!("No running agents."),
+    }
 }
 
 fn show_branch_sync_status(base: &Path) {

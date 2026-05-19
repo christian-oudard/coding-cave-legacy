@@ -19,6 +19,12 @@ pub fn enter(
     let interactive = cmd.is_empty();
     let slug = config::project_slug(base);
 
+    if let Some(aid) = agent_id {
+        if let Some(hint) = registry::other_project_hint(base, aid) {
+            bail!("Agent {} is not in {}.\n{hint}", style::bold(aid), style::blue(&slug));
+        }
+    }
+
     let (resolved_aid, target_pid) = resolve_agent_pid(base, &slug, agent_id)?;
 
     let project_path = format!("/projects/{slug}");

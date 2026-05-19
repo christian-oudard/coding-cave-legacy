@@ -69,10 +69,13 @@ pub fn approve(
 
     if candidates.is_empty() {
         if let Some(aid) = agent_id {
+            let hint = registry::other_project_hint(base, aid)
+                .map(|h| format!("\n{h}"))
+                .unwrap_or_default();
             bail!(
-                "No commits to approve for agent {} in {}.",
+                "No commits to approve for agent {} in {}.{hint}",
                 style::bold(aid),
-                style::blue(&slug)
+                style::blue(&slug),
             );
         }
         if has_any_agent_branches {

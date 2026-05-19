@@ -8,6 +8,7 @@ use crate::config::{
 };
 use crate::constants::{CAVE_SHARED_REMOTE, HOST_SHARED_REMOTE};
 use crate::git;
+use crate::registry;
 use crate::style;
 use crate::workspace;
 
@@ -114,7 +115,16 @@ fn find_agent_base(base: &Path, agent_id: &str) -> Result<String> {
         .filter(|b| parse_dev_branch(b).is_some_and(|(_, aid)| aid == agent_id))
         .collect();
     match matches.len() {
-        0 => bail!("No dev branch found for agent {}.", style::bold(agent_id)),
+        0 => {
+            let hint = registry::other_project_hint(base, agent_id)
+                .map(|h| format!("\n{h}"))
+                .unwrap_or_default();
+            bail!(
+                "No dev branch found for agent {} in {}.{hint}",
+                style::bold(agent_id),
+                style::blue(&config::project_slug(base)),
+            )
+        }
         1 => Ok(parse_dev_branch(&matches[0]).unwrap().0),
         _ => {
             let list = matches

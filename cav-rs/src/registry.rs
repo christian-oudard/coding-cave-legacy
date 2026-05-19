@@ -577,6 +577,25 @@ pub fn agent_project(agent_id: &str) -> Option<String> {
     .ok()
 }
 
+/// If `agent_id` is registered to a project other than the one rooted at
+/// `base`, return a hint pointing at the project's on-disk path. Caller
+/// appends it to a "not found here" error. None when the agent belongs to
+/// this project, isn't in the registry, has no resolvable path, or we're
+/// inside a cave (where the registry only knows about subcaves of self).
+pub fn other_project_hint(base: &Path, agent_id: &str) -> Option<String> {
+    if config::inside_cave() {
+        return None;
+    }
+    let agent_slug = agent_project(agent_id)?;
+    if agent_slug == config::project_slug(base) {
+        return None;
+    }
+    let path = project_path(&agent_slug).ok().flatten()?;
+    Some(format!(
+        "Agent {agent_id} is in {agent_slug}:\n  cd {path}"
+    ))
+}
+
 // -- Approvals --
 
 pub fn record_approval(

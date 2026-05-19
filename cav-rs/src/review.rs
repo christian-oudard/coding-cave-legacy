@@ -27,7 +27,14 @@ pub fn review(base: &Path, agent_id: &str) -> Result<()> {
         .collect();
 
     if candidates.is_empty() {
-        bail!("No agent branch found for agent {}.", style::bold(agent_id));
+        let hint = registry::other_project_hint(base, agent_id)
+            .map(|h| format!("\n{h}"))
+            .unwrap_or_default();
+        bail!(
+            "No agent branch found for agent {} in {}.{hint}",
+            style::bold(agent_id),
+            style::blue(&slug),
+        );
     }
 
     for branch in &candidates {
