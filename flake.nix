@@ -138,7 +138,7 @@
             nativeBuildInputs = [ pkgs.git pkgs.jq ];
             cargoTestFlags = [
               "--bin" "cav"
-              "--bin" "cav-pre-receive"
+              "--bin" "cav-git-pre-receive"
               "--test" "hook"
               "--test" "cli"
               "--test" "statusline"

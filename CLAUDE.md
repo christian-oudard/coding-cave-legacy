@@ -22,7 +22,7 @@ Built in Rust. Use `nix develop --command cargo build` to build locally, or `nix
 
 Three test tiers:
 
-- **Unit tests (inline):** `nix develop --command cargo test --bin cav --bin cav-pre-receive` — tests `check_ref` hook logic, `cp` symlink security, glob matching. No git subprocesses.
+- **Unit tests (inline):** `nix develop --command cargo test --bin cav --bin cav-git-pre-receive` — tests `check_ref` hook logic, `cp` symlink security, glob matching. No git subprocesses.
 - **Integration tests:** `nix develop --command cargo test --test hook --test cli` — runs the hook and CLI binaries against real git repos. Requires git in PATH (provided by devShell).
 - **Cave integration:** Run `cav agent` with a prompt that exercises `cav init`, `cav status`, `cav agent` nested — verifies sandbox, workspace isolation, and nested cave support.
 
@@ -40,11 +40,11 @@ a per-file summary. Add `--html` for line-by-line drill-down at
 
 ## Build
 
-Nix-only. `nix build` produces the `cav` binary and all helper binaries (`cav-pre-receive`, `cav-post-receive`, `cav-handler`, `cav-supervisor`, `cav-git`, `cav-seccomp-gen`, `cav-broker`, `cav-channel-server`). Build-time values (version, sandbox config path, flake URLs) are emitted as a single JSON file at `$out/share/coding-cave/build.json`; the wrapper sets `CODING_CAVE_BUILD_CONFIG` to point at it. `cav-rs/src/constants.rs` loads the JSON at import time. Running without a full `nix build` leaves the env var unset. Most CLI commands work, but `cav version` and `cav agent` need a full `nix build`.
+Nix-only. `nix build` produces the `cav` binary and all helper binaries (`cav-git-pre-receive`, `cav-git-post-receive`, `cav-git-daemon`, `cav-supervisor`, `cav-git`, `cav-seccomp-gen`, `cav-comms-broker`, `cav-comms-channel-server`). Build-time values (version, sandbox config path, flake URLs) are emitted as a single JSON file at `$out/share/coding-cave/build.json`; the wrapper sets `CODING_CAVE_BUILD_CONFIG` to point at it. `cav-rs/src/constants.rs` loads the JSON at import time. Running without a full `nix build` leaves the env var unset. Most CLI commands work, but `cav version` and `cav agent` need a full `nix build`.
 
 ## Layout
 
-- `cav-rs/` - Rust crate (cli, config, daemon, handler, init, sandbox, workspace, pull, push, status, git, user_env, and hook binaries in src/bin/)
+- `cav-rs/` - Rust crate (cli, config, daemon, init, sandbox, workspace, pull, push, status, git, user_env, plus the helper binaries — git daemon, git hooks, comms broker, MCP channel server — in src/bin/)
 - `lib/` - Nix library (mkCaveEnv.nix, sandbox.nix, exported as `lib.mkCaveEnv` in the flake)
 - `.coding-cave/` - per-project data dir created by `cav init` (bare repo with pre-receive hook)
 

@@ -8,16 +8,16 @@ name = "cav"
 path = "src/main.rs"
 
 [[bin]]
-name = "cav-pre-receive"
-path = "src/bin/pre_receive.rs"
+name = "cav-git-pre-receive"
+path = "src/bin/git_pre_receive.rs"
 
 [[bin]]
-name = "cav-post-receive"
-path = "src/bin/post_receive.rs"
+name = "cav-git-post-receive"
+path = "src/bin/git_post_receive.rs"
 
 [[bin]]
-name = "cav-handler"
-path = "src/bin/handler.rs"
+name = "cav-git-daemon"
+path = "src/bin/git_daemon.rs"
 
 [[bin]]
 name = "cav-supervisor"
@@ -32,12 +32,12 @@ name = "cav-seccomp-gen"
 path = "src/bin/seccomp_gen.rs"
 
 [[bin]]
-name = "cav-broker"
-path = "src/bin/broker.rs"
+name = "cav-comms-broker"
+path = "src/bin/comms_broker.rs"
 
 [[bin]]
-name = "cav-channel-server"
-path = "src/bin/channel_server.rs"
+name = "cav-comms-channel-server"
+path = "src/bin/comms_channel_server.rs"
 
 [dependencies]
 anyhow = "1"

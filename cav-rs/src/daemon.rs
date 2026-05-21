@@ -38,9 +38,9 @@ pub fn start(agent_id: &str, shared_repos: &[(PathBuf, String)]) -> Result<Daemo
 
     let socat_bin = which("socat")?;
     let handler_bin = {
-        let p = PathBuf::from(&constants::build().cav_bin).join("cav-handler");
+        let p = PathBuf::from(&constants::build().cav_bin).join("cav-git-daemon");
         if !p.is_file() {
-            bail!("cav-handler not found at {}", p.display());
+            bail!("cav-git-daemon not found at {}", p.display());
         }
         p.to_string_lossy().to_string()
     };

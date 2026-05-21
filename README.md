@@ -105,5 +105,5 @@ network required.
 ## Build
 
 Nix-only. `nix build` produces the `cav` binary and all helper binaries
-(`cav-pre-receive`, `cav-post-receive`, `cav-handler`, `cav-supervisor`,
-`cav-broker`, `cav-channel-server`).
+(`cav-git-pre-receive`, `cav-git-post-receive`, `cav-git-daemon`,
+`cav-supervisor`, `cav-comms-broker`, `cav-comms-channel-server`).

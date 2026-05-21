@@ -1029,9 +1029,9 @@ fn start_broker() -> Result<Option<std::process::Child>> {
     if broker_alive() {
         return Ok(None);
     }
-    let broker_bin = PathBuf::from(&constants::build().cav_bin).join("cav-broker");
+    let broker_bin = PathBuf::from(&constants::build().cav_bin).join("cav-comms-broker");
     if !broker_bin.exists() {
-        bail!("cav-broker not found at {}", broker_bin.display());
+        bail!("cav-comms-broker not found at {}", broker_bin.display());
     }
     let sock = broker_socket_path();
     let _ = std::fs::create_dir_all(sock.parent().unwrap());
@@ -1099,7 +1099,7 @@ fn setup_channel_marketplace(home: &Path) -> Result<()> {
         serde_json::to_string_pretty(&marketplace)?,
     )?;
 
-    let server_bin = PathBuf::from(&constants::build().cav_bin).join("cav-channel-server");
+    let server_bin = PathBuf::from(&constants::build().cav_bin).join("cav-comms-channel-server");
     let plugin = serde_json::json!({
         "name": "cave-messages",
         "version": "0.1.0",

@@ -1,13 +1,13 @@
 /// Integration tests for the pre-receive hook binary.
 ///
 /// Verifies that the hook correctly accepts/rejects pushes by running the
-/// `cav-pre-receive` binary with stdin input and the CODING_CAVE_AGENT_ID
+/// `cav-git-pre-receive` binary with stdin input and the CODING_CAVE_AGENT_ID
 /// env var set, mimicking git's hook invocation.
 use std::env;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-const PRE_RECEIVE: &str = env!("CARGO_BIN_EXE_cav-pre-receive");
+const PRE_RECEIVE: &str = env!("CARGO_BIN_EXE_cav-git-pre-receive");
 
 const ZERO: &str = "0000000000000000000000000000000000000000";
 const SHA_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -23,7 +23,7 @@ fn run_hook(lines: &[&str], agent_id: Option<&str>) -> std::process::Output {
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = cmd.spawn().expect("cav-pre-receive not found");
+    let mut child = cmd.spawn().expect("cav-git-pre-receive not found");
     let stdin = child.stdin.as_mut().unwrap();
     for line in lines {
         writeln!(stdin, "{line}").unwrap();

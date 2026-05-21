@@ -9,14 +9,14 @@ use std::{fs, thread};
 
 use serde_json::{json, Value};
 
-const BROKER: &str = env!("CARGO_BIN_EXE_cav-broker");
+const BROKER: &str = env!("CARGO_BIN_EXE_cav-comms-broker");
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
 fn unique_sock() -> PathBuf {
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir()
-        .join(format!("cav-broker-test-{}-{}.sock", std::process::id(), n))
+        .join(format!("cav-comms-broker-test-{}-{}.sock", std::process::id(), n))
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────
