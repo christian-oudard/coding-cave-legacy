@@ -2,10 +2,11 @@ use std::path::Path;
 
 use anyhow::{bail, Result};
 
-use crate::config::{self, inside_cave, parse_dev_branch, resolve_base, self_agent_id, worktree_dir};
+use crate::config::{self, inside_cave, parse_dev_branch, resolve_base, self_agent_id};
 use crate::constants::{CAVE_SHARED_REMOTE, HOST_SHARED_REMOTE};
 use crate::git;
 use crate::style;
+use crate::workspace::worktree_for;
 
 pub fn pull(base: &Path, force: bool) -> Result<()> {
     let local_branch = git::current_branch(Some(base))?;
@@ -201,7 +202,7 @@ fn pull_cave_self(base: &Path, local_branch: &str, agent_id: &str, force: bool) 
 }
 
 pub(crate) fn sync_agent_to_shared(base: &Path, slug: &str, dev_branch: &str, agent_id: &str) {
-    let ws = worktree_dir(slug, agent_id);
+    let ws = worktree_for(slug, agent_id);
     if !ws.exists() {
         return;
     }

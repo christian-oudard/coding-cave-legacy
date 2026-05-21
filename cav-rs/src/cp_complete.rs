@@ -8,8 +8,9 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::config::{persistent_home, worktree_dir};
+use crate::config::persistent_home;
 use crate::registry;
+use crate::workspace::worktree_for;
 
 /// Emit completion candidates for a partial `cp` argument. Each candidate
 /// is the full word to insert (replacing what the user typed). Directory
@@ -188,29 +189,29 @@ fn resolve_base(slug: &str, agent_id: Option<&str>, path: &str) -> Option<(PathB
 /// must decline rather than guess.
 fn pick_worktree(slug: &str, agent_id: Option<&str>) -> Option<PathBuf> {
     if let Some(aid) = agent_id {
-        let ws = worktree_dir(slug, aid);
+        let ws = worktree_for(slug, aid);
         return ws.is_dir().then_some(ws);
     }
     if let Some(aid) = inferred_agent_for_slug(slug)
         .filter(|a| registry::is_agent_running(a).unwrap_or(false))
     {
-        let ws = worktree_dir(slug, &aid);
+        let ws = worktree_for(slug, &aid);
         return ws.is_dir().then_some(ws);
     }
     let candidates: Vec<String> = registry::all_agent_ids(Some(slug))
         .ok()?
         .into_iter()
-        .filter(|aid| worktree_dir(slug, aid).is_dir())
+        .filter(|aid| worktree_for(slug, aid).is_dir())
         .collect();
     if candidates.len() == 1 {
-        return Some(worktree_dir(slug, &candidates[0]));
+        return Some(worktree_for(slug, &candidates[0]));
     }
     let running: Vec<String> = candidates
         .into_iter()
         .filter(|aid| registry::is_agent_running(aid).unwrap_or(false))
         .collect();
     if running.len() == 1 {
-        return Some(worktree_dir(slug, &running[0]));
+        return Some(worktree_for(slug, &running[0]));
     }
     None
 }
@@ -260,7 +261,7 @@ fn agents_in(slug: &str) -> Vec<String> {
     registry::all_agent_ids(Some(slug))
         .unwrap_or_default()
         .into_iter()
-        .filter(|aid| worktree_dir(slug, aid).is_dir())
+        .filter(|aid| worktree_for(slug, aid).is_dir())
         .collect()
 }
 

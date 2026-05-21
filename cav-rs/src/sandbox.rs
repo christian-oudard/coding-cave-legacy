@@ -1372,12 +1372,7 @@ fn seed_claude_config(home: &Path, project_slug_str: &str, comms: bool) {
 }
 
 fn nix_overlay_dirs(home: &Path, agent_id: &str) -> (PathBuf, PathBuf, PathBuf) {
-    let base = home
-        .join(".local")
-        .join("share")
-        .join("coding-cave")
-        .join("nix-overlay")
-        .join(format!("agent-{agent_id}"));
+    let base = workspace::nix_overlay_base_for(home, agent_id);
     let (upper, work, merged) = (base.join("upper"), base.join("work"), base.join("merged"));
     for d in [&upper, &work, &merged] {
         let _ = std::fs::create_dir_all(d);
@@ -1392,7 +1387,7 @@ fn migrate_shared_overlay(home: &Path, agent_id: &str) {
         .join("coding-cave")
         .join("nix-overlay");
     let legacy = root.join("shared");
-    let target = root.join(format!("agent-{agent_id}"));
+    let target = workspace::nix_overlay_base_for(home, agent_id);
     if legacy.is_dir() && !target.exists() {
         let _ = std::fs::rename(&legacy, &target);
     }
@@ -1466,13 +1461,7 @@ fn seed_nix_db(home: &Path, agent_id: &str, merged_path: &str) -> Option<PathBuf
         return None;
     }
 
-    let db_dir = home
-        .join(".local")
-        .join("share")
-        .join("coding-cave")
-        .join("nix-overlay")
-        .join(format!("agent-{agent_id}"))
-        .join("db");
+    let db_dir = workspace::nix_overlay_base_for(home, agent_id).join("db");
     let _ = std::fs::create_dir_all(&db_dir);
     let cave_db = db_dir.join("db.sqlite");
     let stamp = db_dir.join("db.stamp");
@@ -1785,151 +1774,6 @@ impl Drop for DaemonGuard {
     }
 }
 
-/// Trivially clean = no uncommitted worktree changes anywhere, no unpushed
-/// local commits or stash entries in the worktree clone, AND every agent-N/*
-/// branch on every shared repo is at the same sha as its base. Absent agent
-/// branches count as clean (the agent never pushed anything). An absent
-/// worktree dir counts as clean for that slug (nothing to check); any
-/// salvageable work still lives on the shared agent branch.
-pub fn is_trivially_clean(
-    workspaces: &[(PathBuf, PathBuf, String)],
-    agent_id: &str,
-) -> bool {
-    for (ws, shared, _slug) in workspaces {
-        if ws.exists() {
-            if let Ok(out) = git::git_output(&["status", "--porcelain"], Some(ws)) {
-                if !out.is_empty() {
-                    return false;
-                }
-            } else {
-                // Worktree dir exists but git status failed: weird state, preserve.
-                return false;
-            }
-
-            // Stash entries are always salvageable work.
-            if git::git(
-                &["rev-parse", "--verify", "--quiet", "refs/stash"],
-                Some(ws),
-                false,
-                true,
-                false,
-            )
-            .is_ok()
-            {
-                return false;
-            }
-
-            // Every local branch must have all its commits reachable from a
-            // remote-tracking ref. Unpushed local commits = preserve.
-            let local_branches = git::git_output(
-                &["for-each-ref", "refs/heads/", "--format=%(refname:short)"],
-                Some(ws),
-            )
-            .unwrap_or_default();
-            for br in local_branches.lines() {
-                let count = git::git_output(
-                    &[
-                        "rev-list",
-                        "--count",
-                        &format!("refs/heads/{br}"),
-                        "--not",
-                        "--remotes",
-                    ],
-                    Some(ws),
-                )
-                .unwrap_or_else(|_| "1".to_string());
-                if count.trim() != "0" {
-                    return false;
-                }
-            }
-        }
-
-        let refs = git::git_output(
-            &[
-                "for-each-ref",
-                &format!("refs/heads/agent-{agent_id}/"),
-                "--format=%(refname:short)",
-            ],
-            Some(shared),
-        )
-        .unwrap_or_default();
-        for ab in refs.lines() {
-            let base_name = config::resolve_base(ab.to_string());
-            let ab_sha = git::git_output(
-                &["rev-parse", &format!("refs/heads/{ab}")],
-                Some(shared),
-            );
-            let base_sha = git::git_output(
-                &["rev-parse", &format!("refs/heads/{base_name}")],
-                Some(shared),
-            );
-            match (ab_sha, base_sha) {
-                (Ok(a), Ok(b)) if a == b => continue,
-                _ => return false,
-            }
-        }
-    }
-    true
-}
-
-/// Remove every trace of the agent: shared-repo refs, local host branches,
-/// worktree dirs, registry row. Call only after `is_trivially_clean`.
-fn teardown_agent(
-    base: &Path,
-    workspaces: &[(PathBuf, PathBuf, String)],
-    agent_id: &str,
-) {
-    let primary_slug = project_slug(base);
-    for (ws, shared, slug) in workspaces {
-        let refs = git::git_output(
-            &[
-                "for-each-ref",
-                &format!("refs/heads/agent-{agent_id}/"),
-                "--format=%(refname)",
-            ],
-            Some(shared),
-        )
-        .unwrap_or_default();
-        for rf in refs.lines() {
-            git::git(&["update-ref", "-d", rf], Some(shared), false, true, false).ok();
-        }
-
-        let _ = std::fs::remove_dir_all(ws);
-
-        let host_base: Option<PathBuf> = if slug == &primary_slug {
-            Some(base.to_path_buf())
-        } else {
-            registry::project_path(slug)
-                .ok()
-                .flatten()
-                .map(PathBuf::from)
-        };
-        if let Some(hb) = host_base {
-            let local_refs = git::git_output(
-                &[
-                    "for-each-ref",
-                    &format!("refs/heads/agent-{agent_id}/"),
-                    "--format=%(refname:short)",
-                ],
-                Some(&hb),
-            )
-            .unwrap_or_default();
-            for ab in local_refs.lines() {
-                git::git(&["branch", "-D", ab], Some(&hb), false, true, false).ok();
-            }
-            git::git(
-                &["fetch", "--prune", CAVE_SHARED_REMOTE],
-                Some(&hb),
-                false,
-                true,
-                false,
-            )
-            .ok();
-        }
-    }
-    registry::remove_agent(agent_id).ok();
-}
-
 /// Print the cav resume commands. Claude already prints its own
 /// "Resume this session with: claude --resume <uuid>" line, so we just
 /// append the cav-flavored alternatives. Session uuid first (the
@@ -1975,54 +1819,6 @@ fn print_resume_hints(
     }
     if !agent_id_gone {
         eprintln!("{}", style::bold_cyan(&format!("cav -r {agent_id}{suffix}")));
-    }
-}
-
-/// Reconstruct an agent's workspace tuples from registry state. Used at
-/// command boundaries when reaping agents whose run_agent handler never got
-/// the chance to do teardown (SIGKILL, OOM, etc).
-fn resolve_workspaces_for(agent_id: &str) -> Vec<(PathBuf, PathBuf, String)> {
-    let slugs = registry::agent_all_slugs(agent_id).unwrap_or_default();
-    let mut out = Vec::new();
-    for slug in slugs {
-        let Ok(Some(hb_str)) = registry::project_path(&slug) else { continue };
-        let hb = PathBuf::from(hb_str);
-        let shared = config::shared_repo_path(&hb);
-        let wt = config::worktree_dir(&slug, agent_id);
-        out.push((wt, shared, slug));
-    }
-    out
-}
-
-/// Walk the registry, detect agents whose PID is dead (reaped by
-/// `is_agent_running`) and whose state is trivially clean, and tear them
-/// down. Exists so crashes / SIGKILLs eventually get the teardown that a
-/// clean exit would have done, without a background sweeper.
-pub fn reap_dead_agents() {
-    let Ok(ids) = registry::all_agent_ids(None) else { return };
-    let current = std::env::var("CODING_CAVE_AGENT_ID").ok();
-    for aid in ids {
-        if current.as_deref() == Some(&aid) {
-            continue;
-        }
-        if registry::is_agent_running(&aid).unwrap_or(false) {
-            continue;
-        }
-        // An agent with approvals is still a valid reject target: keep the
-        // registry row alive so reject can reassign work back to it.
-        if registry::agent_has_approvals(&aid).unwrap_or(false) {
-            continue;
-        }
-        let workspaces = resolve_workspaces_for(&aid);
-        if workspaces.is_empty() {
-            continue;
-        }
-        if !is_trivially_clean(&workspaces, &aid) {
-            continue;
-        }
-        let primary_slug = workspaces[0].2.clone();
-        let Ok(Some(base_str)) = registry::project_path(&primary_slug) else { continue };
-        teardown_agent(&PathBuf::from(base_str), &workspaces, &aid);
     }
 }
 
@@ -2119,6 +1915,13 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
         let sid = registry::read_session_id(&aid)?.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         (aid, Some(sid), false)
     };
+
+    // Sweep any pre-uuid display-id-keyed dirs into their canonical
+    // uuid-keyed locations. Runs before load_sandbox_config so the
+    // migration completes even when the sandbox itself isn't reachable
+    // (e.g. tests, missing build config). Each call is idempotent.
+    let _ = &slug;
+    workspace::settle_uuid_keying(&config::persistent_home());
 
     let cfg = load_sandbox_config()?;
 
@@ -2561,26 +2364,23 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
         .filter(|sid| config::session_file_exists(&slug, sid, Some(&home)))
         .map(str::to_string);
 
-    // Keep the registry row alive whenever there's anything worth coming
-    // back to: salvageable git work OR an archived conversation. Pure
-    // teardown only when both are absent.
-    let trivially_clean = is_trivially_clean(&workspaces, &agent_id);
-    let agent_id_survives = !trivially_clean || actual_sid.is_some();
-    if agent_id_survives {
-        if let Some(ref sid) = actual_sid {
-            if Some(sid.as_str()) != session_id.as_deref() {
-                registry::write_session_id(&agent_id, sid).ok();
-            }
+    // Exit always transitions to Paused. The session log, worktree, and
+    // agent branches stay in place until an explicit `cav gc` (or eventual
+    // archive bump). Previous "trivially clean = teardown" heuristic was
+    // wrong: substantive session-log work and uncommitted-but-untracked
+    // files weren't in its signal set, so it routinely discarded results
+    // the user still cared about.
+    if let Some(ref sid) = actual_sid {
+        if Some(sid.as_str()) != session_id.as_deref() {
+            registry::write_session_id(&agent_id, sid).ok();
         }
-        registry::mark_agent_exited(&agent_id).ok();
-    } else {
-        teardown_agent(&base, &workspaces, &agent_id);
     }
+    registry::mark_agent_exited(&agent_id).ok();
     if actual_sid.is_some() {
         print_resume_hints(
             &agent_id,
             actual_sid.as_deref(),
-            !agent_id_survives,
+            false,
             &extra_slugs,
             &host_ports,
             &host_devices,
@@ -2614,10 +2414,7 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_resume_flags, is_trivially_clean};
-    use std::fs;
-    use std::path::PathBuf;
-    use std::process::Command;
+    use super::format_resume_flags;
 
     #[test]
     fn resume_flags_empty() {
@@ -2641,146 +2438,5 @@ mod tests {
         let extras = vec!["my project".to_string()];
         let s = format_resume_flags(&extras, &[], &[], false);
         assert_eq!(s, " -p 'my project'");
-    }
-
-    fn git(args: &[&str], dir: &std::path::Path) {
-        let out = Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .output()
-            .unwrap_or_else(|_| panic!("git {args:?} failed"));
-        assert!(
-            out.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
-
-    struct Fixture {
-        _tmp: PathBuf,
-        ws: PathBuf,
-        shared: PathBuf,
-        slug: String,
-    }
-
-    impl Fixture {
-        fn new(name: &str) -> Self {
-            let tmp = std::env::temp_dir()
-                .join(format!("cav-tc-{}-{name}", std::process::id()));
-            let _ = fs::remove_dir_all(&tmp);
-            fs::create_dir_all(&tmp).unwrap();
-
-            let shared = tmp.join("cave-shared.git");
-            Command::new("git")
-                .args(["init", "--bare", "-b", "main"])
-                .arg(&shared)
-                .output()
-                .unwrap();
-
-            let ws = tmp.join("worktree");
-            Command::new("git")
-                .args(["clone"])
-                .arg(&shared)
-                .arg(&ws)
-                .output()
-                .unwrap();
-            git(&["config", "user.email", "t@t"], &ws);
-            git(&["config", "user.name", "T"], &ws);
-            fs::write(ws.join("file"), "x\n").unwrap();
-            git(&["add", "file"], &ws);
-            git(&["commit", "-m", "base"], &ws);
-            git(&["push", "origin", "main"], &ws);
-
-            Self {
-                _tmp: tmp,
-                ws,
-                shared,
-                slug: "proj".to_string(),
-            }
-        }
-
-        fn workspaces(&self) -> Vec<(PathBuf, PathBuf, String)> {
-            vec![(self.ws.clone(), self.shared.clone(), self.slug.clone())]
-        }
-
-        fn push_agent_branch(&self, agent_id: &str, base: &str, add_commit: bool) {
-            let dev = format!("agent-{agent_id}/{base}");
-            git(&["checkout", "-B", &dev, base], &self.ws);
-            if add_commit {
-                fs::write(self.ws.join("agent-file"), "a\n").unwrap();
-                git(&["add", "agent-file"], &self.ws);
-                git(&["commit", "-m", "agent work"], &self.ws);
-            }
-            git(
-                &["push", "origin", &format!("{dev}:refs/heads/{dev}")],
-                &self.ws,
-            );
-            git(&["checkout", base], &self.ws);
-        }
-    }
-
-    impl Drop for Fixture {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self._tmp);
-        }
-    }
-
-    #[test]
-    fn clean_with_no_agent_branch_is_trivially_clean() {
-        let f = Fixture::new("no-branch");
-        assert!(is_trivially_clean(&f.workspaces(), "1"));
-    }
-
-    #[test]
-    fn agent_branch_matching_base_is_trivially_clean() {
-        let f = Fixture::new("match-base");
-        f.push_agent_branch("1", "main", false);
-        assert!(is_trivially_clean(&f.workspaces(), "1"));
-    }
-
-    #[test]
-    fn agent_branch_with_commits_is_not_clean() {
-        let f = Fixture::new("with-commits");
-        f.push_agent_branch("1", "main", true);
-        assert!(!is_trivially_clean(&f.workspaces(), "1"));
-    }
-
-    #[test]
-    fn uncommitted_changes_in_worktree_are_not_clean() {
-        let f = Fixture::new("dirty-wt");
-        fs::write(f.ws.join("dirty"), "junk").unwrap();
-        assert!(!is_trivially_clean(&f.workspaces(), "1"));
-    }
-
-    #[test]
-    fn other_agents_branch_does_not_count() {
-        // Agent 2 has commits, but we're asking about agent 1.
-        let f = Fixture::new("other-agent");
-        f.push_agent_branch("2", "main", true);
-        assert!(is_trivially_clean(&f.workspaces(), "1"));
-    }
-
-    #[test]
-    fn unpushed_local_commit_is_not_clean() {
-        // Worktree clone has a local agent branch with a commit that was
-        // never pushed to the shared bare repo: must preserve.
-        let f = Fixture::new("unpushed");
-        let dev = "agent-1/main";
-        git(&["checkout", "-B", dev, "main"], &f.ws);
-        fs::write(f.ws.join("local-only"), "x\n").unwrap();
-        git(&["add", "local-only"], &f.ws);
-        git(&["commit", "-m", "local only, never pushed"], &f.ws);
-        git(&["checkout", "main"], &f.ws);
-        assert!(!is_trivially_clean(&f.workspaces(), "1"));
-    }
-
-    #[test]
-    fn stash_in_worktree_is_not_clean() {
-        // Stash entries are salvageable work even with a clean worktree:
-        // must preserve.
-        let f = Fixture::new("stash");
-        fs::write(f.ws.join("file"), "modified\n").unwrap();
-        git(&["stash", "push", "-m", "wip"], &f.ws);
-        assert!(!is_trivially_clean(&f.workspaces(), "1"));
     }
 }

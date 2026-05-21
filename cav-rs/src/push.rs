@@ -2,11 +2,12 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
 
-use crate::config::{self, dev_branch, inside_cave, parse_dev_branch, resolve_base, self_agent_id, worktree_dir};
+use crate::config::{self, dev_branch, inside_cave, parse_dev_branch, resolve_base, self_agent_id};
 use crate::constants::{CAVE_SHARED_REMOTE, HOST_SHARED_REMOTE};
 use crate::git;
 use crate::registry;
 use crate::style;
+use crate::workspace::worktree_for;
 
 pub fn push(base: &Path, force: bool) -> Result<()> {
     let branch = git::current_branch(Some(base))?;
@@ -155,7 +156,7 @@ fn push_dev(
     }
 
     let slug = config::project_slug(base);
-    let ws = worktree_dir(&slug, agent_id);
+    let ws = worktree_for(&slug, agent_id);
     if !ws.exists() {
         return Ok((up_to_date, vec![]));
     }
@@ -237,7 +238,7 @@ fn rebase_agents(base: &Path, base_branch: &str) -> Vec<String> {
         Err(_) => return notes,
     };
     for agent_id in agent_ids {
-        let ws = worktree_dir(&slug, &agent_id);
+        let ws = worktree_for(&slug, &agent_id);
         if !ws.exists() {
             continue;
         }

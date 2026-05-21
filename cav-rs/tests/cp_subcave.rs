@@ -164,9 +164,9 @@ fn register_running_agent(data_dir: &Path, slug: &str, agent_id: &str, pid: u32)
     let conn = rusqlite::Connection::open(&db_path).unwrap();
     conn.execute(
         "INSERT OR REPLACE INTO agents \
-         (agent_id, project, host_pid, cave_pid, started_at, exited_at) \
-         VALUES (?1, ?2, ?3, ?3, ?4, NULL)",
-        rusqlite::params![agent_id, slug, pid, 0.0],
+         (agent_id, uuid, project, host_pid, cave_pid, started_at, exited_at) \
+         VALUES (?1, ?2, ?3, ?4, ?4, ?5, NULL)",
+        rusqlite::params![agent_id, uuid::Uuid::new_v4().to_string(), slug, pid, 0.0],
     )
     .unwrap();
 }

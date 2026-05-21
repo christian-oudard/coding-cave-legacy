@@ -3,11 +3,12 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
 
-use crate::config::{self, persistent_home, worktree_dir};
+use crate::config::{self, persistent_home};
 use crate::cp_complete::passwd_home;
 use crate::git;
 use crate::proc_ns::find_inner_pid;
 use crate::registry;
+use crate::workspace::worktree_for;
 use crate::style;
 
 /// Expand a leading `~` or `~user` in a host-side path. Shell tilde
@@ -272,7 +273,7 @@ fn worktree_for_slug(slug: &str, agent_id: Option<&str>) -> Result<(PathBuf, Str
             .filter(|aid| registry::is_agent_running(aid).unwrap_or(false)),
     };
     if let Some(aid) = inferred {
-        let ws = worktree_dir(slug, &aid);
+        let ws = worktree_for(slug, &aid);
         if !ws.exists() {
             bail!("No worktree found for {}.", style::agent_name(&format!("{slug}@{aid}")));
         }

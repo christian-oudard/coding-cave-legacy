@@ -5,12 +5,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Result};
 
-use crate::config::{self, inside_cave, parse_dev_branch, resolve_base, worktree_dir};
+use crate::config::{self, inside_cave, parse_dev_branch, resolve_base};
 use crate::constants::CAVE_SHARED_REMOTE;
 use crate::git;
 use crate::registry;
 use crate::sandbox;
 use crate::style;
+use crate::workspace::worktree_for;
 
 const MAX_COMMITS_DISPLAY: usize = 3;
 
@@ -70,8 +71,8 @@ pub fn show(base: &Path, agent_id: Option<&str>) -> Result<()> {
 
     if agent_id.is_none() {
         show_branch_sync_status(base);
-        sandbox::reap_dead_agents();
         sandbox::reconcile_merged_dev_branches(base, config::verbose() >= 1);
+        crate::workspace::archive_sweep();
     }
 
     let mut registered = registry::all_agent_ids(Some(&slug))?;
@@ -106,7 +107,44 @@ pub fn show(base: &Path, agent_id: Option<&str>) -> Result<()> {
     });
 
     print_agents(&agents, max_commits);
+    print_gc_hint();
     Ok(())
+}
+
+/// One-line nudge when paused-past-threshold agents have reclaimable
+/// artifacts. The threshold matches `cav gc`'s default so the count here
+/// equals what `cav gc` would collect.
+fn print_gc_hint() {
+    let dur = crate::gc::parse_older_than(crate::gc::default_older_than())
+        .unwrap_or_else(|_| std::time::Duration::from_secs(86400));
+    let cands = crate::gc::candidates(dur);
+    if cands.is_empty() {
+        return;
+    }
+    let total: u64 = cands.iter().map(|c| c.size).sum();
+    let count = cands.len();
+    let noun = if count == 1 { "archived agent" } else { "archived agents" };
+    println!(
+        "{} {}, {} on disk — {} to reclaim",
+        style::yellow(&count.to_string()),
+        style::yellow(noun),
+        style::yellow(&crate::gc::format_size(total)),
+        style::bold_cyan("cav gc"),
+    );
+}
+
+/// Map an agent's display int + run state to the user-facing lifecycle
+/// label. Archived agents are those whose display int has been bumped
+/// into the 1000+ range by `workspace::archive_sweep`; the rest are
+/// "paused" (have a row but no host process) or "running".
+fn agent_state(agent_id: &str, running: bool) -> &'static str {
+    if running {
+        return "running";
+    }
+    match agent_id.parse::<u32>() {
+        Ok(n) if n >= crate::workspace::ARCHIVE_INT_BASE => "archived",
+        _ => "paused",
+    }
 }
 
 fn report_no_agent(base: &Path, agent_id: Option<&str>) {
@@ -225,8 +263,6 @@ fn print_agents(agents: &[AgentInfo], max_commits: Option<usize>) {
 }
 
 pub fn show_all(projects: Vec<(String, String)>) -> Result<()> {
-    sandbox::reap_dead_agents();
-
     let mut entries: Vec<(f64, String, String)> = vec![];
     let mut problems: Vec<(String, String)> = vec![];
 
@@ -400,7 +436,7 @@ fn collect_agent_infos(
         // Worktree state belongs to the queried project only. An agent's
         // primary/extras live under their own === headings.
         let mut dirty_worktrees: Vec<PathBuf> = vec![];
-        let ws = worktree_dir(&base_slug, aid);
+        let ws = worktree_for(&base_slug, aid);
         if ws.is_dir() {
             let st = git::git(
                 &["status", "--porcelain"],
@@ -413,7 +449,7 @@ fn collect_agent_infos(
                 dirty_worktrees.push(ws);
             }
         }
-        let state = if running { "running" } else { "stopped" }.to_string();
+        let state = agent_state(aid, running).to_string();
         // A guest agent (primary slug elsewhere) with no commits and a
         // clean worktree here has nothing to report under this project.
         let is_primary = registry::agent_project(aid).as_deref() == Some(base_slug.as_str());
@@ -472,7 +508,7 @@ pub fn remove_agent(base: &Path, agent_id: &str, yes: bool) -> Result<()> {
     }
 
     for slug_s in registry::agent_all_slugs(agent_id).unwrap_or_default() {
-        let ws = worktree_dir(&slug_s, agent_id);
+        let ws = worktree_for(&slug_s, agent_id);
         if !ws.is_dir() {
             continue;
         }
@@ -529,7 +565,7 @@ pub fn _remove_agent(base: &Path, agent_id: &str, branches: &[String]) -> Result
     let primary_slug = config::project_slug(base);
     let slugs = registry::agent_all_slugs(agent_id)?;
     for slug in &slugs {
-        let ws = config::worktree_dir(slug, agent_id);
+        let ws = worktree_for(slug, agent_id);
         if ws.exists() {
             std::fs::remove_dir_all(&ws).ok();
         }
@@ -566,6 +602,14 @@ pub fn _remove_agent(base: &Path, agent_id: &str, branches: &[String]) -> Result
             }
         }
     }
+    // Per-agent nix overlay (typically the dominant on-disk cost).
+    let overlay = crate::workspace::nix_overlay_base_for(
+        &config::persistent_home(),
+        agent_id,
+    );
+    if overlay.exists() {
+        std::fs::remove_dir_all(&overlay).ok();
+    }
     registry::remove_agent(agent_id)?;
     Ok(())
 }
@@ -596,6 +640,19 @@ mod tests {
             )],
             dirty_worktrees: vec![PathBuf::from("/tmp/coding-cave/1")],
         }
+    }
+
+    #[test]
+    fn agent_state_distinguishes_paused_from_archived() {
+        use super::agent_state;
+        assert_eq!(agent_state("1", true), "running");
+        assert_eq!(agent_state("1", false), "paused");
+        assert_eq!(agent_state("999", false), "paused");
+        assert_eq!(agent_state("1000", false), "archived");
+        assert_eq!(agent_state("1003", false), "archived");
+        // A bumped agent re-launched would be marked running again — the
+        // running bit dominates regardless of which range the int is in.
+        assert_eq!(agent_state("1003", true), "running");
     }
 
     #[test]

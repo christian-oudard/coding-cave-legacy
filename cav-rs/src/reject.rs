@@ -3,7 +3,8 @@ use std::path::Path;
 
 use anyhow::{bail, Result};
 
-use crate::config::{self, dev_branch, parse_dev_branch, resolve_base, worktree_dir};
+use crate::config::{self, dev_branch, parse_dev_branch, resolve_base};
+use crate::workspace::worktree_for;
 use crate::constants::{CAVE_SHARED_REMOTE, HOST_SHARED_REMOTE};
 use crate::git;
 use crate::registry;
@@ -29,7 +30,6 @@ pub fn reject(base: &Path, agent_id: Option<&str>, yes: bool, commit: Option<&st
         verbose,
     )?;
 
-    sandbox::reap_dead_agents();
     sandbox::reconcile_merged_dev_branches(base, verbose);
 
     // Local '{branch}' is the source of truth; reject force-pushes it to
@@ -259,7 +259,7 @@ fn drop_rejected_from_secondary_agents(
         if agent_id == target_agent_id {
             continue;
         }
-        let ws = worktree_dir(&slug, &agent_id);
+        let ws = worktree_for(&slug, &agent_id);
         if !ws.exists() {
             continue;
         }

@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Result};
@@ -6,6 +6,7 @@ use rusqlite::{params, Connection};
 use uuid::Uuid;
 
 use crate::config;
+use crate::workspace;
 
 const SCHEMA: &str = include_str!("schema.sql");
 
@@ -59,6 +60,26 @@ fn open() -> Result<Connection> {
             if cols.iter().any(|c| c == dead) {
                 db.execute_batch(&format!("ALTER TABLE agents DROP COLUMN {dead};"))?;
             }
+        }
+        // Backfill the new `uuid` column on existing rows. SQLite can't add
+        // a NOT NULL UNIQUE column to a populated table in one shot, so add
+        // nullable, fill, then enforce via a unique index.
+        if !cols.iter().any(|c| c == "uuid") {
+            db.execute_batch("ALTER TABLE agents ADD COLUMN uuid TEXT;")?;
+            let existing: Vec<String> = collect_rows(
+                &db,
+                "SELECT agent_id FROM agents WHERE uuid IS NULL",
+                |row| row.get::<_, String>(0),
+            )?;
+            for aid in existing {
+                db.execute(
+                    "UPDATE agents SET uuid = ?1 WHERE agent_id = ?2",
+                    params![Uuid::new_v4().to_string(), aid],
+                )?;
+            }
+            db.execute_batch(
+                "CREATE UNIQUE INDEX IF NOT EXISTS agents_uuid_unique ON agents(uuid);",
+            )?;
         }
     }
     Ok(db)
@@ -245,6 +266,12 @@ pub fn agent_exit_time(agent_id: &str) -> Result<Option<f64>> {
 }
 
 pub fn acquire_agent_id(base: &Path) -> Result<String> {
+    // Push any stale paused agents in the active range up to 1000+ before
+    // we shop for a free int, so the new agent gets a clean low int rather
+    // than reusing a slot whose previous occupant's session/log/worktree
+    // is still around.
+    workspace::archive_sweep();
+
     let slug = config::project_slug(base);
     let ts = now();
     let pid = std::process::id();
@@ -270,15 +297,54 @@ pub fn acquire_agent_id(base: &Path) -> Result<String> {
         n += 1;
     }
     let aid = n.to_string();
+    // If this slot was previously occupied (reclaimable row still in the
+    // table), gather the old occupant's projects so we can wipe their
+    // worktrees and dev branch refs after committing the new row.
+    let reclaim_targets = collect_reclaim_targets(&db, &aid);
     let sid = Uuid::new_v4().to_string();
+    let uuid = Uuid::new_v4().to_string();
     db.execute(
         "INSERT OR REPLACE INTO agents \
-         (agent_id, project, host_pid, started_at, exited_at, session_id) \
-         VALUES (?1, ?2, ?3, ?4, NULL, ?5)",
-        params![aid, slug, pid, ts, sid],
+         (agent_id, uuid, project, host_pid, started_at, exited_at, session_id) \
+         VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6)",
+        params![aid, uuid, slug, pid, ts, sid],
     )?;
     db.execute_batch("COMMIT")?;
+    if !reclaim_targets.is_empty() {
+        workspace::reclaim(&aid, &reclaim_targets);
+    }
     Ok(aid)
+}
+
+fn collect_reclaim_targets(db: &Connection, aid: &str) -> Vec<(String, PathBuf)> {
+    let row: Option<(String, Option<String>)> = db
+        .query_row(
+            "SELECT project, extra_projects FROM agents WHERE agent_id = ?1",
+            params![aid],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        )
+        .ok();
+    let Some((primary, extra)) = row else {
+        return vec![];
+    };
+    let mut slugs = vec![primary];
+    if let Some(e) = extra {
+        if let Ok(more) = serde_json::from_str::<Vec<String>>(&e) {
+            slugs.extend(more);
+        }
+    }
+    slugs
+        .into_iter()
+        .filter_map(|s| {
+            db.query_row(
+                "SELECT path FROM projects WHERE slug = ?1",
+                params![&s],
+                |row| row.get::<_, String>(0),
+            )
+            .ok()
+            .map(|p| (s, PathBuf::from(p)))
+        })
+        .collect()
 }
 
 pub fn continue_agent_id(base: &Path, agent_id: Option<&str>) -> Result<Option<String>> {
@@ -560,11 +626,94 @@ pub fn all_projects() -> Result<Vec<(String, String)>> {
     })
 }
 
+/// Relabel a project. Slug change cascades: project row, every agent's
+/// primary `project` field, every agent's `extra_projects` JSON entries,
+/// and every approvals row. Path is unconditionally updated even when
+/// the slug is unchanged (a pure source-dir move). Caller is responsible
+/// for moving on-disk state (worktrees, session logs).
+pub fn rename_project(old_slug: &str, new_slug: &str, new_path: &Path) -> Result<()> {
+    let mut db = open()?;
+    let path_str = new_path.to_string_lossy().to_string();
+    let tx = db.transaction()?;
+    tx.execute(
+        "UPDATE projects SET slug = ?1, path = ?2 WHERE slug = ?3",
+        params![new_slug, path_str, old_slug],
+    )?;
+    if new_slug != old_slug {
+        tx.execute(
+            "UPDATE agents SET project = ?1 WHERE project = ?2",
+            params![new_slug, old_slug],
+        )?;
+        tx.execute(
+            "UPDATE approvals SET project = ?1 WHERE project = ?2",
+            params![new_slug, old_slug],
+        )?;
+        // extra_projects is a JSON array per agent; iterate and rewrite
+        // entries that match old_slug.
+        let rows: Vec<(String, String)> = {
+            let mut stmt = tx.prepare(
+                "SELECT agent_id, extra_projects FROM agents \
+                 WHERE extra_projects IS NOT NULL",
+            )?;
+            let mapped = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            mapped.filter_map(|r| r.ok()).collect()
+        };
+        for (aid, extras_json) in rows {
+            let Ok(extras) = serde_json::from_str::<Vec<String>>(&extras_json) else {
+                continue;
+            };
+            if !extras.iter().any(|s| s == old_slug) {
+                continue;
+            }
+            let new_extras: Vec<String> = extras
+                .into_iter()
+                .map(|s| if s == old_slug { new_slug.to_string() } else { s })
+                .collect();
+            let new_json = serde_json::to_string(&new_extras)?;
+            tx.execute(
+                "UPDATE agents SET extra_projects = ?1 WHERE agent_id = ?2",
+                params![new_json, aid],
+            )?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 pub fn remove_project(slug: &str) -> Result<()> {
     let db = open()?;
     db.execute("DELETE FROM agents WHERE project = ?1", params![slug])?;
     db.execute("DELETE FROM projects WHERE slug = ?1", params![slug])?;
     Ok(())
+}
+
+/// Relabel an agent's display int. Only the `agent_id` column moves; the
+/// uuid (and therefore worktree dir + nix overlay paths) stays put.
+/// Errors if `new_id` is already taken.
+pub fn bump_agent_id(old_id: &str, new_id: &str) -> Result<()> {
+    let db = open()?;
+    db.execute(
+        "UPDATE agents SET agent_id = ?1 WHERE agent_id = ?2",
+        params![new_id, old_id],
+    )?;
+    db.execute(
+        "UPDATE approvals SET agent_id = ?1 WHERE agent_id = ?2",
+        params![new_id, old_id],
+    )?;
+    Ok(())
+}
+
+pub fn agent_uuid(agent_id: &str) -> Result<Option<String>> {
+    let db = open()?;
+    Ok(db
+        .query_row(
+            "SELECT uuid FROM agents WHERE agent_id = ?1",
+            params![agent_id],
+            |row| row.get::<_, String>(0),
+        )
+        .ok())
 }
 
 pub fn agent_project(agent_id: &str) -> Option<String> {
@@ -659,18 +808,6 @@ pub fn agent_started_at(agent_id: &str) -> Result<Option<f64>> {
             |row| row.get::<_, f64>(0),
         )
         .ok())
-}
-
-pub fn agent_has_approvals(agent_id: &str) -> Result<bool> {
-    let db = open()?;
-    let n: i64 = db
-        .query_row(
-            "SELECT COUNT(*) FROM approvals WHERE agent_id = ?1",
-            params![agent_id],
-            |row| row.get(0),
-        )
-        .unwrap_or(0);
-    Ok(n > 0)
 }
 
 pub fn delete_approvals(approval_ids: &[i64]) -> Result<()> {

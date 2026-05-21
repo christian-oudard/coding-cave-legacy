@@ -1,5 +1,6 @@
 CREATE TABLE agents (
     agent_id TEXT PRIMARY KEY,
+    uuid TEXT NOT NULL UNIQUE,
     project TEXT NOT NULL,
     session_id TEXT UNIQUE,
     host_pid INTEGER,

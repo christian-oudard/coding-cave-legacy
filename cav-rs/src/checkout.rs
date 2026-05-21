@@ -4,7 +4,6 @@ use anyhow::{bail, Result};
 
 use crate::config::{
     self, dev_branch, inside_cave, parse_dev_branch, self_agent_id, shared_repo_path,
-    worktree_dir,
 };
 use crate::constants::{CAVE_SHARED_REMOTE, HOST_SHARED_REMOTE};
 use crate::git;
@@ -267,7 +266,7 @@ fn retarget_remote(
     )?;
 
     let slug = config::project_slug(base);
-    let ws = worktree_dir(&slug, agent_id);
+    let ws = workspace::worktree_for(&slug, agent_id);
     if !ws.exists() {
         return Ok(());
     }

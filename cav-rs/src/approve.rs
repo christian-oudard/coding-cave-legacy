@@ -28,10 +28,8 @@ pub fn approve(
         verbose,
     )?;
 
-    // Reconcile leftovers from prior crashes or half-done commands:
-    // reap any trivially-clean dead agents, and drop shared dev branches
-    // whose tip already matches the base tip (provably nothing to lose).
-    sandbox::reap_dead_agents();
+    // Drop shared dev branches whose tip already matches the base tip
+    // (provably nothing to lose).
     sandbox::reconcile_merged_dev_branches(base, verbose);
 
     // Build flat list of (branch, base_name, agent_id) candidates,

@@ -42,12 +42,25 @@ impl Project {
     /// accepts it. Mirrors what `cav agent` does on sandbox launch, without
     /// requiring the sandbox.
     fn register_agent(&self, agent_id: &str) {
+        // Default to "just exited" so the agent stays in the active range
+        // (not bumped to 1000+ by archive_sweep). Tests that want a stale
+        // agent past the archive threshold use register_agent_exited_at
+        // with epoch 1 directly.
+        let recent = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+        self.register_agent_exited_at(agent_id, recent);
+    }
+
+    fn register_agent_exited_at(&self, agent_id: &str, exited_at: f64) {
         let slug = self.slug();
         let db_path = self.data_dir.join("coding-cave.db");
         let conn = rusqlite::Connection::open(&db_path).unwrap();
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS agents (\
                  agent_id TEXT PRIMARY KEY,\
+                 uuid TEXT NOT NULL UNIQUE,\
                  project TEXT NOT NULL,\
                  session_id TEXT UNIQUE,\
                  host_pid INTEGER,\
@@ -57,11 +70,12 @@ impl Project {
                  extra_projects TEXT);",
         )
         .unwrap();
+        let uuid = uuid::Uuid::new_v4().to_string();
         conn.execute(
             "INSERT OR REPLACE INTO agents \
-             (agent_id, project, started_at, exited_at) \
-             VALUES (?1, ?2, 0, 1)",
-            rusqlite::params![agent_id, slug],
+             (agent_id, uuid, project, started_at, exited_at) \
+             VALUES (?1, ?2, ?3, 0, ?4)",
+            rusqlite::params![agent_id, uuid, slug, exited_at],
         )
         .unwrap();
     }
@@ -150,6 +164,17 @@ impl Project {
             .output()
             .unwrap();
         String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn agent_uuid(&self, agent_id: &str) -> Option<String> {
+        let db_path = self.data_dir.join("coding-cave.db");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.query_row(
+            "SELECT uuid FROM agents WHERE agent_id = ?1",
+            rusqlite::params![agent_id],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
     }
 
     fn agent_registered(&self, agent_id: &str) -> bool {
@@ -328,9 +353,9 @@ fn approve_uses_cwd_when_agent_registered_to_other_project() {
     )
     .unwrap();
     conn.execute(
-        "INSERT OR REPLACE INTO agents (agent_id, project, started_at, exited_at) \
-         VALUES (?1, 'ghost', 0, 1)",
-        rusqlite::params!["7"],
+        "INSERT OR REPLACE INTO agents (agent_id, uuid, project, started_at, exited_at) \
+         VALUES (?1, ?2, 'ghost', 0, 1)",
+        rusqlite::params!["7", uuid::Uuid::new_v4().to_string()],
     )
     .unwrap();
     drop(conn);
@@ -842,13 +867,13 @@ fn reject_drops_rejected_commits_from_secondary_agent_worktrees() {
 // --- Reaper handles crashes that skipped teardown ---
 
 #[test]
-fn reaper_removes_dead_trivially_clean_agent() {
-    // Simulates: agent launched, crashed (SIGKILL) before it ever pushed
-    // anything. The registry row was never cleaned up because run_agent's
-    // exit path didn't run. On the next `cav status`, the reaper should
-    // spot an exited agent with no branches / no approvals / no worktree
-    // and remove the stale row.
-    let p = Project::new("reaper-clean");
+fn cav_status_preserves_exited_agent() {
+    // Previously, a "trivially clean" exited agent (no branches, no
+    // approvals) was reaped by `cav status`. That heuristic discarded
+    // sessions whose only artifact was the conversation log, so it was
+    // removed entirely. Now status leaves every exited agent in place
+    // until explicit `cav gc` or `cav remove-agent`.
+    let p = Project::new("status-preserves-exited");
     p.register_agent("7");
     assert!(p.agent_registered("7"));
 
@@ -861,8 +886,8 @@ fn reaper_removes_dead_trivially_clean_agent() {
     );
 
     assert!(
-        !p.agent_registered("7"),
-        "trivially-clean exited agent should have been reaped"
+        p.agent_registered("7"),
+        "exited agent must survive cav status"
     );
 }
 
@@ -1023,6 +1048,7 @@ fn dead_pid_sweep_uses_session_mtime_for_exit_time() {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS agents (\
              agent_id TEXT PRIMARY KEY,\
+             uuid TEXT NOT NULL UNIQUE,\
              project TEXT NOT NULL,\
              session_id TEXT UNIQUE,\
              host_pid INTEGER,\
@@ -1034,9 +1060,9 @@ fn dead_pid_sweep_uses_session_mtime_for_exit_time() {
     .unwrap();
     conn.execute(
         "INSERT OR REPLACE INTO agents \
-         (agent_id, project, session_id, host_pid, started_at, exited_at) \
-         VALUES (?1, ?2, ?3, ?4, 0, NULL)",
-        rusqlite::params!["3", slug, sid, dead_pid],
+         (agent_id, uuid, project, session_id, host_pid, started_at, exited_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, 0, NULL)",
+        rusqlite::params!["3", uuid::Uuid::new_v4().to_string(), slug, sid, dead_pid],
     )
     .unwrap();
 
@@ -1119,6 +1145,613 @@ fn continue_after_pre_ttl_exit_still_works() {
         combined.contains("@3") || combined.contains("agent-3"),
         "status should show agent 3, got: {combined}"
     );
+}
+
+#[test]
+fn acquire_reclaims_stale_worktree_and_branches() {
+    // When acquire_agent_id reuses a slot, the previous occupant's worktree
+    // dir and bare-repo refs (refs/heads/agent-N/* and
+    // refs/cav/agent-tip/agent-N/*) must be wiped so the new agent doesn't
+    // inherit them. We trigger acquire by invoking `cav agent`; it bails at
+    // load_sandbox_config (no CODING_CAVE_BUILD_CONFIG) only after the
+    // reclaim has run.
+    let p = Project::new("reclaim-stale-state");
+
+    // Seed: an old agent-1 row marked exited well past the reclaim cutoff.
+    p.register_agent_exited_at("1", 1.0);
+
+    // Stale worktree dir (any contents — reclaim should rm -rf it).
+    let ws = p.worktree_dir("1");
+    fs::create_dir_all(&ws).unwrap();
+    fs::write(ws.join("MARKER"), "from a previous incarnation\n").unwrap();
+
+    // Stale agent-1/main branch + agent-tip ref in the bare repo.
+    let main_sha = git_out(&["rev-parse", "main"], &p.dir);
+    git(
+        &["push", "cave", &format!("{main_sha}:refs/heads/agent-1/main")],
+        &p.dir,
+    );
+    git(
+        &[
+            "update-ref",
+            "refs/cav/agent-tip/agent-1/main",
+            &main_sha,
+        ],
+        &p.shared(),
+    );
+    assert!(p.shared_has_ref("refs/heads/agent-1/main"));
+    assert!(p.shared_has_ref("refs/cav/agent-tip/agent-1/main"));
+
+    // Trigger acquire_agent_id. Expected to fail later in run_agent without
+    // a sandbox config; that's fine — reclaim runs first.
+    let _ = p.cav(&["agent"]);
+
+    assert!(
+        !ws.exists(),
+        "stale worktree should be removed; {} still exists",
+        ws.display()
+    );
+    assert!(
+        !p.shared_has_ref("refs/heads/agent-1/main"),
+        "stale agent-1/main branch should be removed from bare repo"
+    );
+    assert!(
+        !p.shared_has_ref("refs/cav/agent-tip/agent-1/main"),
+        "stale agent-tip ref should be removed from bare repo"
+    );
+}
+
+#[test]
+fn acquire_migrates_legacy_display_id_worktree_to_uuid_path() {
+    // Old data (pre-uuid-column) lives at .../worktrees/<slug>/<display_id>/.
+    // On the first cav invocation after upgrade, acquire runs settle and
+    // renames the dir to .../worktrees/<slug>/<uuid>/. Subsequent code
+    // sees the canonical path; the legacy location is empty.
+    let p = Project::new("uuid-migrate-legacy");
+    p.register_agent("3");
+    let uuid = p.agent_uuid("3").expect("registered agent should have uuid");
+
+    let legacy = p.worktree_dir("3");
+    fs::create_dir_all(&legacy).unwrap();
+    fs::write(legacy.join("MARKER"), "carry me forward\n").unwrap();
+
+    let canonical = p
+        .data_dir
+        .join("worktrees")
+        .join(p.slug())
+        .join(&uuid);
+    assert!(!canonical.exists(), "canonical path should not exist before migration");
+
+    let _ = p.cav(&["agent"]);
+
+    assert!(
+        !legacy.exists(),
+        "legacy display-id path should be renamed away"
+    );
+    assert!(canonical.is_dir(), "canonical uuid path should now hold the worktree");
+    assert!(
+        canonical.join("MARKER").is_file(),
+        "rename should preserve contents"
+    );
+}
+
+#[test]
+fn acquire_assigns_uuid_to_new_agent() {
+    // acquire_agent_id stamps every new row with a v4 UUID. cav agent runs
+    // acquire first, then bails at load_sandbox_config — that's enough to
+    // populate the row.
+    let p = Project::new("uuid-acquire");
+    let _ = p.cav(&["agent"]);
+    let uuid = p
+        .agent_uuid("1")
+        .expect("acquire should have created agent 1");
+    assert_eq!(
+        uuid.len(),
+        36,
+        "uuid should be a standard v4 string (8-4-4-4-12), got: {uuid}"
+    );
+    assert!(uuid.contains('-'), "uuid should contain dashes: {uuid}");
+}
+
+// --- Archive bump ---
+
+#[test]
+fn acquire_bumps_old_paused_agent_to_archive_range() {
+    // Paused agent at display int 3 with exited_at well past 24h should be
+    // renamed to 1000+ during the next acquire. The worktree (keyed by
+    // uuid) stays put; the agent-3/* refs in the bare repo are wiped; the
+    // bumped agent is reachable as agent 1000 (or next free in that range).
+    let p = Project::new("archive-bump-old");
+    p.register_agent_exited_at("3", 1.0);
+    let main_sha = git_out(&["rev-parse", "main"], &p.dir);
+    git(
+        &["push", "cave", &format!("{main_sha}:refs/heads/agent-3/main")],
+        &p.dir,
+    );
+    assert!(p.shared_has_ref("refs/heads/agent-3/main"));
+
+    let _ = p.cav(&["agent"]);
+
+    assert!(
+        !p.agent_registered("3"),
+        "old display int 3 should be vacated by the bump"
+    );
+    assert!(
+        p.agent_registered("1000"),
+        "bumped agent should land at 1000"
+    );
+    assert!(
+        !p.shared_has_ref("refs/heads/agent-3/main"),
+        "agent-3/* refs should be wiped on bump (branches are interface)"
+    );
+}
+
+#[test]
+fn acquire_does_not_bump_recently_paused_agent() {
+    let p = Project::new("archive-bump-recent");
+    let recent = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64()
+        - 60.0;
+    p.register_agent_exited_at("3", recent);
+
+    let _ = p.cav(&["agent"]);
+
+    assert!(
+        p.agent_registered("3"),
+        "recently-paused agent must keep its display int"
+    );
+    assert!(
+        !p.agent_registered("1000"),
+        "no archived agent should have been minted"
+    );
+}
+
+#[test]
+fn cav_status_bumps_old_paused_agents() {
+    // cav status calls archive_sweep too, so a stale paused agent gets
+    // rotated even without an acquire.
+    let p = Project::new("archive-bump-status");
+    p.register_agent_exited_at("4", 1.0);
+
+    let out = p.cav(&["status"]);
+    assert_eq!(out.status.code(), Some(0));
+
+    assert!(!p.agent_registered("4"), "status should bump stale agent 4");
+    assert!(p.agent_registered("1000"), "bumped agent should land at 1000");
+
+    // The user gets a one-line notice on stderr so the display int rotation
+    // isn't silent. Strip ANSI before matching.
+    let stderr = strip_ansi(&String::from_utf8_lossy(&out.stderr));
+    assert!(
+        stderr.contains("Archived agent 4") && stderr.contains("1000"),
+        "expected 'Archived agent 4 → 1000' notice on stderr, got: {stderr}"
+    );
+}
+
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // Skip until 'm' (end of CSI sequence).
+            for c2 in chars.by_ref() {
+                if c2 == 'm' {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+// --- cav gc ---
+
+#[test]
+fn gc_removes_worktree_and_branches_for_old_paused_agent() {
+    let p = Project::new("gc-old-paused");
+    // Exited at epoch 1 -> well past any sensible --older-than default.
+    p.register_agent_exited_at("5", 1.0);
+    let ws = p.worktree_dir("5");
+    fs::create_dir_all(&ws).unwrap();
+    fs::write(ws.join("MARKER"), "old\n").unwrap();
+    let main_sha = git_out(&["rev-parse", "main"], &p.dir);
+    git(
+        &["push", "cave", &format!("{main_sha}:refs/heads/agent-5/main")],
+        &p.dir,
+    );
+    git(
+        &[
+            "update-ref",
+            "refs/cav/agent-tip/agent-5/main",
+            &main_sha,
+        ],
+        &p.shared(),
+    );
+
+    let out = p.cav(&["gc"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "gc failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert!(!ws.exists(), "worktree dir should be removed by gc");
+    assert!(
+        !p.shared_has_ref("refs/heads/agent-5/main"),
+        "agent branch should be removed by gc"
+    );
+    assert!(
+        !p.shared_has_ref("refs/cav/agent-tip/agent-5/main"),
+        "agent-tip ref should be removed by gc"
+    );
+    assert!(
+        p.agent_registered("5"),
+        "registry row must survive gc (only artifacts are reclaimed)"
+    );
+}
+
+#[test]
+fn gc_preserves_recent_paused_agent() {
+    let p = Project::new("gc-recent-preserve");
+    // Exited 5 minutes ago -> inside the default 24h window.
+    let recent = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64()
+        - 5.0 * 60.0;
+    p.register_agent_exited_at("5", recent);
+    let ws = p.worktree_dir("5");
+    fs::create_dir_all(&ws).unwrap();
+    fs::write(ws.join("MARKER"), "recent\n").unwrap();
+
+    let out = p.cav(&["gc"]);
+    assert_eq!(out.status.code(), Some(0));
+
+    assert!(
+        ws.exists(),
+        "recently-paused agent's worktree must survive default gc"
+    );
+    assert!(p.agent_registered("5"));
+}
+
+#[test]
+fn gc_dry_run_reports_but_removes_nothing() {
+    let p = Project::new("gc-dry-run");
+    p.register_agent_exited_at("5", 1.0);
+    let ws = p.worktree_dir("5");
+    fs::create_dir_all(&ws).unwrap();
+    fs::write(ws.join("MARKER"), "x\n").unwrap();
+    let main_sha = git_out(&["rev-parse", "main"], &p.dir);
+    git(
+        &["push", "cave", &format!("{main_sha}:refs/heads/agent-5/main")],
+        &p.dir,
+    );
+
+    let out = p.cav(&["gc", "--dry-run"]);
+    assert_eq!(out.status.code(), Some(0));
+
+    assert!(ws.exists(), "dry-run must not touch the worktree");
+    assert!(
+        p.shared_has_ref("refs/heads/agent-5/main"),
+        "dry-run must not touch shared refs"
+    );
+}
+
+// --- cav remove-agent ---
+
+#[test]
+fn remove_agent_drops_worktree_and_nix_overlay() {
+    let p = Project::new("ra-drops-overlay");
+    p.register_agent("1");
+    let uuid = p.agent_uuid("1").unwrap();
+
+    let ws = p.worktree_dir("1");
+    fs::create_dir_all(&ws).unwrap();
+    fs::write(ws.join("MARKER"), "x\n").unwrap();
+
+    // Seed a per-agent nix overlay dir; remove-agent should reclaim it
+    // alongside the worktree.
+    let overlay = p
+        .data_dir
+        .join("home")
+        .join(".local")
+        .join("share")
+        .join("coding-cave")
+        .join("nix-overlay")
+        .join(format!("agent-{uuid}"));
+    fs::create_dir_all(overlay.join("upper")).unwrap();
+    fs::write(overlay.join("upper").join("FILE"), "y\n").unwrap();
+
+    let out = p.cav(&["remove-agent", "1", "--yes"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "remove-agent failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert!(!ws.exists(), "worktree dir must be reclaimed");
+    assert!(!overlay.exists(), "nix overlay dir must be reclaimed");
+    assert!(!p.agent_registered("1"), "registry row must be dropped");
+}
+
+#[test]
+fn remove_agent_refuses_running_even_with_missing_project_dir() {
+    // Previously the project-dir-missing fast path skipped the is_running
+    // check and dropped the row out from under a live process.
+    let p = Project::new("ra-running-missing-dir");
+    let slug = p.slug();
+    let db_path = p.data_dir.join("coding-cave.db");
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let uuid = uuid::Uuid::new_v4().to_string();
+    // Register against a slug whose path won't resolve to a real dir.
+    conn.execute(
+        "INSERT OR REPLACE INTO projects (slug, path) VALUES (?1, ?2)",
+        rusqlite::params!["ghost", "/nonexistent/ghost"],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT OR REPLACE INTO agents \
+         (agent_id, uuid, project, host_pid, started_at, exited_at) \
+         VALUES ('9', ?1, 'ghost', ?2, 0, NULL)",
+        rusqlite::params![uuid, std::process::id()],
+    )
+    .unwrap();
+    drop(conn);
+    let _ = slug;
+
+    let out = p.cav(&["remove-agent", "9", "--yes"]);
+    assert_ne!(
+        out.status.code(),
+        Some(0),
+        "should refuse: agent is running"
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("running"),
+        "error should mention running, got: {err}"
+    );
+
+    // Row must still exist.
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let exists = conn
+        .query_row(
+            "SELECT 1 FROM agents WHERE agent_id = ?1",
+            rusqlite::params!["9"],
+            |_| Ok(()),
+        )
+        .is_ok();
+    assert!(exists, "running agent must survive the refusal");
+}
+
+// --- cav remove-project ---
+
+#[test]
+fn remove_project_drops_owned_agents_and_metadata() {
+    let p = Project::new("rp-owned-agents");
+    let slug = p.slug();
+    p.register_agent("1");
+    p.register_agent("2");
+    let ws1 = p.worktree_dir("1");
+    let ws2 = p.worktree_dir("2");
+    fs::create_dir_all(&ws1).unwrap();
+    fs::create_dir_all(&ws2).unwrap();
+    fs::write(ws1.join("MARKER"), "a\n").unwrap();
+    fs::write(ws2.join("MARKER"), "b\n").unwrap();
+
+    let main_sha = git_out(&["rev-parse", "main"], &p.dir);
+    git(
+        &["push", "cave", &format!("{main_sha}:refs/heads/agent-1/main")],
+        &p.dir,
+    );
+
+    let cav_meta = p.dir.join(".coding-cave");
+    assert!(cav_meta.is_dir(), "test precondition");
+    let src_marker = p.dir.join("README.md");
+    assert!(src_marker.is_file(), "test precondition");
+
+    let out = p.cav(&["remove-project", &slug, "--yes"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "remove-project failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert!(!ws1.exists(), "agent 1 worktree should be gone");
+    assert!(!ws2.exists(), "agent 2 worktree should be gone");
+    assert!(!p.agent_registered("1"), "agent 1 row should be dropped");
+    assert!(!p.agent_registered("2"), "agent 2 row should be dropped");
+    assert!(
+        !cav_meta.exists(),
+        ".coding-cave/ metadata dir should be removed"
+    );
+    assert!(
+        src_marker.is_file(),
+        "source files must NOT be touched"
+    );
+}
+
+#[test]
+fn remove_project_refuses_when_agent_running() {
+    let p = Project::new("rp-running");
+    let slug = p.slug();
+    // Pose as running by setting host_pid to this test's own pid (alive).
+    let db_path = p.data_dir.join("coding-cave.db");
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let uuid = uuid::Uuid::new_v4().to_string();
+    conn.execute(
+        "INSERT OR REPLACE INTO agents \
+         (agent_id, uuid, project, host_pid, started_at, exited_at) \
+         VALUES ('1', ?1, ?2, ?3, 0, NULL)",
+        rusqlite::params![uuid, slug, std::process::id()],
+    )
+    .unwrap();
+    drop(conn);
+
+    let out = p.cav(&["remove-project", &slug, "--yes"]);
+    assert_ne!(out.status.code(), Some(0), "should refuse with running agent");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("running agents") || err.contains("running"),
+        "error should mention running agents, got: {err}"
+    );
+
+    assert!(p.agent_registered("1"), "agent must survive refusal");
+}
+
+#[test]
+fn rename_project_moves_source_and_cascades_slug() {
+    let p = Project::new("rp-rename");
+    let old_slug = p.slug();
+    p.register_agent("1");
+    let old_ws = p.worktree_dir("1");
+    fs::create_dir_all(&old_ws).unwrap();
+    fs::write(old_ws.join("MARKER"), "x\n").unwrap();
+    let uuid = p
+        .agent_uuid("1")
+        .expect("registered agent should have uuid");
+
+    let new_path = p.data_dir.join("renamed-target");
+    assert!(!new_path.exists());
+
+    let out = Command::new(CAV)
+        .args(["rename-project", new_path.to_str().unwrap(), "--yes"])
+        .current_dir(&p.dir)
+        .env("CODING_CAVE_DATA_DIR", &p.data_dir)
+        .env_remove("CODING_CAVE_VERSION")
+        .env_remove("CODING_CAVE_AGENT_ID")
+        .output()
+        .expect("cav");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "rename failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert!(!p.dir.exists(), "old source dir should be gone");
+    assert!(new_path.is_dir(), "new source dir should exist");
+    assert!(new_path.join("README.md").is_file(), "source contents preserved");
+
+    let new_slug = new_path
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_lowercase()
+        .replace(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-', "-");
+    assert_ne!(old_slug, new_slug);
+
+    // Old worktree path gone, new worktree path holds the marker.
+    let new_ws = p
+        .data_dir
+        .join("worktrees")
+        .join(&new_slug)
+        .join(&uuid);
+    assert!(!old_ws.exists(), "old worktree dir should be moved");
+    assert!(new_ws.is_dir(), "new worktree dir should hold the moved content");
+    assert!(new_ws.join("MARKER").is_file());
+
+    // Registry agent.project field follows the slug.
+    let db_path = p.data_dir.join("coding-cave.db");
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let project: String = conn
+        .query_row(
+            "SELECT project FROM agents WHERE agent_id = ?1",
+            rusqlite::params!["1"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(project, new_slug);
+}
+
+#[test]
+fn rename_project_refuses_when_destination_exists() {
+    let p = Project::new("rp-rename-blocked");
+    let existing = p.data_dir.join("already-here");
+    fs::create_dir_all(&existing).unwrap();
+
+    let out = Command::new(CAV)
+        .args(["rename-project", existing.to_str().unwrap(), "--yes"])
+        .current_dir(&p.dir)
+        .env("CODING_CAVE_DATA_DIR", &p.data_dir)
+        .env_remove("CODING_CAVE_VERSION")
+        .env_remove("CODING_CAVE_AGENT_ID")
+        .output()
+        .expect("cav");
+    assert_ne!(out.status.code(), Some(0));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("already exists") || err.contains("exists"),
+        "error should mention destination exists, got: {err}"
+    );
+    assert!(p.dir.is_dir(), "source must not be moved on refusal");
+}
+
+#[test]
+fn rename_project_refuses_when_agent_running() {
+    let p = Project::new("rp-rename-running");
+    let slug = p.slug();
+    let db_path = p.data_dir.join("coding-cave.db");
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let uuid = uuid::Uuid::new_v4().to_string();
+    conn.execute(
+        "INSERT OR REPLACE INTO agents \
+         (agent_id, uuid, project, host_pid, started_at, exited_at) \
+         VALUES ('1', ?1, ?2, ?3, 0, NULL)",
+        rusqlite::params![uuid, slug, std::process::id()],
+    )
+    .unwrap();
+    drop(conn);
+
+    let new_path = p.data_dir.join("dest");
+    let out = Command::new(CAV)
+        .args(["rename-project", new_path.to_str().unwrap(), "--yes"])
+        .current_dir(&p.dir)
+        .env("CODING_CAVE_DATA_DIR", &p.data_dir)
+        .env_remove("CODING_CAVE_VERSION")
+        .env_remove("CODING_CAVE_AGENT_ID")
+        .output()
+        .expect("cav");
+    assert_ne!(out.status.code(), Some(0));
+    assert!(p.dir.is_dir(), "source must not be moved on refusal");
+    assert!(!new_path.exists());
+}
+
+#[test]
+fn remove_project_unknown_slug_errors() {
+    let p = Project::new("rp-unknown");
+    let out = p.cav(&["remove-project", "does-not-exist", "--yes"]);
+    assert_ne!(out.status.code(), Some(0));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("No project") || err.contains("does-not-exist"),
+        "error should mention the missing project, got: {err}"
+    );
+}
+
+#[test]
+fn gc_zero_threshold_collects_freshly_paused() {
+    // --older-than 0 makes every paused agent eligible, regardless of age.
+    let p = Project::new("gc-zero-threshold");
+    let recent = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64();
+    p.register_agent_exited_at("5", recent);
+    let ws = p.worktree_dir("5");
+    fs::create_dir_all(&ws).unwrap();
+    fs::write(ws.join("MARKER"), "fresh\n").unwrap();
+
+    let out = p.cav(&["gc", "--older-than", "0s"]);
+    assert_eq!(out.status.code(), Some(0));
+
+    assert!(!ws.exists(), "0-threshold gc should collect even fresh agents");
 }
 
 // --- Checkout (retarget) ---

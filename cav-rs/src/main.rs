@@ -9,9 +9,11 @@ mod completion;
 mod cp;
 mod cp_complete;
 mod daemon;
+mod gc;
 mod handler;
 mod init;
 mod proc_ns;
+mod project;
 mod pull;
 mod push;
 mod reject;
@@ -143,10 +145,33 @@ enum Cmd {
         #[arg(short = 'y', long = "yes")]
         yes: bool,
     },
-    /// Unregister a project from the cave
+    /// Reclaim disk space from paused agents (worktree, nix overlay, branches)
+    Gc {
+        /// Only collect agents paused at least this long (e.g. 24h, 7d, 1w)
+        #[arg(long = "older-than", default_value_t = gc::default_older_than().to_string())]
+        older_than: String,
+        /// Show what would be removed without removing anything
+        #[arg(long = "dry-run")]
+        dry_run: bool,
+    },
+    /// Unregister a project: drops every owned agent's worktree, nix
+    /// overlay, dev branches, and registry rows, plus the project's
+    /// .coding-cave/ metadata. Source files and session logs are kept.
     #[command(name = "remove-project")]
     RemoveProject {
         slug: String,
+        /// Skip confirmation
+        #[arg(short = 'y', long = "yes")]
+        yes: bool,
+    },
+    /// Move the current project's source dir; cascades slug change
+    /// through registry, worktrees, and session log dirs.
+    #[command(name = "rename-project")]
+    RenameProject {
+        new_path: String,
+        /// Skip confirmation
+        #[arg(short = 'y', long = "yes")]
+        yes: bool,
     },
     /// Fetch and checkout an agent branch for review
     Review {
@@ -209,7 +234,9 @@ impl Cmd {
                 | Cmd::Push { .. }
                 | Cmd::Status { .. }
                 | Cmd::RemoveAgent { .. }
+                | Cmd::Gc { .. }
                 | Cmd::RemoveProject { .. }
+                | Cmd::RenameProject { .. }
                 | Cmd::Review { .. }
                 | Cmd::Shell { .. }
                 | Cmd::Checkout { .. }
@@ -384,6 +411,11 @@ fn run() -> Result<()> {
             if !all_ids.contains(&aid) {
                 bail!("Agent {} not found.", style::bold(&aid));
             }
+            // Only operate on stopped agents — refuse before touching anything,
+            // including the registry-only fallback when the project dir is gone.
+            if registry::is_agent_running(&aid)? {
+                bail!("Agent {} is running. Stop it first.", style::bold(&aid));
+            }
             let slug = registry::agent_project(&aid);
             let path = slug
                 .as_deref()
@@ -398,10 +430,6 @@ fn run() -> Result<()> {
                     );
                     return Ok(());
                 }
-                if registry::is_agent_running(&aid)? {
-                    let name = registry::display_name(&base, &aid);
-                    bail!("{} is running. Stop it first.", style::agent_name(&name));
-                }
                 status::remove_agent(&base, &aid, yes)
             } else {
                 registry::remove_agent(&aid)?;
@@ -412,31 +440,15 @@ fn run() -> Result<()> {
                 Ok(())
             }
         }
-        Cmd::RemoveProject { slug } => {
-            let projects: std::collections::HashMap<_, _> =
-                registry::all_projects()?.into_iter().collect();
-            if !projects.contains_key(&slug) {
-                bail!("No project \"{}\" in registry.", style::blue(&slug));
-            }
-            // Refuse if any agents for this project are still running.
-            let running: Vec<String> = registry::all_agent_ids(Some(&slug))?
-                .into_iter()
-                .filter(|a| registry::is_agent_running(a).unwrap_or(false))
-                .collect();
-            if !running.is_empty() {
-                bail!(
-                    "Project \"{}\" has running agents: {}\nStop them first.",
-                    style::blue(&slug),
-                    running
-                        .iter()
-                        .map(|a| style::bold(a))
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                );
-            }
-            registry::remove_project(&slug)?;
-            println!("Removed project \"{}\".", style::blue(&slug));
-            Ok(())
+        Cmd::Gc { older_than, dry_run } => {
+            let dur = gc::parse_older_than(&older_than)?;
+            gc::run(dur, dry_run)
+        }
+        Cmd::RemoveProject { slug, yes } => project::remove(&slug, yes),
+        Cmd::RenameProject { new_path, yes } => {
+            let base = find_repo_root()?;
+            require_init(&base)?;
+            project::rename(&base, &PathBuf::from(new_path), yes)
         }
         Cmd::Review { agent_id } => {
             let base = find_repo_root()?;
