@@ -97,7 +97,7 @@
             inherit caveSourceHash;
           };
 
-          mkCav = { profile ? "release" }:
+          mkCav = { profile ? "release", binName ? "cav" }:
             # unshare --map-user/--map-group requires util-linux >= 2.39.
             assert pkgs.lib.versionAtLeast pkgs.util-linux.version "2.39";
             craneLib.buildPackage (commonArgs // {
@@ -112,7 +112,11 @@
                 ${buildConfig}
                 JSON
 
-                wrapProgram $out/bin/cav \
+                ${pkgs.lib.optionalString (binName != "cav") ''
+                  mv $out/bin/cav $out/bin/${binName}
+                ''}
+
+                wrapProgram $out/bin/${binName} \
                   --set-default CODING_CAVE_BUILD_CONFIG \
                     "$out/share/coding-cave/build.json" \
                   --prefix PATH : ${pkgs.lib.makeBinPath [
@@ -122,13 +126,15 @@
                   ]}
               '';
 
-              meta.mainProgram = "cav";
+              meta.mainProgram = binName;
             });
 
           cav = mkCav { };
           # Debug build keeps debug_assertions on, which enables verbose
-          # timing logs in cav, supervisor, and entry script.
-          cavDebug = mkCav { profile = "dev"; };
+          # timing logs in cav, supervisor, and entry script. Installed
+          # under a distinct binary name so it can sit alongside the
+          # release `cav` (from the host module) in nix profile.
+          cavDebug = mkCav { profile = "dev"; binName = "cav-debug"; };
 
           tests = craneLib.cargoTest {
             pname = "cav-tests";
