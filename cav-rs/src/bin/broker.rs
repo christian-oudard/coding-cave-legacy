@@ -34,6 +34,19 @@ fn log(msg: &str) {
     }
 }
 
+/// Accept any of the three agent-shaped strings the cave uses: bare
+/// numeric ("5"), branch prefix ("agent-5"), or display name with a
+/// project slug ("coding-cave@5", "@5"). Returns the bare numeric.
+fn normalize_id(raw: &str) -> Option<String> {
+    let after_at = raw.rsplit('@').next().unwrap_or(raw);
+    let body = after_at.strip_prefix("agent-").unwrap_or(after_at);
+    if !body.is_empty() && body.chars().all(|c| c.is_ascii_digit()) {
+        Some(body.to_string())
+    } else {
+        None
+    }
+}
+
 fn write_line(writer: &Writer, value: &serde_json::Value) {
     let mut data = serde_json::to_vec(value).unwrap();
     data.push(b'\n');
@@ -66,9 +79,13 @@ fn handle(stream: UnixStream, agents: Agents) {
         };
 
         if let Some(reg) = msg.get("register") {
-            let id = match reg {
+            let raw = match reg {
                 serde_json::Value::String(s) => s.clone(),
                 v => v.to_string(),
+            };
+            let Some(id) = normalize_id(&raw) else {
+                log(&format!("rejecting register {raw:?}: not a recognized agent id"));
+                continue;
             };
             agent_id = Some(id.clone());
             let replaced = agents
@@ -84,15 +101,23 @@ fn handle(stream: UnixStream, agents: Agents) {
         }
 
         let Some(sender) = agent_id.as_ref() else { continue };
-        let Some(to) = msg.get("to").and_then(|v| v.as_str()) else { continue };
+        let Some(to_raw) = msg.get("to").and_then(|v| v.as_str()) else { continue };
         let body = msg.get("body").and_then(|v| v.as_str()).unwrap_or("");
 
-        let envelope = json!({"from": sender, "body": body});
-        let ack = match deliver(&agents, to, &envelope) {
-            Ok(()) => json!({"ack": true}),
-            Err(reason) => {
-                log(&format!("no connection for agent {to}, dropping message"));
-                json!({"ack": false, "reason": reason})
+        let ack = match normalize_id(to_raw) {
+            Some(to) => {
+                let envelope = json!({"from": sender, "body": body});
+                match deliver(&agents, &to, &envelope) {
+                    Ok(()) => json!({"ack": true}),
+                    Err(reason) => {
+                        log(&format!("no connection for agent {to}, dropping message"));
+                        json!({"ack": false, "reason": reason})
+                    }
+                }
+            }
+            None => {
+                log(&format!("invalid 'to' value {to_raw:?}, dropping message"));
+                json!({"ack": false, "reason": "invalid_id"})
             }
         };
         write_line(&writer, &ack);
@@ -140,4 +165,38 @@ fn main() -> std::io::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_id;
+
+    #[test]
+    fn accepts_bare_numeric() {
+        assert_eq!(normalize_id("5").as_deref(), Some("5"));
+        assert_eq!(normalize_id("13").as_deref(), Some("13"));
+    }
+
+    #[test]
+    fn accepts_branch_prefix() {
+        assert_eq!(normalize_id("agent-5").as_deref(), Some("5"));
+        assert_eq!(normalize_id("agent-42").as_deref(), Some("42"));
+    }
+
+    #[test]
+    fn accepts_display_name() {
+        assert_eq!(normalize_id("coding-cave@5").as_deref(), Some("5"));
+        assert_eq!(normalize_id("@5").as_deref(), Some("5"));
+    }
+
+    #[test]
+    fn rejects_garbage() {
+        assert_eq!(normalize_id(""), None);
+        assert_eq!(normalize_id("foo"), None);
+        assert_eq!(normalize_id("5abc"), None);
+        assert_eq!(normalize_id("agent-"), None);
+        assert_eq!(normalize_id("agent-5abc"), None);
+        assert_eq!(normalize_id("coding-cave@"), None);
+        assert_eq!(normalize_id("5@"), None);
+    }
 }

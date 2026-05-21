@@ -114,6 +114,9 @@ impl Broker {
             Ok(Ack::Dropped(reason)) if reason == "no_listener" => {
                 format!("Agent {to} is not online; message not delivered")
             }
+            Ok(Ack::Dropped(reason)) if reason == "invalid_id" => {
+                format!("Invalid agent ID {to:?}; use the numeric ID (e.g. \"5\")")
+            }
             Ok(Ack::Dropped(reason)) => format!("Not delivered: {reason}"),
             Err(_) => "Broker did not acknowledge within 5s".to_string(),
         };

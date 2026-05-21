@@ -153,6 +153,43 @@ fn broker_reregister_replaces_writer() {
 }
 
 #[test]
+fn broker_normalizes_id_formats() {
+    let broker = BrokerProcess::start();
+
+    // Recipient registers with a branch-style prefix.
+    let (wb, mut rb) = broker.connect();
+    register(&wb, "agent-2");
+    send(&wb, &json!({"to": "999", "body": "probe"}));
+    recv(&mut rb); // no_listener ack, discarded
+
+    // Sender registers with a display-name style and sends with a third style.
+    let (wa, mut ra) = broker.connect();
+    register(&wa, "coding-cave@1");
+    send(&wa, &json!({"to": "agent-2", "body": "hello"}));
+
+    let ack = recv(&mut ra);
+    assert_eq!(ack["ack"], true, "delivery should succeed across formats");
+
+    let msg = recv(&mut rb);
+    assert_eq!(msg["from"], "1", "from should be the normalized bare numeric");
+    assert_eq!(msg["body"], "hello");
+}
+
+#[test]
+fn broker_acks_invalid_id() {
+    let broker = BrokerProcess::start();
+
+    let (wa, mut ra) = broker.connect();
+    register(&wa, "1");
+
+    send(&wa, &json!({"to": "not-an-id", "body": "nope"}));
+
+    let ack = recv(&mut ra);
+    assert_eq!(ack["ack"], false);
+    assert_eq!(ack["reason"], "invalid_id");
+}
+
+#[test]
 fn broker_cleans_up_disconnected_agent() {
     let broker = BrokerProcess::start();
 
