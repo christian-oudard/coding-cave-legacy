@@ -70,7 +70,7 @@ pub fn start(agent_id: &str, shared_repos: &[(PathBuf, String)]) -> Result<Daemo
 
     if !wait_for_port(port, 5.0, Some(&mut proc)) {
         let _ = proc.kill();
-        let _ = std::fs::remove_dir_all(&base_dir);
+        crate::workspace::force_remove_dir_all(&base_dir);
         bail!("Git daemon failed to start on port {port}");
     }
 
@@ -105,7 +105,7 @@ pub fn stop(mut handle: DaemonHandle) {
             }
         }
     }
-    let _ = std::fs::remove_dir_all(&handle.base_dir);
+    crate::workspace::force_remove_dir_all(&handle.base_dir);
 }
 
 fn tempdir_with_prefix(prefix: &str) -> Result<PathBuf> {

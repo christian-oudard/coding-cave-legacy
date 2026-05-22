@@ -567,7 +567,7 @@ pub fn _remove_agent(base: &Path, agent_id: &str, branches: &[String]) -> Result
     for slug in &slugs {
         let ws = worktree_for(slug, agent_id);
         if ws.exists() {
-            std::fs::remove_dir_all(&ws).ok();
+            crate::workspace::force_remove_dir_all(&ws);
         }
         if slug == &primary_slug {
             continue;
@@ -608,7 +608,7 @@ pub fn _remove_agent(base: &Path, agent_id: &str, branches: &[String]) -> Result
         agent_id,
     );
     if overlay.exists() {
-        std::fs::remove_dir_all(&overlay).ok();
+        crate::workspace::force_remove_dir_all(&overlay);
     }
     registry::remove_agent(agent_id)?;
     Ok(())

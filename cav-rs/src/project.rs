@@ -69,12 +69,12 @@ pub fn remove(slug: &str, yes: bool) -> Result<()> {
             }
             let ws = workspace::worktree_for(s, aid);
             if ws.exists() {
-                let _ = std::fs::remove_dir_all(&ws);
+                workspace::force_remove_dir_all(&ws);
             }
         }
         let overlay = workspace::nix_overlay_base_for(&config::persistent_home(), aid);
         if overlay.exists() {
-            let _ = std::fs::remove_dir_all(&overlay);
+            workspace::force_remove_dir_all(&overlay);
         }
     }
 
@@ -84,7 +84,7 @@ pub fn remove(slug: &str, yes: bool) -> Result<()> {
         wipe_host_local_branches(&base, aid);
         let ws = workspace::worktree_for(slug, aid);
         if ws.exists() {
-            let _ = std::fs::remove_dir_all(&ws);
+            workspace::force_remove_dir_all(&ws);
         }
         prune_extra_from_agent(aid, slug)?;
     }
@@ -93,7 +93,7 @@ pub fn remove(slug: &str, yes: bool) -> Result<()> {
     // of the source tree is left alone.
     let cav_meta = config::cav_dir(&base);
     if cav_meta.exists() {
-        let _ = std::fs::remove_dir_all(&cav_meta);
+        workspace::force_remove_dir_all(&cav_meta);
     }
 
     // Finally, drop the registry rows. registry::remove_project deletes

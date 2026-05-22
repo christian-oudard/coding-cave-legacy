@@ -1447,7 +1447,7 @@ fn setup_nix_overlay(home: &Path, agent_id: &str) -> String {
     // Reset work dir
     let work_inner = work.join("work");
     if work_inner.is_dir() {
-        let _ = std::fs::remove_dir_all(&work_inner);
+        workspace::force_remove_dir_all(&work_inner);
         let _ = std::fs::create_dir(&work_inner);
     }
     merged.to_string_lossy().to_string()

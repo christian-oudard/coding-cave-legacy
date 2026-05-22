@@ -153,6 +153,9 @@ enum Cmd {
         /// Show what would be removed without removing anything
         #[arg(long = "dry-run")]
         dry_run: bool,
+        /// Skip the orphan-removal confirmation prompt
+        #[arg(short = 'y', long = "yes")]
+        yes: bool,
     },
     /// Unregister a project: drops every owned agent's worktree, nix
     /// overlay, dev branches, and registry rows, plus the project's
@@ -440,9 +443,9 @@ fn run() -> Result<()> {
                 Ok(())
             }
         }
-        Cmd::Gc { older_than, dry_run } => {
+        Cmd::Gc { older_than, dry_run, yes } => {
             let dur = gc::parse_older_than(&older_than)?;
-            gc::run(dur, dry_run)
+            gc::run(dur, dry_run, yes)
         }
         Cmd::RemoveProject { slug, yes } => project::remove(&slug, yes),
         Cmd::RenameProject { new_path, yes } => {

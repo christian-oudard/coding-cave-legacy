@@ -327,6 +327,30 @@ pub fn set_agent_push_refspec(ws: &Path, base_name: &str, agent_id: &str) -> Res
     Ok(())
 }
 
+/// `std::fs::remove_dir_all` with a chmod-writable preorder pass. Nix
+/// store paths land in the overlay upper layer as mode-0555 dirs; without
+/// the chmod, std bails with EACCES partway through and silently leaves
+/// most of the tree on disk. Warnings on failure are surfaced — callers
+/// here can't usefully react, but the user needs to see when collection
+/// didn't actually free what we claimed.
+pub fn force_remove_dir_all(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    fn chmod_writable(path: &Path) {
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
+        let Ok(entries) = std::fs::read_dir(path) else { return };
+        for entry in entries.flatten() {
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.is_dir() && !meta.is_symlink() {
+                chmod_writable(&entry.path());
+            }
+        }
+    }
+    chmod_writable(path);
+    if let Err(e) = std::fs::remove_dir_all(path) {
+        eprintln!("warning: failed to remove {}: {e}", path.display());
+    }
+}
+
 /// Erase on-disk state belonging to a previous occupant of an agent slot:
 /// the worktree dir, plus `refs/heads/agent-N/*` and
 /// `refs/cav/agent-tip/agent-N/*` in each project's bare repo. Called when
@@ -336,7 +360,7 @@ pub fn reclaim(agent_id: &str, targets: &[(String, PathBuf)]) {
     for (slug, base) in targets {
         let ws = worktree_for(slug, agent_id);
         if ws.exists() {
-            let _ = std::fs::remove_dir_all(&ws);
+            force_remove_dir_all(&ws);
         }
         let shared = config::shared_repo_path(base);
         if !shared.is_dir() {
@@ -504,4 +528,31 @@ pub fn create(base: &Path, agent_id: &str) -> Result<(PathBuf, PathBuf)> {
     }
 
     Ok((ws_path, shared))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn force_remove_dir_all_clears_readonly_dirs() {
+        // Mimics the nix-overlay upper-layer shape: a nested tree where
+        // intermediate dirs are mode 0555. Plain remove_dir_all bails on
+        // these with EACCES.
+        let tmp = std::env::temp_dir().join(format!("cav-rm-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let nested = tmp.join("ro_outer").join("ro_inner");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("leaf"), b"x").unwrap();
+        let perms = std::fs::Permissions::from_mode(0o555);
+        std::fs::set_permissions(&nested, perms.clone()).unwrap();
+        std::fs::set_permissions(nested.parent().unwrap(), perms.clone()).unwrap();
+        std::fs::set_permissions(&tmp, perms).unwrap();
+
+        assert!(std::fs::remove_dir_all(&tmp).is_err(), "baseline: std fails");
+
+        force_remove_dir_all(&tmp);
+        assert!(!tmp.exists(), "force_remove_dir_all should clear the tree");
+    }
 }
