@@ -197,10 +197,14 @@ fn show_branch_sync_status(base: &Path) {
                         style::bold_cyan("cav pull"),
                     );
                 } else {
-                    panic!(
-                        "invariant violation: {remote_ref} is ahead of local \
-                         {local_branch} by {behind} {n}. cav approve and \
-                         cav reject should keep the cave in sync with local."
+                    println!(
+                        "{} {rr} ({}) is ahead of {lb} ({}) by {} {n}.\n  \
+                         If local {local_branch} is correct, run: {}\n",
+                        style::bold_yellow("↓"),
+                        style::bold(&remote[..7]),
+                        style::bold(&local[..7]),
+                        style::bold(&behind.to_string()),
+                        style::bold_cyan("cav push --force"),
                     );
                 }
             } else if local_ahead > 0 {
