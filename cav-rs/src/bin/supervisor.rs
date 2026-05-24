@@ -38,6 +38,12 @@ use rustix::mount::{mount, unmount, MountFlags, UnmountFlags};
 use rustix::pipe::pipe;
 use rustix::termios::{isatty, tcgetattr, tcsetattr, OptionalActions, SpecialCodeIndex};
 
+// Provided by modules/host.nix on the host: an idmapped read-only mount
+// of /nix/store that relabels host-uid-0 to cave-coder. cav's pre-launch
+// check (sandbox.rs::require_host_module) refuses to start without it,
+// so the supervisor can assume it's present.
+const NIX_STORE_IDMAPPED: &str = "/var/lib/coding-cave/nix-store";
+
 fn signal_parent(fd: &OwnedFd) {
     let _ = write(fd, b"1");
 }
@@ -57,7 +63,7 @@ fn is_nix_lock_file(path: &str) -> bool {
 }
 
 fn shadow_host_lock_files(upper: &str) {
-    let dir = match fs::read_dir("/nix/store") {
+    let dir = match fs::read_dir(NIX_STORE_IDMAPPED) {
         Ok(d) => d,
         Err(_) => return,
     };
@@ -67,7 +73,7 @@ fn shadow_host_lock_files(upper: &str) {
         if !name_str.ends_with(".lock") {
             continue;
         }
-        let full_path = format!("/nix/store/{name_str}");
+        let full_path = format!("{NIX_STORE_IDMAPPED}/{name_str}");
         if !is_nix_lock_file(&full_path) {
             continue;
         }
@@ -81,9 +87,9 @@ fn shadow_host_lock_files(upper: &str) {
 
 fn try_overlay_mount(merged: &str, upper: &str, work: &str) -> rustix::io::Result<()> {
     let variants = [
-        format!("lowerdir=/nix/store,upperdir={upper},workdir={work},userxattr,uuid=off"),
-        format!("lowerdir=/nix/store,upperdir={upper},workdir={work},userxattr"),
-        format!("lowerdir=/nix/store,upperdir={upper},workdir={work}"),
+        format!("lowerdir={NIX_STORE_IDMAPPED},upperdir={upper},workdir={work},userxattr,uuid=off"),
+        format!("lowerdir={NIX_STORE_IDMAPPED},upperdir={upper},workdir={work},userxattr"),
+        format!("lowerdir={NIX_STORE_IDMAPPED},upperdir={upper},workdir={work}"),
     ];
     let mut last = Err(Errno::INVAL);
     for opts in &variants {
@@ -95,15 +101,10 @@ fn try_overlay_mount(merged: &str, upper: &str, work: &str) -> rustix::io::Resul
     last
 }
 
-fn mount_kernel_overlay(merged: &str, upper: &str, work: &str) -> bool {
-    match try_overlay_mount(merged, upper, work) {
-        Ok(()) => true,
-        Err(e) => {
-            eprintln!(
-                "supervisor: kernel overlayfs mount failed: {e} (continuing without overlay)"
-            );
-            false
-        }
+fn mount_kernel_overlay(merged: &str, upper: &str, work: &str) {
+    if let Err(e) = try_overlay_mount(merged, upper, work) {
+        eprintln!("supervisor: kernel overlayfs mount failed: {e}");
+        exit(1);
     }
 }
 
@@ -129,7 +130,7 @@ fn start_lock_watcher(upper: String) -> Option<Box<dyn Fn() + Send>> {
             return None;
         }
     };
-    if inotify::add_watch(&ifd, "/nix/store", WatchFlags::CREATE | WatchFlags::MOVED_TO).is_err() {
+    if inotify::add_watch(&ifd, NIX_STORE_IDMAPPED, WatchFlags::CREATE | WatchFlags::MOVED_TO).is_err() {
         eprintln!("supervisor: inotify_add_watch failed, lock file watcher disabled");
         return None;
     }
@@ -221,14 +222,14 @@ fn main() {
         log_phase("lock files shadowed");
     }
 
-    // Mount kernel overlayfs (non-fatal: nested caves may not support it)
-    let overlay_mounted = if !merged.is_empty() && !upper.is_empty() {
-        let m = mount_kernel_overlay(&merged, &upper, &work);
-        log_phase(if m { "overlay mounted" } else { "overlay skipped" });
-        m
-    } else {
-        false
-    };
+    // Top-level cave: cav guarantees the host module is mounted before getting
+    // here, so a mount failure is a real error. Nested caves skip overlay
+    // entirely (cav leaves the env vars empty) and use the inherited /nix/store.
+    let needs_overlay = !merged.is_empty() && !upper.is_empty();
+    if needs_overlay {
+        mount_kernel_overlay(&merged, &upper, &work);
+        log_phase("overlay mounted");
+    }
 
     // Start lock file watcher
     let stop_watcher = if !upper.is_empty() {
@@ -270,7 +271,7 @@ fn main() {
     if let Some(stop) = stop_watcher {
         stop();
     }
-    if overlay_mounted {
+    if needs_overlay {
         umount_kernel(&merged);
     }
 

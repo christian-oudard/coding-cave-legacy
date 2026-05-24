@@ -11,6 +11,7 @@ mod cp_complete;
 mod daemon;
 mod gc;
 mod handler;
+mod host;
 mod init;
 mod proc_ns;
 mod project;
@@ -207,6 +208,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: EnvCmd,
     },
+    /// Host-side setup (called by coding-cave-host.service)
+    Host {
+        #[command(subcommand)]
+        cmd: HostCmd,
+    },
     /// Print shell completion script
     Completion {
         #[arg(value_enum)]
@@ -261,6 +267,14 @@ enum EnvCmd {
     },
     /// Show cave environment flake input versions
     Metadata,
+}
+
+#[derive(Subcommand)]
+enum HostCmd {
+    /// Bring up the host-side idmapped /nix/store mount
+    Setup,
+    /// Tear down the host-side mount (lazy unmount)
+    Teardown,
 }
 
 
@@ -502,6 +516,10 @@ fn run() -> Result<()> {
             EnvCmd::Build { rebuild } => user_env::build(rebuild),
             EnvCmd::Update { input_name } => user_env::update(input_name.as_deref()),
             EnvCmd::Metadata => user_env::metadata(),
+        },
+        Cmd::Host { cmd } => match cmd {
+            HostCmd::Setup => host::setup(),
+            HostCmd::Teardown => host::teardown(),
         },
         Cmd::Completion { shell } => completion::print_completion(shell),
         Cmd::CompleteCp { word } => {

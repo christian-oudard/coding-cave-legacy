@@ -1371,6 +1371,31 @@ fn seed_claude_config(home: &Path, project_slug_str: &str, comms: bool) {
     }
 }
 
+// Provided by modules/host.nix on the host: an idmapped read-only mount
+// of /nix/store that relabels host-uid-0 to cave-coder. Required for nix's
+// chmod/chown enforcement on overlayfs copy-ups to succeed. Duplicated in
+// supervisor.rs because cav-rs has no lib crate.
+const NIX_STORE_IDMAPPED: &str = "/var/lib/coding-cave/nix-store";
+
+fn require_host_module() -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let mounted = match (
+        std::fs::metadata(NIX_STORE_IDMAPPED),
+        std::fs::metadata("/var/lib/coding-cave"),
+    ) {
+        (Ok(a), Ok(b)) => a.dev() != b.dev(),
+        _ => false,
+    };
+    if !mounted {
+        bail!(
+            "{NIX_STORE_IDMAPPED} is not mounted: the host's nixosModules.codingCave \
+             (from the coding-cave flake) must be active. Add it to your NixOS \
+             config and `nixos-rebuild switch`."
+        );
+    }
+    Ok(())
+}
+
 fn nix_overlay_dirs(home: &Path, agent_id: &str) -> (PathBuf, PathBuf, PathBuf) {
     let base = workspace::nix_overlay_base_for(home, agent_id);
     let (upper, work, merged) = (base.join("upper"), base.join("work"), base.join("merged"));
@@ -1424,7 +1449,7 @@ fn setup_nix_overlay(home: &Path, agent_id: &str) -> String {
     migrate_shared_overlay(home, agent_id);
     let (upper, work, merged) = nix_overlay_dirs(home, agent_id);
     // Clean stale upper entries
-    let host_names: std::collections::HashSet<String> = std::fs::read_dir("/nix/store")
+    let host_names: std::collections::HashSet<String> = std::fs::read_dir(NIX_STORE_IDMAPPED)
         .map(|d| d.flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect())
         .unwrap_or_default();
     if let Ok(entries) = std::fs::read_dir(&upper) {
@@ -1487,10 +1512,10 @@ fn seed_nix_db(home: &Path, agent_id: &str, merged_path: &str) -> Option<PathBuf
         if candidate.read_dir().map(|mut d| d.next().is_some()).unwrap_or(false) {
             candidate.to_path_buf()
         } else {
-            PathBuf::from("/nix/store")
+            PathBuf::from(NIX_STORE_IDMAPPED)
         }
     } else {
-        PathBuf::from("/nix/store")
+        PathBuf::from(NIX_STORE_IDMAPPED)
     };
 
     let store_names: std::collections::HashSet<String> = std::fs::read_dir(&store_root)
@@ -1884,6 +1909,10 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
         prompt,
     } = opts;
     let slug = project_slug(&base);
+
+    if !inside_cave() {
+        require_host_module()?;
+    }
 
     // Resolve the agent session BEFORE loading sandbox config so error paths
     // (missing agent, empty -c, etc.) don't trip on missing build config.

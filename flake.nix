@@ -163,6 +163,12 @@
       homeModules.claudeCode = ./modules/claude-code.nix;
       homeModules.default = self.homeModules.claudeCode;
 
+      nixosModules.codingCave = { pkgs, ... }: import ./modules/host.nix {
+        inherit pkgs;
+        cav = self.packages.${pkgs.system}.default;
+      };
+      nixosModules.default = self.nixosModules.codingCave;
+
       packages = nixpkgs.lib.mapAttrs (_: s: s.packages) perSystem;
       checks   = nixpkgs.lib.mapAttrs (_: s: s.checks)   perSystem;
 
