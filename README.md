@@ -8,17 +8,38 @@ See [SPEC.md](SPEC.md) for the full specification.
 
 ## Install
 
-**Requirements:** Linux, Nix with flakes enabled, bubblewrap (`bwrap`).
+**Requirements:** NixOS, kernel ≥ 5.19 (for overlayfs over idmapped lower layers), bubblewrap (`bwrap`).
+
+Add coding-cave to your NixOS flake inputs:
+
+```nix
+inputs.coding-cave = {
+  url = "github:christian-oudard/coding-cave";
+  inputs.nixpkgs.follows = "nixpkgs";
+};
+```
+
+Import `nixosModules.codingCave` into your system configuration (e.g. in `nixosConfigurations.<host>.modules`):
+
+```nix
+inputs.coding-cave.nixosModules.codingCave
+```
+
+Then `sudo nixos-rebuild switch`. That installs `cav` system-wide and brings up `coding-cave-host.service`, which provides the idmapped `/nix/store` mount caves consume as overlayfs lowerdir. Verify with `systemctl status coding-cave-host` and `cav --help`.
+
+### Development install
+
+For a dev build that coexists with the system one:
 
 ```
-$ git clone <this-repo> && cd coding-cave
-$ nix profile add .
+$ nix profile install /path/to/coding-cave#cav-debug
 ```
 
-Or for NixOS / home-manager, add the flake to your inputs and include `cav` in
-your packages.
+Installs `cav-debug` (dev profile, with `-v` timing logs and debug assertions) into your nix profile. The release `cav` from the host module remains the default; reach for `cav-debug` when iterating on cav itself.
 
-After install, run `cav --help` to verify.
+### Non-NixOS hosts
+
+Not yet supported by the install path. The host module is NixOS-specific; a future `cav install-host` subcommand will drop the equivalent systemd unit on other distros. For now, port the contents of `modules/host.nix` to your distro's service manager by hand.
 
 ## Quickstart
 
