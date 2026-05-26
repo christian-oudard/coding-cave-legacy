@@ -1415,15 +1415,7 @@ fn seed_claude_config(home: &Path, project_slug_str: &str, comms: bool) {
 const NIX_STORE_IDMAPPED: &str = "/var/lib/coding-cave/nix-store";
 
 fn require_host_module() -> Result<()> {
-    use std::os::unix::fs::MetadataExt;
-    let mounted = match (
-        std::fs::metadata(NIX_STORE_IDMAPPED),
-        std::fs::metadata("/var/lib/coding-cave"),
-    ) {
-        (Ok(a), Ok(b)) => a.dev() != b.dev(),
-        _ => false,
-    };
-    if !mounted {
+    if !is_mount_point(NIX_STORE_IDMAPPED) {
         bail!(
             "{NIX_STORE_IDMAPPED} is not mounted: the host's nixosModules.codingCave \
              (from the coding-cave flake) must be active. Add it to your NixOS \
@@ -1431,6 +1423,22 @@ fn require_host_module() -> Result<()> {
         );
     }
     Ok(())
+}
+
+// True if `path` appears as a mount point in /proc/self/mountinfo. Field 5
+// of each line is the mount point. We can't use st_dev comparison because
+// idmapped bind mounts from the same underlying filesystem share st_dev
+// with the host's view.
+fn is_mount_point(path: &str) -> bool {
+    let Ok(data) = std::fs::read_to_string("/proc/self/mountinfo") else {
+        return false;
+    };
+    for line in data.lines() {
+        if line.split(' ').nth(4) == Some(path) {
+            return true;
+        }
+    }
+    false
 }
 
 fn nix_overlay_dirs(home: &Path, agent_id: &str) -> (PathBuf, PathBuf, PathBuf) {
