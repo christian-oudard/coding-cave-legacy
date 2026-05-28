@@ -54,36 +54,47 @@ fn now_secs() -> f64 {
         .unwrap_or(0.0)
 }
 
+/// On-disk size of a tree, summing `st_blocks * 512` (matches `du -s`)
+/// so hardlinked content shared into the store still gets credited once
+/// — and only once: the shared `seen` set keeps a (dev, inode) ledger.
+/// Subdirectories fan out onto rayon's pool so a 17 GB nix-overlay
+/// finishes in roughly real-time-divided-by-cores instead of pinning
+/// one thread.
 pub fn dir_size(path: &Path) -> u64 {
-    let mut seen = std::collections::HashSet::new();
-    dir_size_dedup(path, &mut seen)
-}
-
-/// Walks a tree, summing file sizes once per unique (dev, inode). Nix
-/// store paths and `.git/objects` packs hard-link the same content into
-/// many directory entries; counting each link would inflate the total
-/// (in some overlays by 2–3×), which is what gc used to "Reclaim".
-fn dir_size_dedup(path: &Path, seen: &mut std::collections::HashSet<(u64, u64)>) -> u64 {
+    use rayon::prelude::*;
     use std::os::unix::fs::MetadataExt;
-    let mut total = 0u64;
-    let Ok(entries) = std::fs::read_dir(path) else {
-        return 0;
-    };
-    for entry in entries.flatten() {
-        let Ok(meta) = entry.metadata() else { continue };
-        if meta.is_symlink() {
-            total += meta.len();
-        } else if meta.is_dir() {
-            total += dir_size_dedup(&entry.path(), seen);
-        } else if meta.nlink() > 1 {
-            if seen.insert((meta.dev(), meta.ino())) {
-                total += meta.len();
-            }
-        } else {
-            total += meta.len();
-        }
+
+    let seen: std::sync::Mutex<std::collections::HashSet<(u64, u64)>> =
+        std::sync::Mutex::new(std::collections::HashSet::new());
+
+    fn walk(
+        path: &Path,
+        seen: &std::sync::Mutex<std::collections::HashSet<(u64, u64)>>,
+    ) -> u64 {
+        let Ok(entries) = std::fs::read_dir(path) else { return 0 };
+        let entries: Vec<_> = entries.flatten().collect();
+        entries
+            .par_iter()
+            .map(|entry| {
+                let Ok(meta) = entry.metadata() else { return 0 };
+                if meta.file_type().is_symlink() {
+                    return meta.blocks() * 512;
+                }
+                if meta.is_dir() {
+                    return walk(&entry.path(), seen);
+                }
+                if meta.nlink() > 1 {
+                    let mut g = seen.lock().unwrap();
+                    if !g.insert((meta.dev(), meta.ino())) {
+                        return 0;
+                    }
+                }
+                meta.blocks() * 512
+            })
+            .sum()
     }
-    total
+
+    walk(path, &seen)
 }
 
 pub fn format_size(bytes: u64) -> String {
@@ -444,6 +455,15 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "manual bench; pass a path via CAV_DIR_SIZE_BENCH env var"]
+    fn dir_size_bench() {
+        let Ok(p) = std::env::var("CAV_DIR_SIZE_BENCH") else { return };
+        let start = std::time::Instant::now();
+        let n = dir_size(Path::new(&p));
+        eprintln!("dir_size({p}) = {} in {:?}", format_size(n), start.elapsed());
+    }
+
+    #[test]
     fn dir_size_counts_hard_linked_files_once() {
         let tmp = std::env::temp_dir().join(format!("cav-dirsize-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
@@ -457,12 +477,13 @@ mod tests {
         let total = dir_size(&tmp);
         let _ = std::fs::remove_dir_all(&tmp);
 
-        // Without dedup this would be ~3000. With dedup, exactly one
-        // 1000-byte count plus the surrounding directory inode (which
-        // we don't add). Allow slack for filesystem-reported size.
+        // dir_size charges `st_blocks * 512`, so a 1000-byte payload
+        // rounds up to one filesystem block (typically 4096). Without
+        // dedup we'd see ~3× that for the two extra hardlinks; with
+        // dedup we get exactly one allocation.
         assert!(
-            total < 2000,
-            "expected dedup'd total near 1000, got {total}"
+            total <= 8192,
+            "expected dedup'd allocation (≤ one fs block, ~4096), got {total}"
         );
         assert!(total >= 1000, "expected at least one copy counted, got {total}");
     }

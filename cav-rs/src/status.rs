@@ -112,8 +112,10 @@ pub fn show(base: &Path, agent_id: Option<&str>) -> Result<()> {
 }
 
 /// One-line nudge when paused-past-threshold agents have reclaimable
-/// artifacts. The threshold matches `cav gc`'s default so the count here
-/// equals what `cav gc` would collect.
+/// artifacts. The threshold matches `cav gc`'s default so the count and
+/// size here equal what `cav gc` would collect. `gc::candidates` walks
+/// the trees in parallel via rayon and uses `st_blocks`, which keeps it
+/// sub-second even for many-GB nix overlays.
 fn print_gc_hint() {
     let dur = crate::gc::parse_older_than(crate::gc::default_older_than())
         .unwrap_or_else(|_| std::time::Duration::from_secs(86400));
