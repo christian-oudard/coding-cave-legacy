@@ -1892,6 +1892,88 @@ fn print_resume_hints(
     }
 }
 
+/// Rebase the worktree's dev branch onto host-cave/<base>. Called at
+/// agent resume to catch up on base movement that happened while the
+/// agent was paused (push of base no longer rebases paused worktrees).
+/// Stashes uncommitted work (including untracked) before rebasing, then
+/// pops. On conflict, leaves the rebase state in place and surfaces the
+/// stash to the agent so they don't lose track of their changes.
+fn rebase_dev_onto_base(ws: &Path, current: &str) {
+    if current.is_empty() || current == "HEAD" {
+        return;
+    }
+    let remote_ref = format!("{HOST_SHARED_REMOTE}/{current}");
+    if git::git(
+        &["rev-parse", "--verify", &remote_ref],
+        Some(ws),
+        false,
+        true,
+        false,
+    )
+    .is_err()
+    {
+        return;
+    }
+    // Fast path: dev branch already includes base. Skip the rebase
+    // invocation entirely on quiet resumes — saves a fork+exec per
+    // workspace when base hasn't moved.
+    if git::is_ancestor(&remote_ref, "HEAD", Some(ws)) {
+        return;
+    }
+    // Stash if (and only if) there's real local state to preserve. `-u`
+    // captures untracked files too, since `git rebase` will refuse to
+    // overwrite them and an unguarded rebase would fail mid-flight.
+    let has_changes = git::git_output(&["status", "--porcelain"], Some(ws))
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    let stashed = has_changes
+        && git::git(
+            &["stash", "push", "-u", "-m", "cav-resume-autorebase"],
+            Some(ws),
+            false,
+            true,
+            false,
+        )
+        .is_ok();
+    let rebase_ok = git::git(
+        &["rebase", &remote_ref],
+        Some(ws),
+        false,
+        true,
+        false,
+    )
+    .is_ok();
+    if !rebase_ok {
+        let stash_hint = if stashed {
+            " Uncommitted changes were stashed (`cav-resume-autorebase`); \
+              run `git stash pop` after `git rebase --continue`."
+        } else {
+            ""
+        };
+        eprintln!(
+            "{} dev branch could not be rebased onto {}. Resolve conflicts \
+             in the worktree and run `git rebase --continue`.{}",
+            style::bold_yellow("Warning:"),
+            style::yellow(&remote_ref),
+            stash_hint,
+        );
+        // Leave the rebase state (and stash, if any) in place; don't
+        // abort. The agent resolves on startup.
+        return;
+    }
+    if stashed {
+        let pop_ok = git::git(&["stash", "pop"], Some(ws), false, true, false).is_ok();
+        if !pop_ok {
+            eprintln!(
+                "{} rebase succeeded but stashed changes did not re-apply \
+                 cleanly. Resolve conflicts in the worktree; the stash \
+                 (`cav-resume-autorebase`) remains until you drop it.",
+                style::bold_yellow("Warning:"),
+            );
+        }
+    }
+}
+
 /// Drop shared dev branches whose work is already on base. "Already on
 /// base" means either the dev tip is an ancestor of base (covers tip ==
 /// base after approve and tip behind base when the agent lagged), or
@@ -2097,6 +2179,11 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
             let remote_ref = format!("{HOST_SHARED_REMOTE}/{branch}");
             git::git(&["branch", "-f", &branch, &remote_ref], Some(ws), false, true, false).ok();
         }
+        // Rebase the dev branch onto current base. Paused agents skip
+        // the host-side auto-rebase during push, so this is where they
+        // catch up. The worktree's current branch is the dev branch
+        // (named after the base via the agent push refspec).
+        rebase_dev_onto_base(ws, &current);
     }
     crate::log_info!("branches synced");
 
@@ -2517,5 +2604,182 @@ mod tests {
         let extras = vec!["my project".to_string()];
         let s = format_resume_flags(&extras, &[], &[], false);
         assert_eq!(s, " -p 'my project'");
+    }
+}
+
+#[cfg(test)]
+mod rebase_dev_tests {
+    use super::rebase_dev_onto_base;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// Drop-cleaned scratch dir so test failures don't leak tmp trees.
+    struct TmpGuard {
+        path: PathBuf,
+        shared: PathBuf,
+        ws: PathBuf,
+    }
+
+    impl Drop for TmpGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn git_run(args: &[&str], dir: &Path) {
+        let s = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            s.status.success(),
+            "git {args:?} in {dir:?} failed: {}",
+            String::from_utf8_lossy(&s.stderr)
+        );
+    }
+
+    fn git_out(args: &[&str], dir: &Path) -> String {
+        let o = Command::new("git").args(args).current_dir(dir).output().unwrap();
+        assert!(o.status.success(), "git {args:?} failed");
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    }
+
+    fn setup(label: &str) -> TmpGuard {
+        // Monotonic counter scopes parallel-test runs of the same label
+        // to distinct tmp dirs without paying for a uuid.
+        static SEQ: AtomicU32 = AtomicU32::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "cav-rebase-dev-{}-{label}-{seq}",
+            std::process::id(),
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        let shared = path.join("shared.git");
+        let ws = path.join("ws");
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::create_dir_all(&ws).unwrap();
+        git_run(&["init", "--bare", "-b", "main"], &shared);
+        git_run(&["init", "-b", "main"], &ws);
+        git_run(&["config", "user.email", "t@t"], &ws);
+        git_run(&["config", "user.name", "t"], &ws);
+        std::fs::write(ws.join("seed.txt"), "0\n").unwrap();
+        git_run(&["add", "seed.txt"], &ws);
+        git_run(&["commit", "-m", "seed"], &ws);
+        git_run(&["remote", "add", "host-cave", shared.to_str().unwrap()], &ws);
+        git_run(&["push", "host-cave", "main"], &ws);
+        TmpGuard { path, shared, ws }
+    }
+
+    /// Make a sibling clone of `shared` at `<g.path>/user`, advance its
+    /// `main` with a single commit, and push it back. Returns the user
+    /// dir path so the caller can chain further mutations if needed.
+    fn advance_base(g: &TmpGuard, file: &str, content: &str, msg: &str) -> PathBuf {
+        let user = g.path.join("user");
+        git_run(
+            &["clone", g.shared.to_str().unwrap(), user.to_str().unwrap()],
+            &g.path,
+        );
+        git_run(&["config", "user.email", "t@t"], &user);
+        git_run(&["config", "user.name", "t"], &user);
+        std::fs::write(user.join(file), content).unwrap();
+        git_run(&["add", file], &user);
+        git_run(&["commit", "-m", msg], &user);
+        git_run(&["push", "origin", "main"], &user);
+        user
+    }
+
+    #[test]
+    fn rebases_onto_advanced_base() {
+        let g = setup("advance");
+        // Worktree adds a non-conflicting commit on main.
+        std::fs::write(g.ws.join("dev.txt"), "D\n").unwrap();
+        git_run(&["add", "dev.txt"], &g.ws);
+        git_run(&["commit", "-m", "dev commit"], &g.ws);
+
+        advance_base(&g, "base.txt", "B\n", "base advance");
+        git_run(&["fetch", "host-cave"], &g.ws);
+        rebase_dev_onto_base(&g.ws, "main");
+
+        let history = git_out(&["log", "--format=%s", "HEAD"], &g.ws);
+        assert!(
+            history.contains("dev commit") && history.contains("base advance"),
+            "history should include both commits, got:\n{history}",
+        );
+        assert_eq!(
+            git_out(&["log", "-1", "--format=%s", "HEAD^"], &g.ws),
+            "base advance",
+        );
+    }
+
+    #[test]
+    fn does_not_stash_when_worktree_is_clean() {
+        let g = setup("clean-no-stash");
+        rebase_dev_onto_base(&g.ws, "main");
+        let stashes = git_out(&["stash", "list"], &g.ws);
+        assert!(
+            stashes.is_empty(),
+            "no stash should be created when worktree is clean, got: {stashes}"
+        );
+    }
+
+    #[test]
+    fn preserves_stash_on_conflict_and_hints_at_it() {
+        let g = setup("dirty-conflict");
+        // Worktree commits a change to seed.txt, AND has unstaged edits
+        // (plus an untracked file) that need stashing.
+        std::fs::write(g.ws.join("seed.txt"), "WORKTREE\n").unwrap();
+        git_run(&["add", "seed.txt"], &g.ws);
+        git_run(&["commit", "-m", "ws change"], &g.ws);
+        std::fs::write(g.ws.join("seed.txt"), "DIRTY\n").unwrap();
+        std::fs::write(g.ws.join("untracked.txt"), "u\n").unwrap();
+
+        advance_base(&g, "seed.txt", "BASE\n", "base change");
+        git_run(&["fetch", "host-cave"], &g.ws);
+        rebase_dev_onto_base(&g.ws, "main");
+
+        let git_dir = g.ws.join(".git");
+        assert!(
+            git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists(),
+            "rebase state should remain after conflict"
+        );
+        let stashes = git_out(&["stash", "list"], &g.ws);
+        assert!(
+            stashes.contains("cav-resume-autorebase"),
+            "stash should remain after conflict, got: {stashes}"
+        );
+    }
+
+    #[test]
+    fn leaves_rebase_state_on_conflict() {
+        let g = setup("conflict");
+        std::fs::write(g.ws.join("seed.txt"), "WORKTREE\n").unwrap();
+        git_run(&["add", "seed.txt"], &g.ws);
+        git_run(&["commit", "-m", "ws change"], &g.ws);
+
+        advance_base(&g, "seed.txt", "BASE\n", "base change");
+        git_run(&["fetch", "host-cave"], &g.ws);
+        rebase_dev_onto_base(&g.ws, "main");
+
+        let git_dir = g.ws.join(".git");
+        assert!(
+            git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists(),
+            "expected rebase state to be left in place after conflict"
+        );
+    }
+
+    #[test]
+    fn no_op_when_remote_ref_missing() {
+        let g = setup("noremote");
+        git_run(&["checkout", "-b", "lonely"], &g.ws);
+        std::fs::write(g.ws.join("x.txt"), "x\n").unwrap();
+        git_run(&["add", "x.txt"], &g.ws);
+        git_run(&["commit", "-m", "lonely commit"], &g.ws);
+        let before = git_out(&["rev-parse", "HEAD"], &g.ws);
+
+        rebase_dev_onto_base(&g.ws, "lonely");
+        let after = git_out(&["rev-parse", "HEAD"], &g.ws);
+        assert_eq!(before, after, "no rebase should happen without remote ref");
     }
 }
