@@ -1865,3 +1865,42 @@ fn partial_approve_prints_remaining_count() {
         "should mention remaining commits: {combined}"
     );
 }
+
+// --- Patch-equivalent dev ref cleanup ---
+
+#[test]
+fn push_drops_dev_ref_patch_equivalent_to_base() {
+    // Agent 4 pushed CA on a.txt. Independently, the user lands the same
+    // patch on main as CA' (different SHA, same content). agent-4/main
+    // is now "delivered" by patch-id but not by ancestry. cav push of
+    // main should sweep the stale dev ref, not noisily rebase it.
+    let p = Project::new("push-patch-equiv");
+    p.register_agent("4");
+
+    p.push_agent_commits("4", "main", &[("a.txt", "A\n")]);
+    assert!(p.shared_has_ref("refs/heads/agent-4/main"));
+
+    // Land the same patch on main as a distinct commit.
+    git(&["checkout", "main"], &p.dir);
+    fs::write(p.dir.join("a.txt"), "A\n").unwrap();
+    git(&["add", "a.txt"], &p.dir);
+    git(&["commit", "-m", "land a.txt on main"], &p.dir);
+
+    let out = p.cav(&["push"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "push failed: {}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("Rebased agent-4/main"),
+        "should not print rebase note for delivered branch: {stderr}"
+    );
+    assert!(
+        !p.shared_has_ref("refs/heads/agent-4/main"),
+        "patch-equivalent dev ref should be swept by push"
+    );
+}

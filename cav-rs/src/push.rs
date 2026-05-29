@@ -6,6 +6,7 @@ use crate::config::{self, dev_branch, inside_cave, parse_dev_branch, resolve_bas
 use crate::constants::{CAVE_SHARED_REMOTE, HOST_SHARED_REMOTE};
 use crate::git;
 use crate::registry;
+use crate::sandbox;
 use crate::style;
 use crate::workspace::worktree_for;
 
@@ -129,6 +130,7 @@ pub fn push_base(
         args.insert(1, &force_flag);
     }
     git::git(&args, Some(base), true, verbose, verbose)?;
+    sandbox::reconcile_merged_dev_branches(base, verbose);
     let notes = rebase_agents(base, base_branch);
     Ok((false, notes))
 }
@@ -250,14 +252,27 @@ fn rebase_agents(base: &Path, base_branch: &str) -> Vec<String> {
             continue;
         }
         let dev = dev_branch(&branch, &agent_id);
-        let ahead = git::commits_ahead(
-            &format!("refs/heads/{dev}"),
-            &format!("refs/heads/{base_branch}"),
-            None,
-            Some(&shared),
-        )
-        .unwrap_or(0);
-        if ahead == 0 {
+        let dev_ref = format!("refs/heads/{dev}");
+        let base_ref = format!("refs/heads/{base_branch}");
+        // Patch-id check: skip work already on base (whether by ancestry
+        // or by patch-equivalent rebase). Avoids both the pointless
+        // worktree rebase and the resurrection of refs that approve or
+        // reconcile_merged_dev_branches already deleted.
+        let dev_exists =
+            git::git(&["rev-parse", "--verify", &dev_ref], Some(&shared), false, true, false)
+                .is_ok();
+        let undelivered = if dev_exists {
+            git::cherry_undelivered(&base_ref, &dev_ref, Some(&shared)).unwrap_or_default()
+        } else {
+            vec![]
+        };
+        if undelivered.is_empty() {
+            if dev_exists {
+                git::git(&["update-ref", "-d", &dev_ref], Some(&shared), false, true, false).ok();
+                let tip_ref = format!("refs/cav/agent-tip/{dev}");
+                git::git(&["update-ref", "-d", &tip_ref], Some(&shared), false, true, false).ok();
+                git::git(&["branch", "-D", &dev], Some(base), false, true, false).ok();
+            }
             continue;
         }
         git::git(

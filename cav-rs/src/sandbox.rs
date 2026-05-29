@@ -1892,11 +1892,12 @@ fn print_resume_hints(
     }
 }
 
-/// Drop shared dev branches whose tip is already reachable from the base.
-/// Provably nothing to lose: the dev tip is an ancestor of base, so every
-/// commit on it is already in base. Covers tip == base (the post-approve
-/// case) and tip behind base (agent lagging while base advanced). Safe to
-/// call from any command that fetches the shared remote first.
+/// Drop shared dev branches whose work is already on base. "Already on
+/// base" means either the dev tip is an ancestor of base (covers tip ==
+/// base after approve and tip behind base when the agent lagged), or
+/// every commit on the dev branch has a patch-equivalent on base (covers
+/// branches that were rebased into different SHAs but the same content).
+/// Safe to call from any command that fetches the shared remote first.
 pub fn reconcile_merged_dev_branches(base: &Path, verbose: bool) {
     let Ok(remotes) = git::remote_branches(CAVE_SHARED_REMOTE, Some(base)) else {
         return;
@@ -1912,7 +1913,11 @@ pub fn reconcile_merged_dev_branches(base: &Path, verbose: bool) {
         {
             continue;
         }
-        if !git::is_ancestor(&remote_dev, &remote_base, Some(base)) {
+        let delivered = git::is_ancestor(&remote_dev, &remote_base, Some(base))
+            || git::cherry_undelivered(&remote_base, &remote_dev, Some(base))
+                .map(|v| v.is_empty())
+                .unwrap_or(false);
+        if !delivered {
             continue;
         }
         git::git(&["branch", "-D", &rb], Some(&shared), false, true, false).ok();
