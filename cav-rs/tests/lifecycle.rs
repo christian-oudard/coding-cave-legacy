@@ -54,6 +54,23 @@ impl Project {
     }
 
     fn register_agent_exited_at(&self, agent_id: &str, exited_at: f64) {
+        self.register_agent_row(agent_id, None, Some(exited_at));
+    }
+
+    /// Mark the agent's row as running by pointing host_pid at this
+    /// test process (which stays alive for the duration of the test)
+    /// and clearing exited_at. Used by tests that exercise the
+    /// auto-rebase path, which only fires for running agents.
+    fn register_agent_running(&self, agent_id: &str) {
+        self.register_agent_row(agent_id, Some(std::process::id()), None);
+    }
+
+    fn register_agent_row(
+        &self,
+        agent_id: &str,
+        host_pid: Option<u32>,
+        exited_at: Option<f64>,
+    ) {
         let slug = self.slug();
         let db_path = self.data_dir.join("coding-cave.db");
         let conn = rusqlite::Connection::open(&db_path).unwrap();
@@ -73,9 +90,9 @@ impl Project {
         let uuid = uuid::Uuid::new_v4().to_string();
         conn.execute(
             "INSERT OR REPLACE INTO agents \
-             (agent_id, uuid, project, started_at, exited_at) \
-             VALUES (?1, ?2, ?3, 0, ?4)",
-            rusqlite::params![agent_id, uuid, slug, exited_at],
+             (agent_id, uuid, project, host_pid, started_at, exited_at) \
+             VALUES (?1, ?2, ?3, ?4, 0, ?5)",
+            rusqlite::params![agent_id, uuid, slug, host_pid, exited_at],
         )
         .unwrap();
     }
@@ -803,8 +820,11 @@ fn reject_drops_rejected_commits_from_secondary_agent_worktrees() {
     // equivalent of approve's rebase_agents step (which would have
     // dropped CB from agent 1's history at step 3).
     let p = Project::new("reject-secondary-rebase");
-    p.register_agent("1");
-    p.register_agent("2");
+    // Both agents must be running for the auto-rebase to fire — that's
+    // the scenario this test represents (live agents continuing work
+    // through approve/reject churn).
+    p.register_agent_running("1");
+    p.register_agent_running("2");
     seed_agent_worktree(&p, "1");
     seed_agent_worktree(&p, "2");
 
@@ -1863,6 +1883,50 @@ fn partial_approve_prints_remaining_count() {
     assert!(
         combined.contains("remain") || combined.contains("future approval"),
         "should mention remaining commits: {combined}"
+    );
+}
+
+// --- Auto-rebase scope ---
+
+#[test]
+fn push_does_not_rebase_paused_agent_worktree() {
+    // Paused agents are off-limits to the host's auto-rebase. Reaching
+    // into a paused worktree races nothing today, but the agent isn't
+    // there to care, and resume will rebase the dev branch when it
+    // matters. Only running agents get their worktrees rebased.
+    let p = Project::new("push-skip-paused");
+    p.register_agent("1");  // paused (default exited_at = recent)
+    seed_agent_worktree(&p, "1");
+    let ws = p.worktree_dir("1");
+    // Agent has real undelivered work (touches a different file from main).
+    let agent_tip = agent_commit_and_push(&p, "1", "a.txt", "A\n");
+
+    // User advances main with an unrelated change.
+    fs::write(p.dir.join("b.txt"), "B\n").unwrap();
+    git(&["add", "b.txt"], &p.dir);
+    git(&["commit", "-m", "user: b.txt"], &p.dir);
+    let out = p.cav(&["push"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "push failed: {}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    // Paused agent's worktree must still be at its old tip; the host
+    // must not have rebased it.
+    let ws_head = git_out(&["rev-parse", "HEAD"], &ws);
+    assert_eq!(
+        ws_head, agent_tip,
+        "paused agent's worktree must not be rebased by host-side push"
+    );
+    // Shared dev ref also stays at the agent's tip (no fetch-back from
+    // a rebase that didn't happen).
+    assert_eq!(
+        p.shared_sha("refs/heads/agent-1/main"),
+        agent_tip,
+        "shared agent ref must not be moved by paused-agent auto-rebase"
     );
 }
 

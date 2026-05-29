@@ -240,6 +240,13 @@ fn rebase_agents(base: &Path, base_branch: &str) -> Vec<String> {
         Err(_) => return notes,
     };
     for agent_id in agent_ids {
+        // Auto-rebase only applies to running agents. Paused agents'
+        // worktrees are off-limits to the host — reaching into them
+        // races the agent's own writes, and there's no agent there to
+        // care about being current. They catch up at resume time.
+        if !registry::is_agent_running(&agent_id).unwrap_or(false) {
+            continue;
+        }
         let ws = worktree_for(&slug, &agent_id);
         if !ws.exists() {
             continue;
@@ -255,9 +262,8 @@ fn rebase_agents(base: &Path, base_branch: &str) -> Vec<String> {
         let dev_ref = format!("refs/heads/{dev}");
         let base_ref = format!("refs/heads/{base_branch}");
         // Patch-id check: skip work already on base (whether by ancestry
-        // or by patch-equivalent rebase). Avoids both the pointless
-        // worktree rebase and the resurrection of refs that approve or
-        // reconcile_merged_dev_branches already deleted.
+        // or by patch-equivalent rebase). Avoids the pointless worktree
+        // rebase that resurrects refs reconcile just deleted.
         let dev_exists =
             git::git(&["rev-parse", "--verify", &dev_ref], Some(&shared), false, true, false)
                 .is_ok();
@@ -267,12 +273,6 @@ fn rebase_agents(base: &Path, base_branch: &str) -> Vec<String> {
             vec![]
         };
         if undelivered.is_empty() {
-            if dev_exists {
-                git::git(&["update-ref", "-d", &dev_ref], Some(&shared), false, true, false).ok();
-                let tip_ref = format!("refs/cav/agent-tip/{dev}");
-                git::git(&["update-ref", "-d", &tip_ref], Some(&shared), false, true, false).ok();
-                git::git(&["branch", "-D", &dev], Some(base), false, true, false).ok();
-            }
             continue;
         }
         git::git(
