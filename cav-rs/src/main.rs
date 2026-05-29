@@ -785,14 +785,21 @@ pub fn resolve_target(
 
 /// Pick an agent ID for the current project when none was given.
 /// Tries the current dev branch first, then falls back to the only
-/// agent registered for this project. Bails with a helpful message
-/// when there are zero or multiple candidates.
+/// active (non-archived) agent registered for this project. Bails
+/// with a helpful message when there are zero or multiple candidates.
 fn auto_pick_agent_id(base: &Path, cmd: &str) -> Result<String> {
     if let Some(aid) = git::current_agent_id(Some(base)) {
         return Ok(aid);
     }
     let slug = config::project_slug(base);
-    let ids = registry::all_agent_ids(Some(&slug))?;
+    let ids: Vec<String> = registry::all_agent_ids(Some(&slug))?
+        .into_iter()
+        .filter(|aid| {
+            aid.parse::<u32>()
+                .map(|n| n < workspace::ARCHIVE_INT_BASE)
+                .unwrap_or(true)
+        })
+        .collect();
     match ids.len() {
         1 => Ok(ids.into_iter().next().unwrap()),
         0 => bail!("No agents in {slug}."),
