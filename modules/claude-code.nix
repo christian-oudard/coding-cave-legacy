@@ -144,7 +144,7 @@ in {
       skills = mergedSkills;
       commands = mergedCommands;
       plugins = cfg.plugins;
-      memory.text = lib.mkIf (cfg.memoryFragments != [ ]) memoryText;
+      context = lib.mkIf (cfg.memoryFragments != [ ]) memoryText;
     };
 
     home.packages = bundlePackages;
