@@ -27,11 +27,24 @@ pub fn review(base: &Path, agent_id: &str) -> Result<()> {
         .collect();
 
     if candidates.is_empty() {
-        let hint = registry::other_project_hint(base, agent_id)
-            .map(|h| format!("\n{h}"))
-            .unwrap_or_default();
+        if let Some(hint) = registry::other_project_hint(base, agent_id) {
+            bail!(
+                "No dev branch found for agent {} in {}.\n{hint}",
+                style::bold(agent_id),
+                style::blue(&slug),
+            );
+        }
+        if registry::agent_project(agent_id).as_deref() == Some(slug.as_str())
+            && registry::is_agent_running(agent_id).unwrap_or(false)
+        {
+            let name = registry::display_name(base, agent_id);
+            bail!(
+                "Agent {} is running with no pending commits to review.",
+                style::agent_name(&name),
+            );
+        }
         bail!(
-            "No agent branch found for agent {} in {}.{hint}",
+            "No dev branch found for agent {} in {}.",
             style::bold(agent_id),
             style::blue(&slug),
         );
