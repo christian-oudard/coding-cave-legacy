@@ -95,23 +95,31 @@ fn validate_host_devices(paths: Vec<String>) -> Result<Vec<String>> {
 /// Resolve the GID we should adopt as primary so the cave's user-namespace
 /// mapping passes through device group ownership.
 ///
-/// bwrap creates a user_ns whose gid_map has one entry: inner-gid →
+/// bwrap creates a user_ns whose gid_map has one entry: inner-gid ->
 /// caller's primary gid. Any other host gid renders as `nogroup` (65534)
 /// inside, so the cave-coder user can't satisfy mode-660 group checks on
 /// bind-mounted devices unless our primary gid IS the device's owning gid.
 /// We engineer that by `setresgid`'ing to the device's group before exec'ing
 /// bwrap. setresgid is gated on the target being one of {real, effective,
-/// saved} gid for unprivileged callers — supplementary group membership
-/// alone is not enough — so cav re-execs itself under `sg` up front (see
+/// saved} gid for unprivileged callers (supplementary group membership
+/// alone is not enough), so cav re-execs itself under `sg` up front (see
 /// `ensure_egid_for_devices`) when the target gid isn't already settable.
 ///
-/// Returns `Some(gid)` when one or more devices share an owning group we
-/// can adopt; `None` when no devices were requested.
+/// First, though: if the host user can already open the device (mode bits,
+/// POSIX ACL, whatever), `--dev-bind` preserves the inode and the kernel
+/// access check inside the cave uses the host uid via uid_map, so the
+/// existing grant carries over. Skip the gid dance entirely in that case.
+///
+/// Returns `Some(gid)` when devices need a shared owning group adopted as
+/// primary; `None` when no adjustment is required.
 fn device_passthrough_gid(host_devices: &[String]) -> Result<Option<u32>> {
     use std::os::unix::fs::MetadataExt;
     let Some(first) = host_devices.first() else {
         return Ok(None);
     };
+    if host_devices.iter().all(|d| host_can_open(d)) {
+        return Ok(None);
+    }
     let target = std::fs::metadata(first)?.gid();
     for d in &host_devices[1..] {
         let g = std::fs::metadata(d)?.gid();
@@ -122,12 +130,25 @@ fn device_passthrough_gid(host_devices: &[String]) -> Result<Option<u32>> {
         }
     }
     if !host_user_in_group(target)? {
+        let name = lookup_group_name(target)
+            .unwrap_or_else(|| format!("gid {target}"));
         bail!(
-            "host user is not in group with gid {target} (owner of {first}); \
-             add yourself with `sudo usermod -aG <group> $USER` and log back in"
+            "host user is not in group {name} (owner of {first}); \
+             add yourself with `sudo usermod -aG {name} $USER` and log back in"
         );
     }
     Ok(Some(target))
+}
+
+/// Try to open the device read+write. Success means the host user has
+/// access via *some* mechanism (owner, group, or ACL) and the cave will
+/// inherit it through the bind-mounted inode + uid_map.
+fn host_can_open(path: &str) -> bool {
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .is_ok()
 }
 
 fn host_user_in_group(target: u32) -> Result<bool> {
@@ -1854,6 +1875,7 @@ fn format_resume_flags(
     extra_slugs: &[String],
     host_ports: &[u16],
     host_devices: &[String],
+    gpu: bool,
     comms: bool,
 ) -> String {
     let mut s = String::new();
@@ -1863,6 +1885,9 @@ fn format_resume_flags(
     }
     for port in host_ports {
         s.push_str(&format!(" --port {port}"));
+    }
+    if gpu {
+        s.push_str(" --gpu");
     }
     for dev in host_devices {
         s.push_str(" -d ");
@@ -1881,9 +1906,10 @@ fn print_resume_hints(
     extra_slugs: &[String],
     host_ports: &[u16],
     host_devices: &[String],
+    gpu: bool,
     comms: bool,
 ) {
-    let suffix = format_resume_flags(extra_slugs, host_ports, host_devices, comms);
+    let suffix = format_resume_flags(extra_slugs, host_ports, host_devices, gpu, comms);
     if let Some(sid) = session_id {
         eprintln!("{}", style::bold_cyan(&format!("cav --resume {sid}{suffix}")));
     }
@@ -2024,7 +2050,14 @@ pub struct RunAgentOpts {
     pub resume_agent: Option<String>,
     pub extra_projects: Vec<String>,
     pub host_ports: Vec<u16>,
+    /// The effective bind-mount list (user `-d` entries plus any
+    /// `--gpu` expansion). Used for sandbox setup and env wiring.
     pub host_devices: Vec<String>,
+    /// What the user actually typed for `-d`. The resume hint echoes
+    /// these alongside `--gpu` so a copy-pasted command re-runs
+    /// detection rather than freezing today's render-node enumeration.
+    pub host_devices_user: Vec<String>,
+    pub gpu: bool,
     pub comms: bool,
     pub prompt: Option<String>,
 }
@@ -2037,6 +2070,8 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
         extra_projects,
         host_ports,
         host_devices,
+        host_devices_user,
+        gpu,
         comms,
         prompt,
     } = opts;
@@ -2549,7 +2584,8 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
             false,
             &extra_slugs,
             &host_ports,
-            &host_devices,
+            &host_devices_user,
+            gpu,
             comms,
         );
     }
@@ -2584,7 +2620,7 @@ mod tests {
 
     #[test]
     fn resume_flags_empty() {
-        assert_eq!(format_resume_flags(&[], &[], &[], false), "");
+        assert_eq!(format_resume_flags(&[], &[], &[], false, false), "");
     }
 
     #[test]
@@ -2592,7 +2628,7 @@ mod tests {
         let extras = vec!["coding-cave".to_string(), "other-proj".to_string()];
         let ports = vec![3000u16, 8080];
         let devs = vec!["/dev/dri".to_string()];
-        let s = format_resume_flags(&extras, &ports, &devs, true);
+        let s = format_resume_flags(&extras, &ports, &devs, false, true);
         assert_eq!(
             s,
             " -p coding-cave -p other-proj --port 3000 --port 8080 -d /dev/dri --comms"
@@ -2602,8 +2638,25 @@ mod tests {
     #[test]
     fn resume_flags_quotes_spaces() {
         let extras = vec!["my project".to_string()];
-        let s = format_resume_flags(&extras, &[], &[], false);
+        let s = format_resume_flags(&extras, &[], &[], false, false);
         assert_eq!(s, " -p 'my project'");
+    }
+
+    #[test]
+    fn resume_flags_gpu_preserves_flag_not_paths() {
+        // --gpu expands at run time, but the resume hint keeps `--gpu`
+        // so a copy-pasted command re-runs detection.
+        let s = format_resume_flags(&[], &[], &[], true, false);
+        assert_eq!(s, " --gpu");
+    }
+
+    #[test]
+    fn resume_flags_gpu_with_explicit_dev() {
+        // Mixed --gpu and explicit -d: emit both, since -d entries are
+        // independent of GPU detection.
+        let devs = vec!["/dev/snd".to_string()];
+        let s = format_resume_flags(&[], &[], &devs, true, false);
+        assert_eq!(s, " --gpu -d /dev/snd");
     }
 }
 

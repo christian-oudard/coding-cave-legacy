@@ -10,6 +10,7 @@ mod cp;
 mod cp_complete;
 mod daemon;
 mod gc;
+mod gpu;
 mod handler;
 mod host;
 mod init;
@@ -83,6 +84,10 @@ enum Cmd {
         /// Bind a host device into the cave (repeatable, must be under /dev)
         #[arg(short = 'd', long = "dev", value_name = "PATH", action = clap::ArgAction::Append)]
         host_devices: Vec<String>,
+        /// Bind every discrete GPU's render node into the cave.
+        /// Errors when the host has no discrete GPU; use -d for iGPU passthrough.
+        #[arg(long = "gpu")]
+        gpu: bool,
         /// Enable inter-agent communication (send_message tool + channel events)
         #[arg(long = "comms")]
         comms: bool,
@@ -302,6 +307,7 @@ fn run() -> Result<()> {
         extra_projects: vec![],
         host_ports: vec![],
         host_devices: vec![],
+        gpu: false,
         comms: false,
         prompt: None,
     });
@@ -318,13 +324,24 @@ fn run() -> Result<()> {
             extra_projects,
             host_ports,
             host_devices,
+            gpu,
             comms,
             prompt,
         } => {
+            // Expand --gpu into the effective bind list. Keep the user's
+            // -d entries separately so the resume hint can echo `--gpu`
+            // verbatim instead of freezing today's render-node paths.
+            let host_devices_user = host_devices.clone();
+            let mut effective_devices = host_devices;
+            if gpu {
+                for path in gpu::resolve()? {
+                    effective_devices.push(path.to_string_lossy().into_owned());
+                }
+            }
             // May re-exec via `sg <group>` if the device's owning gid is
             // only in our supplementary set; must run before any
             // side-effecting state (registry, daemon) is touched.
-            sandbox::ensure_egid_for_devices(&host_devices)?;
+            sandbox::ensure_egid_for_devices(&effective_devices)?;
             let base = find_repo_root()?;
             require_init(&base)?;
             let extras = extra_projects
@@ -339,7 +356,9 @@ fn run() -> Result<()> {
                 resume_agent,
                 extra_projects: extras,
                 host_ports,
-                host_devices,
+                host_devices: effective_devices,
+                host_devices_user,
+                gpu,
                 comms,
                 prompt,
             })
