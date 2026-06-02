@@ -59,15 +59,6 @@ let
     (map (b: lib.optional (b ? package && b.package != null) b.package)
       resolvedBundles);
 
-  fragmentText = frag:
-    if builtins.isPath frag then builtins.readFile frag
-    else frag;
-  # The nixpkgs module system reverses listOf merge order (later modules
-  # come first). Reverse here so the joined text reads in declaration
-  # order: cave-system's fragment first, user fragments after.
-  memoryText = lib.concatStringsSep "\n\n"
-    (map fragmentText (lib.reverseList cfg.memoryFragments));
-
 in {
   options.coding-cave.claude-code = {
     enable = lib.mkEnableOption "coding-cave Claude Code deep-merge layer";
@@ -115,15 +106,6 @@ in {
       '';
     };
 
-    memoryFragments = lib.mkOption {
-      type = lib.types.listOf (lib.types.either lib.types.str lib.types.path);
-      default = [ ];
-      description = ''
-        Fragments concatenated into CLAUDE.md in declaration order.
-        Strings are used verbatim; paths are read at evaluation time.
-      '';
-    };
-
     extraSettings = lib.mkOption {
       inherit (jsonFormat) type;
       default = { };
@@ -144,7 +126,6 @@ in {
       skills = mergedSkills;
       commands = mergedCommands;
       plugins = cfg.plugins;
-      context = lib.mkIf (cfg.memoryFragments != [ ]) memoryText;
     };
 
     home.packages = bundlePackages;

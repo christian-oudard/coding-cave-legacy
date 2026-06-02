@@ -1336,10 +1336,13 @@ fn build_claude_cmd(
     resuming: bool,
     prompt: Option<&str>,
     channels: bool,
+    system_prompt: &str,
 ) -> Vec<String> {
     let mut cmd = vec![
         "claude".to_string(),
         "--dangerously-skip-permissions".to_string(),
+        "--append-system-prompt".to_string(),
+        system_prompt.to_string(),
     ];
     // Channels only work in interactive mode. --print short-circuits
     // MCP server startup, so skip the flag there.
@@ -1746,40 +1749,41 @@ fn merge_user_files(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
-fn append_to_claude_md(home: &Path, text: &str) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let dest = home.join(".claude").join("CLAUDE.md");
-    if !dest.exists() {
-        return Ok(());
+fn build_system_prompt(
+    workspaces: &[(PathBuf, PathBuf, String)],
+    agent_id: &str,
+    display_name: &str,
+    comms: bool,
+) -> String {
+    let mut out = String::new();
+    out.push_str(include_str!("../../prompts/system.md"));
+    if !out.ends_with('\n') {
+        out.push('\n');
     }
-    let m = std::fs::metadata(&dest)?;
-    let mut p = m.permissions();
-    p.set_mode(p.mode() | 0o200);
-    std::fs::set_permissions(&dest, p)?;
-    let mut buf = std::fs::read_to_string(&dest)?;
-    if !buf.ends_with('\n') {
-        buf.push('\n');
-    }
-    buf.push('\n');
-    buf.push_str(text);
-    std::fs::write(&dest, buf)?;
-    Ok(())
-}
-
-fn append_user_claude_md(home: &Path, host_md: &Path) -> Result<()> {
-    if !host_md.exists() {
-        return Ok(());
-    }
-    append_to_claude_md(home, &std::fs::read_to_string(host_md)?)
-}
-
-fn append_comms_section(home: &Path, comms: bool) -> Result<()> {
-    let text = if comms {
+    out.push('\n');
+    out.push_str(if comms {
         include_str!("../../prompts/comms-on.md")
     } else {
         include_str!("../../prompts/comms-off.md")
-    };
-    append_to_claude_md(home, text)
+    });
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(&format!(
+        "\nYou are agent {agent_id}, named `{display_name}`.\n"
+    ));
+    out.push_str("\n## Projects\n\n");
+    for (i, (ws, _, slug)) in workspaces.iter().enumerate() {
+        let primary = if i == 0 { " (primary)" } else { "" };
+        let branch = git::current_branch(Some(ws)).unwrap_or_default();
+        let branch_part = if branch.is_empty() {
+            String::new()
+        } else {
+            format!(" — branch `{branch}`")
+        };
+        out.push_str(&format!("- `/projects/{slug}/`{primary}{branch_part}\n"));
+    }
+    out
 }
 
 fn write_combined_ca_bundle(home: &Path, os_bundle: &Path, crinj_ca: &Path) -> Result<()> {
@@ -2353,11 +2357,6 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
             uep.to_string_lossy().to_string(),
         );
     }
-    let user_claude_md = host_home()
-        .join(".config")
-        .join("coding-cave")
-        .join("CLAUDE.md");
-
     let crinj_session = crinj_register_session();
     crate::log_info!("starting crinj proxy...");
     let (crinj_proc, crinj_state) = start_crinj()?;
@@ -2417,10 +2416,6 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
             merge_user_files(&src, &home)?;
         }
     }
-    if user_claude_md.is_file() {
-        append_user_claude_md(&home, &user_claude_md)?;
-    }
-    append_comms_section(&home, comms)?;
     if let Some(gc) = host_gitconfig() {
         let _ = std::fs::copy(&gc, home.join(".gitconfig"));
     }
@@ -2430,11 +2425,13 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
     }
     crate::log_info!("cave home ready");
 
+    let system_prompt = build_system_prompt(&workspaces, &agent_id, &agent_name, comms);
     let claude_cmd = build_claude_cmd(
         session_id.as_deref(),
         resuming,
         prompt.as_deref(),
         channels_enabled,
+        &system_prompt,
     );
     let daemon_port = daemon::agent_port(&agent_id);
 

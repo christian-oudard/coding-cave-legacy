@@ -65,7 +65,7 @@ Caves do not have access to any of your SSH keys or API tokens. Instead, all web
 
 ## User/System Configuration
 
-The cave environment is configured by `~/.config/coding-cave/cave.nix`. This is a simple Nix config (not a flake) with an optional `inputs` attrset for user dependencies and a `config` function that receives `pkgs` and those inputs. The system wraps it in a proper flake, injecting system dependencies (nixpkgs, claude-code, home-manager, coding-cave) via build-time substituted store paths. The user never specifies system dependency URLs. Core packages (coreutils, bash, nix, git) are always included automatically. Without a cave.nix, a default environment is generated with claude-code and standard tools. The build result is cached in `~/.local/share/coding-cave/user-env/` and skipped on agent startup if nothing changed. `cav env update` updates flake inputs (e.g. `cav env update claude-code` for latest Claude Code). `cav init` offers to create a default cave.nix for new users. A system CLAUDE.md is prepended to the user's CLAUDE.md at session startup. All coding cave state is in `~/.local/share/coding-cave/`. A SQLite database tracks registered agents, projects, and approvals.
+The cave environment is configured by `~/.config/coding-cave/cave.nix`. This is a simple Nix config (not a flake) with an optional `inputs` attrset for user dependencies and a `config` function that receives `pkgs` and those inputs. The system wraps it in a proper flake, injecting system dependencies (nixpkgs, claude-code, home-manager, coding-cave) via build-time substituted store paths. The user never specifies system dependency URLs. Core packages (coreutils, bash, nix, git) are always included automatically. Without a cave.nix, a default environment is generated with claude-code and standard tools. The build result is cached in `~/.local/share/coding-cave/user-env/` and skipped on agent startup if nothing changed. `cav env update` updates flake inputs (e.g. `cav env update claude-code` for latest Claude Code). `cav init` offers to create a default cave.nix for new users. The cave gives the agent a baseline system prompt at session startup, covering cave conventions and the list of projects mounted into this launch. Users who want CLAUDE.md content in the cave set `programs.claude-code.context` in their `cave.nix`, just like any other home-manager option. All coding cave state is in `~/.local/share/coding-cave/`. A SQLite database tracks registered agents, projects, and approvals.
 
 
 ## Commands
@@ -78,7 +78,7 @@ Adds a project to the coding-cave registry. Sets up the shared bare repo, and br
 
 Launches a Claude Code CLI agent in a coding-cave session. Auto-assigns a numeric ID. There are no agent ID duplicates among running agents or stopped agents with unmerged work.
 
-Continue the most recently exited session with `--continue`. Continue arbitrary sessions, by session-id or agent-id, with `--resume`.
+Continue the most recently exited session with `--continue`. Continue arbitrary sessions, by session-id or agent-id, with `--resume`. Per-launch flags (`--project`, `--port`, `--dev`, `--comms`) apply only to the current launch and do not carry over from the original session; the agent's system prompt is rebuilt each launch to reflect the flags actually in effect.
 
 Allow access to multiple projects with the `--project` flag (repeatable).
 
