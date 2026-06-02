@@ -425,6 +425,7 @@ fn do_approve(
         project_base,
         base_name,
         Some(&format!("{after_sha}:refs/heads/{base_name}")),
+        Some(agent_id),
         false,
         verbose,
     )?;

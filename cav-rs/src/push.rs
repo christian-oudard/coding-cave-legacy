@@ -42,7 +42,7 @@ pub fn push(base: &Path, force: bool) -> Result<()> {
     } else if let Some((_, agent_id)) = parsed {
         push_dev(base, &branch, &agent_id, force, verbose)
     } else {
-        push_base(base, &branch, None, force, verbose)
+        push_base(base, &branch, None, None, force, verbose)
     };
 
     match result {
@@ -107,6 +107,7 @@ pub fn push_base(
     base: &Path,
     base_branch: &str,
     refspec: Option<&str>,
+    source_agent: Option<&str>,
     force: bool,
     verbose: bool,
 ) -> Result<(bool, Vec<String>)> {
@@ -131,7 +132,7 @@ pub fn push_base(
     }
     git::git(&args, Some(base), true, verbose, verbose)?;
     sandbox::reconcile_merged_dev_branches(base, verbose);
-    let notes = rebase_agents(base, base_branch);
+    let notes = rebase_agents(base, base_branch, source_agent);
     Ok((false, notes))
 }
 
@@ -228,7 +229,7 @@ fn sync_agent_worktree(ws: &Path, branch: &str, force: bool) -> Vec<String> {
     notes
 }
 
-fn rebase_agents(base: &Path, base_branch: &str) -> Vec<String> {
+fn rebase_agents(base: &Path, base_branch: &str, source_agent: Option<&str>) -> Vec<String> {
     let mut notes = vec![];
     let slug = config::project_slug(base);
     let shared = config::shared_repo_path(base);
@@ -299,10 +300,14 @@ fn rebase_agents(base: &Path, base_branch: &str) -> Vec<String> {
         .is_ok();
         if !rebase_ok {
             git::git(&["rebase", "--abort"], Some(&ws), false, true, false).ok();
+            let from = match source_agent {
+                Some(src) => style::agent_name(&registry::display_name(base, src)),
+                None => style::yellow(base_branch),
+            };
+            let to = style::agent_name(&registry::display_name(base, &agent_id));
             notes.push(format!(
-                "Note: rebase of {} onto {} failed (conflicts). Agent must resolve them.",
-                style::yellow(&dev),
-                style::yellow(base_branch),
+                "Attempted to sync changes from {from} to {to}, but failed due to conflicts. \
+                 Agent must rebase manually.",
             ));
             continue;
         }
@@ -319,11 +324,6 @@ fn rebase_agents(base: &Path, base_branch: &str) -> Vec<String> {
         )
         .ok();
         git::update_agent_tip(&shared, &dev).ok();
-        notes.push(format!(
-            "Rebased {} onto {}.",
-            style::yellow(&dev),
-            style::yellow(base_branch),
-        ));
     }
     notes
 }
