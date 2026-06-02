@@ -9,7 +9,7 @@ use std::process::Command;
 
 const STATE_DIR: &str = "/var/lib/coding-cave";
 const IDMAP_TARGET: &str = "/var/lib/coding-cave/nix-store";
-const IDMAP_OPTS: &str = "X-mount.idmap=u:1000:0:1 g:1000:0:1";
+const IDMAP_OPTS: &str = "X-mount.idmap=u:0:1000:1 g:0:1000:1";
 
 pub fn setup() -> Result<()> {
     if !rustix::process::geteuid().is_root() {
