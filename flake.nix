@@ -171,7 +171,7 @@
 
       nixosModules.codingCave = { pkgs, ... }: import ./modules/host.nix {
         inherit pkgs;
-        cav = self.packages.${pkgs.system}.default;
+        cav = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
       };
       nixosModules.default = self.nixosModules.codingCave;
 
