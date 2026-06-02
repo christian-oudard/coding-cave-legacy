@@ -728,20 +728,23 @@ pub fn agent_project(agent_id: &str) -> Option<String> {
 
 /// If `agent_id` is registered to a project other than the one rooted at
 /// `base`, return a hint pointing at the project's on-disk path. Caller
-/// appends it to a "not found here" error. None when the agent belongs to
-/// this project, isn't in the registry, has no resolvable path, or we're
-/// inside a cave (where the registry only knows about subcaves of self).
+/// appends it to a "not found here" error. None when the agent has access
+/// to this project (primary or extras), isn't in the registry, has no
+/// resolvable path, or we're inside a cave (where the registry only knows
+/// about subcaves of self).
 pub fn other_project_hint(base: &Path, agent_id: &str) -> Option<String> {
     if config::inside_cave() {
         return None;
     }
-    let agent_slug = agent_project(agent_id)?;
-    if agent_slug == config::project_slug(base) {
+    let slugs = agent_all_slugs(agent_id).ok()?;
+    let current = config::project_slug(base);
+    if slugs.iter().any(|s| s == &current) {
         return None;
     }
-    let path = project_path(&agent_slug).ok().flatten()?;
+    let primary = slugs.into_iter().next()?;
+    let path = project_path(&primary).ok().flatten()?;
     Some(format!(
-        "Agent {agent_id} is in {agent_slug}:\n  cd {path}"
+        "Agent {agent_id} is in {primary}:\n  cd {path}"
     ))
 }
 
