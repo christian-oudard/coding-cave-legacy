@@ -256,15 +256,58 @@ and descendants are unaffected.
 
 ## Promoting Packages to Host
 
-To permanently keep a cave-installed package on the host, copy it from
-the agent's upper layer:
+The `coding-cave-host.service` systemd unit (in `modules/host.nix`)
+runs `cav host watch` as root alongside the idmap setup. It maintains
+an inotify watch on every agent's `db/` directory; when the agent's
+nix DB is written, the watcher diffs `ValidPaths` against the host
+`/nix/store`, then for each new path:
+
+1. `rename(2)` the path from `agent-<id>/upper/<basename>` to
+   `/nix/store/<basename>`. Same filesystem, so atomic. The agent's
+   overlay falls through to the lower (host store) on its next
+   lookup, same path string, no whiteout.
+2. Recursively `chown` to root:root so the host's idmapped mount maps
+   it back to cave-coder inside other caves, matching the rest of
+   `/nix/store`.
+3. `nix-store --dump-db <new paths>` against a snapshot of the
+   agent's DB, piped into `nix-store --load-db` against the host DB.
+   Schema knowledge stays in nix.
+
+The DB-write trigger eliminates the install-vs-DB race: nix registers
+the path before closing the transaction, so by the time the watcher
+fires the metadata is already complete.
+
+Side effects: sibling agents in the same cave (and any later cave or
+subcave) inherit the path through the overlay lower with no second
+download. The agent that installed it keeps no copy in its upper.
+
+### Known race: rename-vs-chown window
+
+Between step 1 and step 2 the promoted path is on the host fs at uid
+1000 (cave-coder, inherited from the agent's upper). Through the
+idmapped mount + cave userns chain, files outside the idmap's range
+appear as overflow uid (65534) inside other caves. Cave nix operations
+that read content are unaffected, but anything that triggers an
+overlayfs copy-up (chmod, mainly on `.lock` files) gets EPERM until
+the recursive chown completes.
+
+Window size is bounded by the file count in the package: microseconds
+for a small derivation, up to ~100ms for something like glibc. Impact
+on collision is a transient nix error that a retry resolves, not a
+persistent broken state. The mitigations we considered all reintroduce
+either a copy or a structural change to promotion timing (see commit
+history). Accepted as-is; revisit if it actually bites a workflow.
+
+### Manual smoke test
+
+To verify end-to-end on a host that has the unit running:
 
 ```
-$ cp -a ~/.local/share/coding-cave/nix-overlay/agent-<id>/upper/<hash>-<name> \
-    /nix/store/
-$ nix-store --register-validity <<< "<path> <hash> <narSize> <deriver> 0"
+$ journalctl -u coding-cave-host.service -f &
+$ cav agent --prompt 'nix shell nixpkgs#hello -c true'
+# wait for the agent to exit, then:
+$ ls /nix/store/*-hello-*
 ```
 
-The package then becomes a first-class host store path, survives host
-`nix-store --gc`, and appears in the lower layer for every future cave
-and agent.
+The hello derivation's store path should be in `/nix/store`, owned by
+root, with a row in `/nix/var/nix/db/db.sqlite`.

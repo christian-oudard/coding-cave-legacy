@@ -53,7 +53,7 @@ Agents can launch their own agents, creating a subcave one level deeper. Each le
 
 Each agent runs in bubblewrap sandbox.
 - The development environment is a standard POSIX environment and Bash shell.
-- Agents can install Nix packages to a Nix store overlay (host store read-only, writable upper layer).
+- Agents can install Nix packages to a Nix store overlay (host store read-only, writable upper layer). Newly-installed packages are auto-promoted from the agent's upper into the host `/nix/store` so siblings and future agents inherit them through the lower layer without re-downloading.
 - Project workspaces are mounted at `/projects/<slug>`.
 - A persistent shared home directory is at `/home/cave-coder`.
 - Agents sign commits with host GPG keys, through a forwarded GPG agent extra socket. The extra socket runs in restricted mode, allowing signing but blocking secret key export and other dangerous operations.

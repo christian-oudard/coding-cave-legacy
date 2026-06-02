@@ -213,7 +213,8 @@ enum Cmd {
         #[command(subcommand)]
         cmd: EnvCmd,
     },
-    /// Host-side setup (called by coding-cave-host.service)
+    /// Host-side ops invoked by coding-cave-host.service. Not for manual use.
+    #[command(hide = true)]
     Host {
         #[command(subcommand)]
         cmd: HostCmd,
@@ -280,6 +281,8 @@ enum HostCmd {
     Setup,
     /// Tear down the host-side mount (lazy unmount)
     Teardown,
+    /// Watch agent overlays and auto-promote new packages into /nix/store
+    Watch,
 }
 
 
@@ -539,6 +542,7 @@ fn run() -> Result<()> {
         Cmd::Host { cmd } => match cmd {
             HostCmd::Setup => host::setup(),
             HostCmd::Teardown => host::teardown(),
+            HostCmd::Watch => host::watch(),
         },
         Cmd::Completion { shell } => completion::print_completion(shell),
         Cmd::CompleteCp { word } => {
