@@ -456,11 +456,15 @@ fn collect_agent_infos(
             }
         }
         let state = agent_state(aid, running).to_string();
-        // A guest agent (primary slug elsewhere) with no commits and a
-        // clean worktree here has nothing to report under this project.
+        // Show every non-archived agent of this project, running or paused,
+        // even with no commits and a clean worktree, so an agent stopped
+        // without committing stays visible until it archives at 24h. A guest
+        // agent (primary slug elsewhere) only surfaces here once it has
+        // activity to report under this project.
         let is_primary = registry::agent_project(aid).as_deref() == Some(base_slug.as_str());
         let has_activity = total_ahead > 0 || !dirty_worktrees.is_empty();
-        if !has_activity && !(running && is_primary) {
+        let live_primary = is_primary && state != "archived";
+        if !has_activity && !live_primary {
             continue;
         }
         agents.push(AgentInfo {
@@ -737,5 +741,23 @@ mod tests {
         let guest_agents = collect_agent_infos(&base_guest, &by_agent).unwrap();
         assert_eq!(guest_agents.len(), 1);
         assert_eq!(guest_agents[0].dirty_worktrees, vec![guest_ws]);
+    }
+
+    #[test]
+    fn stopped_agent_without_commits_stays_visible() {
+        // An agent closed without committing keeps its registry row but has
+        // no dev branch and a clean (or absent) worktree. It must still show
+        // up as "paused" so its context is findable until it archives at 24h.
+        let g = DataDirGuard::new("paused-visible");
+        let base = g.path.join("proj");
+        fs::create_dir_all(&base).unwrap();
+        let aid = registry::acquire_agent_id(&base).unwrap();
+        registry::mark_agent_exited(&aid).unwrap();
+
+        let by_agent: HashMap<String, Vec<(String, String)>> =
+            [(aid.clone(), vec![])].into_iter().collect();
+        let agents = collect_agent_infos(&base, &by_agent).unwrap();
+        assert_eq!(agents.len(), 1, "paused 0-commit primary agent must be visible");
+        assert_eq!(agents[0].state, "paused");
     }
 }

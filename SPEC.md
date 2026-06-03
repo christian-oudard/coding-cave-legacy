@@ -39,7 +39,7 @@ Projects are registered with the coding-cave system with `cav init`. This create
 
 Agent sessions are launched with `cav agent`, or just `cav` for short. Agent sessions are identified by unique numeric IDs (1, 2, 3, etc.). Display name tags combine the project slug with the ID: `web-frontend@1`, `data_pipeline@2`, and so on. Dev branches are named `agent-<n>/<base>` (e.g. `agent-1/main`). Each agent gets its own workspace clone of the shared repo. Agent session information, including Claude session IDs, are stored in the agent registry database table.
 
-`cav status` shows current running agents and work in progress, as unmerged commits. The agent session can be running or stopped. Running sessions are visible in `cav status`. Stopped sessions with unmerged work also show in `cav status`.
+`cav status` shows current running agents and work in progress, as unmerged commits. The agent session can be running or stopped. Running sessions are visible in `cav status`. Stopped sessions stay visible too, including those with no unmerged work, until they are archived after 24 hours.
 
 Each agent session is launched in the context of a project directory. This is their primary project, which gives the agents name tag its project slug.
 
@@ -114,7 +114,7 @@ Retargets an agent to a different base branch. The agent's workspace is switched
 
 ### `cav status [-a,--all] [agent-id]`
 
-Shows the current list of agents and unmerged commits for the current project, or for all projects with `cav status --all`. Optionally filter to a single agent by ID. The agent ID resolves from the registry regardless of the current working directory. It fetches from the shared remote to get latest information, and queries the registry database. As a side effect, the status command performs lightweight maintenance: it reaps agents whose process has died and removes their registry entries and branches if they left no pending work, and it drops shared dev branches whose tip already matches their base (already merged). The status command shows agent status of "running" or "stopped". The sort order is most recent first. Similar to `git status`, it shows whether the host base branch is behind or ahead of the cave remote.
+Shows the current list of agents and unmerged commits for the current project, or for all projects with `cav status --all`. Optionally filter to a single agent by ID. The agent ID resolves from the registry regardless of the current working directory. It fetches from the shared remote to get latest information, and queries the registry database. As a side effect, the status command performs lightweight maintenance: it marks agents whose process has died as stopped, archives stopped agents older than 24 hours, and drops shared dev branches whose tip already matches their base (already merged). The status command shows agent status of "running" or "stopped". The sort order is most recent first. Similar to `git status`, it shows whether the host base branch is behind or ahead of the cave remote.
 
 ### `cav remove-agent [--yes] [<n>]`
 
