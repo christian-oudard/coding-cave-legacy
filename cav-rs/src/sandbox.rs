@@ -2371,12 +2371,6 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
         "CODING_CAVE_PROXY_CA".to_string(),
         ca_path.to_string_lossy().to_string(),
     );
-    env.insert(
-        "CLAUDE_CODE_OAUTH_TOKEN".to_string(),
-        "sk-ant-oat01-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\
-         AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA-AAAAAAAA"
-            .to_string(),
-    );
 
     // Channel broker (inter-agent messaging). Gated by --comms.
     let (broker_session, broker_proc, channels_enabled) = if comms {
