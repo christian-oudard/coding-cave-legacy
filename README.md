@@ -64,6 +64,17 @@ $ cav push                     # send your edits back to the agent
 $ cav status                   # see unmerged agent commits
 ```
 
+## Updating Claude Code
+
+Each cave locks Claude Code to the latest [sadjow/claude-code-nix](https://github.com/sadjow/claude-code-nix) release on its first build. To pull a newer release:
+
+```
+$ cav env update claude-code
+$ cav env build
+```
+
+The new version takes effect in the next agent session. Check the locked version with `cav env metadata`.
+
 ## Bringing your dotfiles
 
 The cave does not auto-mount your host `$HOME`. Anything you want available inside it (vim config, shell rc files, git config, ...) has to be declared in `~/.config/coding-cave/cave.nix`. Cave.nix is a home-manager module under the hood, so you have the full HM API: `home.file`, `xdg.configFile`, and the `programs.*` modules.

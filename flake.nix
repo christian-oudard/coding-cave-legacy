@@ -91,7 +91,10 @@
             cavBin = "${builtins.placeholder "out"}/bin";
             sandboxConfig = "${sandbox}";
             nixpkgsUrl = "path:${nixpkgs}";
-            claudeCodeNixUrl = "path:${claude-code}";
+            # Upstream ref so each user-env locks claude-code to the latest
+            # sadjow release on its first build, bumped only on an explicit
+            # `cav env update claude-code`.
+            claudeCodeNixUrl = "github:sadjow/claude-code-nix";
             homeManagerUrl = "path:${home-manager}";
             codingCaveUrl = "path:${self}";
             inherit caveSourceHash;
