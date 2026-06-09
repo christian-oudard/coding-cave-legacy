@@ -112,9 +112,14 @@ Pushes the current branch to the shared remote. With `--force`, force-pushes (fo
 
 Retargets an agent to a different base branch. The agent's workspace is switched to the new base, and its unmerged work is rebased onto it. Agent ID is inferred from the currently checked-out agent branch if present, otherwise it must be specified.
 
-### `cav status [-a,--all] [agent-id]`
+### `cav status [-a,--all] [project] [agent-id]`
 
-Shows the current list of agents and unmerged commits for the current project, or for all projects with `cav status --all`. Optionally filter to a single agent by ID. The agent ID resolves from the registry regardless of the current working directory. It fetches from the shared remote to get latest information, and queries the registry database. As a side effect, the status command performs lightweight maintenance: it marks agents whose process has died as stopped, archives stopped agents older than 24 hours, and drops shared dev branches whose tip already matches their base (already merged). The status command shows agent status of "running" or "stopped". The sort order is most recent first. Similar to `git status`, it shows whether the host base branch is behind or ahead of the cave remote.
+Shows the current list of agents and unmerged commits. Two independent selectors narrow what is shown, and either can be left out:
+
+- Project: name a project slug, or default to the project of the current directory. With `--all`, every registered project is shown.
+- Agent: name an agent ID, or default to the agent of the current dev branch when one is checked out. Leave it out to show all agents in the project.
+
+Naming an agent ID broadens the project selector: a single agent can reach more than one project (its home project plus any extra projects it was granted), and the status then shows that agent under each project it can reach, one section per project, with the project you are standing in shown first. Run from outside any of the agent's projects, the home project is shown first. The agent ID resolves from the registry regardless of the current working directory, and may name a project the agent only guests on. It fetches from the shared remote to get latest information, and queries the registry database. As a side effect, the status command performs lightweight maintenance: it marks agents whose process has died as stopped, archives stopped agents older than 24 hours, and drops shared dev branches whose tip already matches their base (already merged). The status command shows agent status of "running" or "stopped". The sort order is most recent first. Similar to `git status`, it shows whether the host base branch is behind or ahead of the cave remote.
 
 ### `cav remove-agent [--yes] [<n>]`
 

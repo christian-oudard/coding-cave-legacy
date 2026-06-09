@@ -368,13 +368,15 @@ fn run() -> Result<()> {
         }
         Cmd::Approve { args, yes, commit } => {
             let agent_id = parse_single_agent_arg(&args, "approve")?;
-            let base = approve_reject_base(agent_id.as_deref())?;
+            // Actions stay in the current repo (redirect: false) so they never
+            // touch a project the user didn't name.
+            let base = resolve_base(agent_id.as_deref(), None, false)?;
             require_init(&base)?;
             approve::approve(&base, agent_id.as_deref(), yes, commit.as_deref())
         }
         Cmd::Reject { args, yes, commit } => {
             let agent_id = parse_single_agent_arg(&args, "reject")?;
-            let base = approve_reject_base(agent_id.as_deref())?;
+            let base = resolve_base(agent_id.as_deref(), None, false)?;
             require_init(&base)?;
             reject::reject(&base, agent_id.as_deref(), yes, commit.as_deref())
         }
@@ -665,24 +667,6 @@ fn looks_like_hash(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-fn approve_reject_base(agent_id: Option<&str>) -> Result<PathBuf> {
-    // Prefer the CWD's repo when the user is inside one. The registry lookup
-    // is only a fallback for `cav approve <id>` invoked from outside any
-    // project: otherwise it would chase the agent's home project even when
-    // the same agent ID has pending work in the project the user is in.
-    if let Ok(root) = git::repo_root(None) {
-        return Ok(PathBuf::from(root));
-    }
-    if let Some(aid) = agent_id {
-        if let Some(slug) = registry::agent_project(aid) {
-            if let Some(p) = registry::project_path(&slug)? {
-                return Ok(PathBuf::from(p));
-            }
-        }
-    }
-    find_repo_root()
-}
-
 fn find_repo_root() -> Result<PathBuf> {
     git::repo_root(None)
         .map(PathBuf::from)
@@ -741,33 +725,72 @@ fn require_init(base: &Path) -> Result<()> {
 /// Returns `Ok(None)` when neither is given (caller falls back to CWD).
 /// Bails when the args disagree (slug given alongside an agent that lives
 /// elsewhere) or when the named agent isn't registered.
-fn target_base(
-    agent_id: Option<&str>,
-    project_slug: Option<&str>,
-) -> Result<Option<PathBuf>> {
-    let slug = match (project_slug, agent_id) {
-        (Some(s), Some(aid)) => {
-            match registry::agent_project(aid) {
-                Some(reg) if reg != s => bail!(
-                    "Agent {aid} belongs to project '{reg}', not '{s}'."
-                ),
-                None => bail!("No agent {aid} in registry."),
-                _ => {}
-            }
-            s.to_string()
-        }
-        (Some(s), None) => s.to_string(),
-        (None, Some(aid)) => registry::agent_project(aid)
-            .ok_or_else(|| anyhow::anyhow!("No agent {aid} in registry."))?,
-        (None, None) => return Ok(None),
-    };
-    let p = registry::project_path(&slug)?
+/// True when `agent_id` can reach the project rooted at `base` — its home
+/// project or one of the extra projects it was granted.
+fn agent_visible_in(agent_id: &str, base: &Path) -> bool {
+    let slug = config::project_slug(base);
+    registry::agent_all_slugs(agent_id)
+        .map(|slugs| slugs.contains(&slug))
+        .unwrap_or(false)
+}
+
+/// Resolve a registered project slug to its on-disk base directory.
+fn project_base(slug: &str) -> Result<PathBuf> {
+    let p = registry::project_path(slug)?
         .ok_or_else(|| anyhow::anyhow!("No project '{slug}'. Check spelling or run: cav init"))?;
     let b = PathBuf::from(p);
     if !b.is_dir() {
         bail!("Project '{slug}' path missing: {}", b.display());
     }
-    Ok(Some(b))
+    Ok(b)
+}
+
+/// Resolve which project directory a command acts on, given optional project
+/// and agent args, anchored to where the user is standing. The shared rule
+/// behind `cav status`, `cav approve`, and `cav reject`:
+///
+/// - An explicit project arg wins, validated against the agent's reachable
+///   projects (home or guest) when an agent is also named.
+/// - Otherwise the current repo wins when it can serve the request: no agent
+///   was named, or the named agent has presence here.
+/// - When an agent was named but isn't present in the current repo,
+///   `redirect` decides. Queries (status) jump to the agent's home project so
+///   they can show it from anywhere. Actions (approve/reject) stay in the
+///   current repo so they never touch a project the user didn't name.
+/// - Outside any repo, both fall back to the agent's home project.
+fn resolve_base(
+    agent_id: Option<&str>,
+    project_slug: Option<&str>,
+    redirect: bool,
+) -> Result<PathBuf> {
+    if let Some(slug) = project_slug {
+        if let Some(aid) = agent_id {
+            let slugs = registry::agent_all_slugs(aid)?;
+            if slugs.is_empty() {
+                bail!("No agent {aid} in registry.");
+            }
+            if !slugs.iter().any(|s| s == slug) {
+                bail!(
+                    "Agent {aid} has no access to project '{slug}' (reaches: {}).",
+                    slugs.join(", "),
+                );
+            }
+        }
+        return project_base(slug);
+    }
+    if let Ok(root) = git::repo_root(None) {
+        let base = PathBuf::from(root);
+        let serves_here = agent_id.map_or(true, |aid| agent_visible_in(aid, &base));
+        if serves_here || !redirect {
+            return Ok(base);
+        }
+    }
+    if let Some(aid) = agent_id {
+        let slug = registry::agent_project(aid)
+            .ok_or_else(|| anyhow::anyhow!("No agent {aid} in registry."))?;
+        return project_base(&slug);
+    }
+    find_repo_root()
 }
 
 pub fn resolve_target(
@@ -792,10 +815,10 @@ pub fn resolve_target(
         }
     }
 
-    let base = match target_base(agent_id.as_deref(), project_slug.as_deref())? {
-        Some(b) => b,
-        None => find_repo_root()?,
-    };
+    // Status is a query: redirect to the agent's home project when it isn't
+    // present in the current repo, so `cav status <id>` works from anywhere.
+    // The current project still anchors the per-project ordering downstream.
+    let base = resolve_base(agent_id.as_deref(), project_slug.as_deref(), true)?;
 
     require_init(&base)?;
 
@@ -903,7 +926,7 @@ fn unix_to_ymdhm(secs: u64) -> (u64, u64, u64, u64, u64) {
 }
 
 #[cfg(test)]
-mod target_base_tests {
+mod resolve_base_tests {
     use super::*;
     use crate::test_util::DataDirGuard;
     use std::fs;
@@ -917,41 +940,72 @@ mod target_base_tests {
     }
 
     #[test]
-    fn agent_only_redirects_to_agents_project() {
-        // `cav status @N` from anywhere should land on agent N's project.
-        let g = DataDirGuard::new("tb-redirect");
+    fn agent_only_redirects_to_home_project() {
+        // `cav status <id>` from a repo the agent can't reach lands on the
+        // agent's home project (redirect: true).
+        let g = DataDirGuard::new("rb-redirect");
         let (proj_b, aid) = register_project_with_agent(&g.path, "proj-b");
         // Also register an unrelated project — the lookup must pick proj-b.
         let _ = register_project_with_agent(&g.path, "proj-a");
 
-        let base = target_base(Some(&aid), None).unwrap().unwrap();
+        let base = resolve_base(Some(&aid), None, true).unwrap();
         assert_eq!(base.canonicalize().unwrap(), proj_b.canonicalize().unwrap());
     }
 
     #[test]
-    fn slug_mismatch_with_agent_is_rejected() {
-        let g = DataDirGuard::new("tb-mismatch");
+    fn named_project_unreachable_by_agent_is_rejected() {
+        let g = DataDirGuard::new("rb-mismatch");
         let (_, aid) = register_project_with_agent(&g.path, "proj-b");
         let _ = register_project_with_agent(&g.path, "proj-a");
 
-        let err = target_base(Some(&aid), Some("proj-a")).expect_err("must error");
+        let err = resolve_base(Some(&aid), Some("proj-a"), true).expect_err("must error");
         let msg = err.to_string();
         assert!(
             msg.contains("proj-b") && msg.contains("proj-a"),
-            "error should name both projects, got: {msg}",
+            "error should name both the agent's project and the bad one, got: {msg}",
         );
     }
 
     #[test]
+    fn named_guest_project_is_accepted() {
+        // A project the agent guests on (extra_projects) must resolve, not
+        // bail. This was the bug: validation only checked the home project.
+        let g = DataDirGuard::new("rb-guest");
+        let (_, aid) = register_project_with_agent(&g.path, "proj-home");
+        let guest = g.path.join("proj-guest");
+        fs::create_dir_all(&guest).unwrap();
+        registry::register_project(&guest).unwrap();
+        registry::save_agent_extras(&aid, &["proj-guest".to_string()]).unwrap();
+
+        let base = resolve_base(Some(&aid), Some("proj-guest"), true).unwrap();
+        assert_eq!(base.canonicalize().unwrap(), guest.canonicalize().unwrap());
+    }
+
+    #[test]
     fn unknown_agent_is_rejected() {
-        let _g = DataDirGuard::new("tb-no-agent");
-        let err = target_base(Some("999"), None).expect_err("must error");
+        let g = DataDirGuard::new("rb-no-agent");
+        let _ = register_project_with_agent(&g.path, "proj-b");
+        let err = resolve_base(Some("999"), Some("proj-b"), true).expect_err("must error");
         assert!(err.to_string().contains("999"), "got: {err}");
     }
 
     #[test]
-    fn neither_arg_returns_none() {
-        let _g = DataDirGuard::new("tb-empty");
-        assert!(target_base(None, None).unwrap().is_none());
+    fn agent_visible_in_covers_home_and_guest_projects() {
+        let g = DataDirGuard::new("tb-visible");
+        let (home, aid) = register_project_with_agent(&g.path, "proj-home");
+        let guest = g.path.join("proj-guest");
+        fs::create_dir_all(&guest).unwrap();
+        registry::register_project(&guest).unwrap();
+        registry::save_agent_extras(&aid, &["proj-guest".to_string()]).unwrap();
+
+        assert!(agent_visible_in(&aid, &home), "home project must be visible");
+        assert!(agent_visible_in(&aid, &guest), "guest project must be visible");
+
+        let other = g.path.join("proj-other");
+        fs::create_dir_all(&other).unwrap();
+        assert!(
+            !agent_visible_in(&aid, &other),
+            "a project the agent can't reach must not be visible",
+        );
     }
 }

@@ -42,6 +42,13 @@ struct AgentInfo {
 }
 
 pub fn show(base: &Path, agent_id: Option<&str>) -> Result<()> {
+    match agent_id {
+        Some(aid) => show_agent(base, aid),
+        None => show_project(base),
+    }
+}
+
+fn show_project(base: &Path) -> Result<()> {
     // Inside a cave, the cave remote may not exist yet (before cav init).
     // Make the fetch non-fatal in that case.
     let fetch_result = git::git(
@@ -58,42 +65,31 @@ pub fn show(base: &Path, agent_id: Option<&str>) -> Result<()> {
         // Inside cave without a cave remote (not yet cav init'd): no sub-agents.
         let slug = config::project_slug(base);
         println!("{}", style::bold_white(&format!("=== {slug} ===")));
-        if let Some(aid) = agent_id {
-            println!("No agent {aid}.");
-        } else {
-            println!("No agents. Start one with: {}", style::bold_cyan("cav agent"));
-        }
+        println!("No agents. Start one with: {}", style::bold_cyan("cav agent"));
         return Ok(());
     }
 
     let slug = config::project_slug(base);
     println!("{}", style::bold_white(&format!("=== {slug} ===")));
 
-    if agent_id.is_none() {
-        show_branch_sync_status(base);
-        sandbox::reconcile_merged_dev_branches(base, config::verbose() >= 1);
-        crate::workspace::archive_sweep();
-    }
+    show_branch_sync_status(base);
+    sandbox::reconcile_merged_dev_branches(base, config::verbose() >= 1);
+    crate::workspace::archive_sweep();
 
-    let mut registered = registry::all_agent_ids(Some(&slug))?;
-    if let Some(aid) = agent_id {
-        registered.retain(|a| a == aid);
-    }
-
+    let registered = registry::all_agent_ids(Some(&slug))?;
     let by_agent = build_by_agent(base, &registered)?;
 
     if by_agent.is_empty() {
-        report_no_agent(base, agent_id);
+        report_no_agent(base, None);
         return Ok(());
     }
 
-    let verbose_mode = config::verbose() >= 1 || agent_id.is_some();
-    let max_commits = if verbose_mode { None } else { Some(MAX_COMMITS_DISPLAY) };
+    let max_commits = if config::verbose() >= 1 { None } else { Some(MAX_COMMITS_DISPLAY) };
 
-    let mut agents = collect_agent_infos(base, &by_agent)?;
+    let mut agents = collect_agent_infos(base, &by_agent, false)?;
 
     if agents.is_empty() {
-        report_no_agent(base, agent_id);
+        report_no_agent(base, None);
         return Ok(());
     }
 
@@ -109,6 +105,63 @@ pub fn show(base: &Path, agent_id: Option<&str>) -> Result<()> {
     print_agents(&agents, max_commits);
     print_gc_hint();
     Ok(())
+}
+
+/// Render a single agent's status across every project it can reach,
+/// current project first. `cav status <id>` lands here. An agent that
+/// guests on other projects gets one `=== slug ===` section per project,
+/// so its work shows under the right heading instead of collapsing into
+/// its home project alone.
+fn show_agent(base: &Path, aid: &str) -> Result<()> {
+    let current = config::project_slug(base);
+    let slugs = order_current_first(
+        registry::agent_all_slugs(aid).unwrap_or_default(),
+        &current,
+    );
+    if slugs.is_empty() {
+        println!("{}", style::bold_white(&format!("=== {current} ===")));
+        report_no_agent(base, Some(aid));
+        return Ok(());
+    }
+    let mut first = true;
+    for slug in &slugs {
+        let proj_base = match registry::project_path(slug)? {
+            Some(p) => PathBuf::from(p),
+            None => continue,
+        };
+        if !proj_base.is_dir() {
+            continue;
+        }
+        let (_, text) = capture_status_output(&proj_base, Some(aid))?;
+        if text.trim().is_empty() {
+            continue;
+        }
+        if !first {
+            println!();
+        }
+        first = false;
+        println!("{}", style::bold_white(&format!("=== {slug} ===")));
+        print!("{text}");
+    }
+    if first {
+        println!("{}", style::bold_white(&format!("=== {current} ===")));
+        println!("No status for {}.", registry::display_name(base, aid));
+        return Ok(());
+    }
+    print_gc_hint();
+    Ok(())
+}
+
+/// Order an agent's project slugs with the current project first, leaving
+/// the rest in their existing order. When the current project isn't one of
+/// the agent's projects (you ran `cav status <id>` from elsewhere), the
+/// agent's home project — first in the list — stays first.
+fn order_current_first(mut slugs: Vec<String>, current: &str) -> Vec<String> {
+    if let Some(pos) = slugs.iter().position(|s| s == current) {
+        let c = slugs.remove(pos);
+        slugs.insert(0, c);
+    }
+    slugs
 }
 
 /// One-line nudge when paused-past-threshold agents have reclaimable
@@ -296,7 +349,7 @@ pub fn show_all(projects: Vec<(String, String)>) -> Result<()> {
             ));
             continue;
         }
-        match capture_status_output(&base) {
+        match capture_status_output(&base, None) {
             Ok((timestamp, text)) => entries.push((timestamp, slug.clone(), text)),
             Err(e) => problems.push((slug.clone(), e.to_string())),
         }
@@ -350,9 +403,11 @@ pub fn show_all(projects: Vec<(String, String)>) -> Result<()> {
     Ok(())
 }
 
-fn capture_status_output(base: &Path) -> Result<(f64, String)> {
+fn capture_status_output(base: &Path, agent_filter: Option<&str>) -> Result<(f64, String)> {
     // This fetches and builds status for the given project, returning
-    // the last activity timestamp and formatted text.
+    // the last activity timestamp and formatted text. When filtered to a
+    // single agent, that agent shows even with no activity here, and its
+    // commit lists are not truncated.
     let _ = git::git(
         &["fetch", "--prune", CAVE_SHARED_REMOTE],
         Some(base),
@@ -363,9 +418,12 @@ fn capture_status_output(base: &Path) -> Result<(f64, String)> {
     sandbox::reconcile_merged_dev_branches(base, config::verbose() >= 1);
 
     let slug = config::project_slug(base);
-    let registered = registry::all_agent_ids(Some(&slug))?;
+    let mut registered = registry::all_agent_ids(Some(&slug))?;
+    if let Some(aid) = agent_filter {
+        registered.retain(|a| a == aid);
+    }
     let by_agent = build_by_agent(base, &registered)?;
-    let mut agents = collect_agent_infos(base, &by_agent)?;
+    let mut agents = collect_agent_infos(base, &by_agent, agent_filter.is_some())?;
 
     agents.sort_by(|a, b| {
         let order_a = if a.running { 0 } else { 1 };
@@ -375,13 +433,14 @@ fn capture_status_output(base: &Path) -> Result<(f64, String)> {
             .then(b.last_activity.partial_cmp(&a.last_activity).unwrap_or(std::cmp::Ordering::Equal))
     });
 
+    let max_commits = if agent_filter.is_some() { None } else { Some(MAX_COMMITS_DISPLAY) };
     let ts = agents.first().map(|a| a.last_activity).unwrap_or(0.0);
     let mut text = String::new();
     for (i, agent) in agents.iter().enumerate() {
         if i > 0 {
             text.push('\n');
         }
-        text.push_str(&format_agent(agent, Some(MAX_COMMITS_DISPLAY)));
+        text.push_str(&format_agent(agent, max_commits));
     }
     Ok((ts, text))
 }
@@ -409,6 +468,7 @@ fn build_by_agent(
 fn collect_agent_infos(
     base: &Path,
     by_agent: &HashMap<String, Vec<(String, String)>>,
+    force_show: bool,
 ) -> Result<Vec<AgentInfo>> {
     let base_slug = config::project_slug(base);
     let mut agents = vec![];
@@ -460,11 +520,13 @@ fn collect_agent_infos(
         // even with no commits and a clean worktree, so an agent stopped
         // without committing stays visible until it archives at 24h. A guest
         // agent (primary slug elsewhere) only surfaces here once it has
-        // activity to report under this project.
+        // activity to report under this project. `force_show` overrides both
+        // gates: `cav status <id>` shows the queried agent under every
+        // project it can reach, activity or not.
         let is_primary = registry::agent_project(aid).as_deref() == Some(base_slug.as_str());
         let has_activity = total_ahead > 0 || !dirty_worktrees.is_empty();
         let live_primary = is_primary && state != "archived";
-        if !has_activity && !live_primary {
+        if !has_activity && !live_primary && !force_show {
             continue;
         }
         agents.push(AgentInfo {
@@ -653,6 +715,21 @@ mod tests {
     }
 
     #[test]
+    fn order_current_first_brings_current_to_front() {
+        let slugs = vec!["home".to_string(), "guest".to_string()];
+        // Standing in the guest project, it leads.
+        assert_eq!(
+            order_current_first(slugs.clone(), "guest"),
+            vec!["guest".to_string(), "home".to_string()],
+        );
+        // Standing outside the agent's projects, the home project leads.
+        assert_eq!(
+            order_current_first(slugs.clone(), "elsewhere"),
+            vec!["home".to_string(), "guest".to_string()],
+        );
+    }
+
+    #[test]
     fn agent_state_distinguishes_paused_from_archived() {
         use super::agent_state;
         assert_eq!(agent_state("1", true), "running");
@@ -729,16 +806,21 @@ mod tests {
         let by_agent: HashMap<String, Vec<(String, String)>> =
             [(aid.clone(), vec![])].into_iter().collect();
 
-        let host_agents = collect_agent_infos(&base_host, &by_agent).unwrap();
+        let host_agents = collect_agent_infos(&base_host, &by_agent, false).unwrap();
         assert!(
             host_agents.is_empty(),
             "guest agent with clean worktree on this project must not appear; got {} agent(s)",
             host_agents.len(),
         );
 
+        // But `cav status <id>` forces the agent to show under every project
+        // it can reach, even with a clean worktree and no commits here.
+        let forced = collect_agent_infos(&base_host, &by_agent, true).unwrap();
+        assert_eq!(forced.len(), 1, "force_show must surface the guest agent");
+
         // Sanity check the inverse: from the guest project, the dirty
         // worktree is reported normally.
-        let guest_agents = collect_agent_infos(&base_guest, &by_agent).unwrap();
+        let guest_agents = collect_agent_infos(&base_guest, &by_agent, false).unwrap();
         assert_eq!(guest_agents.len(), 1);
         assert_eq!(guest_agents[0].dirty_worktrees, vec![guest_ws]);
     }
@@ -756,7 +838,7 @@ mod tests {
 
         let by_agent: HashMap<String, Vec<(String, String)>> =
             [(aid.clone(), vec![])].into_iter().collect();
-        let agents = collect_agent_infos(&base, &by_agent).unwrap();
+        let agents = collect_agent_infos(&base, &by_agent, false).unwrap();
         assert_eq!(agents.len(), 1, "paused 0-commit primary agent must be visible");
         assert_eq!(agents[0].state, "paused");
     }
