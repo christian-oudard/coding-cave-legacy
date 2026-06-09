@@ -381,6 +381,7 @@ fn refresh_path_inputs() -> Result<()> {
 pub fn update(input_name: Option<&str>) -> Result<()> {
     prepare()?;
     let user_env = user_env_dir();
+    let before = read_flake_lock();
     let mut cmd = Command::new("nix");
     cmd.args(["flake", "update"]).current_dir(&user_env);
     if let Some(name) = input_name {
@@ -390,7 +391,14 @@ pub fn update(input_name: Option<&str>) -> Result<()> {
     if !status.success() {
         bail!("nix flake update failed.");
     }
-    eprintln!("Run {} to rebuild with updated inputs.", style::bold_cyan("cav env build"));
+    if read_flake_lock() == before {
+        match input_name {
+            Some(name) => eprintln!("{name} is already up to date."),
+            None => eprintln!("All inputs are already up to date."),
+        }
+    } else {
+        eprintln!("Run {} to rebuild with updated inputs.", style::bold_cyan("cav env build"));
+    }
     Ok(())
 }
 
