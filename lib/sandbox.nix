@@ -208,9 +208,6 @@ let
     "CODING_CAVE_GATEWAY" "CODING_CAVE_PROXY_ADDR"
     "CODING_CAVE_PROJECT_SLUG" "CODING_CAVE_USER_ENV"
     "CODING_CAVE_BIN" "CODING_CAVE_NS_MOUNTPOINT"
-    # Dummy token so Claude Code considers itself logged in.
-    # Crinj replaces the Authorization header with real credentials.
-    "CLAUDE_CODE_OAUTH_TOKEN"
     # Anthropic API endpoint overrides. Used by tests that mock the API
     # at a local server, and by users pointing claude at a custom endpoint.
     "ANTHROPIC_BASE_URL" "ANTHROPIC_API_KEY" "ANTHROPIC_AUTH_TOKEN"
