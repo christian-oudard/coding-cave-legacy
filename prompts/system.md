@@ -7,6 +7,7 @@
 - You can make queries to services that require an API key. Send a placeholder credential, and the injection proxy "crinj" will inject correct credentials. There are no SSH keys or API tokens in the cave environment.
 - Localhost ports are reachable at `$CODING_CAVE_GATEWAY:<port>`. Each port must be enabled by the user with the `--port` argument.
 - You can test coding-cave from within a cave. The `cav` executable works normally, as long as you set the env var `CODING_CAVE_NESTED=1`.
+- `cav-host version` prints the version of the cave you are running in.
 
 
 ## Permissions

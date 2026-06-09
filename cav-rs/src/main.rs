@@ -12,7 +12,6 @@ mod daemon;
 mod gc;
 mod gpu;
 mod handler;
-mod host;
 mod init;
 mod proc_ns;
 mod project;
@@ -213,12 +212,6 @@ enum Cmd {
         #[command(subcommand)]
         cmd: EnvCmd,
     },
-    /// Host-side ops invoked by coding-cave-host.service. Not for manual use.
-    #[command(hide = true)]
-    Host {
-        #[command(subcommand)]
-        cmd: HostCmd,
-    },
     /// Print shell completion script
     Completion {
         #[arg(value_enum)]
@@ -274,17 +267,6 @@ enum EnvCmd {
     /// Show cave environment flake input versions
     Metadata,
 }
-
-#[derive(Subcommand)]
-enum HostCmd {
-    /// Bring up the host-side idmapped /nix/store mount
-    Setup,
-    /// Tear down the host-side mount (lazy unmount)
-    Teardown,
-    /// Watch agent overlays and auto-promote new packages into /nix/store
-    Watch,
-}
-
 
 fn main() {
     if let Err(e) = run() {
@@ -540,11 +522,6 @@ fn run() -> Result<()> {
             EnvCmd::Build { rebuild } => user_env::build(rebuild),
             EnvCmd::Update { input_name } => user_env::update(input_name.as_deref()),
             EnvCmd::Metadata => user_env::metadata(),
-        },
-        Cmd::Host { cmd } => match cmd {
-            HostCmd::Setup => host::setup(),
-            HostCmd::Teardown => host::teardown(),
-            HostCmd::Watch => host::watch(),
         },
         Cmd::Completion { shell } => completion::print_completion(shell),
         Cmd::CompleteCp { word } => {

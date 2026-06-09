@@ -1,7 +1,9 @@
-// `cav host setup` / `cav host teardown` / `cav host watch` — the imperative
-// body of modules/host.nix's systemd units. Lives in the cav binary so the
-// unit definitions are thin shims that call back into cav; logic stays in one
-// place (Rust) and updates ride the cav binary instead of unit-file rewrites.
+// cav-store: the host-side root daemon behind coding-cave-host.service.
+// Verbs: `cav-store setup | teardown | watch`. A standalone binary rather
+// than a `cav` subcommand, so the root systemd process links only this
+// daemon and not the user-facing CLI. The unit definitions stay thin shims
+// calling these verbs; logic lives in Rust and updates ride the binary
+// instead of unit-file rewrites.
 
 use anyhow::{bail, Context, Result};
 use rusqlite::Connection;
@@ -24,9 +26,25 @@ const IDMAP_OPTS: &str = "X-mount.idmap=u:0:1000:1 g:0:1000:1";
 const CAVE_USER_HOME: &str = "/home/cave-coder";
 const HOST_STORE: &str = "/nix/store";
 
-pub fn setup() -> Result<()> {
+fn main() {
+    if let Err(e) = run() {
+        eprintln!("error: {e:#}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<()> {
+    match std::env::args().nth(1).as_deref() {
+        Some("setup") => setup(),
+        Some("teardown") => teardown(),
+        Some("watch") => watch(),
+        other => bail!("usage: cav-store <setup|teardown|watch> (got {other:?})"),
+    }
+}
+
+fn setup() -> Result<()> {
     if !rustix::process::geteuid().is_root() {
-        bail!("cav host setup must be run as root");
+        bail!("cav-store setup must be run as root");
     }
     std::fs::create_dir_all(STATE_DIR).context("create /var/lib/coding-cave")?;
     if !Path::new(IDMAP_TARGET).exists() {
@@ -57,9 +75,9 @@ fn is_mount_point(path: &str) -> bool {
     data.lines().any(|l| l.split(' ').nth(4) == Some(path))
 }
 
-pub fn teardown() -> Result<()> {
+fn teardown() -> Result<()> {
     if !rustix::process::geteuid().is_root() {
-        bail!("cav host teardown must be run as root");
+        bail!("cav-store teardown must be run as root");
     }
     let status = Command::new("umount")
         .args(["--lazy", IDMAP_TARGET])
@@ -74,9 +92,9 @@ pub fn teardown() -> Result<()> {
 /// Watch each agent's nix DB; promote newly-installed paths into the
 /// host /nix/store so siblings inherit them via the overlay lower.
 /// Long-running; the ExecStart of coding-cave-host.service.
-pub fn watch() -> Result<()> {
+fn watch() -> Result<()> {
     if !test_mode() && !rustix::process::geteuid().is_root() {
-        bail!("cav host watch must be run as root");
+        bail!("cav-store watch must be run as root");
     }
     let overlay_base = overlay_base_from_env();
     std::fs::create_dir_all(&overlay_base).context("create nix-overlay base")?;
@@ -130,7 +148,7 @@ pub fn watch() -> Result<()> {
             if let Some(state) = w.active.get_mut(&wd) {
                 let id = format!("agent-{}", state.agent_id);
                 if let Err(e) = scan_and_promote(state) {
-                    eprintln!("cav host watch: {id} promotion: {e:#}");
+                    eprintln!("cav-store watch: {id} promotion: {e:#}");
                 }
             }
         }
@@ -183,14 +201,14 @@ impl Watcher {
                     Ok(wd) => {
                         if let Err(e) = scan_and_promote(&mut state) {
                             eprintln!(
-                                "cav host watch: agent-{agent_id} initial scan: {e:#}"
+                                "cav-store watch: agent-{agent_id} initial scan: {e:#}"
                             );
                         }
                         self.active.insert(wd, state);
                     }
                     Err(e) => {
                         eprintln!(
-                            "cav host watch: add_watch {}: {e}",
+                            "cav-store watch: add_watch {}: {e}",
                             state.db_dir.display()
                         );
                         self.tracked.remove(agent_id);
@@ -230,7 +248,7 @@ impl Watcher {
                 }
                 Err(e) => {
                     eprintln!(
-                        "cav host watch: add_watch {}: {e}",
+                        "cav-store watch: add_watch {}: {e}",
                         target.display()
                     );
                     self.tracked.remove(agent_id);

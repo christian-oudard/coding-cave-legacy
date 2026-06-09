@@ -1,6 +1,6 @@
 /// Integration test for the auto-promote watcher.
 ///
-/// Exercises `cav host watch` against a fake nix-overlay tree and store.
+/// Exercises `cav-store watch` against a fake nix-overlay tree and store.
 /// The watcher's inotify-driven scan/rename loop is what we want covered;
 /// the chown and `nix-store --load-db` invocations would need CAP_CHOWN
 /// and a real nix DB, so we short-circuit them via
@@ -15,7 +15,7 @@ use std::process::{Child, Command};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const CAV: &str = env!("CARGO_BIN_EXE_cav");
+const CAV_STORE: &str = env!("CARGO_BIN_EXE_cav-store");
 
 struct Watcher {
     child: Child,
@@ -61,15 +61,15 @@ impl Fixture {
     }
 
     fn watcher(&self) -> Watcher {
-        let child = Command::new(CAV)
-            .args(["host", "watch"])
+        let child = Command::new(CAV_STORE)
+            .args(["watch"])
             .env("CODING_CAVE_HOST_WATCH_HOME", &self.home)
             .env("CODING_CAVE_HOST_WATCH_STORE", &self.store)
             .env("CODING_CAVE_HOST_WATCH_TEST_MODE", "1")
             .env_remove("CODING_CAVE_VERSION")
             .env_remove("CODING_CAVE_AGENT_ID")
             .spawn()
-            .expect("spawn cav host watch");
+            .expect("spawn cav-store watch");
         // Give the watcher a moment to set up inotify before the first
         // simulated install. Without this the install can land between
         // discovery and add_watch and slip through until the next event.

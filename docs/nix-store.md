@@ -257,7 +257,7 @@ and descendants are unaffected.
 ## Promoting Packages to Host
 
 The `coding-cave-host.service` systemd unit (in `modules/host.nix`)
-runs `cav host watch` as root alongside the idmap setup. It maintains
+runs `cav-store watch` as root alongside the idmap setup. It maintains
 an inotify watch on every agent's `db/` directory; when the agent's
 nix DB is written, the watcher diffs `ValidPaths` against the host
 `/nix/store`, then for each new path:
