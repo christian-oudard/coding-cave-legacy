@@ -251,7 +251,11 @@ fn prepare() -> Result<(Option<String>, Vec<(String, String)>)> {
     let user_env = user_env_dir();
     std::fs::create_dir_all(&user_env)?;
 
+    // Canonicalize so a symlinked cave.nix adopts its target's context:
+    // sibling .nix files are taken from the directory cave.nix really
+    // lives in (e.g. a dotfiles repo), not from the symlink's directory.
     let cave_nix = cave_nix_path();
+    let cave_nix = cave_nix.canonicalize().unwrap_or(cave_nix);
     let cave_nix_dest = user_env.join("cave.nix");
 
     let (cave_nix_content, sibling_files, flake) = if cave_nix.exists() {
@@ -430,6 +434,39 @@ pub fn default_cave_nix() -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::compute_hash_pure;
+
+    // Mirrors prepare(): cave.nix is canonicalized first, so a symlinked
+    // cave.nix takes sibling .nix files from the directory it really
+    // lives in, not from the symlink's directory.
+    #[test]
+    fn symlinked_cave_nix_adopts_target_directory_siblings() {
+        let base = std::env::temp_dir().join(format!(
+            "cav-uenv-symlink-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        let repo = base.join("repo");
+        let confdir = base.join("config");
+        let user_env = base.join("user-env");
+        for d in [&repo, &confdir, &user_env] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(repo.join("cave.nix"), "{ }").unwrap();
+        std::fs::write(repo.join("extra.nix"), "x = 1;").unwrap();
+        std::fs::write(confdir.join("decoy.nix"), "y = 2;").unwrap();
+        let link = confdir.join("cave.nix");
+        std::os::unix::fs::symlink(repo.join("cave.nix"), &link).unwrap();
+
+        let canonical = link.canonicalize().unwrap();
+        let siblings = super::copy_sibling_nix_files(&canonical, &user_env).unwrap();
+        assert_eq!(
+            siblings,
+            vec![("extra.nix".to_string(), "x = 1;".to_string())]
+        );
+        assert!(user_env.join("extra.nix").exists());
+        assert!(!user_env.join("decoy.nix").exists());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
 
     #[derive(Clone)]
     struct Args {

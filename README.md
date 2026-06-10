@@ -64,6 +64,32 @@ $ cav push                     # send your edits back to the agent
 $ cav status                   # see unmerged agent commits
 ```
 
+## Cave configuration
+
+The cave environment is defined by `~/.config/coding-cave/cave.nix` plus
+any sibling `.nix` files next to it (`cav init` offers to create a
+default one). The config is re-read at every agent launch, so edits
+apply on the next `cav agent`, or immediately with `cav env build`.
+
+Three layouts work; pick one:
+
+- **Plain directory.** Keep `cave.nix` and friends as regular files in
+  `~/.config/coding-cave/`.
+- **Symlinked cave.nix.** Symlink `~/.config/coding-cave/cave.nix` at a
+  file in a repo (e.g. your dotfiles). cav resolves the symlink and
+  adopts its target's context: sibling `.nix` files are read from the
+  directory cave.nix really lives in, never from the symlink's
+  directory.
+- **Symlinked directory.** Symlink all of `~/.config/coding-cave` at a
+  directory in your repo.
+
+In every layout, the directory holding the real cave.nix is the single
+source of truth, sampled at launch time with no separate apply or
+deploy step. `path:` flake inputs (see below) are re-pinned live at
+launch the same way. One nix caveat: `path:` input URLs must be
+absolute and symlink-free — resolve them with `realpath` if a parent
+directory (like `~/code`) is a symlink.
+
 ## Updating Claude Code
 
 Each cave locks Claude Code to the latest [sadjow/claude-code-nix](https://github.com/sadjow/claude-code-nix) release on its first build. To pull a newer release:
