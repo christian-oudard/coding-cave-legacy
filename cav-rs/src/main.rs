@@ -681,11 +681,20 @@ fn require_init(base: &Path) -> Result<()> {
         }
     }
     let slug = config::project_slug(base);
-    if registry::project_path(&slug)?.is_none() {
-        if inside_cave() {
+    match registry::project_path(&slug)? {
+        // A moved checkout keeps its slug but leaves the registry pointing
+        // at the old path. Re-register at the current location so commands
+        // that resolve projects by slug (cav status <id>, cav agent
+        // --project) stop serving the dead path.
+        Some(p) if !Path::new(&p).is_dir() => {
+            registry::register_project(base)?;
+        }
+        Some(_) => {}
+        None if inside_cave() => {
             // Inside the cave the registry is isolated. Auto-register.
             registry::register_project(base)?;
-        } else {
+        }
+        None => {
             bail!(
                 "Shared repo exists but project '{slug}' is not registered.\n\
                  If this project was renamed from another directory, run:\n\

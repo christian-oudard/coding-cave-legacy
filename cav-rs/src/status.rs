@@ -111,7 +111,8 @@ fn show_project(base: &Path) -> Result<()> {
 /// current project first. `cav status <id>` lands here. An agent that
 /// guests on other projects gets one `=== slug ===` section per project,
 /// so its work shows under the right heading instead of collapsing into
-/// its home project alone.
+/// its home project alone. A project that can't be resolved or read
+/// reports its problem under its heading instead of being skipped.
 fn show_agent(base: &Path, aid: &str) -> Result<()> {
     let current = config::project_slug(base);
     let slugs = order_current_first(
@@ -123,33 +124,64 @@ fn show_agent(base: &Path, aid: &str) -> Result<()> {
         report_no_agent(base, Some(aid));
         return Ok(());
     }
-    let mut first = true;
-    for slug in &slugs {
-        let proj_base = match registry::project_path(slug)? {
-            Some(p) => PathBuf::from(p),
-            None => continue,
-        };
-        if !proj_base.is_dir() {
-            continue;
-        }
-        let (_, text) = capture_status_output(&proj_base, Some(aid))?;
-        if text.trim().is_empty() {
-            continue;
-        }
-        if !first {
+    for (i, slug) in slugs.iter().enumerate() {
+        if i > 0 {
             println!();
         }
-        first = false;
         println!("{}", style::bold_white(&format!("=== {slug} ===")));
-        print!("{text}");
-    }
-    if first {
-        println!("{}", style::bold_white(&format!("=== {current} ===")));
-        println!("No status for {}.", registry::display_name(base, aid));
-        return Ok(());
+        let status = agent_project_base(slug, &current, base).and_then(|proj_base| {
+            capture_status_output(&proj_base, Some(aid)).map_err(|e| e.to_string())
+        });
+        match status {
+            Ok((_, text)) if !text.trim().is_empty() => print!("{text}"),
+            Ok(_) => println!("No status for {}.", registry::display_name(base, aid)),
+            Err(problem) => println!("{}", style::red(&problem)),
+        }
     }
     print_gc_hint();
     Ok(())
+}
+
+/// Resolve one of an agent's project slugs to its base directory. The
+/// current project is wherever we're standing (the registry may lag a
+/// moved checkout); other slugs resolve through the registry, reporting
+/// a stale or absent registration as a printable problem.
+fn agent_project_base(
+    slug: &str,
+    current: &str,
+    base: &Path,
+) -> std::result::Result<PathBuf, String> {
+    if slug == current {
+        return Ok(base.to_path_buf());
+    }
+    let path = registry::project_path(slug)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("project '{slug}' is not registered. Run: cav init"))?;
+    match project_problem(slug, &path) {
+        Some(problem) => Err(problem),
+        None => Ok(PathBuf::from(path)),
+    }
+}
+
+/// Printable problem when a registered project's on-disk state is gone
+/// or incomplete. None means the project looks usable.
+fn project_problem(slug: &str, path: &str) -> Option<String> {
+    let base = Path::new(path);
+    if !base.is_dir() {
+        return Some(format!(
+            "registered at {path} but the directory is missing.\n\
+             Remove with: cav remove-project {slug}"
+        ));
+    }
+    let shared = config::shared_repo_path(base);
+    if !shared.exists() {
+        return Some(format!(
+            "registered at {path} but {} is missing.\n\
+             Restore with: cav init {path}",
+            shared.display()
+        ));
+    }
+    None
 }
 
 /// Order an agent's project slugs with the current project first, leaving
@@ -326,40 +358,24 @@ pub fn show_all(projects: Vec<(String, String)>) -> Result<()> {
     let mut problems: Vec<(String, String)> = vec![];
 
     for (slug, path) in &projects {
+        if let Some(problem) = project_problem(slug, path) {
+            problems.push((slug.clone(), problem));
+            continue;
+        }
         let base = PathBuf::from(path);
-        if !base.is_dir() {
-            problems.push((
-                slug.clone(),
-                format!(
-                    "registered at {path} but the directory is missing.\n\
-                     Remove with: cav remove-project {slug}"
-                ),
-            ));
-            continue;
-        }
-        let shared = config::shared_repo_path(&base);
-        if !shared.exists() {
-            problems.push((
-                slug.clone(),
-                format!(
-                    "registered at {path} but {} is missing.\n\
-                     Restore with: cav init {path}",
-                    shared.display()
-                ),
-            ));
-            continue;
-        }
         match capture_status_output(&base, None) {
             Ok((timestamp, text)) => entries.push((timestamp, slug.clone(), text)),
             Err(e) => problems.push((slug.clone(), e.to_string())),
         }
     }
 
-    // Print all collected output
-    let active: Vec<_> = entries.iter().filter(|(ts, _, _)| *ts > 0.0).collect();
+    // Print all collected output. A project is inactive only when it has
+    // nothing to show — a running agent with no commits yet still has a
+    // section, even though its last-activity timestamp is unknown (0.0).
+    let active: Vec<_> = entries.iter().filter(|(_, _, text)| !text.trim().is_empty()).collect();
     let inactive: Vec<_> = entries
         .iter()
-        .filter(|(ts, _, _)| *ts == 0.0)
+        .filter(|(_, _, text)| text.trim().is_empty())
         .map(|(_, s, _)| s.as_str())
         .collect();
 
@@ -823,6 +839,45 @@ mod tests {
         let guest_agents = collect_agent_infos(&base_guest, &by_agent, false).unwrap();
         assert_eq!(guest_agents.len(), 1);
         assert_eq!(guest_agents[0].dirty_worktrees, vec![guest_ws]);
+    }
+
+    #[test]
+    fn project_problem_flags_missing_dir_then_missing_shared_repo() {
+        let g = DataDirGuard::new("problem");
+        let base = g.path.join("proj");
+        let path = base.to_string_lossy().to_string();
+        let missing = project_problem("proj", &path).unwrap();
+        assert!(missing.contains("remove-project proj"), "got: {missing}");
+        fs::create_dir_all(&base).unwrap();
+        let uninit = project_problem("proj", &path).unwrap();
+        assert!(uninit.contains("cav init"), "got: {uninit}");
+        fs::create_dir_all(config::shared_repo_path(&base)).unwrap();
+        assert!(project_problem("proj", &path).is_none());
+    }
+
+    #[test]
+    fn agent_project_base_prefers_cwd_and_reports_stale_registrations() {
+        let g = DataDirGuard::new("agent-base");
+        let here = g.path.join("here");
+        fs::create_dir_all(&here).unwrap();
+
+        // The current project resolves to where we stand, even when the
+        // registry has no (or a stale) path for it.
+        assert_eq!(agent_project_base("here", "here", &here).unwrap(), here);
+
+        // A slug the registry has never seen reports itself instead of
+        // being silently skipped.
+        let err = agent_project_base("ghost", "here", &here).unwrap_err();
+        assert!(err.contains("not registered"), "got: {err}");
+
+        // A registration whose directory vanished (project moved on disk)
+        // reports the stale path.
+        let gone = g.path.join("gone");
+        fs::create_dir_all(&gone).unwrap();
+        registry::register_project(&gone).unwrap();
+        fs::remove_dir_all(&gone).unwrap();
+        let err = agent_project_base("gone", "here", &here).unwrap_err();
+        assert!(err.contains("directory is missing"), "got: {err}");
     }
 
     #[test]

@@ -33,7 +33,7 @@ Git hooks enforce that git commands run by agents are topologically correct. Age
 
 ## Projects
 
-Projects are registered with the coding-cave system with `cav init`. This creates the shared bare repo and adds the project to the project registry database table. Each project is assigned a unique slug based on its folder name.
+Projects are registered with the coding-cave system with `cav init`. This creates the shared bare repo and adds the project to the project registry database table. Each project is assigned a unique slug based on its folder name. A project directory moved on disk keeps working: running any cav command from the new location re-registers the slug there once the old registered path no longer exists.
 
 ## Agent IDs
 
@@ -119,7 +119,7 @@ Shows the current list of agents and unmerged commits. Two independent selectors
 - Project: name a project slug, or default to the project of the current directory. With `--all`, every registered project is shown.
 - Agent: name an agent ID, or default to the agent of the current dev branch when one is checked out. Leave it out to show all agents in the project.
 
-Naming an agent ID broadens the project selector: a single agent can reach more than one project (its home project plus any extra projects it was granted), and the status then shows that agent under each project it can reach, one section per project, with the project you are standing in shown first. Run from outside any of the agent's projects, the home project is shown first. The agent ID resolves from the registry regardless of the current working directory, and may name a project the agent only guests on. It fetches from the shared remote to get latest information, and queries the registry database. As a side effect, the status command performs lightweight maintenance: it marks agents whose process has died as stopped, archives stopped agents older than 24 hours, and drops shared dev branches whose tip already matches their base (already merged). The status command shows agent status of "running" or "stopped". The sort order is most recent first. Similar to `git status`, it shows whether the host base branch is behind or ahead of the cave remote.
+Naming an agent ID broadens the project selector: a single agent can reach more than one project (its home project plus any extra projects it was granted), and the status then shows that agent under each project it can reach, one section per project, with the project you are standing in shown first. Run from outside any of the agent's projects, the home project is shown first. A project that cannot be read (its registered directory is missing, or it was never initialized) still gets its section, showing the problem and how to repair it, so no project the agent can reach is silently omitted. The agent ID resolves from the registry regardless of the current working directory, and may name a project the agent only guests on. It fetches from the shared remote to get latest information, and queries the registry database. As a side effect, the status command performs lightweight maintenance: it marks agents whose process has died as stopped, archives stopped agents older than 24 hours, and drops shared dev branches whose tip already matches their base (already merged). The status command shows agent status of "running" or "stopped". The sort order is most recent first. Similar to `git status`, it shows whether the host base branch is behind or ahead of the cave remote.
 
 ### `cav remove-agent [--yes] [<n>]`
 
