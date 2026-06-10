@@ -25,14 +25,19 @@
   coding-cave.claude-code = {
     enable = lib.mkDefault true;
     extraSettings = {
-      model = "opus";
-      reasoning_effort = "high";
-      skipDangerousModePermissionPrompt = true;
-      sandbox.enabled = false;
-      statusLine = {
+      # Preference defaults: mkDefault so a user's cave.nix value wins
+      # instead of colliding (extraSettings merges per leaf, and two
+      # equal-priority definitions only merge when identical).
+      model = lib.mkDefault "opus";
+      reasoning_effort = lib.mkDefault "high";
+      statusLine = lib.mkDefault {
         type = "command";
         command = "~/.claude/statusline.sh";
       };
+      # Cave requirements stay at normal priority: overriding them
+      # should take a deliberate mkForce.
+      skipDangerousModePermissionPrompt = true;
+      sandbox.enabled = false;
       # Register the cave marketplace (directory source) and enable the
       # cave-messages channel plugin for inter-agent messaging. The
       # marketplace files are written to ~/.cave-marketplace by sandbox.rs
