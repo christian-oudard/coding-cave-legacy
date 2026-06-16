@@ -10,7 +10,6 @@ use std::path::{Path, PathBuf};
 
 use crate::config::persistent_home;
 use crate::registry;
-use crate::workspace::worktree_for;
 
 /// Emit completion candidates for a partial `cp` argument. Each candidate
 /// is the full word to insert (replacing what the user typed). Directory
@@ -87,9 +86,10 @@ fn complete_cave(word: &str, colon: usize) -> Vec<String> {
 
     // Emit the fully-qualified `<slug>@<aid>:` form so accepting a
     // candidate records which agent the cp targets. `~/` paths share a
-    // single persistent home across agents, so they stay bare `<slug>:`
-    // (matching `cp::qualify_spec`).
-    let qual_prefix = match resolved_aid.as_deref() {
+    // single persistent home, so resolution doesn't pin an agent; keep
+    // the one the user typed (`@31`) rather than dropping it, so tab
+    // completion never deletes part of what was already entered.
+    let qual_prefix = match resolved_aid.as_deref().or(agent_id.as_deref()) {
         Some(aid) => format!("{slug}@{aid}"),
         None => slug.clone(),
     };
@@ -220,15 +220,16 @@ fn current_project_slug(projects: &[(String, String)]) -> Option<String> {
     None
 }
 
-/// Agents for which a `cav cp <slug>@<id>:` would have somewhere to
-/// write. Filters out registered agents whose worktree was torn down
-/// (e.g. after `cav approve`); those would never produce a valid
-/// destination, so they shouldn't appear in completion.
+/// Running agents for `slug`. Completion only offers live agents: a
+/// paused agent's worktree is a valid cp destination, but restarting it
+/// first is easy, and listing every paused agent buries the live ones.
+/// `cav cp` itself still accepts an explicit paused agent id typed by
+/// hand.
 fn agents_in(slug: &str) -> Vec<String> {
     registry::all_agent_ids(Some(slug))
         .unwrap_or_default()
         .into_iter()
-        .filter(|aid| worktree_for(slug, aid).is_dir())
+        .filter(|aid| registry::is_agent_running(aid).unwrap_or(false))
         .collect()
 }
 

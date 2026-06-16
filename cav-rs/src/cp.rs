@@ -154,8 +154,9 @@ pub fn cp(srcs: Vec<String>, dest: String, recursive: bool, force: bool) -> Resu
 struct ResolvedCave {
     path: PathBuf,
     slug: String,
-    /// `Some` when the path pins to a specific agent (worktree or live cave).
-    /// `None` for `~` paths, which share a single persistent home across agents.
+    /// The agent the spec names. `~` paths share one persistent home, so
+    /// the id doesn't pin the target there, but it's retained for the
+    /// echoed spec when the user typed `@N`. `None` when no agent was given.
     agent_id: Option<String>,
 }
 
@@ -194,7 +195,10 @@ fn resolve_cave_path(spec: &str, is_dest: bool) -> Result<Option<ResolvedCave>> 
         let rel = if path == "~" { "" } else { &path[2..] };
         let result = normalize(&home, rel);
         check_in_dir(&result, &home, is_dest)?;
-        return Ok(Some(ResolvedCave { path: result, slug, agent_id: None }));
+        // The home is shared, so the agent id doesn't change the target,
+        // but keep whatever the user typed so the echoed spec matches
+        // their input instead of silently dropping `@N`.
+        return Ok(Some(ResolvedCave { path: result, slug, agent_id }));
     }
 
     if path.starts_with('/') {
@@ -220,7 +224,7 @@ fn resolve_cave_path(spec: &str, is_dest: bool) -> Result<Option<ResolvedCave>> 
 }
 
 /// Rewrite the prefix of a cave spec to the fully qualified `slug@agent_id:path`
-/// form (or `slug:path` when the path is not agent-specific, e.g. `~/...`).
+/// form (or `slug:path` when no agent was named).
 fn qualify_spec(spec: &str, resolved: Option<&ResolvedCave>) -> String {
     match resolved {
         Some(r) => {
@@ -857,6 +861,26 @@ mod tests {
             assert!(
                 err.to_string().contains("999"),
                 "error should name the missing id, got: {err}",
+            );
+        }
+
+        #[test]
+        fn tilde_path_keeps_typed_agent_id() {
+            // The home is shared, so `@N:~` resolves to the same dir for
+            // every agent, but the echoed spec must keep the `@N` the
+            // user typed instead of collapsing to a bare slug.
+            let g = DataDirGuard::new("cp-tilde-at-n");
+            let aid = register_agent_in(&g.path, "real-proj");
+            fs::create_dir_all(g.path.join("home")).unwrap();
+
+            let spec = format!("real-proj@{aid}:~/notes.txt");
+            let resolved = resolve_cave_path(&spec, true)
+                .unwrap()
+                .expect("~ path should resolve");
+            assert_eq!(resolved.agent_id.as_deref(), Some(aid.as_str()));
+            assert!(
+                qualify_spec(&spec, Some(&resolved)).contains(&format!("@{aid}:")),
+                "qualified spec must retain the typed agent id",
             );
         }
     }
