@@ -25,12 +25,15 @@
   coding-cave.claude-code = {
     enable = lib.mkDefault true;
     extraSettings = {
-      # Preference defaults: mkDefault so a user's cave.nix value wins
-      # instead of colliding (extraSettings merges per leaf, and two
-      # equal-priority definitions only merge when identical).
-      model = lib.mkDefault "opus";
-      reasoning_effort = lib.mkDefault "high";
-      statusLine = lib.mkDefault {
+      # Preference defaults: mkOptionDefault (the lowest priority) so any
+      # user cave.nix value wins instead of colliding. mkDefault is not
+      # enough: a user value at the same mkDefault priority ties rather
+      # than overriding, which fails the build with a conflicting-
+      # definition error. Dotfiles frameworks routinely wrap values in
+      # mkDefault, so the system default must sit strictly below it.
+      model = lib.mkOptionDefault "opus";
+      reasoning_effort = lib.mkOptionDefault "high";
+      statusLine = lib.mkOptionDefault {
         type = "command";
         command = "~/.claude/statusline.sh";
       };
