@@ -68,6 +68,22 @@ fn write_resolv_conf(dns_server: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Managed-settings file that puts the locally-generated cave-messages plugin
+/// on Claude Code's approved-channels allowlist. Without it, --channels rejects
+/// the plugin (not on the allowlist) and the development-channels flag prompts
+/// an interactive confirmation that would wedge the headless launch.
+fn write_managed_settings() -> Result<PathBuf> {
+    let path = temp_file("cave-managed-settings-")?;
+    let content = serde_json::json!({
+        "channelsEnabled": true,
+        "allowedChannelPlugins": [
+            {"marketplace": "cave", "plugin": "cave-messages"}
+        ],
+    });
+    std::fs::write(&path, serde_json::to_string(&content)?)?;
+    Ok(path)
+}
+
 /// Validate user-supplied --dev paths. `--dev-bind` would mount any host path
 /// onto any cave path, so we restrict to char/block device nodes under /dev.
 /// `metadata` follows symlinks, so stable names like
@@ -540,6 +556,13 @@ fn build_bwrap_argv(
             if let Some(aid) = env.get("CODING_CAVE_AGENT_ID") {
                 args.extend([
                     "--setenv".to_string(), "CAVE_AGENT_ID".to_string(), aid.clone(),
+                ]);
+            }
+            if let Ok(settings) = write_managed_settings() {
+                args.extend([
+                    "--ro-bind".to_string(),
+                    settings.to_string_lossy().to_string(),
+                    "/etc/claude-code/managed-settings.json".to_string(),
                 ]);
             }
         }
@@ -1347,6 +1370,9 @@ fn build_claude_cmd(
     // Channels only work in interactive mode. --print short-circuits
     // MCP server startup, so skip the flag there.
     if channels && prompt.is_none() {
+        // cave-messages@cave is allowlisted via the managed-settings.json the
+        // sandbox binds in, so the plain --channels path loads it with no
+        // confirmation prompt.
         cmd.extend(["--channels".to_string(), "plugin:cave-messages@cave".to_string()]);
     }
     if let Some(sid) = session_id {
