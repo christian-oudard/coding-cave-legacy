@@ -110,46 +110,60 @@ pub fn remove(slug: &str, yes: bool) -> Result<()> {
     Ok(())
 }
 
-/// `cav rename-project <new-path>`. Moves the project's source dir to
-/// the new path; if the new dir name slugs differently, cascades the
-/// slug change through the registry and renames worktree + session log
-/// dirs to match. Refuses if any agent in the project is running.
-pub fn rename(old_base: &Path, new_path: &Path, yes: bool) -> Result<()> {
-    let old_slug = config::project_slug(old_base);
-    let registered_path = registry::project_path(&old_slug)?
+/// `cav rename-project <old-slug> <new-path>`. The project directory has
+/// already been moved or renamed on disk; cav only reconciles its records.
+/// Resolves the new location (a bare name is taken as an in-place rename
+/// next to the old registered path), then cascades the slug change through
+/// the registry and renames cav's worktree + session log dirs to match.
+/// Never touches the source tree. Refuses if any agent is running or if the
+/// new slug collides with a different registered project.
+pub fn rename(old_slug: &str, new_arg: &str, yes: bool) -> Result<()> {
+    let registered_path = registry::project_path(old_slug)?
         .ok_or_else(|| anyhow::anyhow!("No project \"{}\" in registry.", old_slug))?;
-    let registered_pathbuf = PathBuf::from(&registered_path);
-    if registered_pathbuf != old_base {
-        bail!(
-            "Project path mismatch: cwd resolves to {} but registry has {}.\n\
-             Use cav from the project root.",
-            old_base.display(),
-            registered_pathbuf.display(),
-        );
-    }
+    let old_path = PathBuf::from(&registered_path);
 
-    let new_abs = if new_path.is_absolute() {
-        new_path.to_path_buf()
+    let new_abs = if new_arg.contains('/') || Path::new(new_arg).is_absolute() {
+        let p = PathBuf::from(new_arg);
+        if p.is_absolute() {
+            p
+        } else {
+            std::env::current_dir()?.join(p)
+        }
     } else {
-        std::env::current_dir()?.join(new_path)
+        // A bare name renames in place: same parent, new basename.
+        match old_path.parent() {
+            Some(parent) => parent.join(new_arg),
+            None => PathBuf::from(new_arg),
+        }
     };
 
-    if new_abs.exists() {
+    if !new_abs.is_dir() {
+        if old_path.is_dir() {
+            bail!(
+                "Directory not moved yet. Move it on disk first, then rerun:\n\
+                 \x20 mv {} {}\n\
+                 \x20 cav rename-project {} {}",
+                style::dim(&old_path.display().to_string()),
+                style::dim(&new_abs.display().to_string()),
+                old_slug,
+                new_arg,
+            );
+        }
         bail!(
-            "Destination already exists: {}",
+            "Project directory not found at {}.\n\
+             Neither the old nor the new path exists on disk.",
             style::yellow(&new_abs.display().to_string()),
         );
     }
-    if let Some(parent) = new_abs.parent() {
-        if !parent.is_dir() {
-            bail!(
-                "Destination parent does not exist: {}",
-                style::yellow(&parent.display().to_string()),
-            );
-        }
+    let new_abs = new_abs.canonicalize()?;
+    if !config::cav_dir(&new_abs).is_dir() {
+        bail!(
+            "{} has no .coding-cave/ metadata; it is not the moved project.",
+            style::yellow(&new_abs.display().to_string()),
+        );
     }
 
-    let agent_ids = registry::all_agent_ids(Some(&old_slug))?;
+    let agent_ids = registry::all_agent_ids(Some(old_slug))?;
     let running: Vec<String> = agent_ids
         .iter()
         .filter(|a| registry::is_agent_running(a).unwrap_or(false))
@@ -158,7 +172,7 @@ pub fn rename(old_base: &Path, new_path: &Path, yes: bool) -> Result<()> {
     if !running.is_empty() {
         bail!(
             "Project \"{}\" has running agents: {}\nStop them first.",
-            style::blue(&old_slug),
+            style::blue(old_slug),
             running
                 .iter()
                 .map(|a| style::bold(a))
@@ -168,103 +182,148 @@ pub fn rename(old_base: &Path, new_path: &Path, yes: bool) -> Result<()> {
     }
 
     let new_slug = config::project_slug(&new_abs);
-    print_rename_summary(&old_slug, old_base, &new_slug, &new_abs, &agent_ids);
+    // If the new slug is already registered to this same directory (e.g. cav
+    // init was run in the moved dir), fold old_slug's history into it rather
+    // than renaming the row: its agents, worktrees, and logs join whatever is
+    // already there. A different path is a genuine collision.
+    let mut fold = false;
+    let mut dup_agents = 0;
+    if new_slug != old_slug {
+        if let Some(p) = registry::project_path(&new_slug)? {
+            let same_dir = PathBuf::from(&p).canonicalize().ok().as_deref()
+                == Some(new_abs.as_path());
+            if !same_dir {
+                bail!(
+                    "Slug \"{}\" is already registered to {}.\n\
+                     Pick a different directory name.",
+                    style::blue(&new_slug),
+                    style::dim(&p),
+                );
+            }
+            fold = true;
+            dup_agents = registry::all_agent_ids(Some(&new_slug))?.len();
+        }
+    }
 
-    if !yes {
-        print!("Rename? [y/N] ");
-        io::stdout().flush()?;
-        let mut answer = String::new();
-        io::stdin().read_line(&mut answer).unwrap_or(0);
-        let answer = answer.trim().to_lowercase();
-        if answer != "y" && answer != "yes" {
-            bail!("Aborted.");
+    // A plain rename (destination not registered) is frictionless. Merging or
+    // adopting an already-registered destination asks first, unless -y given.
+    if fold {
+        print_merge_summary(old_slug, &new_slug, &new_abs, dup_agents, &agent_ids);
+        if !yes {
+            print!("Proceed? [y/N] ");
+            io::stdout().flush()?;
+            let mut answer = String::new();
+            io::stdin().read_line(&mut answer).unwrap_or(0);
+            let answer = answer.trim().to_lowercase();
+            if answer != "y" && answer != "yes" {
+                bail!("Aborted.");
+            }
         }
     }
 
     // Finish any pending display-id → uuid worktree migration before we
-    // move the tree, otherwise legacy display-id-keyed dirs would survive
-    // the rename in their old location.
+    // rename, otherwise legacy display-id-keyed dirs would survive the
+    // rename in their old location.
     workspace::settle_uuid_keying(&config::persistent_home());
-
-    // Source dir first. If this fails (cross-fs etc.) we bail before
-    // touching anything else.
-    std::fs::rename(old_base, &new_abs).map_err(|e| {
-        anyhow::anyhow!(
-            "Failed to move {} → {}: {e}",
-            old_base.display(),
-            new_abs.display()
-        )
-    })?;
 
     if new_slug != old_slug {
         let data = config::data_dir();
-        let worktrees_old = data.join("worktrees").join(&old_slug);
-        let worktrees_new = data.join("worktrees").join(&new_slug);
-        if worktrees_old.exists() && !worktrees_new.exists() {
-            std::fs::rename(&worktrees_old, &worktrees_new).map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to move worktrees: {} → {}: {e}",
-                    worktrees_old.display(),
-                    worktrees_new.display()
-                )
-            })?;
-        }
-        let logs_old = config::claude_project_dir(&old_slug, None);
-        let logs_new = config::claude_project_dir(&new_slug, None);
-        if logs_old.exists() && !logs_new.exists() {
-            let _ = std::fs::rename(&logs_old, &logs_new);
-        }
+        merge_dir(
+            &data.join("worktrees").join(old_slug),
+            &data.join("worktrees").join(&new_slug),
+        )
+        .map_err(|e| anyhow::anyhow!("Failed to move worktrees: {e}"))?;
+        let _ = merge_dir(
+            &config::claude_project_dir(old_slug, None),
+            &config::claude_project_dir(&new_slug, None),
+        );
     }
 
-    registry::rename_project(&old_slug, &new_slug, &new_abs)?;
-
-    println!(
-        "Renamed project: {} → {}{}",
-        style::blue(&old_slug),
-        style::blue(&new_slug),
-        if new_slug == old_slug {
-            format!(" {}", style::dim("(slug unchanged, source moved only)"))
-        } else {
-            String::new()
-        },
-    );
+    if fold {
+        registry::merge_project(old_slug, &new_slug, &new_abs)?;
+        let total = agent_ids.len() + dup_agents;
+        println!(
+            "Merged {} into {} ({} {} now under {}).",
+            style::blue(old_slug),
+            style::blue(&new_slug),
+            style::bold(&total.to_string()),
+            if total == 1 { "agent" } else { "agents" },
+            style::blue(&new_slug),
+        );
+    } else {
+        registry::rename_project(old_slug, &new_slug, &new_abs)?;
+        println!(
+            "Renamed project: {} → {}{}",
+            style::blue(old_slug),
+            style::blue(&new_slug),
+            if new_slug == old_slug {
+                format!(" {}", style::dim("(slug unchanged, path updated only)"))
+            } else {
+                String::new()
+            },
+        );
+    }
     Ok(())
 }
 
-fn print_rename_summary(
+/// Summary shown before a merge/adopt into an already-registered destination.
+/// Only reached when the new slug differs from the old and already exists.
+fn print_merge_summary(
     old_slug: &str,
-    old_base: &Path,
     new_slug: &str,
     new_path: &Path,
+    dup_agents: usize,
     agent_ids: &[String],
 ) {
-    println!(
-        "Renaming project \"{}\":",
-        style::blue(old_slug),
-    );
-    println!(
-        "  - Move source: {} → {}",
-        style::dim(&old_base.display().to_string()),
-        style::dim(&new_path.display().to_string()),
-    );
-    if new_slug != old_slug {
+    if dup_agents == 0 {
         println!(
-            "  - Slug: {} → {}",
-            style::blue(old_slug),
+            "Adopting the empty \"{}\" project at {}:",
             style::blue(new_slug),
-        );
-        let agent_word = if agent_ids.len() == 1 { "agent" } else { "agents" };
-        println!(
-            "  - Update {} {} and rename worktree/session-log dirs to match",
-            style::bold(&agent_ids.len().to_string()),
-            agent_word,
+            style::dim(&new_path.display().to_string()),
         );
     } else {
         println!(
-            "  - Slug unchanged ({}), no registry cascade needed",
+            "Merging \"{}\" into \"{}\" at {}:",
             style::blue(old_slug),
+            style::blue(new_slug),
+            style::dim(&new_path.display().to_string()),
+        );
+        println!(
+            "  - {} already has {} {} here",
+            style::blue(new_slug),
+            style::bold(&dup_agents.to_string()),
+            if dup_agents == 1 { "agent" } else { "agents" },
         );
     }
+    let agent_word = if agent_ids.len() == 1 { "agent" } else { "agents" };
+    println!(
+        "  - Move {} {} (worktrees + session logs) from {} into {}",
+        style::bold(&agent_ids.len().to_string()),
+        agent_word,
+        style::blue(old_slug),
+        style::blue(new_slug),
+    );
+}
+
+/// Move `old` into `new`. If `new` does not exist, renames wholesale; if it
+/// does, moves each child not already present (worktree and session dirs are
+/// uuid-keyed, so they don't collide), then drops the emptied `old`.
+fn merge_dir(old: &Path, new: &Path) -> std::io::Result<()> {
+    if !old.exists() {
+        return Ok(());
+    }
+    if !new.exists() {
+        return std::fs::rename(old, new);
+    }
+    for entry in std::fs::read_dir(old)? {
+        let entry = entry?;
+        let dest = new.join(entry.file_name());
+        if !dest.exists() {
+            std::fs::rename(entry.path(), &dest)?;
+        }
+    }
+    let _ = std::fs::remove_dir(old);
+    Ok(())
 }
 
 fn partition_agents(slug: &str, agent_ids: &[String]) -> (Vec<String>, Vec<String>) {

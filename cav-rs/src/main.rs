@@ -173,10 +173,14 @@ enum Cmd {
         #[arg(short = 'y', long = "yes")]
         yes: bool,
     },
-    /// Move the current project's source dir; cascades slug change
-    /// through registry, worktrees, and session log dirs.
+    /// Reconcile cav's records after a project directory was moved or
+    /// renamed on disk. Updates the registry and renames cav's worktree
+    /// and session log dirs to match the new slug. Never touches the
+    /// source tree. <new-path> is where the directory now lives; a bare
+    /// name is taken as an in-place rename next to the old location.
     #[command(name = "rename-project")]
     RenameProject {
+        old_slug: String,
         new_path: String,
         /// Skip confirmation
         #[arg(short = 'y', long = "yes")]
@@ -469,10 +473,8 @@ fn run() -> Result<()> {
             gc::run(dur, dry_run, yes)
         }
         Cmd::RemoveProject { slug, yes } => project::remove(&slug, yes),
-        Cmd::RenameProject { new_path, yes } => {
-            let base = find_repo_root()?;
-            require_init(&base)?;
-            project::rename(&base, &PathBuf::from(new_path), yes)
+        Cmd::RenameProject { old_slug, new_path, yes } => {
+            project::rename(&old_slug, &new_path, yes)
         }
         Cmd::Review { agent_id } => {
             let base = find_repo_root()?;

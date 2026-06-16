@@ -1626,94 +1626,6 @@ fn remove_project_refuses_when_agent_running() {
 }
 
 #[test]
-fn rename_project_moves_source_and_cascades_slug() {
-    let p = Project::new("rp-rename");
-    let old_slug = p.slug();
-    p.register_agent("1");
-    let old_ws = p.worktree_dir("1");
-    fs::create_dir_all(&old_ws).unwrap();
-    fs::write(old_ws.join("MARKER"), "x\n").unwrap();
-    let uuid = p
-        .agent_uuid("1")
-        .expect("registered agent should have uuid");
-
-    let new_path = p.data_dir.join("renamed-target");
-    assert!(!new_path.exists());
-
-    let out = Command::new(CAV)
-        .args(["rename-project", new_path.to_str().unwrap(), "--yes"])
-        .current_dir(&p.dir)
-        .env("CODING_CAVE_DATA_DIR", &p.data_dir)
-        .env_remove("CODING_CAVE_VERSION")
-        .env_remove("CODING_CAVE_AGENT_ID")
-        .output()
-        .expect("cav");
-    assert_eq!(
-        out.status.code(),
-        Some(0),
-        "rename failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-
-    assert!(!p.dir.exists(), "old source dir should be gone");
-    assert!(new_path.is_dir(), "new source dir should exist");
-    assert!(new_path.join("README.md").is_file(), "source contents preserved");
-
-    let new_slug = new_path
-        .file_name()
-        .unwrap()
-        .to_string_lossy()
-        .to_lowercase()
-        .replace(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-', "-");
-    assert_ne!(old_slug, new_slug);
-
-    // Old worktree path gone, new worktree path holds the marker.
-    let new_ws = p
-        .data_dir
-        .join("worktrees")
-        .join(&new_slug)
-        .join(&uuid);
-    assert!(!old_ws.exists(), "old worktree dir should be moved");
-    assert!(new_ws.is_dir(), "new worktree dir should hold the moved content");
-    assert!(new_ws.join("MARKER").is_file());
-
-    // Registry agent.project field follows the slug.
-    let db_path = p.data_dir.join("coding-cave.db");
-    let conn = rusqlite::Connection::open(&db_path).unwrap();
-    let project: String = conn
-        .query_row(
-            "SELECT project FROM agents WHERE agent_id = ?1",
-            rusqlite::params!["1"],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(project, new_slug);
-}
-
-#[test]
-fn rename_project_refuses_when_destination_exists() {
-    let p = Project::new("rp-rename-blocked");
-    let existing = p.data_dir.join("already-here");
-    fs::create_dir_all(&existing).unwrap();
-
-    let out = Command::new(CAV)
-        .args(["rename-project", existing.to_str().unwrap(), "--yes"])
-        .current_dir(&p.dir)
-        .env("CODING_CAVE_DATA_DIR", &p.data_dir)
-        .env_remove("CODING_CAVE_VERSION")
-        .env_remove("CODING_CAVE_AGENT_ID")
-        .output()
-        .expect("cav");
-    assert_ne!(out.status.code(), Some(0));
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        err.contains("already exists") || err.contains("exists"),
-        "error should mention destination exists, got: {err}"
-    );
-    assert!(p.dir.is_dir(), "source must not be moved on refusal");
-}
-
-#[test]
 fn rename_project_refuses_when_agent_running() {
     let p = Project::new("rp-rename-running");
     let slug = p.slug();
@@ -1729,18 +1641,532 @@ fn rename_project_refuses_when_agent_running() {
     .unwrap();
     drop(conn);
 
-    let new_path = p.data_dir.join("dest");
+    // Directory already moved; rename-project should still refuse because
+    // an agent is running, and leave the registry untouched.
+    let new_path = p
+        .dir
+        .parent()
+        .unwrap()
+        .join(format!("running-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&new_path);
+    fs::rename(&p.dir, &new_path).unwrap();
+
     let out = Command::new(CAV)
-        .args(["rename-project", new_path.to_str().unwrap(), "--yes"])
-        .current_dir(&p.dir)
+        .args([
+            "rename-project",
+            &slug,
+            new_path.to_str().unwrap(),
+            "--yes",
+        ])
+        .current_dir(&new_path)
         .env("CODING_CAVE_DATA_DIR", &p.data_dir)
         .env_remove("CODING_CAVE_VERSION")
         .env_remove("CODING_CAVE_AGENT_ID")
         .output()
         .expect("cav");
     assert_ne!(out.status.code(), Some(0));
-    assert!(p.dir.is_dir(), "source must not be moved on refusal");
+
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let project: String = conn
+        .query_row(
+            "SELECT project FROM agents WHERE agent_id = '1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(project, slug, "registry must be untouched on refusal");
+    let _ = fs::remove_dir_all(&new_path);
+}
+
+#[test]
+fn rename_project_after_manual_move_cascades_slug() {
+    let p = Project::new("rp-rename-moved");
+    let old_slug = p.slug();
+    p.register_agent("1");
+    let old_ws = p.worktree_dir("1");
+    fs::create_dir_all(&old_ws).unwrap();
+    fs::write(old_ws.join("MARKER"), "x\n").unwrap();
+    let uuid = p
+        .agent_uuid("1")
+        .expect("registered agent should have uuid");
+
+    // User moves the source dir outside cav (a plain `mv`); .coding-cave
+    // travels with it. The registry now points at a missing old path.
+    let new_path = p
+        .dir
+        .parent()
+        .unwrap()
+        .join(format!("moved-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&new_path);
+    fs::rename(&p.dir, &new_path).unwrap();
+
+    let out = Command::new(CAV)
+        .args([
+            "rename-project",
+            &old_slug,
+            new_path.to_str().unwrap(),
+            "--yes",
+        ])
+        .current_dir(&new_path)
+        .env("CODING_CAVE_DATA_DIR", &p.data_dir)
+        .env_remove("CODING_CAVE_VERSION")
+        .env_remove("CODING_CAVE_AGENT_ID")
+        .output()
+        .expect("cav");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "rename failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let new_slug = new_path
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_lowercase()
+        .replace(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-', "-");
+    assert_ne!(old_slug, new_slug);
+
+    // Worktree dir follows the slug; agent history (the MARKER) survives.
+    let new_ws = p.data_dir.join("worktrees").join(&new_slug).join(&uuid);
+    assert!(!old_ws.exists(), "old worktree dir should be moved");
+    assert!(new_ws.join("MARKER").is_file(), "worktree content preserved");
+
+    let db_path = p.data_dir.join("coding-cave.db");
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let project: String = conn
+        .query_row(
+            "SELECT project FROM agents WHERE agent_id = ?1",
+            rusqlite::params!["1"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(project, new_slug);
+    let registered: String = conn
+        .query_row(
+            "SELECT path FROM projects WHERE slug = ?1",
+            rusqlite::params![new_slug],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(registered, new_path.canonicalize().unwrap().to_str().unwrap());
+
+    let _ = fs::remove_dir_all(&new_path);
+}
+
+#[test]
+fn rename_project_reminds_when_not_moved_yet() {
+    let p = Project::new("rp-rename-not-moved");
+    let old_slug = p.slug();
+
+    // Directory still at the old path, target doesn't exist yet: cav should
+    // remind the user to move it first, and change nothing.
+    let new_path = p
+        .dir
+        .parent()
+        .unwrap()
+        .join(format!("not-moved-{}", std::process::id()));
     assert!(!new_path.exists());
+
+    let out = Command::new(CAV)
+        .args([
+            "rename-project",
+            &old_slug,
+            new_path.to_str().unwrap(),
+            "--yes",
+        ])
+        .current_dir(&p.data_dir)
+        .env("CODING_CAVE_DATA_DIR", &p.data_dir)
+        .env_remove("CODING_CAVE_VERSION")
+        .env_remove("CODING_CAVE_AGENT_ID")
+        .output()
+        .expect("cav");
+    assert_ne!(out.status.code(), Some(0));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("not moved yet"),
+        "error should remind the user to move the dir, got: {err}"
+    );
+    assert!(p.dir.is_dir(), "source must be untouched");
+    assert!(!new_path.exists());
+}
+
+#[test]
+fn rename_project_errors_when_neither_path_exists() {
+    let p = Project::new("rp-rename-neither");
+    let old_slug = p.slug();
+
+    // Old dir gone, new dir never created: the names match nothing on disk.
+    let new_path = p
+        .dir
+        .parent()
+        .unwrap()
+        .join(format!("ghost-{}", std::process::id()));
+    fs::remove_dir_all(&p.dir).unwrap();
+
+    let out = Command::new(CAV)
+        .args([
+            "rename-project",
+            &old_slug,
+            new_path.to_str().unwrap(),
+            "--yes",
+        ])
+        .current_dir(&p.data_dir)
+        .env("CODING_CAVE_DATA_DIR", &p.data_dir)
+        .env_remove("CODING_CAVE_VERSION")
+        .env_remove("CODING_CAVE_AGENT_ID")
+        .output()
+        .expect("cav");
+    assert_ne!(out.status.code(), Some(0));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("not found") || err.contains("Neither"),
+        "error should report no matching directory, got: {err}"
+    );
+}
+
+#[test]
+fn rename_project_refuses_slug_collision() {
+    let p = Project::new("rp-rename-collide");
+    let old_slug = p.slug();
+
+    // A different project already owns the target slug.
+    let other = p.data_dir.join("other-proj");
+    fs::create_dir_all(&other).unwrap();
+    let db_path = p.data_dir.join("coding-cave.db");
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    conn.execute(
+        "INSERT INTO projects (slug, path) VALUES ('taken', ?1)",
+        rusqlite::params![other.to_str().unwrap()],
+    )
+    .unwrap();
+    drop(conn);
+
+    // Move our project to a dir whose name slugs to the taken slug.
+    let new_path = p.dir.parent().unwrap().join("taken");
+    let _ = fs::remove_dir_all(&new_path);
+    fs::rename(&p.dir, &new_path).unwrap();
+
+    let out = Command::new(CAV)
+        .args([
+            "rename-project",
+            &old_slug,
+            new_path.to_str().unwrap(),
+            "--yes",
+        ])
+        .current_dir(&new_path)
+        .env("CODING_CAVE_DATA_DIR", &p.data_dir)
+        .env_remove("CODING_CAVE_VERSION")
+        .env_remove("CODING_CAVE_AGENT_ID")
+        .output()
+        .expect("cav");
+    assert_ne!(out.status.code(), Some(0));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("already registered"),
+        "error should report the slug collision, got: {err}"
+    );
+    let _ = fs::remove_dir_all(&new_path);
+    let _ = fs::remove_dir_all(&other);
+}
+
+#[test]
+fn rename_project_adopts_empty_duplicate_from_cav_init() {
+    let p = Project::new("rp-rename-adopt");
+    let old_slug = p.slug();
+    p.register_agent("1");
+    let old_ws = p.worktree_dir("1");
+    fs::create_dir_all(&old_ws).unwrap();
+    fs::write(old_ws.join("MARKER"), "x\n").unwrap();
+    let uuid = p
+        .agent_uuid("1")
+        .expect("registered agent should have uuid");
+
+    // User moved the dir, then ran cav/cav init in it, which auto-registered
+    // an empty duplicate project pointing at the same directory.
+    let new_path = p
+        .dir
+        .parent()
+        .unwrap()
+        .join(format!("adopt-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&new_path);
+    fs::rename(&p.dir, &new_path).unwrap();
+    let new_slug = new_path
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_lowercase()
+        .replace(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-', "-");
+    let db_path = p.data_dir.join("coding-cave.db");
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    conn.execute(
+        "INSERT INTO projects (slug, path) VALUES (?1, ?2)",
+        rusqlite::params![new_slug, new_path.canonicalize().unwrap().to_str().unwrap()],
+    )
+    .unwrap();
+    drop(conn);
+
+    let out = Command::new(CAV)
+        .args([
+            "rename-project",
+            &old_slug,
+            new_path.to_str().unwrap(),
+            "--yes",
+        ])
+        .current_dir(&new_path)
+        .env("CODING_CAVE_DATA_DIR", &p.data_dir)
+        .env_remove("CODING_CAVE_VERSION")
+        .env_remove("CODING_CAVE_AGENT_ID")
+        .output()
+        .expect("cav");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "adopt failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // History migrated onto the adopted slug.
+    let new_ws = p.data_dir.join("worktrees").join(&new_slug).join(&uuid);
+    assert!(new_ws.join("MARKER").is_file(), "worktree content preserved");
+
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let project: String = conn
+        .query_row(
+            "SELECT project FROM agents WHERE agent_id = '1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(project, new_slug, "agent should follow the adopted slug");
+    let stale: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM projects WHERE slug = ?1",
+            rusqlite::params![old_slug],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stale, 0, "old slug row should be gone");
+    let dup: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM projects WHERE slug = ?1",
+            rusqlite::params![new_slug],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(dup, 1, "exactly one project row under the new slug");
+    let _ = fs::remove_dir_all(&new_path);
+}
+
+#[test]
+fn rename_project_merges_into_populated_destination() {
+    let p = Project::new("rp-rename-merge");
+    let old_slug = p.slug();
+    // Old project: one agent with history.
+    p.register_agent("1");
+    let old_ws = p.worktree_dir("1");
+    fs::create_dir_all(&old_ws).unwrap();
+    fs::write(old_ws.join("MARKER"), "old\n").unwrap();
+    let old_uuid = p.agent_uuid("1").expect("agent 1 should have uuid");
+
+    // The dir was moved and reinitialized as `diktat`, where two new agents
+    // have since done work.
+    let new_path = p
+        .dir
+        .parent()
+        .unwrap()
+        .join(format!("merge-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&new_path);
+    fs::rename(&p.dir, &new_path).unwrap();
+    let new_slug = new_path
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_lowercase()
+        .replace(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-', "-");
+    let canon = new_path.canonicalize().unwrap();
+
+    let db_path = p.data_dir.join("coding-cave.db");
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    conn.execute(
+        "INSERT INTO projects (slug, path) VALUES (?1, ?2)",
+        rusqlite::params![new_slug, canon.to_str().unwrap()],
+    )
+    .unwrap();
+    let mut new_uuids = Vec::new();
+    for aid in ["2", "3"] {
+        let u = uuid::Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO agents (agent_id, uuid, project, started_at, exited_at) \
+             VALUES (?1, ?2, ?3, 0, 1)",
+            rusqlite::params![aid, u, new_slug],
+        )
+        .unwrap();
+        let ws = p.data_dir.join("worktrees").join(&new_slug).join(&u);
+        fs::create_dir_all(&ws).unwrap();
+        fs::write(ws.join("MARKER"), format!("new-{aid}\n")).unwrap();
+        new_uuids.push(u);
+    }
+    drop(conn);
+
+    let out = Command::new(CAV)
+        .args([
+            "rename-project",
+            &old_slug,
+            new_path.to_str().unwrap(),
+            "--yes",
+        ])
+        .current_dir(&new_path)
+        .env("CODING_CAVE_DATA_DIR", &p.data_dir)
+        .env_remove("CODING_CAVE_VERSION")
+        .env_remove("CODING_CAVE_AGENT_ID")
+        .output()
+        .expect("cav");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "merge failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // All three agents now live under the new slug.
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM agents WHERE project = ?1",
+            rusqlite::params![new_slug],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 3, "old agent should join the two existing ones");
+    let stale: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM projects WHERE slug = ?1",
+            rusqlite::params![old_slug],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stale, 0, "old slug row should be gone");
+
+    // Every agent's worktree is preserved under the merged slug.
+    let base = p.data_dir.join("worktrees").join(&new_slug);
+    assert!(base.join(&old_uuid).join("MARKER").is_file(), "old history kept");
+    for u in &new_uuids {
+        assert!(base.join(u).join("MARKER").is_file(), "new history kept");
+    }
+    let _ = fs::remove_dir_all(&new_path);
+}
+
+#[test]
+fn rename_project_plain_needs_no_confirmation() {
+    let p = Project::new("rp-rename-nofriction");
+    let old_slug = p.slug();
+    p.register_agent("1");
+
+    let new_path = p
+        .dir
+        .parent()
+        .unwrap()
+        .join(format!("nofriction-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&new_path);
+    fs::rename(&p.dir, &new_path).unwrap();
+    let new_slug = new_path
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_lowercase()
+        .replace(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-', "-");
+
+    // No --yes and no stdin: a plain rename must still go through.
+    let out = Command::new(CAV)
+        .args(["rename-project", &old_slug, new_path.to_str().unwrap()])
+        .current_dir(&new_path)
+        .env("CODING_CAVE_DATA_DIR", &p.data_dir)
+        .env_remove("CODING_CAVE_VERSION")
+        .env_remove("CODING_CAVE_AGENT_ID")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("cav");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "plain rename should not prompt: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let db_path = p.data_dir.join("coding-cave.db");
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let project: String = conn
+        .query_row(
+            "SELECT project FROM agents WHERE agent_id = '1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(project, new_slug);
+    let _ = fs::remove_dir_all(&new_path);
+}
+
+#[test]
+fn rename_project_merge_requires_confirmation() {
+    let p = Project::new("rp-rename-merge-confirm");
+    let old_slug = p.slug();
+    p.register_agent("1");
+
+    let new_path = p
+        .dir
+        .parent()
+        .unwrap()
+        .join(format!("mergeconfirm-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&new_path);
+    fs::rename(&p.dir, &new_path).unwrap();
+    let new_slug = new_path
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_lowercase()
+        .replace(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-', "-");
+    let canon = new_path.canonicalize().unwrap();
+
+    let db_path = p.data_dir.join("coding-cave.db");
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    conn.execute(
+        "INSERT INTO projects (slug, path) VALUES (?1, ?2)",
+        rusqlite::params![new_slug, canon.to_str().unwrap()],
+    )
+    .unwrap();
+    let u = uuid::Uuid::new_v4().to_string();
+    conn.execute(
+        "INSERT INTO agents (agent_id, uuid, project, started_at, exited_at) \
+         VALUES ('2', ?1, ?2, 0, 1)",
+        rusqlite::params![u, new_slug],
+    )
+    .unwrap();
+    drop(conn);
+
+    // No --yes, empty stdin: the merge must be declined, leaving records intact.
+    let out = Command::new(CAV)
+        .args(["rename-project", &old_slug, new_path.to_str().unwrap()])
+        .current_dir(&new_path)
+        .env("CODING_CAVE_DATA_DIR", &p.data_dir)
+        .env_remove("CODING_CAVE_VERSION")
+        .env_remove("CODING_CAVE_AGENT_ID")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("cav");
+    assert_ne!(out.status.code(), Some(0), "merge without -y should abort");
+
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let project: String = conn
+        .query_row(
+            "SELECT project FROM agents WHERE agent_id = '1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(project, old_slug, "registry must be untouched when declined");
+    let _ = fs::remove_dir_all(&new_path);
 }
 
 #[test]

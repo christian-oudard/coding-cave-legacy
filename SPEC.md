@@ -132,6 +132,18 @@ Removes a paused agent by agent ID. Deletes its session from the database, delet
 
 Unregisters a project from the coding-cave registry. Refuses if the project has running agents. Does not delete the project directory, worktrees, or the shared bare repo — it only removes the registry entry. Use this to clean up after a project directory has been moved or deleted.
 
+### `cav rename-project <old-slug> <new-path>`
+
+Reconciles cav's records after a project directory has been moved or renamed on disk. The project slug is derived from the directory name, so renaming the directory changes the slug; this command cascades that change through the registry and renames the agents' worktree directories and session log directories to match, preserving agent history. It never moves or modifies the source tree.
+
+`<new-path>` is where the directory now lives. A bare name is taken as an in-place rename next to the old location, so `cav rename-project whisper_dictation diktat` reconciles a directory renamed from `whisper_dictation` to `diktat` in the same parent.
+
+If the directory has not been moved yet (the old path still exists), cav reminds you to move it first and changes nothing. If neither the old nor the new path exists on disk, it errors out. Refuses if the project has running agents.
+
+When the new slug is not yet registered, the rename happens without prompting.
+
+If the new slug is already registered to a different directory, it errors as a genuine collision. If it is already registered to the same directory (for example because `cav init` was run, and agents were started, in the directory after moving it), the old slug's agents, worktrees, and session logs are merged into that existing project, keeping both histories under the new slug. Agent IDs and worktree identifiers are globally unique, so nothing is overwritten. Because a merge combines two projects, it shows a summary and asks for confirmation first; `-y`/`--yes` skips the prompt.
+
 ### `cav env build`
 
 Force-rebuilds the cave environment from `~/.config/coding-cave/cave.nix` (or the default). Useful for iterating on cave.nix without starting an agent.

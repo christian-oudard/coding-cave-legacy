@@ -689,6 +689,63 @@ pub fn remove_project(slug: &str) -> Result<()> {
     Ok(())
 }
 
+/// Fold `from_slug` into the already-registered `into_slug`: reassign every
+/// agent, approval, and extra-project entry from the former to the latter,
+/// refresh `into_slug`'s path, then drop the `from_slug` project row. Unlike
+/// `rename_project`, the destination row already exists and keeps its own
+/// agents. Used when the new slug is already registered to the same dir.
+pub fn merge_project(from_slug: &str, into_slug: &str, into_path: &Path) -> Result<()> {
+    let mut db = open()?;
+    let path_str = into_path.to_string_lossy().to_string();
+    let tx = db.transaction()?;
+    tx.execute(
+        "UPDATE agents SET project = ?1 WHERE project = ?2",
+        params![into_slug, from_slug],
+    )?;
+    tx.execute(
+        "UPDATE approvals SET project = ?1 WHERE project = ?2",
+        params![into_slug, from_slug],
+    )?;
+    // extra_projects is a per-agent JSON array; rewrite from_slug to into_slug
+    // and drop any duplicate the rewrite introduces.
+    let rows: Vec<(String, String)> = {
+        let mut stmt = tx.prepare(
+            "SELECT agent_id, extra_projects FROM agents \
+             WHERE extra_projects IS NOT NULL",
+        )?;
+        let mapped = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        mapped.filter_map(|r| r.ok()).collect()
+    };
+    for (aid, extras_json) in rows {
+        let Ok(extras) = serde_json::from_str::<Vec<String>>(&extras_json) else {
+            continue;
+        };
+        if !extras.iter().any(|s| s == from_slug) {
+            continue;
+        }
+        let mut seen = std::collections::HashSet::new();
+        let new_extras: Vec<String> = extras
+            .into_iter()
+            .map(|s| if s == from_slug { into_slug.to_string() } else { s })
+            .filter(|s| seen.insert(s.clone()))
+            .collect();
+        let new_json = serde_json::to_string(&new_extras)?;
+        tx.execute(
+            "UPDATE agents SET extra_projects = ?1 WHERE agent_id = ?2",
+            params![new_json, aid],
+        )?;
+    }
+    tx.execute(
+        "UPDATE projects SET path = ?1 WHERE slug = ?2",
+        params![path_str, into_slug],
+    )?;
+    tx.execute("DELETE FROM projects WHERE slug = ?1", params![from_slug])?;
+    tx.commit()?;
+    Ok(())
+}
+
 /// Relabel an agent's display int. Only the `agent_id` column moves; the
 /// uuid (and therefore worktree dir + nix overlay paths) stays put.
 /// Errors if `new_id` is already taken.
