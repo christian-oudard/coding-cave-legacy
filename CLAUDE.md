@@ -25,6 +25,7 @@ Three test tiers:
 - **Unit tests (inline):** `nix develop --command cargo test --bin cav --bin cav-git-pre-receive` — tests `check_ref` hook logic, `cp` symlink security, glob matching. No git subprocesses.
 - **Integration tests:** `nix develop --command cargo test --test hook --test cli` — runs the hook and CLI binaries against real git repos. Requires git in PATH (provided by devShell).
 - **Cave integration:** Run `cav agent` with a prompt that exercises `cav init`, `cav status`, `cav agent` nested — verifies sandbox, workspace isolation, and nested cave support.
+- **Host NixOS module:** `./check_module.sh` instantiates `nixosModules.codingCave` and evaluates its rendered config, build-free and with no downloads (~1s). REQUIRED after any change to `modules/host.nix` or the module wiring in `flake.nix`: parsing, `nix build` (builds the package, not the module), and `nix flake check` (only shape-checks `nixosModules`) all miss errors that fire when the module is applied to a config — only instantiation catches them. The check uses the flake CLI, not `builtins.getFlake` (which serves stale evaluations in a script).
 
 Run unit + integration tests before committing changes to core modules.
 
