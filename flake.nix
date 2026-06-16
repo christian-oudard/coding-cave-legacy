@@ -172,9 +172,11 @@
       homeModules.claudeCode = ./modules/claude-code.nix;
       homeModules.default = self.homeModules.claudeCode;
 
-      nixosModules.codingCave = { pkgs, ... }: import ./modules/host.nix {
-        inherit pkgs;
-        cav = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
+      nixosModules.codingCave = { pkgs, ... }: {
+        imports = [ ./modules/host.nix ];
+        # Inject cav as a module arg so host.nix evaluates as a normal NixOS
+        # module (config/lib/pkgs from the module system, cav from here).
+        _module.args.cav = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
       };
       nixosModules.default = self.nixosModules.codingCave;
 

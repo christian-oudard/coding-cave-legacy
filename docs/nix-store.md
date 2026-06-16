@@ -289,6 +289,41 @@ Removing an agent's directory drops every package that agent installed.
 They will be re-downloaded on next use. Sibling agents, ancestors,
 and descendants are unaffected.
 
+## Disk quotas
+
+Every cave's writable storage sits on one shared host filesystem
+(home, nix overlay uppers, the per-cave nix databases). Without a cap,
+one runaway or hostile agent can fill it, and because the cave nix
+databases live there too, a full disk breaks nix for every cave at
+once. Optional ext4 project quotas bound that.
+
+There are two caps, both off unless a size is set in the host config
+(`/etc/coding-cave/host.json`, rendered by the NixOS module):
+
+- **`perAgentQuota`** caps each agent's own writable trees: its nix
+  overlay (`nix-overlay/agent-<id>`) and its workspace clones
+  (`worktrees/<slug>/<id>`). Each agent gets a stable project ID
+  derived from its key (FNV-1a, never 0 or the reserved home ID), set
+  with `chattr -p <id> +P` so new files inherit it, and a block limit
+  via `setquota -P`.
+- **`sharedHomeQuota`** caps the shared cave home under one reserved
+  project ID. It is a single global limit, not per-agent, because
+  sibling agents at one level share a home.
+
+The host daemon (`cav-store watch`) reads the config at startup. If a
+quota is configured, it probes whether project quota is active on the
+cave-state filesystem (`quotaon -Pp`); if not, it exits non-zero so
+`coding-cave-host.service` fails loudly rather than running
+unprotected. This is the deliberate exception to the project's usual
+graceful handling: a quota you asked for that cannot be enforced is a
+misconfiguration, not something to paper over. With no quota
+configured, nothing is probed and behavior is unchanged.
+
+Applying a cap as agents are adopted is best-effort and off the
+promote/sync path: a failure is logged, never fatal. Enabling the
+filesystem features is a one-time host step (see the README); it
+cannot be done declaratively on an existing filesystem.
+
 ## Bidirectional sync
 
 The `coding-cave-host.service` systemd unit (in `modules/host.nix`)

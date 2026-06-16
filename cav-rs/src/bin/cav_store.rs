@@ -10,6 +10,8 @@ use rusqlite::Connection;
 
 #[path = "../nix_db.rs"]
 mod nix_db;
+#[path = "../quota.rs"]
+mod quota;
 use rustix::fd::{AsFd, OwnedFd};
 use rustix::fs::inotify::{self, CreateFlags, WatchFlags};
 use rustix::io::Errno;
@@ -106,6 +108,15 @@ fn watch() -> Result<()> {
     let base_wd = inotify::add_watch(&ifd, &overlay_base, WatchFlags::CREATE)
         .context("watch overlay base")?;
 
+    // Crashes here if a quota is configured but the filesystem can't enforce
+    // it; applies the shared-home cap. Skipped in test mode so a dev host's
+    // /etc/coding-cave/host.json can't perturb the integration tests.
+    let quota = if test_mode() {
+        None
+    } else {
+        setup_quota(&overlay_base)?
+    };
+
     let mut w = Watcher {
         ifd,
         overlay_base,
@@ -113,6 +124,7 @@ fn watch() -> Result<()> {
         active: HashMap::new(),
         pending: HashMap::new(),
         tracked: HashSet::new(),
+        quota,
     };
 
     // Adopt any agents that already exist. Picks up installs that happened
@@ -185,6 +197,14 @@ struct Watcher {
     /// All agent_ids currently in `active` or `pending`. Lets the base-wd
     /// CREATE handler skip agents we're already tracking.
     tracked: HashSet<String>,
+    /// Per-agent disk-quota state, when a per-agent cap is configured.
+    quota: Option<QuotaState>,
+}
+
+/// Resolved per-agent quota: the cap and the filesystem to set it on.
+struct QuotaState {
+    per_agent_bytes: u64,
+    mountpoint: PathBuf,
 }
 
 impl Watcher {
@@ -220,6 +240,7 @@ impl Watcher {
                                 "cav-store watch: agent-{agent_id} initial scan: {e:#}"
                             );
                         }
+                        self.apply_agent_quota(agent_id);
                         self.active.insert(wd, state);
                     }
                     Err(e) => {
@@ -273,6 +294,75 @@ impl Watcher {
             }
         }
     }
+
+    /// Apply the per-agent cap to an agent's writable trees. Best-effort: a
+    /// failure is logged, never fatal, so a quota hiccup can't wedge an agent.
+    fn apply_agent_quota(&self, agent_id: &str) {
+        let Some(q) = &self.quota else {
+            return;
+        };
+        let dirs = agent_quota_dirs(&self.overlay_base, agent_id);
+        if let Err(e) = quota::apply(
+            &dirs,
+            quota::projid_for(agent_id),
+            q.per_agent_bytes,
+            &q.mountpoint,
+        ) {
+            eprintln!("cav-store quota: agent-{agent_id} cap not applied: {e:#}");
+        }
+    }
+}
+
+/// An agent's writable host trees: its nix overlay plus its workspace
+/// clone(s) under any project slug.
+fn agent_quota_dirs(overlay_base: &Path, agent_key: &str) -> Vec<PathBuf> {
+    let mut dirs = vec![overlay_base.join(format!("agent-{agent_key}"))];
+    if let Some(data_dir) = overlay_base.parent() {
+        if let Ok(slugs) = std::fs::read_dir(data_dir.join("worktrees")) {
+            for slug in slugs.flatten() {
+                let cand = slug.path().join(agent_key);
+                if cand.exists() {
+                    dirs.push(cand);
+                }
+            }
+        }
+    }
+    dirs
+}
+
+/// Resolve quota config at startup. Crashes if a quota is configured but the
+/// filesystem can't enforce it; applies the shared-home cap once. Returns the
+/// per-agent state (if a per-agent cap is set) for use as agents are adopted.
+fn setup_quota(overlay_base: &Path) -> Result<Option<QuotaState>> {
+    let cfg = quota::HostConfig::load()?;
+    if !cfg.active() {
+        return Ok(None);
+    }
+    let mountpoint = quota::mountpoint_for(overlay_base)?;
+    let supported = quota::project_quota_supported(&mountpoint);
+    if quota::should_crash(cfg.active(), supported) {
+        bail!(
+            "disk quota configured but project quota is not active on {}; \
+             enable it (see README) or unset the quota",
+            mountpoint.display()
+        );
+    }
+    if let Some(bytes) = cfg.shared_home_bytes()? {
+        if let Some(data_dir) = overlay_base.parent() {
+            let home = data_dir.join("home");
+            if let Err(e) =
+                quota::apply(&[home], quota::SHARED_HOME_PROJID, bytes, &mountpoint)
+            {
+                eprintln!("cav-store quota: shared-home cap not applied: {e:#}");
+            }
+        }
+    }
+    Ok(cfg
+        .per_agent_bytes()?
+        .map(|per_agent_bytes| QuotaState {
+            per_agent_bytes,
+            mountpoint,
+        }))
 }
 
 fn overlay_base_from_env() -> PathBuf {
