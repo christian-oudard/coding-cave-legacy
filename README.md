@@ -41,6 +41,18 @@ Installs `cav-debug` (dev profile, with `-v` timing logs and debug assertions) i
 
 Not yet supported by the install path. The host module is NixOS-specific; a future `cav install-host` subcommand will drop the equivalent systemd unit on other distros. For now, port the contents of `modules/host.nix` to your distro's service manager by hand.
 
+## Shell completion
+
+`cav` emits completion scripts for bash, zsh, and fish. Completion of
+`cav cp` paths is dynamic: it expands registered slugs, agent IDs, and
+worktree contents.
+
+Add the matching line to your shell startup file:
+
+- bash (`~/.bashrc`): `eval "$(cav completion bash)"`
+- zsh (`~/.zshrc`): `eval "$(cav completion zsh)"`
+- fish (`~/.config/fish/config.fish`): `cav completion fish | source`
+
 ## Per-agent disk quotas
 
 Every cave's writable storage (its home, its nix overlay upper, its
