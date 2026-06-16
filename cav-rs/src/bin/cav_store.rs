@@ -7,12 +7,14 @@
 
 use anyhow::{bail, Context, Result};
 use rusqlite::Connection;
+
+#[path = "../nix_db.rs"]
+mod nix_db;
 use rustix::fd::{AsFd, OwnedFd};
 use rustix::fs::inotify::{self, CreateFlags, WatchFlags};
 use rustix::io::Errno;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
-use std::io::Read;
 use std::mem::MaybeUninit;
 use std::os::unix::fs::lchown;
 use std::path::{Path, PathBuf};
@@ -25,6 +27,7 @@ const IDMAP_OPTS: &str = "X-mount.idmap=u:0:1000:1 g:0:1000:1";
 // The cave user's home. uid 1000 by convention (see IDMAP_OPTS above).
 const CAVE_USER_HOME: &str = "/home/cave-coder";
 const HOST_STORE: &str = "/nix/store";
+const HOST_DB: &str = "/nix/var/nix/db/db.sqlite";
 
 fn main() {
     if let Err(e) = run() {
@@ -120,6 +123,19 @@ fn watch() -> Result<()> {
                 w.advance_tracking(&id, None);
             }
         }
+    }
+
+    // Down-sync runs on its own inotify fd in a side thread so it never
+    // interleaves with the up-sync (promote) loop below. Skip it in test
+    // mode unless the test points us at a host DB of its own, so the
+    // up-sync integration tests don't reconcile against the real host store.
+    if !test_mode() || std::env::var_os("CODING_CAVE_HOST_WATCH_DB").is_some() {
+        let base = w.overlay_base.clone();
+        std::thread::spawn(move || {
+            if let Err(e) = run_down_sync(base) {
+                eprintln!("cav-store down-sync thread exited: {e:#}");
+            }
+        });
     }
 
     let mut buf = [MaybeUninit::<u8>::uninit(); 8192];
@@ -350,22 +366,16 @@ fn scan_and_promote(state: &mut AgentState) -> Result<()> {
         to_promote.push((path.clone(), name.to_os_string()));
     }
 
-    let testing = test_mode();
-    // Rename upper -> host store, then register the closure in one nix-store
-    // round-trip so dependencies resolve. Rename first because nix-store
-    // --dump-db verifies path presence under NIX_STORE_DIR.
-    for (_, name) in &to_promote {
-        let src = state.upper_dir.join(name);
-        let dst = store_target.join(name);
-        std::fs::rename(&src, &dst)
-            .with_context(|| format!("rename {src:?} -> {dst:?}"))?;
-        if !testing {
-            chown_tree_to_root(&dst)?;
+    if test_mode() {
+        // Exercise the diff/rename pipeline without nix-store or chown.
+        for (_, name) in &to_promote {
+            let src = state.upper_dir.join(name);
+            let dst = store_target.join(name);
+            std::fs::rename(&src, &dst)
+                .with_context(|| format!("rename {src:?} -> {dst:?}"))?;
         }
-    }
-    if !to_promote.is_empty() && !testing {
-        let paths: Vec<String> = to_promote.iter().map(|(p, _)| p.clone()).collect();
-        register_paths_in_host_db(&state.db_path, &paths)?;
+    } else if !to_promote.is_empty() {
+        promote_to_host(state, &store_target, &to_promote)?;
     }
 
     // Advance the cursor only after everything in this batch succeeded.
@@ -381,6 +391,103 @@ fn host_store_dir() -> PathBuf {
     std::env::var("CODING_CAVE_HOST_WATCH_STORE")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(HOST_STORE))
+}
+
+fn host_db() -> PathBuf {
+    // Override only for tests; production unconditionally uses the host DB.
+    std::env::var("CODING_CAVE_HOST_WATCH_DB")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(HOST_DB))
+}
+
+/// Watch the parent (host) nix DB and propagate its changes into every
+/// running agent's cave DB. The host store keeps changing under live caves
+/// (the host's own builds, GC, and other agents' promotions); without this
+/// the cave DB drifts and nix trips over on-disk paths it considers
+/// unregistered. Debounced so a build's burst of writes collapses into one
+/// reconcile pass.
+fn run_down_sync(overlay_base: PathBuf) -> Result<()> {
+    let host_db = host_db();
+    let watch_dir = host_db
+        .parent()
+        .context("host db path has no parent dir")?
+        .to_path_buf();
+
+    let ifd = inotify::init(CreateFlags::empty()).context("down-sync inotify init")?;
+    inotify::add_watch(
+        &ifd,
+        &watch_dir,
+        WatchFlags::MODIFY | WatchFlags::CLOSE_WRITE | WatchFlags::MOVED_TO,
+    )
+    .with_context(|| format!("watch host db dir {}", watch_dir.display()))?;
+
+    // Agents launched before us still hold a launch-time snapshot; bring
+    // them current immediately.
+    reconcile_all_agents(&overlay_base, &host_db);
+
+    let mut buf = [MaybeUninit::<u8>::uninit(); 4096];
+    loop {
+        let relevant = {
+            let mut reader = inotify::Reader::new(ifd.as_fd(), &mut buf);
+            match reader.next() {
+                Ok(ev) => ev
+                    .file_name()
+                    .and_then(|n| n.to_str().ok())
+                    .map(is_host_db_write)
+                    .unwrap_or(false),
+                Err(Errno::INTR) => continue,
+                Err(e) => bail!("down-sync inotify read: {e}"),
+            }
+        };
+        // Ignore -shm churn (WAL readers, including our own dump-db, touch it)
+        // so reconcile never retriggers itself.
+        if !relevant {
+            continue;
+        }
+        // Let the writer's burst settle; queued events coalesce into the
+        // next blocking read.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        reconcile_all_agents(&overlay_base, &host_db);
+    }
+}
+
+/// A change to the DB proper (a checkpoint) or its write-ahead log (every
+/// commit). The shared-memory index (`-shm`) is touched by readers too, so
+/// it is not a write signal.
+fn is_host_db_write(name: &str) -> bool {
+    name == "db.sqlite" || name == "db.sqlite-wal"
+}
+
+fn reconcile_all_agents(overlay_base: &Path, host_db: &Path) {
+    let entries = match std::fs::read_dir(overlay_base) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let Some(id) = agent_id_from_name(&entry.file_name()) else {
+            continue;
+        };
+        let Some(state) = AgentState::new(overlay_base, &id) else {
+            continue;
+        };
+        let cave_state_dir = state.db_dir.parent().unwrap_or(&state.db_dir);
+        match nix_db::reconcile_cave_db(
+            cave_state_dir,
+            &state.db_path,
+            host_db,
+            &state.upper_dir,
+        ) {
+            Ok(plan) if !plan.adds.is_empty() || !plan.removes.is_empty() => {
+                eprintln!(
+                    "cav-store down-sync: agent-{id}: +{} -{}",
+                    plan.adds.len(),
+                    plan.removes.len()
+                );
+            }
+            Ok(_) => {}
+            Err(e) => eprintln!("cav-store down-sync: agent-{id}: {e:#}"),
+        }
+    }
 }
 
 /// Test-only escape hatch: skips the root check, the recursive chown,
@@ -406,57 +513,68 @@ fn chown_tree_to_root(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Ship the closure metadata from the agent's DB into the host DB by
-/// piping nix-store --dump-db (pointed at the agent's DB) into
-/// nix-store --load-db (default host DB). This keeps schema knowledge
-/// inside nix, not our INSERTs.
-fn register_paths_in_host_db(agent_db: &Path, paths: &[String]) -> Result<()> {
-    let tmp = mkstate_for(agent_db)?;
-    let dump_result = (|| -> Result<()> {
-        let mut dump = Command::new("nix-store")
-            .arg("--dump-db")
-            .args(paths)
-            .env("NIX_REMOTE", "")
-            .env("NIX_STATE_DIR", &tmp)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .context("spawn nix-store --dump-db")?;
-        let dump_stdout = dump.stdout.take().expect("piped stdout");
-
-        let mut load = Command::new("nix-store")
-            .arg("--load-db")
-            .stdin(Stdio::from(dump_stdout))
-            .stderr(Stdio::piped())
-            .spawn()
-            .context("spawn nix-store --load-db")?;
-
-        let load_status = load.wait().context("wait load-db")?;
-        let dump_status = dump.wait().context("wait dump-db")?;
-
-        if !dump_status.success() {
-            let mut err = String::new();
-            if let Some(mut e) = dump.stderr {
-                let _ = e.read_to_string(&mut err);
+/// Promote an agent's installs into the host store. For each path: rename
+/// it from the agent's upper into `/nix/store`, verify its contents hash to
+/// what the agent registered (refusing tampered or corrupt content), chown
+/// it to root, and finally register the verified closure in the host DB.
+///
+/// The agent DB is snapshotted once and used as both the integrity oracle
+/// (it holds the recorded hash before the path is in the host DB) and the
+/// source of the closure metadata.
+fn promote_to_host(
+    state: &AgentState,
+    store_target: &Path,
+    to_promote: &[(String, std::ffi::OsString)],
+) -> Result<()> {
+    let snapshot = mkstate_for(&state.db_path)?;
+    let result = (|| -> Result<()> {
+        let mut promoted = Vec::new();
+        for (path, name) in to_promote {
+            let src = state.upper_dir.join(name);
+            let dst = store_target.join(name);
+            std::fs::rename(&src, &dst)
+                .with_context(|| format!("rename {src:?} -> {dst:?}"))?;
+            if !verify_path(&snapshot, path)? {
+                // Undo so the path stays the agent's private business rather
+                // than a half-promoted orphan, and never enters a store other
+                // agents trust.
+                let _ = std::fs::rename(&dst, &src);
+                eprintln!(
+                    "cav-store: refusing to promote {}: content hash mismatch",
+                    name.to_string_lossy()
+                );
+                continue;
             }
-            bail!("nix-store --dump-db failed: {err}");
+            chown_tree_to_root(&dst)?;
+            promoted.push(path.clone());
         }
-        if !load_status.success() {
-            let mut err = String::new();
-            if let Some(mut e) = load.stderr {
-                let _ = e.read_to_string(&mut err);
-            }
-            bail!("nix-store --load-db failed: {err}");
-        }
-        Ok(())
+        nix_db::register_paths(None, Some(&snapshot), &promoted)
     })();
-    let _ = std::fs::remove_dir_all(&tmp);
-    dump_result
+    let _ = std::fs::remove_dir_all(&snapshot);
+    result
+}
+
+/// Verify a just-renamed store path's contents against the hash the agent
+/// recorded for it. Reads the expected hash from the agent DB snapshot (so
+/// it works before the path is in the host DB) and the contents from the
+/// canonical `/nix/store` location.
+fn verify_path(snapshot_state_dir: &Path, store_path: &str) -> Result<bool> {
+    let status = Command::new("nix-store")
+        .arg("--verify-path")
+        .arg(store_path)
+        .env("NIX_REMOTE", "")
+        .env("NIX_STATE_DIR", snapshot_state_dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("spawn nix-store --verify-path")?;
+    Ok(status.success())
 }
 
 /// Build a NIX_STATE_DIR tree whose db.sqlite is a snapshot of the
 /// agent's DB. A copy (not a symlink) so concurrent writes from the
-/// cave can't race the dump.
+/// cave can't race the dump. nix resolves the DB at `$NIX_STATE_DIR/db`,
+/// so the returned path is the state dir itself.
 fn mkstate_for(agent_db: &Path) -> Result<PathBuf> {
     let base = Path::new(STATE_DIR).join("promote-tmp");
     std::fs::create_dir_all(&base).context("create promote-tmp")?;
@@ -465,7 +583,7 @@ fn mkstate_for(agent_db: &Path) -> Result<PathBuf> {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     let dir = base.join(format!("p-{}-{}", std::process::id(), nanos));
-    let db_target_dir = dir.join("nix").join("db");
+    let db_target_dir = dir.join("db");
     std::fs::create_dir_all(&db_target_dir).context("create promote tmp dirs")?;
     std::fs::copy(agent_db, db_target_dir.join("db.sqlite")).context("snapshot agent db")?;
     Ok(dir)

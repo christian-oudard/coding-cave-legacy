@@ -13,6 +13,7 @@ mod gc;
 mod gpu;
 mod handler;
 mod init;
+mod nix_db;
 mod proc_ns;
 mod project;
 mod pull;

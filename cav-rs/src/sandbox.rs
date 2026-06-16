@@ -1618,22 +1618,15 @@ fn seed_nix_db(home: &Path, agent_id: &str, merged_path: &str) -> Option<PathBuf
         .unwrap_or_default();
 
     let result = (|| -> Result<()> {
-        // Collect cave-only paths
+        // Collect cave-only paths (present on disk, absent from the parent):
+        // the agent's own installs, preserved across the file rebuild.
         let mut cave_only_rows: Vec<(String, String, f64, String, i64, i64, Option<String>, Option<String>)> = vec![];
         if cave_db.exists() {
+            let host_paths = crate::nix_db::valid_paths(parent_db)?;
             let old = Connection::open_with_flags(
                 &cave_db,
                 rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
             )?;
-            let host = Connection::open_with_flags(
-                parent_db,
-                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-            )?;
-            let host_paths: std::collections::HashSet<String> = {
-                let mut stmt = host.prepare("SELECT path FROM ValidPaths")?;
-                let rows = stmt.query_map([], |r| r.get(0))?;
-                rows.filter_map(|r| r.ok()).collect()
-            };
             let mut stmt = old.prepare(
                 "SELECT path, hash, registrationTime, deriver, narSize, ultimate, sigs, ca \
                  FROM ValidPaths",
@@ -1651,15 +1644,10 @@ fn seed_nix_db(home: &Path, agent_id: &str, merged_path: &str) -> Option<PathBuf
                 ))
             })?;
             for row in rows.flatten() {
-                if !host_paths.contains(&row.0) {
-                    let name = PathBuf::from(&row.0)
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string();
-                    if store_names.contains(&name) {
-                        cave_only_rows.push(row);
-                    }
+                if !host_paths.contains(&row.0)
+                    && store_names.contains(&crate::nix_db::store_name(&row.0))
+                {
+                    cave_only_rows.push(row);
                 }
             }
         }
@@ -1676,46 +1664,37 @@ fn seed_nix_db(home: &Path, agent_id: &str, merged_path: &str) -> Option<PathBuf
             }
         }
         std::fs::copy(parent_db, &cave_db)?;
-        let dst = Connection::open(&cave_db)?;
 
-        // Merge cave-only paths
-        if !cave_only_rows.is_empty() {
-            dst.execute_batch("BEGIN")?;
-            for (path, hash, reg_time, deriver, nar_size, ult, sigs, ca) in &cave_only_rows {
-                dst.execute(
-                    "INSERT OR IGNORE INTO ValidPaths \
-                     (path, hash, registrationTime, deriver, narSize, ultimate, sigs, ca) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                    params![path, hash, reg_time, deriver, nar_size, ult, sigs, ca],
-                )?;
+        // Merge cave-only paths back into the fresh copy.
+        {
+            let dst = Connection::open(&cave_db)?;
+            if !cave_only_rows.is_empty() {
+                dst.execute_batch("BEGIN")?;
+                for (path, hash, reg_time, deriver, nar_size, ult, sigs, ca) in &cave_only_rows {
+                    dst.execute(
+                        "INSERT OR IGNORE INTO ValidPaths \
+                         (path, hash, registrationTime, deriver, narSize, ultimate, sigs, ca) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                        params![path, hash, reg_time, deriver, nar_size, ult, sigs, ca],
+                    )?;
+                }
+                dst.execute_batch("COMMIT")?;
             }
-            dst.execute_batch("COMMIT")?;
         }
 
-        // Remove stale entries
-        let stale: Vec<i64> = {
-            let mut stmt = dst.prepare("SELECT id, path FROM ValidPaths")?;
-            let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+        // Remove stale entries: paths whose files no longer exist in the store.
+        let stale: Vec<String> = {
+            let dst = Connection::open_with_flags(
+                &cave_db,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )?;
+            let mut stmt = dst.prepare("SELECT path FROM ValidPaths")?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
             rows.flatten()
-                .filter(|(_, path)| {
-                    let name = PathBuf::from(path)
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string();
-                    !store_names.contains(&name)
-                })
-                .map(|(id, _)| id)
+                .filter(|path| !store_names.contains(&crate::nix_db::store_name(path)))
                 .collect()
         };
-        if !stale.is_empty() {
-            dst.execute_batch("BEGIN")?;
-            for vid in &stale {
-                dst.execute("DELETE FROM Refs WHERE referrer = ?1 OR reference = ?1", params![vid])?;
-                dst.execute("DELETE FROM ValidPaths WHERE id = ?1", params![vid])?;
-            }
-            dst.execute_batch("COMMIT")?;
-        }
+        crate::nix_db::delete_paths(&cave_db, &stale)?;
         Ok(())
     })();
 

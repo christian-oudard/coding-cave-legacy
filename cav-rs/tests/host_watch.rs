@@ -61,20 +61,40 @@ impl Fixture {
     }
 
     fn watcher(&self) -> Watcher {
-        let child = Command::new(CAV_STORE)
-            .args(["watch"])
+        self.spawn_watcher(None)
+    }
+
+    /// A watcher with the down-sync enabled, pointed at `host_db` as the
+    /// parent store DB.
+    fn watcher_with_host_db(&self, host_db: &Path) -> Watcher {
+        self.spawn_watcher(Some(host_db))
+    }
+
+    fn spawn_watcher(&self, host_db: Option<&Path>) -> Watcher {
+        let mut cmd = Command::new(CAV_STORE);
+        cmd.args(["watch"])
             .env("CODING_CAVE_HOST_WATCH_HOME", &self.home)
             .env("CODING_CAVE_HOST_WATCH_STORE", &self.store)
             .env("CODING_CAVE_HOST_WATCH_TEST_MODE", "1")
             .env_remove("CODING_CAVE_VERSION")
-            .env_remove("CODING_CAVE_AGENT_ID")
-            .spawn()
-            .expect("spawn cav-store watch");
+            .env_remove("CODING_CAVE_AGENT_ID");
+        if let Some(db) = host_db {
+            cmd.env("CODING_CAVE_HOST_WATCH_DB", db);
+        }
+        let child = cmd.spawn().expect("spawn cav-store watch");
         // Give the watcher a moment to set up inotify before the first
         // simulated install. Without this the install can land between
         // discovery and add_watch and slip through until the next event.
         thread::sleep(Duration::from_millis(300));
         Watcher { child }
+    }
+
+    /// Create a parent (host) nix DB under the fixture and return its path.
+    fn make_host_db(&self) -> PathBuf {
+        let db = self.root.join("hostdb/db/db.sqlite");
+        fs::create_dir_all(db.parent().unwrap()).unwrap();
+        init_nix_db(&db);
+        db
     }
 }
 
@@ -126,9 +146,35 @@ fn init_nix_db(path: &Path) {
             ultimate INTEGER DEFAULT 0,
             sigs TEXT,
             ca TEXT
+        );
+        CREATE TABLE Refs (
+            referrer INTEGER NOT NULL,
+            reference INTEGER NOT NULL
         );",
     )
     .unwrap();
+}
+
+/// Insert a bare ValidPaths row (no files, no closure) straight into a DB.
+/// Enough for the down-sync's set-difference and delete logic.
+fn insert_path(db: &Path, store_path: &str) {
+    let conn = Connection::open(db).unwrap();
+    conn.execute(
+        "INSERT INTO ValidPaths (path, hash, registrationTime, deriver, narSize, ultimate) \
+         VALUES (?1, ?2, 0, '', 7, 1)",
+        rusqlite::params![
+            store_path,
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        ],
+    )
+    .unwrap();
+}
+
+fn path_set(db: &Path) -> std::collections::HashSet<String> {
+    let conn = Connection::open(db).unwrap();
+    let mut stmt = conn.prepare("SELECT path FROM ValidPaths").unwrap();
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0)).unwrap();
+    rows.filter_map(|r| r.ok()).collect()
 }
 
 fn wait_for<F: Fn() -> bool>(timeout: Duration, predicate: F) -> bool {
@@ -230,4 +276,35 @@ fn second_install_after_first_promotion_also_promotes() {
     // First install must still be in the store, not back in upper.
     assert!(fx.store.join(first).exists());
     assert!(!agent.upper.join(first).exists());
+}
+
+/// Down-sync: a path the parent (host) DB no longer has, and which is not a
+/// cave-only install, must be dropped from the agent's DB so nix never
+/// trips over an on-disk-but-unregistered path. Pure removal, so no
+/// nix-store invocation is needed.
+#[test]
+fn down_sync_drops_host_gcd_path_from_agent_db() {
+    let fx = Fixture::new("downsync-gc");
+    let host_db = fx.make_host_db();
+    let agent = fx.agent("1");
+
+    let shared = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-shared";
+    let gone = "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-gone";
+
+    // Host has only `shared`. The agent's DB also lists `gone`, which the
+    // host has since garbage-collected (not in the agent's upper either).
+    insert_path(&host_db, shared);
+    insert_path(&agent.db, shared);
+    insert_path(&agent.db, gone);
+
+    let _watcher = fx.watcher_with_host_db(&host_db);
+
+    assert!(
+        wait_for(Duration::from_secs(5), || {
+            let paths = path_set(&agent.db);
+            paths.contains(shared) && !paths.contains(gone)
+        }),
+        "down-sync did not drop the host-GC'd path. agent paths: {:?}",
+        path_set(&agent.db),
+    );
 }

@@ -49,11 +49,30 @@ content may ever be triggered.
 
 The cave's nix DB must include all host store paths so nix does not
 re-register or re-download them. Cave-only paths from previous sessions
-must be preserved if their files still exist. Stale entries (host-GC'd
-paths) must be cleaned on launch.
+must be preserved if their files still exist.
 
-The DB must support concurrent access from multiple sibling agents.
-SQLite WAL mode is required. The DB file must reside on the native
+The DB must track the live host store for the whole session, not just
+at launch. The host store changes underneath a running cave: the host
+builds its own paths, garbage-collects others, and other agents promote
+installs into it. The overlay lower is a read-only bind of that live
+store, so those paths appear and disappear in the cave's `/nix/store`
+mid-session. The DB must follow:
+
+- A path the host adds must be registered in the cave DB before nix
+  encounters it on disk. Otherwise nix sees an on-disk path it considers
+  unregistered, tries to delete it to make room, and the delete chmods a
+  host-owned path. That triggers a copy-up that fails with EOVERFLOW
+  (`fchmodat2 ... Value too large for defined data type`) because the
+  host path's ownership is outside the cave's idmap range. This is the
+  failure the live sync exists to prevent.
+- A path the host garbage-collects must be removed from the cave DB, so
+  nix never references a path whose files are gone.
+- Cave-only paths (an agent's own installs, not yet on the host) are
+  preserved as long as their files exist in the agent's upper layer.
+
+The DB must support concurrent access. WAL mode is required: the agent's
+own nix writes the DB, and the host-side daemon writes it from the other
+side to apply the live sync. The DB file must reside on the native
 filesystem, not under a FUSE mount, to ensure correct file locking.
 
 The DerivationOutputs table must be correctly populated for
@@ -195,18 +214,32 @@ shadowed. This is benign: the cave's nix only accesses lock files for
 paths it is building. With correct DB seeding, it never re-registers
 host paths, so it never opens host lock files.
 
-## Nix DB Seeding
+## Nix DB Seeding and Live Sync
 
-On every launch, the launcher takes a fresh backup of the parent nix
+The cave DB is brought up to the parent store at launch, then held
+consistent with it for the rest of the session.
+
+**Launch seed.** The launcher takes a fresh backup of the parent nix
 DB (the real host DB at the top level, or the parent cave's
 bind-mounted DB at a nested level) and merges back level-only paths
 (packages any agent at this level installed) whose files still exist
 on the merged overlay. It also removes stale entries for paths the
-parent GC'd after the snapshot was taken.
+parent GC'd. This is a whole-file rebuild, safe only because it runs
+before the cave's nix opens the DB. The "backup + merge-back + stale
+cleanup" approach is self-cleaning: GC'd paths are dropped, level-only
+paths survive only if their files still exist.
 
-The "backup + merge-back + stale cleanup" approach is self-cleaning:
-paths the parent has GC'd are dropped, and level-only paths are only
-preserved if their files still exist on the overlay.
+**Live sync.** After launch the parent store keeps changing, so the
+host-side daemon reconciles each running agent's DB against the parent
+store whenever the parent DB is written (see "Bidirectional sync"
+below). The cave's nix has the DB open by then, so the live sync never
+rebuilds the file: it computes the set difference against the parent,
+registers newly-parent-valid paths with their closure
+(`dump-db | load-db`), deletes parent-GC'd paths, and leaves cave-only
+installs untouched. The whole-file seed is a launch-only optimization
+(it carries the full Refs and DerivationOutputs tables in one copy
+while nix is not yet attached); thereafter the incremental sync keeps
+the same invariant cheaply.
 
 ### DerivationOutputs repair
 
@@ -235,8 +268,10 @@ persistent home (`~/.cache/nix/`):
   cache).
 - An agent can only write to its own upper / db. Siblings and
   descendants cannot modify its layer, and it cannot modify theirs.
-- Siblings at the same level do NOT share an overlay. Installs are
-  private per agent until promoted into an ancestor layer.
+- Siblings at the same level do NOT share an overlay. An install is
+  private to the agent that made it until it promotes to the host
+  store, at which point the live sync registers it in every sibling's
+  DB and they use it from the shared lower.
 - Packages that already exist in an ancestor are never duplicated.
   Agents only write their own new installs.
 
@@ -254,32 +289,79 @@ Removing an agent's directory drops every package that agent installed.
 They will be re-downloaded on next use. Sibling agents, ancestors,
 and descendants are unaffected.
 
-## Promoting Packages to Host
+## Bidirectional sync
 
 The `coding-cave-host.service` systemd unit (in `modules/host.nix`)
-runs `cav-store watch` as root alongside the idmap setup. It maintains
-an inotify watch on every agent's `db/` directory; when the agent's
-nix DB is written, the watcher diffs `ValidPaths` against the host
-`/nix/store`, then for each new path:
+runs `cav-store watch` as root alongside the idmap setup. It is the
+single root-privileged process that can read the host DB (the trust
+anchor) and write each agent's cave DB. It carries packages in both
+directions.
 
-1. `rename(2)` the path from `agent-<id>/upper/<basename>` to
-   `/nix/store/<basename>`. Same filesystem, so atomic. The agent's
-   overlay falls through to the lower (host store) on its next
-   lookup, same path string, no whiteout.
-2. Recursively `chown` to root:root so the host's idmapped mount maps
+### Up: promoting an agent install to the host
+
+The daemon keeps an inotify watch on every agent's `db/` directory.
+When the agent's nix DB is written, it diffs `ValidPaths` against the
+host `/nix/store`, and for each new path:
+
+1. Verify the path's contents match its recorded nix hash (see
+   "Integrity" below). Only verified paths promote.
+2. `rename(2)` the path from `agent-<id>/upper/<basename>` to
+   `/nix/store/<basename>`. Same filesystem, so atomic.
+3. Recursively `chown` to root:root so the host's idmapped mount maps
    it back to cave-coder inside other caves, matching the rest of
    `/nix/store`.
-3. `nix-store --dump-db <new paths>` against a snapshot of the
+4. `nix-store --dump-db <new paths>` against a snapshot of the
    agent's DB, piped into `nix-store --load-db` against the host DB.
    Schema knowledge stays in nix.
 
 The DB-write trigger eliminates the install-vs-DB race: nix registers
 the path before closing the transaction, so by the time the watcher
-fires the metadata is already complete.
+fires the metadata is already complete. The agent that installed it
+keeps no copy in its upper; its DB entry stays valid because the path
+is now in the host store, which is the overlay lower.
 
-Side effects: sibling agents in the same cave (and any later cave or
-subcave) inherit the path through the overlay lower with no second
-download. The agent that installed it keeps no copy in its upper.
+### Down: propagating host changes to running agents
+
+The daemon also watches the host nix DB. When it changes, the daemon
+reconciles every running agent's cave DB against the host store using
+the shared reconcile routine: parent-added paths (the host's own
+builds, and other agents' promotions) are registered with their
+closure via `dump-db | load-db`; parent-GC'd paths are deleted with a
+direct SQL `DELETE` of their `ValidPaths` and `Refs` rows; cave-only
+installs are left alone.
+
+This closes the loop: a promotion in step "Up" writes the host DB,
+which fires the down-sync, which registers the new path in every
+sibling's DB. Siblings then use it straight from the overlay lower
+with no second download. A host `nix-collect-garbage` fires the same
+down-sync, dropping the collected paths from every agent's DB before
+nix can trip over them on disk.
+
+The down-sync only ever writes cave DBs, never the host DB, so it
+cannot retrigger its own host-DB watch. Reconcile is idempotent, so a
+spurious fire is a no-op. Registering a host path in a cave DB does
+fire that agent's `db/` watch, but the path is already in `/nix/store`,
+so the up-scan's "already on host" filter skips it. No loops.
+
+### Integrity
+
+Promotion is the only way bytes cross from one agent's private layer
+into a store other agents trust, so it is where poisoning is blocked.
+Before registering a promoted path the daemon verifies the path's
+contents hash to its recorded nix hash (`nix-store --verify-path`). A
+mismatch aborts the promotion. This makes it impossible to register
+content that does not match the path's own metadata, and for
+content-addressed paths (sources, fixed-output fetches) the path name
+*is* that hash, so the verification is total.
+
+Input-addressed build outputs are a weaker case: their name is derived
+from the derivation inputs, not the output contents, so a hash check
+confirms only that the recorded hash matches the bytes, not that the
+bytes are the legitimate build. Their security rests on all agents
+being the same user's, one trust domain, exactly as a single-user host
+nix store already trusts every locally-built path. Gating input-
+addressed promotion on a trusted-cache signature would tighten this
+further if caves ever needed to distrust each other.
 
 ### Known race: rename-vs-chown window
 
