@@ -17,9 +17,17 @@
   manual.json.enable = false;
   news.display = "silent";
 
-  # Cave-required packages. The user can add more via home.packages.
+  # Packages guaranteed in every cave, regardless of the user's cave.nix.
+  # A customized cave.nix replaces the user package list, so anything an
+  # agent treats as "always there" must live here, not in the default
+  # cave.nix. Two groups: cave infrastructure that cav itself relies on,
+  # and the standard Unix toolbox agents assume exists.
   home.packages = with pkgs; [
+    # cave infrastructure
     coreutils bash nix git gnupg gnugrep gnused jq less
+    # standard toolbox agents rely on
+    gawk findutils diffutils gnutar gzip xz bzip2 unzip curl ripgrep which
+    procps patch file tree
   ];
 
   coding-cave.claude-code = {

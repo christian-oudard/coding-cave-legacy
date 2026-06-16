@@ -419,7 +419,7 @@ pub fn default_cave_nix() -> Result<String> {
     Ok(r#"{
   config = { pkgs, ... }: {
     home.packages = with pkgs; [
-      jq gawk findutils curl wget nano
+      wget nano
     ];
 
     home.sessionVariables = {
