@@ -513,40 +513,106 @@ fn chown_tree_to_root(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Promote an agent's installs into the host store. For each path: rename
-/// it from the agent's upper into `/nix/store`, verify its contents hash to
-/// what the agent registered (refusing tampered or corrupt content), chown
-/// it to root, and finally register the verified closure in the host DB.
-///
-/// The agent DB is snapshotted once and used as both the integrity oracle
-/// (it holds the recorded hash before the path is in the host DB) and the
-/// source of the closure metadata.
+/// What to do with one candidate promotion after authenticity checking.
+#[derive(Debug, PartialEq, Eq)]
+enum PromoteDecision {
+    /// Content-addressed or trusted-signed: forge-proof, promote.
+    Promote,
+    /// Not cryptographically verifiable, but the trust-local policy allows
+    /// promoting the agent's own builds anyway. Its agent-claimed signatures
+    /// are stripped before registration.
+    PromoteUntrusted,
+    /// Not verifiable and trust-local is off: refuse.
+    Reject,
+}
+
+fn classify_promote(authentic: bool, trust_local: bool) -> PromoteDecision {
+    if authentic {
+        PromoteDecision::Promote
+    } else if trust_local {
+        PromoteDecision::PromoteUntrusted
+    } else {
+        PromoteDecision::Reject
+    }
+}
+
+/// Whether to promote the agent's own unsigned, input-addressed builds.
+/// Off by default: only content-addressed or trusted-signed paths cross into
+/// a store other agents trust, so a malicious agent cannot poison a sibling
+/// by pre-registering forged content under a predictable path name. Set
+/// CODING_CAVE_PROMOTE_TRUST_LOCAL=1 in a single-user fleet to also share
+/// locally-built packages, accepting that this trusts the producing agent.
+fn promote_trust_local() -> bool {
+    std::env::var_os("CODING_CAVE_PROMOTE_TRUST_LOCAL").is_some()
+}
+
+/// Promote an agent's installs into the host store. For each path: refuse
+/// symlinks, rename it from the agent's upper into `/nix/store`, gate it on
+/// cryptographic authenticity (content-address or trusted signature) plus the
+/// trust-local policy, chown to root, and register the survivors' closure in
+/// the host DB. A rejected or failed path is unstaged so the store never
+/// keeps an unregistered orphan.
 fn promote_to_host(
     state: &AgentState,
     store_target: &Path,
     to_promote: &[(String, std::ffi::OsString)],
 ) -> Result<()> {
     let snapshot = mkstate_for(&state.db_path)?;
+    let trust_local = promote_trust_local();
     let result = (|| -> Result<()> {
         let mut promoted = Vec::new();
+        let mut untrusted = Vec::new();
         for (path, name) in to_promote {
             let src = state.upper_dir.join(name);
             let dst = store_target.join(name);
+
+            // A symlink is not a legitimate store path and would point
+            // wherever the agent chose; never promote one.
+            match src.symlink_metadata() {
+                Ok(m) if m.file_type().is_symlink() => {
+                    eprintln!(
+                        "cav-store: refusing to promote {}: symlink",
+                        name.to_string_lossy()
+                    );
+                    continue;
+                }
+                Ok(_) => {}
+                Err(_) => continue,
+            }
+
             std::fs::rename(&src, &dst)
                 .with_context(|| format!("rename {src:?} -> {dst:?}"))?;
-            if !verify_path(&snapshot, path)? {
-                // Undo so the path stays the agent's private business rather
-                // than a half-promoted orphan, and never enters a store other
-                // agents trust.
-                let _ = std::fs::rename(&dst, &src);
+
+            let authentic = verify_authentic(&snapshot, path).unwrap_or(false);
+            match classify_promote(authentic, trust_local) {
+                PromoteDecision::Reject => {
+                    unstage(&dst, &src);
+                    eprintln!(
+                        "cav-store: refusing to promote {}: not content-addressed \
+                         or trusted-signed (set CODING_CAVE_PROMOTE_TRUST_LOCAL=1 \
+                         to share local builds)",
+                        name.to_string_lossy()
+                    );
+                    continue;
+                }
+                PromoteDecision::PromoteUntrusted => untrusted.push(path.clone()),
+                PromoteDecision::Promote => {}
+            }
+
+            if let Err(e) = chown_tree_to_root(&dst) {
+                unstage(&dst, &src);
                 eprintln!(
-                    "cav-store: refusing to promote {}: content hash mismatch",
+                    "cav-store: rolled back {} after chown failure: {e:#}",
                     name.to_string_lossy()
                 );
                 continue;
             }
-            chown_tree_to_root(&dst)?;
             promoted.push(path.clone());
+        }
+        // Trust-local promotions are unverified, so don't carry the agent's
+        // claimed signatures (which it could fabricate) into the host DB.
+        if !untrusted.is_empty() {
+            strip_sigs(&snapshot, &untrusted)?;
         }
         nix_db::register_paths(None, Some(&snapshot), &promoted)
     })();
@@ -554,21 +620,52 @@ fn promote_to_host(
     result
 }
 
-/// Verify a just-renamed store path's contents against the hash the agent
-/// recorded for it. Reads the expected hash from the agent DB snapshot (so
-/// it works before the path is in the host DB) and the contents from the
-/// canonical `/nix/store` location.
-fn verify_path(snapshot_state_dir: &Path, store_path: &str) -> Result<bool> {
-    let status = Command::new("nix-store")
-        .arg("--verify-path")
-        .arg(store_path)
+/// Return a staged path to the agent's upper, or remove it if that fails, so
+/// a rejected promotion never leaves an unregistered path in the host store.
+fn unstage(dst: &Path, src: &Path) {
+    if std::fs::rename(dst, src).is_ok() {
+        return;
+    }
+    let _ = std::fs::remove_file(dst);
+    let _ = std::fs::remove_dir_all(dst);
+}
+
+/// Verify a just-renamed store path is authentic: its contents hash to its
+/// recorded value AND it is either content-addressed (the name binds the
+/// content) or carries a signature from a trusted key. An agent cannot forge
+/// either, so this is the anti-poisoning gate. Reads metadata from the agent
+/// DB snapshot and contents from the canonical `/nix/store` location.
+fn verify_authentic(snapshot_state_dir: &Path, store_path: &str) -> Result<bool> {
+    let status = Command::new("nix")
+        .args([
+            "--extra-experimental-features",
+            "nix-command",
+            "store",
+            "verify",
+            "--sigs-needed",
+            "1",
+            store_path,
+        ])
         .env("NIX_REMOTE", "")
         .env("NIX_STATE_DIR", snapshot_state_dir)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .context("spawn nix-store --verify-path")?;
+        .context("spawn nix store verify")?;
     Ok(status.success())
+}
+
+/// Clear the signature column for `paths` in the snapshot DB so unverified,
+/// trust-local promotions cannot inject fabricated trusted-signature metadata
+/// into the host DB.
+fn strip_sigs(snapshot_state_dir: &Path, paths: &[String]) -> Result<()> {
+    let db = snapshot_state_dir.join("db").join("db.sqlite");
+    let conn = Connection::open(&db)?;
+    let mut stmt = conn.prepare("UPDATE ValidPaths SET sigs = NULL WHERE path = ?1")?;
+    for p in paths {
+        stmt.execute([p])?;
+    }
+    Ok(())
 }
 
 /// Build a NIX_STATE_DIR tree whose db.sqlite is a snapshot of the
@@ -587,4 +684,24 @@ fn mkstate_for(agent_db: &Path) -> Result<PathBuf> {
     std::fs::create_dir_all(&db_target_dir).context("create promote tmp dirs")?;
     std::fs::copy(agent_db, db_target_dir.join("db.sqlite")).context("snapshot agent db")?;
     Ok(dir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{classify_promote, PromoteDecision};
+
+    #[test]
+    fn authentic_paths_always_promote() {
+        assert_eq!(classify_promote(true, false), PromoteDecision::Promote);
+        assert_eq!(classify_promote(true, true), PromoteDecision::Promote);
+    }
+
+    #[test]
+    fn unverifiable_paths_rejected_unless_trust_local() {
+        assert_eq!(classify_promote(false, false), PromoteDecision::Reject);
+        assert_eq!(
+            classify_promote(false, true),
+            PromoteDecision::PromoteUntrusted
+        );
+    }
 }

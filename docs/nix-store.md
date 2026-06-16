@@ -347,21 +347,36 @@ so the up-scan's "already on host" filter skips it. No loops.
 
 Promotion is the only way bytes cross from one agent's private layer
 into a store other agents trust, so it is where poisoning is blocked.
-Before registering a promoted path the daemon verifies the path's
-contents hash to its recorded nix hash (`nix-store --verify-path`). A
-mismatch aborts the promotion. This makes it impossible to register
-content that does not match the path's own metadata, and for
-content-addressed paths (sources, fixed-output fetches) the path name
-*is* that hash, so the verification is total.
+The agent controls both its cave DB and its upper layer, so any check
+against the agent's own recorded hash is self-referential and proves
+nothing against a malicious agent. The daemon instead gates on
+cryptographic authenticity that the agent cannot forge:
 
-Input-addressed build outputs are a weaker case: their name is derived
-from the derivation inputs, not the output contents, so a hash check
-confirms only that the recorded hash matches the bytes, not that the
-bytes are the legitimate build. Their security rests on all agents
-being the same user's, one trust domain, exactly as a single-user host
-nix store already trusts every locally-built path. Gating input-
-addressed promotion on a trusted-cache signature would tighten this
-further if caves ever needed to distrust each other.
+    nix store verify --sigs-needed 1 <path>
+
+This passes only when the path is **content-addressed** (sources,
+fixed-output fetches — the name *is* the content hash, so forging it is
+a preimage attack) or carries a **signature from a trusted key** (e.g.
+a cache.nixos.org-signed substitution — the agent has no private key to
+forge one). It also re-checks the contents against the recorded hash,
+so corruption or a post-build content swap is caught too. A path that
+fails the gate is unstaged (returned to the agent's upper, or removed
+if that fails) so the store never keeps an unregistered orphan.
+
+**Input-addressed local builds** (an agent's own build outputs, no
+signature) cannot be authenticated this way: the name derives from the
+derivation, not the contents, so nothing distinguishes the real build
+from forged bytes. By default they are **refused** — a malicious agent
+cannot pre-register forged content under the predictable path name a
+sibling will later want. Setting `CODING_CAVE_PROMOTE_TRUST_LOCAL=1`
+permits them, for a single-user fleet that wants to share locally-built
+packages and accepts trusting the producing agent; their agent-claimed
+signatures are stripped before they enter the host DB so they cannot
+masquerade as trusted-signed. Substituted packages (the common case)
+are signed and propagate either way.
+
+Symlinks are never promoted: a top-level symlink is not a legitimate
+store path and would resolve wherever the agent pointed it.
 
 ### Known race: rename-vs-chown window
 
