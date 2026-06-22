@@ -209,6 +209,35 @@ pub fn cherry_undelivered(
     Ok(lines)
 }
 
+/// Commits on `head` not yet delivered to `base`, newest first. When the
+/// two share a merge base this is `cherry_undelivered`. When they don't —
+/// a brand-new repo whose only commits live on the agent branch, so `base`
+/// doesn't exist on the remote, or genuinely unrelated histories — every
+/// commit on `head` is undelivered, so list them all.
+pub fn undelivered_commits(base: &str, head: &str, cwd: Option<&Path>) -> Result<Vec<String>> {
+    if has_merge_base(head, base, cwd) {
+        cherry_undelivered(base, head, cwd)
+    } else {
+        all_commits(head, cwd)
+    }
+}
+
+fn all_commits(head: &str, cwd: Option<&Path>) -> Result<Vec<String>> {
+    let out = git_output(&["log", "--format=%H %s", head], cwd)?;
+    if out.is_empty() {
+        return Ok(vec![]);
+    }
+    let lines = out
+        .lines()
+        .map(|l| {
+            let (sha, subject) = l.split_once(' ').unwrap_or((l, ""));
+            let sha_short: String = sha.chars().take(7).collect();
+            format!("{sha_short} {}", subject.trim())
+        })
+        .collect();
+    Ok(lines)
+}
+
 pub fn commit_timestamp(ref_name: &str, cwd: Option<&Path>) -> Option<f64> {
     git_output(&["log", "-1", "--format=%ct", ref_name], cwd)
         .ok()
@@ -268,4 +297,78 @@ pub fn format_commit_list(lines: &[String], indent: &str, max: Option<usize>) ->
         ));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    fn run(repo: &Path, args: &[&str]) {
+        let out = Command::new("git").args(args).current_dir(repo).output().unwrap();
+        assert!(out.status.success(), "git {args:?} failed: {out:?}");
+    }
+
+    fn commit(repo: &Path, msg: &str) {
+        run(repo, &["commit", "-q", "--allow-empty", "-m", msg]);
+    }
+
+    fn tmp_repo(label: &str) -> PathBuf {
+        let base = std::env::temp_dir();
+        for i in 0..1000 {
+            let p = base.join(format!("cav-git-test-{label}-{i}"));
+            if fs::create_dir(&p).is_ok() {
+                run(&p, &["init", "-q", "-b", "main"]);
+                run(&p, &["config", "user.email", "t@t"]);
+                run(&p, &["config", "user.name", "T"]);
+                return p;
+            }
+        }
+        panic!("could not allocate tmp dir");
+    }
+
+    fn subjects(lines: &[String]) -> Vec<String> {
+        lines.iter().map(|l| l.split_once(' ').unwrap().1.to_string()).collect()
+    }
+
+    #[test]
+    fn undelivered_lists_all_commits_when_base_ref_missing() {
+        // A brand-new repo whose only commits live on the agent branch: the
+        // base ref doesn't exist, so every commit on the dev branch counts
+        // as undelivered. This is the `cav status` "shows nothing" bug.
+        let repo = tmp_repo("missing-base");
+        // Branch off the unborn HEAD so `main` never comes into existence.
+        run(&repo, &["checkout", "-q", "-b", "agent-1/main"]);
+        commit(&repo, "root on agent branch only");
+        commit(&repo, "Add Severance episode list");
+
+        let lines = undelivered_commits("main", "agent-1/main", Some(&repo)).unwrap();
+        assert_eq!(
+            subjects(&lines),
+            vec!["Add Severance episode list", "root on agent branch only"],
+            "newest first, all commits surfaced",
+        );
+        fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    fn undelivered_lists_only_commits_ahead_of_base() {
+        // With a real shared base, only the commits not yet on the base are
+        // undelivered, newest first.
+        let repo = tmp_repo("with-base");
+        commit(&repo, "shared root");
+        run(&repo, &["checkout", "-q", "-b", "agent-1/main"]);
+        commit(&repo, "first agent commit");
+        commit(&repo, "second agent commit");
+
+        let lines = undelivered_commits("main", "agent-1/main", Some(&repo)).unwrap();
+        assert_eq!(
+            subjects(&lines),
+            vec!["second agent commit", "first agent commit"],
+            "base commit excluded, newest first",
+        );
+        fs::remove_dir_all(&repo).ok();
+    }
 }

@@ -501,11 +501,9 @@ fn collect_agent_infos(
                     last_activity = ts;
                 }
             }
-            if git::has_merge_base(&remote_dev, &remote_base, Some(base)) {
-                if let Ok(lines) = git::cherry_undelivered(&remote_base, &remote_dev, Some(base)) {
-                    if !lines.is_empty() {
-                        unapproved.push((branch.clone(), lines.len(), lines));
-                    }
+            if let Ok(lines) = git::undelivered_commits(&remote_base, &remote_dev, Some(base)) {
+                if !lines.is_empty() {
+                    unapproved.push((branch.clone(), lines.len(), lines));
                 }
             }
         }
@@ -578,19 +576,17 @@ pub fn remove_agent(base: &Path, agent_id: &str, yes: bool) -> Result<()> {
         let base_name = config::resolve_base(b.clone());
         let remote_dev = format!("{CAVE_SHARED_REMOTE}/{b}");
         let base_ref = format!("{CAVE_SHARED_REMOTE}/{base_name}");
-        if git::has_merge_base(&remote_dev, &base_ref, Some(base)) {
-            if let Ok(commits) = git::cherry_undelivered(&base_ref, &remote_dev, Some(base)) {
-                if !commits.is_empty() {
-                    needs_confirm = true;
-                    let count = commits.len();
-                    let n = if count == 1 { "commit" } else { "commits" };
-                    println!(
-                        "{} discarding {count} unapproved {n} on {}:",
-                        style::bold_yellow("Warning:"),
-                        style::yellow(b),
-                    );
-                    print!("{}", git::format_commit_list(&commits, "    ", Some(MAX_COMMITS_DISPLAY)));
-                }
+        if let Ok(commits) = git::undelivered_commits(&base_ref, &remote_dev, Some(base)) {
+            if !commits.is_empty() {
+                needs_confirm = true;
+                let count = commits.len();
+                let n = if count == 1 { "commit" } else { "commits" };
+                println!(
+                    "{} discarding {count} unapproved {n} on {}:",
+                    style::bold_yellow("Warning:"),
+                    style::yellow(b),
+                );
+                print!("{}", git::format_commit_list(&commits, "    ", Some(MAX_COMMITS_DISPLAY)));
             }
         }
     }

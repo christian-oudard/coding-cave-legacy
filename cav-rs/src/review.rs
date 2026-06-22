@@ -67,12 +67,10 @@ pub fn review(base: &Path, agent_id: &str) -> Result<()> {
         let target = resolve_base(branch.clone());
         let remote_dev = format!("{CAVE_SHARED_REMOTE}/{branch}");
         let remote_target = format!("{CAVE_SHARED_REMOTE}/{target}");
-        if git::has_merge_base(&remote_dev, &remote_target, Some(base)) {
-            let lines = git::cherry_undelivered(&remote_target, &remote_dev, Some(base))
-                .unwrap_or_default();
-            if !lines.is_empty() {
-                pending.push((branch.clone(), target, lines));
-            }
+        let lines = git::undelivered_commits(&remote_target, &remote_dev, Some(base))
+            .unwrap_or_default();
+        if !lines.is_empty() {
+            pending.push((branch.clone(), target, lines));
         }
     }
 
@@ -118,20 +116,17 @@ pub fn review(base: &Path, agent_id: &str) -> Result<()> {
 
     println!("Checked out {}", style::yellow(&agent_branch));
 
-    let log = git::git_output(
-        &["log", "--oneline", &format!("{remote_target}..{remote_ref}")],
-        Some(base),
-    )
-    .unwrap_or_default();
+    let log = git::undelivered_commits(&remote_target, &remote_ref, Some(base))
+        .unwrap_or_default();
     if !log.is_empty() {
-        let count = log.lines().count();
+        let count = log.len();
         let n = if count == 1 { "commit" } else { "commits" };
         println!(
             "{} {n} ahead of {}:",
             style::bold(&count.to_string()),
             style::yellow(&target),
         );
-        for line in log.lines() {
+        for line in &log {
             println!("{}", style::commit_line(line));
         }
     }
