@@ -1465,8 +1465,8 @@ fn gc_dry_run_reports_but_removes_nothing() {
 // --- cav remove-agent ---
 
 #[test]
-fn remove_agent_drops_worktree_and_nix_overlay() {
-    let p = Project::new("ra-drops-overlay");
+fn remove_agent_drops_worktree_and_cave_store() {
+    let p = Project::new("ra-drops-store");
     p.register_agent("1");
     let uuid = p.agent_uuid("1").unwrap();
 
@@ -1474,18 +1474,11 @@ fn remove_agent_drops_worktree_and_nix_overlay() {
     fs::create_dir_all(&ws).unwrap();
     fs::write(ws.join("MARKER"), "x\n").unwrap();
 
-    // Seed a per-agent nix overlay dir; remove-agent should reclaim it
+    // Seed a per-cave nix store dir; remove-agent should reclaim it
     // alongside the worktree.
-    let overlay = p
-        .data_dir
-        .join("home")
-        .join(".local")
-        .join("share")
-        .join("coding-cave")
-        .join("nix-overlay")
-        .join(format!("agent-{uuid}"));
-    fs::create_dir_all(overlay.join("upper")).unwrap();
-    fs::write(overlay.join("upper").join("FILE"), "y\n").unwrap();
+    let store = p.data_dir.join("store").join(format!("agent-{uuid}"));
+    fs::create_dir_all(store.join("nix").join("store")).unwrap();
+    fs::write(store.join("nix").join("store").join("FILE"), "y\n").unwrap();
 
     let out = p.cav(&["remove-agent", "1", "--yes"]);
     assert_eq!(
@@ -1496,7 +1489,7 @@ fn remove_agent_drops_worktree_and_nix_overlay() {
     );
 
     assert!(!ws.exists(), "worktree dir must be reclaimed");
-    assert!(!overlay.exists(), "nix overlay dir must be reclaimed");
+    assert!(!store.exists(), "cave store dir must be reclaimed");
     assert!(!p.agent_registered("1"), "registry row must be dropped");
 }
 

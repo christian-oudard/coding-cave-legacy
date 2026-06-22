@@ -26,22 +26,29 @@ pub fn worktree_for(slug: &str, agent_id: &str) -> PathBuf {
     canonical
 }
 
-/// Same shape as `worktree_for` for the per-agent nix overlay base
-/// (`<home>/.local/share/coding-cave/nix-overlay/agent-<key>`). Pure.
-pub fn nix_overlay_base_for(home: &Path, agent_id: &str) -> PathBuf {
-    let nix_root = home
-        .join(".local")
-        .join("share")
-        .join("coding-cave")
-        .join("nix-overlay");
+/// The base dir holding every per-cave nix store: `<data>/store`. Must match
+/// cav-store's `store_base_from_env` (the host manager watches this dir for
+/// `agent-*` chroot stores). `data_dir()` resolves to the cave user's
+/// `~/.local/share/coding-cave`, the same root cav-store derives from
+/// CODING_CAVE_HOST_WATCH_HOME / CAVE_USER_HOME.
+pub fn cave_store_base() -> PathBuf {
+    config::data_dir().join("store")
+}
+
+/// One cave's private nix chroot store: `<data>/store/agent-<key>`. Keyed by
+/// agent uuid (like the worktree and overlay dirs) so the host manager's
+/// per-agent quota dirs line up. The cave runs `nix` against this as
+/// `local?root=<this>`, so its paths are logically `/nix/store/...`. Pure.
+pub fn cave_store_root_for(agent_id: &str) -> PathBuf {
+    let base = cave_store_base();
     let Some(uuid) = registry::agent_uuid(agent_id).ok().flatten() else {
-        return nix_root.join(format!("agent-{agent_id}"));
+        return base.join(format!("agent-{agent_id}"));
     };
-    let canonical = nix_root.join(format!("agent-{uuid}"));
+    let canonical = base.join(format!("agent-{uuid}"));
     if canonical.exists() {
         return canonical;
     }
-    let legacy = nix_root.join(format!("agent-{agent_id}"));
+    let legacy = base.join(format!("agent-{agent_id}"));
     if legacy != canonical && legacy.exists() {
         return legacy;
     }
@@ -103,7 +110,7 @@ pub fn archive_sweep() {
     // about-to-be-bumped agent's legacy display-id-keyed dir would never
     // get migrated — settle keys on the current display int, which we're
     // about to change.
-    settle_uuid_keying(&config::persistent_home());
+    settle_uuid_keying();
 
     let Ok(agents) = registry::all_agent_ids(None) else {
         return;
@@ -183,12 +190,12 @@ pub fn archive_sweep() {
 }
 
 /// Sweep every non-running agent's on-disk state, renaming display-id-
-/// keyed worktrees and nix overlays into their canonical uuid-keyed
+/// keyed worktrees and nix stores into their canonical uuid-keyed
 /// locations. One-shot upgrade migration that completes lazily as the
 /// user runs cav after picking up the uuid column. Skips running agents
 /// since renaming their dirs would yank state out from under them. Safe
 /// to call repeatedly — each call is a no-op once everything's settled.
-pub fn settle_uuid_keying(home: &Path) {
+pub fn settle_uuid_keying() {
     let Ok(agents) = registry::all_agent_ids(None) else {
         return;
     };
@@ -209,15 +216,14 @@ pub fn settle_uuid_keying(home: &Path) {
                 let _ = std::fs::rename(&legacy, &canonical);
             }
         }
-        let nix_root = home
-            .join(".local")
-            .join("share")
-            .join("coding-cave")
-            .join("nix-overlay");
-        let canonical_nix = nix_root.join(format!("agent-{uuid}"));
-        let legacy_nix = nix_root.join(format!("agent-{aid}"));
-        if legacy_nix != canonical_nix && legacy_nix.exists() && !canonical_nix.exists() {
-            let _ = std::fs::rename(&legacy_nix, &canonical_nix);
+        let store_base = cave_store_base();
+        let canonical_store = store_base.join(format!("agent-{uuid}"));
+        let legacy_store = store_base.join(format!("agent-{aid}"));
+        if legacy_store != canonical_store
+            && legacy_store.exists()
+            && !canonical_store.exists()
+        {
+            let _ = std::fs::rename(&legacy_store, &canonical_store);
         }
     }
 }
@@ -554,5 +560,19 @@ mod tests {
 
         force_remove_dir_all(&tmp);
         assert!(!tmp.exists(), "force_remove_dir_all should clear the tree");
+    }
+
+    #[test]
+    fn cave_store_root_matches_manager_layout() {
+        // The host manager (cav-store) watches `<base>/agent-<id>` as a chroot
+        // store; the cave side must produce the same path. Serialize on the
+        // shared data-dir lock and use an agent id with no registry uuid so
+        // the fallback (display-id keying) is deterministic without a database.
+        let g = crate::test_util::DataDirGuard::new("cave-store-root");
+        assert_eq!(cave_store_base(), g.path.join("store"));
+        assert_eq!(
+            cave_store_root_for("__no_such_agent__"),
+            g.path.join("store").join("agent-__no_such_agent__"),
+        );
     }
 }

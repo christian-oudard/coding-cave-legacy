@@ -686,13 +686,10 @@ pub fn _remove_agent(base: &Path, agent_id: &str, branches: &[String]) -> Result
             }
         }
     }
-    // Per-agent nix overlay (typically the dominant on-disk cost).
-    let overlay = crate::workspace::nix_overlay_base_for(
-        &config::persistent_home(),
-        agent_id,
-    );
-    if overlay.exists() {
-        crate::workspace::force_remove_dir_all(&overlay);
+    // Per-agent nix store (typically the dominant on-disk cost).
+    let store = crate::workspace::cave_store_root_for(agent_id);
+    if store.exists() {
+        crate::workspace::force_remove_dir_all(&store);
     }
     registry::remove_agent(agent_id)?;
     Ok(())

@@ -4,32 +4,46 @@
 // daemon and not the user-facing CLI. The unit definitions stay thin shims
 // calling these verbs; logic lives in Rust and updates ride the binary
 // instead of unit-file rewrites.
+//
+// Model (see docs/nix-store-redesign.md): each cave owns a private chroot
+// store under its home; the cave does its own builds as itself, no idmap.
+// This daemon owns the single shared store (root-owned, chroot store at
+// SHARED_STORE_ROOT). It watches each cave store's nix DB; for every new
+// valid path it gates the path through the trust logic and, if it crosses,
+// `nix copy`s the path (and closure) from the cave store into the shared
+// store, hardlinks the cave's file to the shared inode, and marks the shared
+// path immutable. Caves use the shared store as a read-only substituter to
+// fetch shared packages without rebuilding. The daemon also garbage-collects
+// the shared store, rooting the closures every live cave references so a path
+// in use is never removed.
 
 use anyhow::{bail, Context, Result};
 use rusqlite::Connection;
 
-#[path = "../nix_db.rs"]
-mod nix_db;
 #[path = "../quota.rs"]
 mod quota;
+#[path = "../nix_db.rs"]
+mod nix_db;
 use rustix::fd::{AsFd, OwnedFd};
 use rustix::fs::inotify::{self, CreateFlags, WatchFlags};
 use rustix::io::Errno;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::mem::MaybeUninit;
-use std::os::unix::fs::lchown;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 const STATE_DIR: &str = "/var/lib/coding-cave";
-const IDMAP_TARGET: &str = "/var/lib/coding-cave/nix-store";
-const IDMAP_OPTS: &str = "X-mount.idmap=u:0:1000:1 g:0:1000:1";
+// Root-owned shared store: the deduplicated store every cave substitutes from
+// and promotes into. A chroot store ("local?root=<this>"), so its paths are
+// logically /nix/store/... like any other store's.
+const SHARED_STORE_ROOT: &str = "/var/lib/coding-cave/store";
 
-// The cave user's home. uid 1000 by convention (see IDMAP_OPTS above).
+// How often the background thread garbage-collects the shared store.
+const GC_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3600);
+
+// The cave user's home, owned by the host account that runs caves.
 const CAVE_USER_HOME: &str = "/home/cave-coder";
-const HOST_STORE: &str = "/nix/store";
-const HOST_DB: &str = "/nix/var/nix/db/db.sqlite";
 
 fn main() {
     if let Err(e) = run() {
@@ -43,7 +57,8 @@ fn run() -> Result<()> {
         Some("setup") => setup(),
         Some("teardown") => teardown(),
         Some("watch") => watch(),
-        other => bail!("usage: cav-store <setup|teardown|watch> (got {other:?})"),
+        Some("gc") => gc_shared_store(),
+        other => bail!("usage: cav-store <setup|teardown|watch|gc> (got {other:?})"),
     }
 }
 
@@ -52,61 +67,34 @@ fn setup() -> Result<()> {
         bail!("cav-store setup must be run as root");
     }
     std::fs::create_dir_all(STATE_DIR).context("create /var/lib/coding-cave")?;
-    if !Path::new(IDMAP_TARGET).exists() {
-        std::fs::create_dir(IDMAP_TARGET).context("create idmap target")?;
-    }
-    // Idempotent: the watch ExecStart can crash and trigger a restart, which
-    // re-runs ExecStartPre. If the mount is still active from the previous
-    // invocation, leave it in place — re-mounting would fail and cascade
-    // into a restart loop.
-    if is_mount_point(IDMAP_TARGET) {
-        return Ok(());
-    }
-    let status = Command::new("mount")
-        .args(["--bind", "--read-only", "-o", IDMAP_OPTS, "/nix/store", IDMAP_TARGET])
-        .status()
-        .context("invoke mount")?;
-    if !status.success() {
-        bail!("mount failed: {status}");
-    }
+    // The shared store is a root-owned chroot store. Nix initializes its
+    // database on the first `nix copy --to`, so we only ensure the directory
+    // exists. Idempotent across restarts.
+    std::fs::create_dir_all(SHARED_STORE_ROOT).context("create shared store")?;
     Ok(())
-}
-
-fn is_mount_point(path: &str) -> bool {
-    // Field 5 of each /proc/self/mountinfo line is the mount point.
-    let Ok(data) = std::fs::read_to_string("/proc/self/mountinfo") else {
-        return false;
-    };
-    data.lines().any(|l| l.split(' ').nth(4) == Some(path))
 }
 
 fn teardown() -> Result<()> {
-    if !rustix::process::geteuid().is_root() {
-        bail!("cav-store teardown must be run as root");
-    }
-    let status = Command::new("umount")
-        .args(["--lazy", IDMAP_TARGET])
-        .status()
-        .context("invoke umount")?;
-    if !status.success() {
-        bail!("umount failed: {status}");
-    }
+    // Nothing to tear down: the shared store is a plain directory that persists
+    // across restarts. Kept as a verb so the unit's ExecStopPost shim is
+    // stable.
     Ok(())
 }
 
-/// Watch each agent's nix DB; promote newly-installed paths into the
-/// host /nix/store so siblings inherit them via the overlay lower.
-/// Long-running; the ExecStart of coding-cave-host.service.
+/// Watch each cave's nix DB; promote newly-installed paths into the shared
+/// store so siblings can substitute them, hardlink the cave's copy to the
+/// shared inode, and mark shared paths immutable. Long-running; the ExecStart
+/// of coding-cave-host.service.
 fn watch() -> Result<()> {
     if !test_mode() && !rustix::process::geteuid().is_root() {
         bail!("cav-store watch must be run as root");
     }
-    let overlay_base = overlay_base_from_env();
-    std::fs::create_dir_all(&overlay_base).context("create nix-overlay base")?;
+    let store_base = store_base_from_env();
+    std::fs::create_dir_all(&store_base).context("create cave-store base")?;
 
     let ifd = inotify::init(CreateFlags::empty()).context("inotify init")?;
-    let base_wd = inotify::add_watch(&ifd, &overlay_base, WatchFlags::CREATE)
-        .context("watch overlay base")?;
+    let base_wd = inotify::add_watch(&ifd, &store_base, WatchFlags::CREATE)
+        .context("watch cave-store base")?;
 
     // Crashes here if a quota is configured but the filesystem can't enforce
     // it; applies the shared-home cap. Skipped in test mode so a dev host's
@@ -114,12 +102,12 @@ fn watch() -> Result<()> {
     let quota = if test_mode() {
         None
     } else {
-        setup_quota(&overlay_base)?
+        setup_quota(&store_base)?
     };
 
     let mut w = Watcher {
         ifd,
-        overlay_base,
+        store_base,
         base_wd,
         active: HashMap::new(),
         pending: HashMap::new(),
@@ -127,9 +115,9 @@ fn watch() -> Result<()> {
         quota,
     };
 
-    // Adopt any agents that already exist. Picks up installs that happened
+    // Adopt any caves that already exist. Picks up installs that happened
     // while the watcher was down by way of advance_tracking's initial scan.
-    if let Ok(entries) = std::fs::read_dir(&w.overlay_base) {
+    if let Ok(entries) = std::fs::read_dir(&w.store_base) {
         for entry in entries.flatten() {
             if let Some(id) = agent_id_from_name(&entry.file_name()) {
                 w.advance_tracking(&id, None);
@@ -137,15 +125,16 @@ fn watch() -> Result<()> {
         }
     }
 
-    // Down-sync runs on its own inotify fd in a side thread so it never
-    // interleaves with the up-sync (promote) loop below. Skip it in test
-    // mode unless the test points us at a host DB of its own, so the
-    // up-sync integration tests don't reconcile against the real host store.
-    if !test_mode() || std::env::var_os("CODING_CAVE_HOST_WATCH_DB").is_some() {
-        let base = w.overlay_base.clone();
-        std::thread::spawn(move || {
-            if let Err(e) = run_down_sync(base) {
-                eprintln!("cav-store down-sync thread exited: {e:#}");
+    // Periodically garbage-collect the shared store, rooting the closures
+    // every live cave references so a path in use is never removed. Runs on
+    // its own thread so it never blocks the inotify promote loop. Skipped in
+    // test mode (no real nix store to collect).
+    if !test_mode() {
+        let base = w.store_base.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(GC_INTERVAL);
+            if let Err(e) = gc_with_base(&base) {
+                eprintln!("cav-store gc: {e:#}");
             }
         });
     }
@@ -185,17 +174,17 @@ fn watch() -> Result<()> {
 
 struct Watcher {
     ifd: OwnedFd,
-    overlay_base: PathBuf,
+    store_base: PathBuf,
     base_wd: i32,
-    /// wd -> AgentState; the watch is on `agent-<id>/db/` and fires
-    /// MODIFY/CLOSE_WRITE for every nix DB write.
+    /// wd -> AgentState; the watch is on `agent-<id>/nix/var/nix/db/` and
+    /// fires MODIFY/CLOSE_WRITE for every nix DB write.
     active: HashMap<i32, AgentState>,
-    /// wd -> agent_id; the watch is on `agent-<id>/` or `agent-<id>/db/`
-    /// waiting for db.sqlite to materialize. Promoted to `active` on the
-    /// next event that lets us attach the real watch.
+    /// wd -> agent_id; the watch is on a parent of the cave DB waiting for
+    /// db.sqlite to materialize. Promoted to `active` on the next event that
+    /// lets us attach the real watch.
     pending: HashMap<i32, String>,
     /// All agent_ids currently in `active` or `pending`. Lets the base-wd
-    /// CREATE handler skip agents we're already tracking.
+    /// CREATE handler skip caves we're already tracking.
     tracked: HashSet<String>,
     /// Per-agent disk-quota state, when a per-agent cap is configured.
     quota: Option<QuotaState>,
@@ -208,14 +197,14 @@ struct QuotaState {
 }
 
 impl Watcher {
-    /// Drive an agent toward the active state. If a pending watch was
-    /// already in place for this agent, `current_wd` is its wd; that watch
-    /// gets retired before we attach the next one (no inotify watch leaks).
+    /// Drive a cave toward the active state. If a pending watch was already in
+    /// place for this cave, `current_wd` is its wd; that watch gets retired
+    /// before we attach the next one (no inotify watch leaks).
     ///
-    /// The loop closes the small race where db.sqlite is created between
-    /// our "does it exist?" check and the add_watch on its parent dir —
-    /// after attaching, we re-check; if the deeper level is now ready, we
-    /// drop this pending watch and try again.
+    /// The loop closes the small race where db.sqlite is created between our
+    /// "does it exist?" check and the add_watch on its parent dir — after
+    /// attaching, we re-check; if the deeper level is now ready, we drop this
+    /// pending watch and try again.
     fn advance_tracking(&mut self, agent_id: &str, current_wd: Option<i32>) {
         if let Some(wd) = current_wd {
             self.pending.remove(&wd);
@@ -228,7 +217,7 @@ impl Watcher {
 
         loop {
             // Ready: attach the db-dir watch and run the initial scan.
-            if let Some(mut state) = AgentState::new(&self.overlay_base, agent_id) {
+            if let Some(mut state) = AgentState::new(&self.store_base, agent_id) {
                 match inotify::add_watch(
                     &self.ifd,
                     &state.db_dir,
@@ -254,16 +243,11 @@ impl Watcher {
                 return;
             }
 
-            // Not ready: attach a watch on the deepest existing parent of
+            // Not ready: attach a watch on the deepest existing ancestor of
             // db.sqlite so we wake up when the next piece materializes.
-            let agent_dir = self.overlay_base.join(format!("agent-{agent_id}"));
-            let db_dir = agent_dir.join("db");
-            let target = if db_dir.exists() {
-                db_dir
-            } else if agent_dir.exists() {
-                agent_dir
-            } else {
-                // The agent dir vanished (created then deleted). Drop tracking.
+            let target = deepest_existing(&cave_db_dir(&self.store_base, agent_id));
+            let Some(target) = target else {
+                // The cave dir vanished (created then deleted). Drop tracking.
                 self.tracked.remove(agent_id);
                 return;
             };
@@ -276,7 +260,7 @@ impl Watcher {
                     // Close the check-vs-attach race: if db.sqlite materialized
                     // between our exists() and add_watch, retry with the new
                     // watch retired.
-                    if AgentState::new(&self.overlay_base, agent_id).is_some() {
+                    if AgentState::new(&self.store_base, agent_id).is_some() {
                         let _ = inotify::remove_watch(&self.ifd, wd);
                         continue;
                     }
@@ -295,13 +279,13 @@ impl Watcher {
         }
     }
 
-    /// Apply the per-agent cap to an agent's writable trees. Best-effort: a
-    /// failure is logged, never fatal, so a quota hiccup can't wedge an agent.
+    /// Apply the per-agent cap to a cave's writable trees. Best-effort: a
+    /// failure is logged, never fatal, so a quota hiccup can't wedge a cave.
     fn apply_agent_quota(&self, agent_id: &str) {
         let Some(q) = &self.quota else {
             return;
         };
-        let dirs = agent_quota_dirs(&self.overlay_base, agent_id);
+        let dirs = agent_quota_dirs(&self.store_base, agent_id);
         if let Err(e) = quota::apply(
             &dirs,
             quota::projid_for(agent_id),
@@ -313,11 +297,44 @@ impl Watcher {
     }
 }
 
-/// An agent's writable host trees: its nix overlay plus its workspace
-/// clone(s) under any project slug.
-fn agent_quota_dirs(overlay_base: &Path, agent_key: &str) -> Vec<PathBuf> {
-    let mut dirs = vec![overlay_base.join(format!("agent-{agent_key}"))];
-    if let Some(data_dir) = overlay_base.parent() {
+/// The cave-store dir for one agent: `<store_base>/agent-<id>`.
+fn cave_store_root(store_base: &Path, agent_id: &str) -> PathBuf {
+    store_base.join(format!("agent-{agent_id}"))
+}
+
+/// The cave's nix DB directory: `<cave-store>/nix/var/nix/db`.
+fn cave_db_dir(store_base: &Path, agent_id: &str) -> PathBuf {
+    cave_store_root(store_base, agent_id)
+        .join("nix")
+        .join("var")
+        .join("nix")
+        .join("db")
+}
+
+/// The deepest ancestor of `target` (inclusive) that currently exists, or
+/// None if not even the cave-store root exists. Lets inotify watch the
+/// closest live dir while the nix DB tree is still being created.
+fn deepest_existing(target: &Path) -> Option<PathBuf> {
+    let mut cur = target;
+    loop {
+        if cur.exists() {
+            return Some(cur.to_path_buf());
+        }
+        cur = cur.parent()?;
+        // Stop climbing above the agent's own store root; the base-dir watch
+        // covers creation of the agent dir itself.
+        if cur.file_name().and_then(|n| n.to_str()).map(|n| n.starts_with("agent-")) == Some(true) {
+            return if cur.exists() { Some(cur.to_path_buf()) } else { None };
+        }
+    }
+}
+
+/// A cave's writable trees: its store plus its workspace clone(s) under any
+/// project slug.
+fn agent_quota_dirs(store_base: &Path, agent_key: &str) -> Vec<PathBuf> {
+    let mut dirs = vec![cave_store_root(store_base, agent_key)];
+    // store_base is <data>/store; worktrees live under <data>/worktrees.
+    if let Some(data_dir) = store_base.parent() {
         if let Ok(slugs) = std::fs::read_dir(data_dir.join("worktrees")) {
             for slug in slugs.flatten() {
                 let cand = slug.path().join(agent_key);
@@ -332,13 +349,13 @@ fn agent_quota_dirs(overlay_base: &Path, agent_key: &str) -> Vec<PathBuf> {
 
 /// Resolve quota config at startup. Crashes if a quota is configured but the
 /// filesystem can't enforce it; applies the shared-home cap once. Returns the
-/// per-agent state (if a per-agent cap is set) for use as agents are adopted.
-fn setup_quota(overlay_base: &Path) -> Result<Option<QuotaState>> {
+/// per-agent state (if a per-agent cap is set) for use as caves are adopted.
+fn setup_quota(store_base: &Path) -> Result<Option<QuotaState>> {
     let cfg = quota::HostConfig::load()?;
     if !cfg.active() {
         return Ok(None);
     }
-    let mountpoint = quota::mountpoint_for(overlay_base)?;
+    let mountpoint = quota::mountpoint_for(store_base)?;
     let supported = quota::project_quota_supported(&mountpoint);
     if quota::should_crash(cfg.active(), supported) {
         bail!(
@@ -348,7 +365,7 @@ fn setup_quota(overlay_base: &Path) -> Result<Option<QuotaState>> {
         );
     }
     if let Some(bytes) = cfg.shared_home_bytes()? {
-        if let Some(data_dir) = overlay_base.parent() {
+        if let Some(data_dir) = store_base.parent() {
             let home = data_dir.join("home");
             if let Err(e) =
                 quota::apply(&[home], quota::SHARED_HOME_PROJID, bytes, &mountpoint)
@@ -365,14 +382,14 @@ fn setup_quota(overlay_base: &Path) -> Result<Option<QuotaState>> {
         }))
 }
 
-fn overlay_base_from_env() -> PathBuf {
+fn store_base_from_env() -> PathBuf {
     let home = std::env::var("CODING_CAVE_HOST_WATCH_HOME")
         .unwrap_or_else(|_| CAVE_USER_HOME.to_string());
     PathBuf::from(home)
         .join(".local")
         .join("share")
         .join("coding-cave")
-        .join("nix-overlay")
+        .join("store")
 }
 
 fn agent_id_from_name(name: &OsStr) -> Option<String> {
@@ -381,27 +398,33 @@ fn agent_id_from_name(name: &OsStr) -> Option<String> {
 
 struct AgentState {
     agent_id: String,
-    upper_dir: PathBuf,
+    /// The cave's chroot-store root (`<store_base>/agent-<id>`), passed to nix
+    /// as `local?root=<this>`.
+    cave_root: PathBuf,
+    /// Physical store dir (`<cave_root>/nix/store`), where the cave's files
+    /// live and where we hardlink the shared inode.
+    store_dir: PathBuf,
     db_path: PathBuf,
     db_dir: PathBuf,
-    /// Highest `ValidPaths.id` we've processed for this agent. The next
-    /// scan reads `WHERE id > last_seen_id`. `ValidPaths.id` is
-    /// `INTEGER PRIMARY KEY AUTOINCREMENT` so values are monotonic and
-    /// never reused.
+    /// Highest `ValidPaths.id` we've processed for this cave. The next scan
+    /// reads `WHERE id > last_seen_id`. `ValidPaths.id` is
+    /// `INTEGER PRIMARY KEY AUTOINCREMENT` so values are monotonic and never
+    /// reused.
     last_seen_id: i64,
 }
 
 impl AgentState {
-    fn new(overlay_base: &Path, agent_id: &str) -> Option<Self> {
-        let agent_dir = overlay_base.join(format!("agent-{agent_id}"));
-        let db_dir = agent_dir.join("db");
+    fn new(store_base: &Path, agent_id: &str) -> Option<Self> {
+        let cave_root = cave_store_root(store_base, agent_id);
+        let db_dir = cave_db_dir(store_base, agent_id);
         let db_path = db_dir.join("db.sqlite");
         if !db_path.exists() {
             return None;
         }
         Some(Self {
             agent_id: agent_id.to_string(),
-            upper_dir: agent_dir.join("upper"),
+            store_dir: cave_root.join("nix").join("store"),
+            cave_root,
             db_path,
             db_dir,
             last_seen_id: 0,
@@ -414,7 +437,7 @@ fn scan_and_promote(state: &mut AgentState) -> Result<()> {
         &state.db_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
-    .context("open agent db")?;
+    .context("open cave db")?;
 
     let rows: Vec<(i64, String)> = match conn
         .prepare("SELECT id, path FROM ValidPaths WHERE id > ?1 ORDER BY id")
@@ -426,7 +449,7 @@ fn scan_and_promote(state: &mut AgentState) -> Result<()> {
             rows.filter_map(|r| r.ok()).collect()
         }
         // Race: db.sqlite exists but the schema hasn't been written yet
-        // (agent setup mid-flight). The next DB write will retry.
+        // (cave setup mid-flight). The next DB write will retry.
         Err(rusqlite::Error::SqliteFailure(_, Some(ref msg))) if msg.contains("no such table") => {
             return Ok(());
         }
@@ -438,34 +461,38 @@ fn scan_and_promote(state: &mut AgentState) -> Result<()> {
         return Ok(());
     }
 
-    let store_target = host_store_dir();
+    let shared = PathBuf::from(shared_store_root());
+    let shared_store_dir = shared.join("nix").join("store");
     let mut to_promote = Vec::new();
     for (_id, path) in &rows {
         let Some(name) = Path::new(path).file_name() else {
             continue;
         };
-        // Already on host (prior promotion, or originally from host store).
-        if store_target.join(name).exists() {
+        // Already shared (prior promotion, or it came from the shared store
+        // via substitution / launch population). Nothing to do.
+        if shared_store_dir.join(name).exists() {
             continue;
         }
-        // In the agent's DB via the seed-from-parent, not installed on
-        // this layer. Nothing to promote.
-        if !state.upper_dir.join(name).exists() {
+        // Must be a real path in this cave's store. A DB row whose file is
+        // absent is nothing to promote.
+        if !state.store_dir.join(name).exists() {
             continue;
         }
         to_promote.push((path.clone(), name.to_os_string()));
     }
 
     if test_mode() {
-        // Exercise the diff/rename pipeline without nix-store or chown.
+        // Exercise the diff pipeline without nix/chattr: "promote" by
+        // copying the cave file into the shared store dir.
+        std::fs::create_dir_all(&shared_store_dir).ok();
         for (_, name) in &to_promote {
-            let src = state.upper_dir.join(name);
-            let dst = store_target.join(name);
-            std::fs::rename(&src, &dst)
-                .with_context(|| format!("rename {src:?} -> {dst:?}"))?;
+            let src = state.store_dir.join(name);
+            let dst = shared_store_dir.join(name);
+            copy_tree(&src, &dst)
+                .with_context(|| format!("copy {src:?} -> {dst:?}"))?;
         }
     } else if !to_promote.is_empty() {
-        promote_to_host(state, &store_target, &to_promote)?;
+        promote_to_shared(state, &shared, &shared_store_dir, &to_promote)?;
     }
 
     // Advance the cursor only after everything in this batch succeeded.
@@ -476,130 +503,27 @@ fn scan_and_promote(state: &mut AgentState) -> Result<()> {
     Ok(())
 }
 
-fn host_store_dir() -> PathBuf {
-    // Override only for tests; production unconditionally uses /nix/store.
-    std::env::var("CODING_CAVE_HOST_WATCH_STORE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(HOST_STORE))
+fn shared_store_root() -> String {
+    // Override only for tests; production unconditionally uses SHARED_STORE_ROOT.
+    std::env::var("CODING_CAVE_SHARED_STORE")
+        .unwrap_or_else(|_| SHARED_STORE_ROOT.to_string())
 }
 
-fn host_db() -> PathBuf {
-    // Override only for tests; production unconditionally uses the host DB.
-    std::env::var("CODING_CAVE_HOST_WATCH_DB")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(HOST_DB))
-}
-
-/// Watch the parent (host) nix DB and propagate its changes into every
-/// running agent's cave DB. The host store keeps changing under live caves
-/// (the host's own builds, GC, and other agents' promotions); without this
-/// the cave DB drifts and nix trips over on-disk paths it considers
-/// unregistered. Debounced so a build's burst of writes collapses into one
-/// reconcile pass.
-fn run_down_sync(overlay_base: PathBuf) -> Result<()> {
-    let host_db = host_db();
-    let watch_dir = host_db
-        .parent()
-        .context("host db path has no parent dir")?
-        .to_path_buf();
-
-    let ifd = inotify::init(CreateFlags::empty()).context("down-sync inotify init")?;
-    inotify::add_watch(
-        &ifd,
-        &watch_dir,
-        WatchFlags::MODIFY | WatchFlags::CLOSE_WRITE | WatchFlags::MOVED_TO,
-    )
-    .with_context(|| format!("watch host db dir {}", watch_dir.display()))?;
-
-    // Agents launched before us still hold a launch-time snapshot; bring
-    // them current immediately.
-    reconcile_all_agents(&overlay_base, &host_db);
-
-    let mut buf = [MaybeUninit::<u8>::uninit(); 4096];
-    loop {
-        let relevant = {
-            let mut reader = inotify::Reader::new(ifd.as_fd(), &mut buf);
-            match reader.next() {
-                Ok(ev) => ev
-                    .file_name()
-                    .and_then(|n| n.to_str().ok())
-                    .map(is_host_db_write)
-                    .unwrap_or(false),
-                Err(Errno::INTR) => continue,
-                Err(e) => bail!("down-sync inotify read: {e}"),
-            }
-        };
-        // Ignore -shm churn (WAL readers, including our own dump-db, touch it)
-        // so reconcile never retriggers itself.
-        if !relevant {
-            continue;
+/// Recursively copy a tree (test-mode promotion stand-in for `nix copy`).
+fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
+    let meta = src.symlink_metadata()?;
+    if meta.file_type().is_symlink() {
+        let target = std::fs::read_link(src)?;
+        std::os::unix::fs::symlink(target, dst)?;
+    } else if meta.is_dir() {
+        std::fs::create_dir_all(dst)?;
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            copy_tree(&entry.path(), &dst.join(entry.file_name()))?;
         }
-        // Let the writer's burst settle; queued events coalesce into the
-        // next blocking read.
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        reconcile_all_agents(&overlay_base, &host_db);
+    } else {
+        std::fs::copy(src, dst)?;
     }
-}
-
-/// A change to the DB proper (a checkpoint) or its write-ahead log (every
-/// commit). The shared-memory index (`-shm`) is touched by readers too, so
-/// it is not a write signal.
-fn is_host_db_write(name: &str) -> bool {
-    name == "db.sqlite" || name == "db.sqlite-wal"
-}
-
-fn reconcile_all_agents(overlay_base: &Path, host_db: &Path) {
-    let entries = match std::fs::read_dir(overlay_base) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    for entry in entries.flatten() {
-        let Some(id) = agent_id_from_name(&entry.file_name()) else {
-            continue;
-        };
-        let Some(state) = AgentState::new(overlay_base, &id) else {
-            continue;
-        };
-        let cave_state_dir = state.db_dir.parent().unwrap_or(&state.db_dir);
-        match nix_db::reconcile_cave_db(
-            cave_state_dir,
-            &state.db_path,
-            host_db,
-            &state.upper_dir,
-        ) {
-            Ok(plan) if !plan.adds.is_empty() || !plan.removes.is_empty() => {
-                eprintln!(
-                    "cav-store down-sync: agent-{id}: +{} -{}",
-                    plan.adds.len(),
-                    plan.removes.len()
-                );
-            }
-            Ok(_) => {}
-            Err(e) => eprintln!("cav-store down-sync: agent-{id}: {e:#}"),
-        }
-    }
-}
-
-/// Test-only escape hatch: skips the root check, the recursive chown,
-/// and the nix-store --load-db invocation. Lets the integration test
-/// exercise the inotify/diff/rename pipeline without CAP_CHOWN or a
-/// real nix DB. Production never sets this.
-fn test_mode() -> bool {
-    std::env::var_os("CODING_CAVE_HOST_WATCH_TEST_MODE").is_some()
-}
-
-fn chown_tree_to_root(path: &Path) -> Result<()> {
-    fn walk(p: &Path) -> std::io::Result<()> {
-        lchown(p, Some(0), Some(0))?;
-        let meta = p.symlink_metadata()?;
-        if meta.is_dir() && !meta.file_type().is_symlink() {
-            for entry in std::fs::read_dir(p)? {
-                walk(&entry?.path())?;
-            }
-        }
-        Ok(())
-    }
-    walk(path).with_context(|| format!("chown {path:?}"))?;
     Ok(())
 }
 
@@ -609,8 +533,7 @@ enum PromoteDecision {
     /// Content-addressed or trusted-signed: forge-proof, promote.
     Promote,
     /// Not cryptographically verifiable, but the trust-local policy allows
-    /// promoting the agent's own builds anyway. Its agent-claimed signatures
-    /// are stripped before registration.
+    /// promoting the cave's own builds anyway.
     PromoteUntrusted,
     /// Not verifiable and trust-local is off: refuse.
     Reject,
@@ -626,118 +549,107 @@ fn classify_promote(authentic: bool, trust_local: bool) -> PromoteDecision {
     }
 }
 
-/// Whether to promote the agent's own unsigned, input-addressed builds.
+/// Whether to promote the cave's own unsigned, input-addressed builds.
 /// Off by default: only content-addressed or trusted-signed paths cross into
-/// a store other agents trust, so a malicious agent cannot poison a sibling
-/// by pre-registering forged content under a predictable path name. Set
-/// CODING_CAVE_PROMOTE_TRUST_LOCAL=1 in a single-user fleet to also share
+/// the shared store other caves trust, so a malicious agent cannot poison a
+/// sibling by pre-registering forged content under a predictable path name.
+/// Set CODING_CAVE_PROMOTE_TRUST_LOCAL=1 in a single-user fleet to also share
 /// locally-built packages, accepting that this trusts the producing agent.
 fn promote_trust_local() -> bool {
     std::env::var_os("CODING_CAVE_PROMOTE_TRUST_LOCAL").is_some()
 }
 
-/// Promote an agent's installs into the host store. For each path: refuse
-/// symlinks, rename it from the agent's upper into `/nix/store`, gate it on
-/// cryptographic authenticity (content-address or trusted signature) plus the
-/// trust-local policy, chown to root, and register the survivors' closure in
-/// the host DB. A rejected or failed path is unstaged so the store never
-/// keeps an unregistered orphan.
-fn promote_to_host(
+/// Promote a cave's installs into the shared store. For each path: refuse
+/// symlinks at the top level, gate it on cryptographic authenticity
+/// (content-address or trusted signature) plus the trust-local policy, then
+/// `nix copy` the path and its closure cave-store -> shared store. After the
+/// copy, hardlink the cave's file to the shared inode (one copy on disk) and
+/// mark the shared path immutable so no cave can rewrite it.
+fn promote_to_shared(
     state: &AgentState,
-    store_target: &Path,
+    shared_root: &Path,
+    shared_store_dir: &Path,
     to_promote: &[(String, std::ffi::OsString)],
 ) -> Result<()> {
-    let snapshot = mkstate_for(&state.db_path)?;
     let trust_local = promote_trust_local();
-    let result = (|| -> Result<()> {
-        let mut promoted = Vec::new();
-        let mut untrusted = Vec::new();
-        for (path, name) in to_promote {
-            let src = state.upper_dir.join(name);
-            let dst = store_target.join(name);
+    let cave_uri = format!("local?root={}", state.cave_root.display());
+    let shared_uri = format!("local?root={}", shared_root.display());
 
-            // A symlink is not a legitimate store path and would point
-            // wherever the agent chose; never promote one.
-            match src.symlink_metadata() {
-                Ok(m) if m.file_type().is_symlink() => {
-                    eprintln!(
-                        "cav-store: refusing to promote {}: symlink",
-                        name.to_string_lossy()
-                    );
-                    continue;
-                }
-                Ok(_) => {}
-                Err(_) => continue,
-            }
+    for (path, name) in to_promote {
+        let src = state.store_dir.join(name);
 
-            std::fs::rename(&src, &dst)
-                .with_context(|| format!("rename {src:?} -> {dst:?}"))?;
-
-            let authentic = verify_authentic(&snapshot, path).unwrap_or(false);
-            match classify_promote(authentic, trust_local) {
-                PromoteDecision::Reject => {
-                    unstage(&dst, &src);
-                    eprintln!(
-                        "cav-store: refusing to promote {}: not content-addressed \
-                         or trusted-signed (set CODING_CAVE_PROMOTE_TRUST_LOCAL=1 \
-                         to share local builds)",
-                        name.to_string_lossy()
-                    );
-                    continue;
-                }
-                PromoteDecision::PromoteUntrusted => untrusted.push(path.clone()),
-                PromoteDecision::Promote => {}
-            }
-
-            if let Err(e) = chown_tree_to_root(&dst) {
-                unstage(&dst, &src);
+        // A symlink at the store-path root is not a legitimate store path and
+        // would point wherever the agent chose; never promote one.
+        match src.symlink_metadata() {
+            Ok(m) if m.file_type().is_symlink() => {
                 eprintln!(
-                    "cav-store: rolled back {} after chown failure: {e:#}",
+                    "cav-store: refusing to promote {}: symlink",
                     name.to_string_lossy()
                 );
                 continue;
             }
-            promoted.push(path.clone());
+            Ok(_) => {}
+            Err(_) => continue,
         }
-        // Trust-local promotions are unverified, so don't carry the agent's
-        // claimed signatures (which it could fabricate) into the host DB.
-        if !untrusted.is_empty() {
-            strip_sigs(&snapshot, &untrusted)?;
-        }
-        nix_db::register_paths(None, Some(&snapshot), &promoted)
-    })();
-    let _ = std::fs::remove_dir_all(&snapshot);
-    result
-}
 
-/// Return a staged path to the agent's upper, or remove it if that fails, so
-/// a rejected promotion never leaves an unregistered path in the host store.
-fn unstage(dst: &Path, src: &Path) {
-    if std::fs::rename(dst, src).is_ok() {
-        return;
+        let authentic = verify_authentic(&cave_uri, path).unwrap_or(false);
+        let decision = classify_promote(authentic, trust_local);
+        if decision == PromoteDecision::Reject {
+            eprintln!(
+                "cav-store: refusing to promote {}: not content-addressed \
+                 or trusted-signed (set CODING_CAVE_PROMOTE_TRUST_LOCAL=1 \
+                 to share local builds)",
+                name.to_string_lossy()
+            );
+            continue;
+        }
+
+        // Trust-local promotions are unverified, so don't carry the cave's
+        // claimed signatures into the shared store: copy with --no-check-sigs
+        // and let nix recompute on substitution. Verified promotions copy
+        // with signature checking on.
+        let trusted = decision == PromoteDecision::Promote;
+        if let Err(e) = nix_copy(&cave_uri, &shared_uri, path, trusted) {
+            eprintln!(
+                "cav-store: nix copy of {} failed: {e:#}",
+                name.to_string_lossy()
+            );
+            continue;
+        }
+
+        // Collapse the cave's copy and the shared copy to one inode (same
+        // filesystem) so the package lives once on disk. The shared store is
+        // root-owned and bound read-only into caves, so a cave cannot modify
+        // shared content through its hardlink; no immutable bit is needed, and
+        // leaving the paths mutable is what lets the GC pass delete them.
+        if let Err(e) = hardlink_into_shared(&src, &shared_store_dir.join(name)) {
+            eprintln!(
+                "cav-store: hardlink dedup of {} failed: {e:#}",
+                name.to_string_lossy()
+            );
+        }
     }
-    let _ = std::fs::remove_file(dst);
-    let _ = std::fs::remove_dir_all(dst);
+    Ok(())
 }
 
-/// Verify a just-renamed store path is authentic: its contents hash to its
-/// recorded value AND it is either content-addressed (the name binds the
-/// content) or carries a signature from a trusted key. An agent cannot forge
-/// either, so this is the anti-poisoning gate. Reads metadata from the agent
-/// DB snapshot and contents from the canonical `/nix/store` location.
-fn verify_authentic(snapshot_state_dir: &Path, store_path: &str) -> Result<bool> {
+/// Verify a cave store path is authentic: it is either content-addressed (the
+/// name binds the content) or carries a signature from a trusted key, and its
+/// contents hash to the recorded value. An agent cannot forge either, so this
+/// is the anti-poisoning gate. Reads from the cave's chroot store.
+fn verify_authentic(cave_uri: &str, store_path: &str) -> Result<bool> {
     let status = Command::new("nix")
         .args([
             "--extra-experimental-features",
             "nix-command",
             "store",
             "verify",
+            "--store",
+            cave_uri,
             "--sigs-needed",
             "1",
             store_path,
         ])
         .env("NIX_REMOTE", "")
-        .env("NIX_STATE_DIR", snapshot_state_dir)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
@@ -745,40 +657,144 @@ fn verify_authentic(snapshot_state_dir: &Path, store_path: &str) -> Result<bool>
     Ok(status.success())
 }
 
-/// Clear the signature column for `paths` in the snapshot DB so unverified,
-/// trust-local promotions cannot inject fabricated trusted-signature metadata
-/// into the host DB.
-fn strip_sigs(snapshot_state_dir: &Path, paths: &[String]) -> Result<()> {
-    let db = snapshot_state_dir.join("db").join("db.sqlite");
-    let conn = Connection::open(&db)?;
-    let mut stmt = conn.prepare("UPDATE ValidPaths SET sigs = NULL WHERE path = ?1")?;
-    for p in paths {
-        stmt.execute([p])?;
+/// `nix copy` a path and its closure from one chroot store to another. When
+/// `check_sigs` is false (trust-local promotions), signature checking is
+/// skipped and nix recomputes integrity from the content on the way in.
+fn nix_copy(from_uri: &str, to_uri: &str, store_path: &str, check_sigs: bool) -> Result<()> {
+    let mut cmd = Command::new("nix");
+    cmd.args([
+        "--extra-experimental-features",
+        "nix-command",
+        "copy",
+        "--from",
+        from_uri,
+        "--to",
+        to_uri,
+    ]);
+    if !check_sigs {
+        cmd.arg("--no-check-sigs");
+    }
+    cmd.arg(store_path);
+    let out = cmd
+        .env("NIX_REMOTE", "")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .context("spawn nix copy")?;
+    if !out.status.success() {
+        bail!("nix copy: {}", String::from_utf8_lossy(&out.stderr).trim());
     }
     Ok(())
 }
 
-/// Build a NIX_STATE_DIR tree whose db.sqlite is a snapshot of the
-/// agent's DB. A copy (not a symlink) so concurrent writes from the
-/// cave can't race the dump. nix resolves the DB at `$NIX_STATE_DIR/db`,
-/// so the returned path is the state dir itself.
-fn mkstate_for(agent_db: &Path) -> Result<PathBuf> {
-    let base = Path::new(STATE_DIR).join("promote-tmp");
-    std::fs::create_dir_all(&base).context("create promote-tmp")?;
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let dir = base.join(format!("p-{}-{}", std::process::id(), nanos));
-    let db_target_dir = dir.join("db");
-    std::fs::create_dir_all(&db_target_dir).context("create promote tmp dirs")?;
-    std::fs::copy(agent_db, db_target_dir.join("db.sqlite")).context("snapshot agent db")?;
-    Ok(dir)
+/// Hardlink the cave's store path to the shared inode so the two share one
+/// copy on disk. Both stores sit on the same filesystem (under the cave
+/// home / state dir), so a cross-store hardlink of the top-level entry (and
+/// every file beneath it) collapses the duplicate. The shared file is the
+/// link target; the cave's file is replaced by a link to it.
+fn hardlink_into_shared(cave_path: &Path, shared_path: &Path) -> Result<()> {
+    fn link_tree(cave: &Path, shared: &Path) -> std::io::Result<()> {
+        let meta = shared.symlink_metadata()?;
+        if meta.is_dir() && !meta.file_type().is_symlink() {
+            for entry in std::fs::read_dir(shared)? {
+                let entry = entry?;
+                link_tree(&cave.join(entry.file_name()), &entry.path())?;
+            }
+            return Ok(());
+        }
+        // File or symlink: replace the cave's copy with a hardlink to the
+        // shared inode. Symlinks can't be hardlinked portably, so leave the
+        // cave's symlink in place (negligible disk).
+        if meta.file_type().is_symlink() {
+            return Ok(());
+        }
+        let _ = std::fs::remove_file(cave);
+        std::fs::hard_link(shared, cave)
+    }
+    link_tree(cave_path, shared_path)
+        .with_context(|| format!("hardlink {cave_path:?} <- {shared_path:?}"))
+}
+
+/// `cav-store gc`: one-shot garbage collection of the shared store. Roots
+/// every path any cave still references, then collects the rest.
+fn gc_shared_store() -> Result<()> {
+    if !test_mode() && !rustix::process::geteuid().is_root() {
+        bail!("cav-store gc must be run as root");
+    }
+    gc_with_base(&store_base_from_env())
+}
+
+/// Garbage-collect the shared store, first rooting every store path any cave
+/// still references so a path in use is never removed. Conservative: roots all
+/// caves' paths, not just running ones, so a shared path is collected only once
+/// no cave references it at all.
+///
+/// Roots are plain symlinks under the shared store's gcroots dir (the
+/// documented "any symlink in gcroots is a root" mechanism). The set is rebuilt
+/// from scratch each pass, so a removed cave stops pinning its paths. Only the
+/// shared store's own paths are rooted; a cave's private builds live in the
+/// cave store and are not the shared store's concern.
+fn gc_with_base(store_base: &Path) -> Result<()> {
+    let shared = PathBuf::from(shared_store_root());
+    let shared_store_dir = shared.join("nix").join("store");
+    let gcroots = shared
+        .join("nix")
+        .join("var")
+        .join("nix")
+        .join("gcroots")
+        .join("cav");
+    let _ = std::fs::remove_dir_all(&gcroots);
+    std::fs::create_dir_all(&gcroots).context("create shared gcroots")?;
+
+    let mut rooted = 0u64;
+    if let Ok(entries) = std::fs::read_dir(store_base) {
+        for entry in entries.flatten() {
+            let Some(id) = agent_id_from_name(&entry.file_name()) else {
+                continue;
+            };
+            let Some(state) = AgentState::new(store_base, &id) else {
+                continue;
+            };
+            let Ok(paths) = nix_db::valid_paths(&state.db_path) else {
+                continue;
+            };
+            for p in paths {
+                let name = nix_db::store_name(&p);
+                let target = shared_store_dir.join(&name);
+                if !target.exists() {
+                    continue;
+                }
+                // Duplicate names across caves just fail the second symlink.
+                let _ = std::os::unix::fs::symlink(&target, gcroots.join(&name));
+                rooted += 1;
+            }
+        }
+    }
+
+    if test_mode() {
+        return Ok(());
+    }
+    let status = Command::new("nix-store")
+        .args(["--store", &format!("local?root={}", shared.display()), "--gc"])
+        .status()
+        .context("nix-store --gc on shared store")?;
+    if !status.success() {
+        bail!("shared store gc failed");
+    }
+    eprintln!("cav-store gc: rooted {rooted} shared paths, collected the rest");
+    Ok(())
+}
+
+/// Test-only escape hatch: skips the root check and the nix/chattr shell-outs.
+/// Lets the integration test exercise the inotify/diff pipeline without root,
+/// nix, or a real nix DB. Production never sets this.
+fn test_mode() -> bool {
+    std::env::var_os("CODING_CAVE_HOST_WATCH_TEST_MODE").is_some()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_promote, PromoteDecision};
+    use super::*;
 
     #[test]
     fn authentic_paths_always_promote() {
@@ -793,5 +809,42 @@ mod tests {
             classify_promote(false, true),
             PromoteDecision::PromoteUntrusted
         );
+    }
+
+    #[test]
+    fn cave_db_dir_is_chroot_store_db() {
+        let base = Path::new("/x/store");
+        assert_eq!(
+            cave_db_dir(base, "7"),
+            Path::new("/x/store/agent-7/nix/var/nix/db"),
+        );
+    }
+
+    #[test]
+    fn cave_store_root_layout() {
+        let base = Path::new("/x/store");
+        let s = AgentState {
+            agent_id: "7".into(),
+            cave_root: cave_store_root(base, "7"),
+            store_dir: cave_store_root(base, "7").join("nix").join("store"),
+            db_path: cave_db_dir(base, "7").join("db.sqlite"),
+            db_dir: cave_db_dir(base, "7"),
+            last_seen_id: 0,
+        };
+        assert_eq!(s.cave_root, Path::new("/x/store/agent-7"));
+        assert_eq!(s.store_dir, Path::new("/x/store/agent-7/nix/store"));
+    }
+
+    #[test]
+    fn deepest_existing_finds_live_ancestor() {
+        let tmp = std::env::temp_dir().join(format!("cav-deepest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let base = tmp.join("store");
+        // Create only agent-1/nix; the db dir below it does not exist yet.
+        std::fs::create_dir_all(base.join("agent-1").join("nix")).unwrap();
+        let db_dir = cave_db_dir(&base, "1");
+        let found = deepest_existing(&db_dir).unwrap();
+        assert_eq!(found, base.join("agent-1").join("nix"));
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

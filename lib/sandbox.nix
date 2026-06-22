@@ -131,8 +131,9 @@ let
     "--setenv" "TERMINFO_DIRS" "${pkgs.ncurses}/share/terminfo"
     # FHS library path for pre-built native extensions (libstdc++ etc.)
     "--setenv" "LD_LIBRARY_PATH" gccLib
-    # Nix inside the cave
-    "--setenv" "NIX_CONFIG" "sandbox = false\nexperimental-features = nix-command flakes\nbuild-users-group ="
+    # Nix inside the cave. NIX_CONFIG is emitted by cav at launch (from the
+    # nixConfig field below) so a top-level cave can append the shared-store
+    # substituter; here we only set NIX_PATH.
     "--setenv" "NIX_PATH" "nixpkgs=${nixpkgs}"
 
     # Environment: belt-and-braces unsets. --clearenv preserves PWD by
@@ -141,12 +142,11 @@ let
     # --clearenv wouldn't already drop them.
     "--unsetenv" "PWD"
     "--unsetenv" "SHLVL"
-    "--unsetenv" "CODING_CAVE_NIX_MERGED"
+    "--unsetenv" "CODING_CAVE_STORE_ROOT"
     "--unsetenv" "CODING_CAVE_HOME"
     "--unsetenv" "CODING_CAVE_WORKSPACES"
     "--unsetenv" "CODING_CAVE_SHARED_REPOS"
     "--unsetenv" "CODING_CAVE_HOST_HOME"
-    "--unsetenv" "CODING_CAVE_NIX_DB_DIR"
     "--unsetenv" "CODING_CAVE_GPG_SOCKET"
     "--unsetenv" "CODING_CAVE_GPG_PUBRING"
     "--unsetenv" "CODING_CAVE_GITCONFIG"
@@ -241,9 +241,13 @@ let
     "/proc/acpi" "/proc/fs" "/proc/irq" "/proc/pressure"
   ];
 
+  # Base nix.conf for the cave's own nix. cav emits this as NIX_CONFIG at
+  # launch; a top-level cave appends the shared-store substituter to it.
+  nixConfig = "sandbox = false\nexperimental-features = nix-command flakes\nbuild-users-group =";
+
   config = {
     bwrap = "${pkgs.bubblewrap}/bin/bwrap";
-    inherit staticArgs forwardEnv procMaskFiles procMaskDirs;
+    inherit staticArgs forwardEnv procMaskFiles procMaskDirs nixConfig;
     procMask = "${procMask}";
     procMaskDir = "${procMaskDir}";
     procMaskMeminfo = "${procMaskMeminfo}";

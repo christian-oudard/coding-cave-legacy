@@ -72,9 +72,9 @@ pub fn remove(slug: &str, yes: bool) -> Result<()> {
                 workspace::force_remove_dir_all(&ws);
             }
         }
-        let overlay = workspace::nix_overlay_base_for(&config::persistent_home(), aid);
-        if overlay.exists() {
-            workspace::force_remove_dir_all(&overlay);
+        let store = workspace::cave_store_root_for(aid);
+        if store.exists() {
+            workspace::force_remove_dir_all(&store);
         }
     }
 
@@ -224,7 +224,7 @@ pub fn rename(old_slug: &str, new_arg: &str, yes: bool) -> Result<()> {
     // Finish any pending display-id → uuid worktree migration before we
     // rename, otherwise legacy display-id-keyed dirs would survive the
     // rename in their old location.
-    workspace::settle_uuid_keying(&config::persistent_home());
+    workspace::settle_uuid_keying();
 
     if new_slug != old_slug {
         let data = config::data_dir();
@@ -348,9 +348,9 @@ fn print_summary(slug: &str, base: &Path, owned: &[String], guests: &[String]) {
                 owned_disk += gc::dir_size(&ws);
             }
         }
-        let overlay = workspace::nix_overlay_base_for(&config::persistent_home(), aid);
-        if overlay.exists() {
-            owned_disk += gc::dir_size(&overlay);
+        let store = workspace::cave_store_root_for(aid);
+        if store.exists() {
+            owned_disk += gc::dir_size(&store);
         }
     }
     let mut guest_disk = 0u64;

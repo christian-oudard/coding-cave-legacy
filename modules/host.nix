@@ -1,11 +1,10 @@
-# Single NixOS module owning every coding-cave host-side concern that
-# requires CAP_SYS_ADMIN. Today that's an idmapped read-only mount of
-# /nix/store at /var/lib/coding-cave/nix-store (relabeling host-uid-0 to
-# the cave-coder uid so the cave's overlayfs copy-ups land with ownership
-# nix can chmod), a watcher that auto-promotes packages from agent
-# overlays into the host /nix/store, and optional per-agent disk quotas.
-# Future host-side concerns extend `cav-store` rather than fragmenting
-# into separate services.
+# Single NixOS module owning the coding-cave host-side store manager. It
+# maintains a root-owned shared nix store at /var/lib/coding-cave/store,
+# promotes each cave's packages into it (deduplicating by hardlink and marking
+# shared paths immutable so no cave can rewrite them), garbage-collects that
+# store while rooting the paths every live cave still references, and applies
+# optional per-agent disk quotas. Future host-side concerns extend `cav-store`
+# rather than fragmenting into separate services.
 #
 # The unit body is `cav-store <verb>` so the same logic works on
 # non-NixOS hosts (Ubuntu via `cav install-host`, etc.). Host configuration
@@ -29,7 +28,7 @@ in
       default = null;
       example = "10G";
       description = ''
-        Per-agent disk cap, applied to each agent's nix overlay and its
+        Per-agent disk cap, applied to each agent's nix store and its
         workspace clones (e.g. "10G"). null leaves it inactive. Requires
         project quota enabled on the filesystem that holds the cave state
         (see the README); if set without that support, coding-cave-host
@@ -55,14 +54,14 @@ in
     environment.etc."coding-cave/host.json".text = builtins.toJSON hostConfig;
 
     systemd.services.coding-cave-host = {
-      description = "Coding-cave host-side mount + auto-promote watcher";
+      description = "Coding-cave host-side store manager";
       wantedBy = [ "multi-user.target" ];
       after = [ "local-fs.target" ];
       unitConfig.RequiresMountsFor = "/nix/store";
       # cav-store is unwrapped (only the cav binary gets a wrapped PATH), so
-      # its mount/umount/nix-store/chattr/setquota shell-outs resolve from
-      # this unit path.
-      path = [ pkgs.nix pkgs.util-linux pkgs.e2fsprogs pkgs.quota ];
+      # its nix/nix-store/chattr/setquota shell-outs resolve from this unit
+      # path. chattr (e2fsprogs) marks shared store paths immutable.
+      path = [ pkgs.nix pkgs.e2fsprogs pkgs.quota ];
       serviceConfig = {
         Type = "simple";
         ExecStartPre = "${cav}/bin/cav-store setup";

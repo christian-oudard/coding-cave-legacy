@@ -112,8 +112,8 @@ pub fn format_size(bytes: u64) -> String {
     }
 }
 
-fn nix_overlay_dir(agent_id: &str) -> PathBuf {
-    workspace::nix_overlay_base_for(&config::persistent_home(), agent_id)
+fn cave_store_dir(agent_id: &str) -> PathBuf {
+    workspace::cave_store_root_for(agent_id)
 }
 
 /// Collect everything currently eligible for `cav gc --older-than <dur>`.
@@ -140,7 +140,7 @@ pub fn candidates(older_than: Duration) -> Vec<Candidate> {
                 size += dir_size(&ws);
             }
         }
-        let overlay = nix_overlay_dir(&aid);
+        let overlay = cave_store_dir(&aid);
         if overlay.exists() {
             size += dir_size(&overlay);
         }
@@ -175,6 +175,21 @@ fn resolve_targets(agent_id: &str) -> Vec<(String, PathBuf)> {
 /// a useful "this agent was GC'd, session at <path>" message instead of
 /// silently re-cloning a fresh worktree.
 pub fn collect(c: &Candidate) {
+    // Final safety check against a stale "exited" record: never reclaim an
+    // agent whose cave is still mounting its overlay or a worktree. Removing
+    // those strands the live cave's bind-mounted nix DB.
+    let overlay = cave_store_dir(&c.agent_id);
+    let live = dir_in_use_by_mount(&overlay)
+        || c.targets
+            .iter()
+            .any(|(slug, _)| dir_in_use_by_mount(&workspace::worktree_for(slug, &c.agent_id)));
+    if live {
+        eprintln!(
+            "cav gc: skipping agent-{} — its cave is still running",
+            c.agent_id
+        );
+        return;
+    }
     workspace::reclaim(&c.agent_id, &c.targets);
     // Also drop the host-side local agent branches; workspace::reclaim
     // only touches the bare repo's refs.
@@ -193,7 +208,7 @@ pub fn collect(c: &Candidate) {
             }
         }
     }
-    let overlay = nix_overlay_dir(&c.agent_id);
+    let overlay = cave_store_dir(&c.agent_id);
     if overlay.exists() {
         workspace::force_remove_dir_all(&overlay);
     }
@@ -208,7 +223,7 @@ pub struct Orphans {
     /// (path, size) — paths under `<data_dir>/worktrees/<slug>/<X>`
     /// whose `<slug>, X` pair isn't claimed by any registered agent.
     pub worktrees: Vec<(PathBuf, u64)>,
-    /// (path, size) — paths under `<home>/.../nix-overlay/agent-<X>`
+    /// (path, size) — per-cave store dirs under `<data>/store/agent-<X>`
     /// whose `<X>` isn't a registered agent's uuid or display id.
     pub overlays: Vec<(PathBuf, u64)>,
     /// Empty `<data_dir>/worktrees/<slug>/` dirs — cosmetic, but no
@@ -224,6 +239,54 @@ impl Orphans {
         self.worktrees.iter().map(|(_, s)| s).sum::<u64>()
             + self.overlays.iter().map(|(_, s)| s).sum::<u64>()
     }
+}
+
+/// True if `dir` (or a path beneath it) is an active mount source or target
+/// in any process's mount table. A running cave bind-mounts its store dir
+/// (`agent-<key>/nix/store` and `agent-<key>/nix/var`) over /nix/store and
+/// /nix/var, so its `/proc/<pid>/mountinfo` references these host paths. GC
+/// must never remove such a dir: unlinking the inode the cave's nix store or
+/// DB is bind-mounted from strands it (link-count 0, then `big-lock: No such
+/// file or directory`) and kills nix in the live cave until it restarts.
+fn dir_in_use_by_mount(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        // Only numeric pid dirs have a readable mountinfo; the rest just Err.
+        if let Ok(data) = std::fs::read_to_string(entry.path().join("mountinfo")) {
+            if mountinfo_references(&data, dir) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Whether a mountinfo dump names `dir` or any path beneath it. The cave's
+/// store dir shows up as a bind-source field (`.../agent-<key>/nix/store`),
+/// so match it as a substring but require a path boundary after it —
+/// otherwise `agent-abc` would spuriously match `agent-abcdef`. The boundary
+/// set also covers a path embedded in a comma-joined mount option, so the
+/// check is robust to either shape. Split out from the `/proc` walk so the
+/// matching is unit-testable.
+fn mountinfo_references(mountinfo: &str, dir: &Path) -> bool {
+    let needle = dir.to_string_lossy();
+    let bytes = mountinfo.as_bytes();
+    let mut from = 0;
+    while let Some(pos) = mountinfo[from..].find(needle.as_ref()) {
+        let end = from + pos + needle.len();
+        // A real reference ends at the dir itself or continues with `/`; any
+        // other trailing char means we landed inside a longer name.
+        if matches!(
+            bytes.get(end),
+            None | Some(b'/') | Some(b',') | Some(b' ') | Some(b'\t') | Some(b'\n')
+        ) {
+            return true;
+        }
+        from += pos + 1;
+    }
+    false
 }
 
 pub fn find_orphans() -> Orphans {
@@ -275,6 +338,11 @@ pub fn find_orphans() -> Orphans {
                     let key = agent_entry.file_name().to_string_lossy().to_string();
                     if !legit_wt.contains(&(slug.clone(), key)) {
                         let p = agent_entry.path();
+                        // A live cave still mounting this dir is not an orphan,
+                        // even if the registry has lost track of it.
+                        if dir_in_use_by_mount(&p) {
+                            continue;
+                        }
                         let size = dir_size(&p);
                         out.worktrees.push((p, size));
                     }
@@ -286,12 +354,8 @@ pub fn find_orphans() -> Orphans {
         }
     }
 
-    let overlay_root = config::persistent_home()
-        .join(".local")
-        .join("share")
-        .join("coding-cave")
-        .join("nix-overlay");
-    if let Ok(entries) = std::fs::read_dir(&overlay_root) {
+    let store_root = workspace::cave_store_base();
+    if let Ok(entries) = std::fs::read_dir(&store_root) {
         for entry in entries.flatten() {
             if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                 continue;
@@ -300,6 +364,11 @@ pub fn find_orphans() -> Orphans {
             let Some(key) = name.strip_prefix("agent-") else { continue };
             if !legit_overlay.contains(key) {
                 let p = entry.path();
+                // A live cave still mounting this overlay is not an orphan,
+                // even if the registry has lost track of it.
+                if dir_in_use_by_mount(&p) {
+                    continue;
+                }
                 let size = dir_size(&p);
                 out.overlays.push((p, size));
             }
@@ -317,7 +386,7 @@ fn print_orphans(o: &Orphans) {
         }
     }
     if !o.overlays.is_empty() {
-        println!("{}", style::bold("Orphan nix-overlay dirs:"));
+        println!("{}", style::bold("Orphan cave-store dirs:"));
         for (p, s) in &o.overlays {
             println!("  {} ({})", p.display(), style::yellow(&format_size(*s)));
         }
@@ -415,6 +484,23 @@ mod tests {
     use std::fs;
 
     #[test]
+    fn mountinfo_references_matches_dir_and_descendants_only() {
+        let store = Path::new("/home/u/.local/share/coding-cave/store/agent-abc");
+        // A live cave binds its store dir over /nix/store and /nix/var.
+        let store_bind = "26 25 0:24 / /nix/store rw - none \
+            /home/u/.local/share/coding-cave/store/agent-abc/nix/store";
+        assert!(mountinfo_references(store_bind, store));
+        let var_bind = "30 25 0:24 / /nix/var rw - none \
+            /home/u/.local/share/coding-cave/store/agent-abc/nix/var";
+        assert!(mountinfo_references(var_bind, store));
+        // A sibling agent's mounts must not match (no prefix-bleed onto agent-abcdef).
+        let other = "26 25 0:24 / /nix/store rw - none \
+            /home/u/.local/share/coding-cave/store/agent-abcdef/nix/store";
+        assert!(!mountinfo_references(other, store));
+        assert!(!mountinfo_references("", store));
+    }
+
+    #[test]
     fn find_orphans_keeps_registered_agent_dirs_drops_strangers() {
         let g = DataDirGuard::new("orphans");
         let base = g.path.join("proj");
@@ -434,22 +520,18 @@ mod tests {
         let empty_slug = g.path.join("worktrees").join("ghost-slug");
         fs::create_dir_all(&empty_slug).unwrap();
 
-        let nix_root = config::persistent_home()
-            .join(".local")
-            .join("share")
-            .join("coding-cave")
-            .join("nix-overlay");
-        fs::create_dir_all(nix_root.join(format!("agent-{aid}"))).unwrap();
-        let orphan_overlay = nix_root.join("agent-deadbeef");
-        fs::create_dir_all(&orphan_overlay).unwrap();
+        let store_root = workspace::cave_store_base();
+        fs::create_dir_all(store_root.join(format!("agent-{aid}"))).unwrap();
+        let orphan_store = store_root.join("agent-deadbeef");
+        fs::create_dir_all(&orphan_store).unwrap();
 
         let o = find_orphans();
 
         let ws_paths: Vec<_> = o.worktrees.iter().map(|(p, _)| p.clone()).collect();
         assert_eq!(ws_paths, vec![orphan_ws], "wrong worktree orphans");
 
-        let ov_paths: Vec<_> = o.overlays.iter().map(|(p, _)| p.clone()).collect();
-        assert_eq!(ov_paths, vec![orphan_overlay], "wrong overlay orphans");
+        let store_paths: Vec<_> = o.overlays.iter().map(|(p, _)| p.clone()).collect();
+        assert_eq!(store_paths, vec![orphan_store], "wrong cave-store orphans");
 
         assert_eq!(o.empty_slug_dirs, vec![empty_slug]);
     }

@@ -1,13 +1,11 @@
-/// Integration test for the auto-promote watcher.
+/// Integration test for the store manager's promote watcher.
 ///
-/// Exercises `cav-store watch` against a fake nix-overlay tree and store.
-/// The watcher's inotify-driven scan/rename loop is what we want covered;
-/// the chown and `nix-store --load-db` invocations would need CAP_CHOWN
-/// and a real nix DB, so we short-circuit them via
-/// CODING_CAVE_HOST_WATCH_TEST_MODE and verify the rename behavior.
-///
-/// Production never sets that env var. A separate manual smoke test
-/// (see docs/nix-store.md) covers the full chown + register path.
+/// Exercises `cav-store watch` against fake per-cave stores and a shared
+/// store. The watcher's inotify-driven scan/promote loop is what we cover;
+/// the real `nix copy` + hardlink + `chattr +i` would need a real nix store
+/// and CAP_LINUX_IMMUTABLE, so we short-circuit them via
+/// CODING_CAVE_HOST_WATCH_TEST_MODE, which "promotes" by copying the cave
+/// file into the shared store dir. Production never sets that env var.
 use rusqlite::Connection;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -31,7 +29,8 @@ impl Drop for Watcher {
 struct Fixture {
     root: PathBuf,
     home: PathBuf,
-    store: PathBuf,
+    /// Shared store root (a chroot store: paths live under `<shared>/nix/store`).
+    shared: PathBuf,
 }
 
 impl Fixture {
@@ -40,61 +39,45 @@ impl Fixture {
         let root = std::env::temp_dir().join(format!("cav-host-watch-{uniq}"));
         let _ = fs::remove_dir_all(&root);
         let home = root.join("home");
-        let store = root.join("store");
+        let shared = root.join("shared");
         fs::create_dir_all(&home).unwrap();
-        fs::create_dir_all(&store).unwrap();
-        Self { root, home, store }
+        fs::create_dir_all(&shared).unwrap();
+        Self { root, home, shared }
+    }
+
+    /// Where a promoted path lands in the shared store.
+    fn shared_path(&self, basename: &str) -> PathBuf {
+        self.shared.join("nix").join("store").join(basename)
     }
 
     fn agent(&self, id: &str) -> AgentFiles {
         let base = self
             .home
-            .join(".local/share/coding-cave/nix-overlay")
+            .join(".local/share/coding-cave/store")
             .join(format!("agent-{id}"));
-        let upper = base.join("upper");
-        let db_dir = base.join("db");
-        fs::create_dir_all(&upper).unwrap();
+        let store_dir = base.join("nix/store");
+        let db_dir = base.join("nix/var/nix/db");
+        fs::create_dir_all(&store_dir).unwrap();
         fs::create_dir_all(&db_dir).unwrap();
         let db = db_dir.join("db.sqlite");
         init_nix_db(&db);
-        AgentFiles { upper, db }
+        AgentFiles { store_dir, db }
     }
 
     fn watcher(&self) -> Watcher {
-        self.spawn_watcher(None)
-    }
-
-    /// A watcher with the down-sync enabled, pointed at `host_db` as the
-    /// parent store DB.
-    fn watcher_with_host_db(&self, host_db: &Path) -> Watcher {
-        self.spawn_watcher(Some(host_db))
-    }
-
-    fn spawn_watcher(&self, host_db: Option<&Path>) -> Watcher {
         let mut cmd = Command::new(CAV_STORE);
         cmd.args(["watch"])
             .env("CODING_CAVE_HOST_WATCH_HOME", &self.home)
-            .env("CODING_CAVE_HOST_WATCH_STORE", &self.store)
+            .env("CODING_CAVE_SHARED_STORE", &self.shared)
             .env("CODING_CAVE_HOST_WATCH_TEST_MODE", "1")
             .env_remove("CODING_CAVE_VERSION")
             .env_remove("CODING_CAVE_AGENT_ID");
-        if let Some(db) = host_db {
-            cmd.env("CODING_CAVE_HOST_WATCH_DB", db);
-        }
         let child = cmd.spawn().expect("spawn cav-store watch");
         // Give the watcher a moment to set up inotify before the first
         // simulated install. Without this the install can land between
         // discovery and add_watch and slip through until the next event.
         thread::sleep(Duration::from_millis(300));
         Watcher { child }
-    }
-
-    /// Create a parent (host) nix DB under the fixture and return its path.
-    fn make_host_db(&self) -> PathBuf {
-        let db = self.root.join("hostdb/db/db.sqlite");
-        fs::create_dir_all(db.parent().unwrap()).unwrap();
-        init_nix_db(&db);
-        db
     }
 }
 
@@ -105,13 +88,14 @@ impl Drop for Fixture {
 }
 
 struct AgentFiles {
-    upper: PathBuf,
+    /// The cave's `<root>/nix/store` where its own builds land.
+    store_dir: PathBuf,
     db: PathBuf,
 }
 
 impl AgentFiles {
     fn fake_install(&self, basename: &str) {
-        let dir = self.upper.join(basename);
+        let dir = self.store_dir.join(basename);
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("content"), b"hi").unwrap();
         let conn = Connection::open(&self.db).unwrap();
@@ -155,28 +139,6 @@ fn init_nix_db(path: &Path) {
     .unwrap();
 }
 
-/// Insert a bare ValidPaths row (no files, no closure) straight into a DB.
-/// Enough for the down-sync's set-difference and delete logic.
-fn insert_path(db: &Path, store_path: &str) {
-    let conn = Connection::open(db).unwrap();
-    conn.execute(
-        "INSERT INTO ValidPaths (path, hash, registrationTime, deriver, narSize, ultimate) \
-         VALUES (?1, ?2, 0, '', 7, 1)",
-        rusqlite::params![
-            store_path,
-            "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-        ],
-    )
-    .unwrap();
-}
-
-fn path_set(db: &Path) -> std::collections::HashSet<String> {
-    let conn = Connection::open(db).unwrap();
-    let mut stmt = conn.prepare("SELECT path FROM ValidPaths").unwrap();
-    let rows = stmt.query_map([], |r| r.get::<_, String>(0)).unwrap();
-    rows.filter_map(|r| r.ok()).collect()
-}
-
 fn wait_for<F: Fn() -> bool>(timeout: Duration, predicate: F) -> bool {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
@@ -189,7 +151,7 @@ fn wait_for<F: Fn() -> bool>(timeout: Duration, predicate: F) -> bool {
 }
 
 #[test]
-fn promotes_new_install_into_host_store() {
+fn promotes_new_install_into_shared_store() {
     let fx = Fixture::new("simple");
     let agent = fx.agent("1");
     let _watcher = fx.watcher();
@@ -197,14 +159,16 @@ fn promotes_new_install_into_host_store() {
     let pkg = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-fake-pkg";
     agent.fake_install(pkg);
 
-    let promoted = fx.store.join(pkg);
-    let stayed_in_upper = agent.upper.join(pkg);
+    let promoted = fx.shared_path(pkg);
+    // Promotion copies into the shared store; the cave keeps its own copy
+    // (the hardlink dedup that collapses them needs a real filesystem op and
+    // is skipped in test mode).
+    let kept_in_cave = agent.store_dir.join(pkg);
     assert!(
-        wait_for(Duration::from_secs(5), || promoted.exists() && !stayed_in_upper.exists()),
-        "watcher did not promote `{pkg}` within 5s. promoted={} upper={}",
-        promoted.exists(),
-        stayed_in_upper.exists()
+        wait_for(Duration::from_secs(5), || promoted.exists()),
+        "watcher did not promote `{pkg}` into the shared store within 5s",
     );
+    assert!(kept_in_cave.exists(), "cave lost its own copy of `{pkg}`");
 }
 
 #[test]
@@ -213,31 +177,23 @@ fn promotes_agent_created_after_watcher_started() {
     let _watcher = fx.watcher();
 
     // The watcher discovers this agent via the CREATE event on the
-    // overlay-base watch, then attaches a DB watch in time for the
-    // first install on it.
+    // store-base watch, then attaches a DB watch in time for the first
+    // install on it.
     let agent = fx.agent("2");
-    // Inotify event ordering: the CREATE for agent-2/ fires before the
-    // DB-file write that fake_install does. The watcher must have
-    // already added the db-dir watch by then. The base-dir CREATE
-    // event is for `agent-2`, and we create the db file underneath
-    // it on a separate filesystem operation, so the ordering is fine
-    // in practice — but allow a brief settle for the watcher to
-    // process the CREATE.
     thread::sleep(Duration::from_millis(150));
     let pkg = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-late-pkg";
     agent.fake_install(pkg);
 
-    let promoted = fx.store.join(pkg);
     assert!(
-        wait_for(Duration::from_secs(5), || promoted.exists()),
+        wait_for(Duration::from_secs(5), || fx.shared_path(pkg).exists()),
         "watcher did not promote late-agent install within 5s"
     );
 }
 
 #[test]
 fn promotes_preexisting_install_on_watcher_startup() {
-    // Models a host reboot or systemd restart: the agent's DB already
-    // has rows + the upper still has the files when the watcher first
+    // Models a host reboot or systemd restart: the cave's DB already has
+    // rows and the cave store still has the files when the watcher first
     // starts. Hits scan_and_promote with last_seen_id = 0 against a
     // pre-populated DB, which event-driven tests don't cover.
     let fx = Fixture::new("preexisting");
@@ -247,9 +203,8 @@ fn promotes_preexisting_install_on_watcher_startup() {
 
     let _watcher = fx.watcher();
 
-    let promoted = fx.store.join(pkg);
     assert!(
-        wait_for(Duration::from_secs(5), || promoted.exists()),
+        wait_for(Duration::from_secs(5), || fx.shared_path(pkg).exists()),
         "watcher did not promote pre-existing install on startup"
     );
 }
@@ -264,47 +219,15 @@ fn second_install_after_first_promotion_also_promotes() {
     let second = "dddddddddddddddddddddddddddddddd-second";
     agent.fake_install(first);
     assert!(
-        wait_for(Duration::from_secs(5), || fx.store.join(first).exists()),
+        wait_for(Duration::from_secs(5), || fx.shared_path(first).exists()),
         "first install not promoted"
     );
 
     agent.fake_install(second);
     assert!(
-        wait_for(Duration::from_secs(5), || fx.store.join(second).exists()),
+        wait_for(Duration::from_secs(5), || fx.shared_path(second).exists()),
         "second install not promoted (state tracking broken?)"
     );
-    // First install must still be in the store, not back in upper.
-    assert!(fx.store.join(first).exists());
-    assert!(!agent.upper.join(first).exists());
-}
-
-/// Down-sync: a path the parent (host) DB no longer has, and which is not a
-/// cave-only install, must be dropped from the agent's DB so nix never
-/// trips over an on-disk-but-unregistered path. Pure removal, so no
-/// nix-store invocation is needed.
-#[test]
-fn down_sync_drops_host_gcd_path_from_agent_db() {
-    let fx = Fixture::new("downsync-gc");
-    let host_db = fx.make_host_db();
-    let agent = fx.agent("1");
-
-    let shared = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-shared";
-    let gone = "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-gone";
-
-    // Host has only `shared`. The agent's DB also lists `gone`, which the
-    // host has since garbage-collected (not in the agent's upper either).
-    insert_path(&host_db, shared);
-    insert_path(&agent.db, shared);
-    insert_path(&agent.db, gone);
-
-    let _watcher = fx.watcher_with_host_db(&host_db);
-
-    assert!(
-        wait_for(Duration::from_secs(5), || {
-            let paths = path_set(&agent.db);
-            paths.contains(shared) && !paths.contains(gone)
-        }),
-        "down-sync did not drop the host-GC'd path. agent paths: {:?}",
-        path_set(&agent.db),
-    );
+    // First install must still be in the shared store.
+    assert!(fx.shared_path(first).exists());
 }

@@ -33,6 +33,7 @@ struct SandboxConfig {
     seccomp_filter: String,
     dot_claude_json_default: String,
     ca_cert_bundle: String,
+    nix_config: String,
 }
 
 fn load_sandbox_config() -> Result<SandboxConfig> {
@@ -434,20 +435,53 @@ fn build_bwrap_argv(
         }
     }
 
-    if let Some(merged) = env.get("CODING_CAVE_NIX_MERGED") {
-        args.extend(["--bind".to_string(), merged.clone(), "/nix/store".to_string()]);
-        args.extend([
-            "--tmpfs".to_string(), "/nix/var".to_string(),
-            "--dir".to_string(), "/nix/var/nix".to_string(),
-        ]);
-        if let Some(db_dir) = env.get("CODING_CAVE_NIX_DB_DIR") {
-            if Path::new(db_dir).is_dir() {
-                args.extend([
-                    "--bind".to_string(), db_dir.clone(), "/nix/var/nix/db".to_string(),
-                ]);
-            }
+    // Top-level cave: bind its own chroot store over /nix/store and /nix/var
+    // (read-write), replacing the static_args ro-bind of the host /nix/store.
+    // The cave's nix uses its own store and DB and builds into it as itself.
+    // A nested cave leaves CODING_CAVE_STORE_ROOT unset and keeps the
+    // inherited read-only /nix/store from the host cave (and the base
+    // NIX_CONFIG, set just below for every cave).
+    let mut nix_config = cfg.nix_config.clone();
+    if let Some(root) = env.get("CODING_CAVE_STORE_ROOT") {
+        let store = format!("{root}/nix/store");
+        let var = format!("{root}/nix/var");
+        args.extend(["--bind".to_string(), store, "/nix/store".to_string()]);
+        args.extend(["--bind".to_string(), var, "/nix/var".to_string()]);
+
+        // Configure the root-owned shared store as a substituter so the cave
+        // fetches shared packages instead of rebuilding. require-sigs is off
+        // for the cave's nix: the shared store is host-provided and trusted,
+        // and the cave's own from-source builds are unsigned, so requiring
+        // signatures would block legitimate local builds. Content integrity is
+        // enforced by the manager's content-address / trusted-sig gate on
+        // promotion plus the root-owned store paths, not by the cave.
+        //
+        // Bind the store paths read-only (a cave must not alter shared
+        // content), but its nix/var read-write: nix takes a lock under the
+        // substituter store's nix/var while substituting, so a fully read-only
+        // bind makes substitution fail with "big-lock: Permission denied".
+        // The cost is that a cave can write the shared store's metadata
+        // (db/temproots) — a DoS surface, not content poisoning (paths stay
+        // root-owned). A binary-cache server would avoid even that; see
+        // docs/nix-store-redesign.md.
+        if Path::new(SHARED_STORE_ROOT).is_dir() {
+            let shared_var = format!("{SHARED_STORE_ROOT}/nix/var");
+            args.extend([
+                "--ro-bind".to_string(),
+                SHARED_STORE_ROOT.to_string(),
+                SHARED_STORE_ROOT.to_string(),
+                "--bind".to_string(),
+                shared_var.clone(),
+                shared_var,
+            ]);
+            nix_config.push_str(&format!(
+                "\nextra-substituters = local?root={SHARED_STORE_ROOT}\n\
+                 extra-trusted-substituters = local?root={SHARED_STORE_ROOT}\n\
+                 require-sigs = false"
+            ));
         }
     }
+    args.extend(["--setenv".to_string(), "NIX_CONFIG".to_string(), nix_config]);
 
     if Path::new("/dev/net/tun").exists() {
         args.extend([
@@ -1458,255 +1492,86 @@ fn seed_claude_config(home: &Path, project_slug_str: &str, comms: bool) {
     }
 }
 
-// Provided by modules/host.nix on the host: an idmapped read-only mount
-// of /nix/store that relabels host-uid-0 to cave-coder. Required for nix's
-// chmod/chown enforcement on overlayfs copy-ups to succeed. Duplicated in
-// supervisor.rs because cav-rs has no lib crate.
-const NIX_STORE_IDMAPPED: &str = "/var/lib/coding-cave/nix-store";
+// The root-owned shared store the host manager (cav-store) deduplicates into
+// and the cave substitutes from. A chroot store, so its paths are logically
+// /nix/store/... like any other. Bound read-only into the cave; configured as
+// an extra-substituter so the cave fetches shared packages instead of
+// rebuilding. Must match cav-store's SHARED_STORE_ROOT.
+const SHARED_STORE_ROOT: &str = "/var/lib/coding-cave/store";
 
-fn require_host_module() -> Result<()> {
-    if !is_mount_point(NIX_STORE_IDMAPPED) {
+/// Populate a cave's own nix store with its environment closure before launch.
+///
+/// Each cave runs ordinary nix against its private chroot store at
+/// `<cave_root>` (bound to /nix/store + /nix/var inside the sandbox). The
+/// closure that must be present for the cave to function — the user-env /
+/// claude-code closure — lives in the host store, so we `nix copy` it across
+/// and register a GC root so nix never collects it. No idmap and no DB seed:
+/// nix manages the cave store's database itself.
+///
+/// `nix copy` is incremental: paths already in the cave store (from a prior
+/// launch or substituted from the shared store) are skipped, so this is cheap
+/// on resume. Returns the cave store root for the env/bwrap wiring.
+fn populate_cave_store(agent_id: &str, user_env: Option<&Path>) -> Result<PathBuf> {
+    let cave_root = workspace::cave_store_root_for(agent_id);
+    std::fs::create_dir_all(cave_root.join("nix").join("store"))?;
+    std::fs::create_dir_all(cave_root.join("nix").join("var").join("nix"))?;
+
+    let Some(env_path) = user_env else {
+        // No user-env built yet (e.g. first run with no cave.nix produced
+        // nothing). Nothing to seed; nix will substitute on demand.
+        return Ok(cave_root);
+    };
+    let closure = env_path.to_string_lossy().to_string();
+    let cave_uri = format!("local?root={}", cave_root.display());
+
+    // Copy the closure host store -> cave store. No --from: the host's
+    // default store (daemon or local) is the source. Incremental.
+    let out = Command::new("nix")
+        .args([
+            "--extra-experimental-features",
+            "nix-command",
+            "copy",
+            "--no-check-sigs",
+            "--to",
+            &cave_uri,
+            &closure,
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| anyhow::anyhow!("spawn nix copy into cave store: {e}"))?;
+    if !out.status.success() {
         bail!(
-            "{NIX_STORE_IDMAPPED} is not mounted: the host's nixosModules.codingCave \
-             (from the coding-cave flake) must be active. Add it to your NixOS \
-             config and `nixos-rebuild switch`."
+            "nix copy of cave env closure into {} failed: {}",
+            cave_root.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
         );
     }
-    Ok(())
-}
 
-// True if `path` appears as a mount point in /proc/self/mountinfo. Field 5
-// of each line is the mount point. We can't use st_dev comparison because
-// idmapped bind mounts from the same underlying filesystem share st_dev
-// with the host's view.
-fn is_mount_point(path: &str) -> bool {
-    let Ok(data) = std::fs::read_to_string("/proc/self/mountinfo") else {
-        return false;
-    };
-    for line in data.lines() {
-        if line.split(' ').nth(4) == Some(path) {
-            return true;
-        }
+    // Root the closure inside the cave store so its own GC never collects the
+    // environment the cave needs to run. A symlink under the store's gcroots
+    // dir is the documented persistent-root mechanism.
+    let gcroots = cave_root
+        .join("nix")
+        .join("var")
+        .join("nix")
+        .join("gcroots")
+        .join("cav");
+    std::fs::create_dir_all(&gcroots)?;
+    let out = Command::new("nix-store")
+        .args(["--store", &cave_uri, "--add-root", &gcroots.join("user-env").to_string_lossy(), "-r", &closure])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| anyhow::anyhow!("spawn nix-store --add-root in cave store: {e}"))?;
+    if !out.status.success() {
+        bail!(
+            "rooting cave env closure in {} failed: {}",
+            cave_root.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
     }
-    false
-}
-
-fn nix_overlay_dirs(home: &Path, agent_id: &str) -> (PathBuf, PathBuf, PathBuf) {
-    let base = workspace::nix_overlay_base_for(home, agent_id);
-    let (upper, work, merged) = (base.join("upper"), base.join("work"), base.join("merged"));
-    for d in [&upper, &work, &merged] {
-        let _ = std::fs::create_dir_all(d);
-    }
-    (upper, work, merged)
-}
-
-fn migrate_shared_overlay(home: &Path, agent_id: &str) {
-    let root = home
-        .join(".local")
-        .join("share")
-        .join("coding-cave")
-        .join("nix-overlay");
-    let legacy = root.join("shared");
-    let target = workspace::nix_overlay_base_for(home, agent_id);
-    if legacy.is_dir() && !target.exists() {
-        let _ = std::fs::rename(&legacy, &target);
-    }
-}
-
-fn rm_store_path(path: &Path) {
-    if path.is_symlink() || !path.is_dir() {
-        if let Some(parent) = path.parent() {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
-        }
-        let _ = std::fs::remove_file(path);
-        return;
-    }
-    let _ = chmod_tree(path);
-    let _ = std::fs::remove_dir_all(path);
-}
-
-fn chmod_tree(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
-    if let Ok(entries) = std::fs::read_dir(path) {
-        for entry in entries.flatten() {
-            let p = entry.path();
-            if p.is_dir() && !p.is_symlink() {
-                chmod_tree(&p)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn setup_nix_overlay(home: &Path, agent_id: &str) -> String {
-    migrate_shared_overlay(home, agent_id);
-    let (upper, work, merged) = nix_overlay_dirs(home, agent_id);
-    // Clean stale upper entries
-    let host_names: std::collections::HashSet<String> = std::fs::read_dir(NIX_STORE_IDMAPPED)
-        .map(|d| d.flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect())
-        .unwrap_or_default();
-    if let Ok(entries) = std::fs::read_dir(&upper) {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with('.') {
-                continue;
-            }
-            if name.ends_with(".lock") {
-                if entry.path().metadata().map(|m| m.len() == 0).unwrap_or(false) {
-                    let _ = std::fs::remove_file(entry.path());
-                }
-                continue;
-            }
-            if !host_names.contains(&name) {
-                rm_store_path(&entry.path());
-            }
-        }
-    }
-    // Reset work dir
-    let work_inner = work.join("work");
-    if work_inner.is_dir() {
-        workspace::force_remove_dir_all(&work_inner);
-        let _ = std::fs::create_dir(&work_inner);
-    }
-    merged.to_string_lossy().to_string()
-}
-
-fn seed_nix_db(home: &Path, agent_id: &str, merged_path: &str) -> Option<PathBuf> {
-    use rusqlite::{Connection, params};
-
-    let parent_db = Path::new("/nix/var/nix/db/db.sqlite");
-    if !parent_db.exists() {
-        return None;
-    }
-
-    let db_dir = workspace::nix_overlay_base_for(home, agent_id).join("db");
-    let _ = std::fs::create_dir_all(&db_dir);
-    let cave_db = db_dir.join("db.sqlite");
-    let stamp = db_dir.join("db.stamp");
-
-    // Skip reseed if host DB unchanged
-    let state = parent_db.metadata().ok().map(|m| {
-        use std::os::unix::fs::MetadataExt;
-        format!("{}:{}", m.mtime_nsec(), m.size())
-    });
-    if let Some(ref s) = state {
-        if cave_db.exists()
-            && stamp.exists()
-            && std::fs::read_to_string(&stamp).unwrap_or_default().trim() == s
-        {
-            crate::log_debug!("nix DB: host unchanged, skipping reseed");
-            return Some(db_dir);
-        }
-    }
-
-    // Determine store root for existence checks
-    let store_root = if !merged_path.is_empty() {
-        let candidate = Path::new(merged_path);
-        if candidate.read_dir().map(|mut d| d.next().is_some()).unwrap_or(false) {
-            candidate.to_path_buf()
-        } else {
-            PathBuf::from(NIX_STORE_IDMAPPED)
-        }
-    } else {
-        PathBuf::from(NIX_STORE_IDMAPPED)
-    };
-
-    let store_names: std::collections::HashSet<String> = std::fs::read_dir(&store_root)
-        .map(|d| d.flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect())
-        .unwrap_or_default();
-
-    let result = (|| -> Result<()> {
-        // Collect cave-only paths (present on disk, absent from the parent):
-        // the agent's own installs, preserved across the file rebuild.
-        let mut cave_only_rows: Vec<(String, String, f64, String, i64, i64, Option<String>, Option<String>)> = vec![];
-        if cave_db.exists() {
-            let host_paths = crate::nix_db::valid_paths(parent_db)?;
-            let old = Connection::open_with_flags(
-                &cave_db,
-                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-            )?;
-            let mut stmt = old.prepare(
-                "SELECT path, hash, registrationTime, deriver, narSize, ultimate, sigs, ca \
-                 FROM ValidPaths",
-            )?;
-            let rows = stmt.query_map([], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, f64>(2)?,
-                    r.get::<_, String>(3)?,
-                    r.get::<_, i64>(4)?,
-                    r.get::<_, i64>(5)?,
-                    r.get::<_, Option<String>>(6)?,
-                    r.get::<_, Option<String>>(7)?,
-                ))
-            })?;
-            for row in rows.flatten() {
-                if !host_paths.contains(&row.0)
-                    && store_names.contains(&crate::nix_db::store_name(&row.0))
-                {
-                    cave_only_rows.push(row);
-                }
-            }
-        }
-
-        // Fresh backup from parent (copy file)
-        for wal in std::fs::read_dir(&db_dir)
-            .into_iter()
-            .flatten()
-            .flatten()
-        {
-            let name = wal.file_name().to_string_lossy().to_string();
-            if name.starts_with("db.sqlite-") {
-                let _ = std::fs::remove_file(wal.path());
-            }
-        }
-        std::fs::copy(parent_db, &cave_db)?;
-
-        // Merge cave-only paths back into the fresh copy.
-        {
-            let dst = Connection::open(&cave_db)?;
-            if !cave_only_rows.is_empty() {
-                dst.execute_batch("BEGIN")?;
-                for (path, hash, reg_time, deriver, nar_size, ult, sigs, ca) in &cave_only_rows {
-                    dst.execute(
-                        "INSERT OR IGNORE INTO ValidPaths \
-                         (path, hash, registrationTime, deriver, narSize, ultimate, sigs, ca) \
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                        params![path, hash, reg_time, deriver, nar_size, ult, sigs, ca],
-                    )?;
-                }
-                dst.execute_batch("COMMIT")?;
-            }
-        }
-
-        // Remove stale entries: paths whose files no longer exist in the store.
-        let stale: Vec<String> = {
-            let dst = Connection::open_with_flags(
-                &cave_db,
-                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-            )?;
-            let mut stmt = dst.prepare("SELECT path FROM ValidPaths")?;
-            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
-            rows.flatten()
-                .filter(|path| !store_names.contains(&crate::nix_db::store_name(path)))
-                .collect()
-        };
-        crate::nix_db::delete_paths(&cave_db, &stale)?;
-        Ok(())
-    })();
-
-    if let Err(e) = result {
-        eprintln!("{} nix DB seed failed: {e}", style::bold_yellow("Warning:"));
-    }
-
-    if let Some(s) = state {
-        let _ = std::fs::write(&stamp, s);
-    }
-
-    Some(db_dir)
+    Ok(cave_root)
 }
 
 fn user_env_path() -> Option<PathBuf> {
@@ -2086,10 +1951,6 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
     } = opts;
     let slug = project_slug(&base);
 
-    if !inside_cave() {
-        require_host_module()?;
-    }
-
     // Resolve the agent session BEFORE loading sandbox config so error paths
     // (missing agent, empty -c, etc.) don't trip on missing build config.
     let (agent_id, session_id, resuming) = if continue_agent {
@@ -2126,7 +1987,7 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
     // migration completes even when the sandbox itself isn't reachable
     // (e.g. tests, missing build config). Each call is idempotent.
     let _ = &slug;
-    workspace::settle_uuid_keying(&config::persistent_home());
+    workspace::settle_uuid_keying();
 
     let cfg = load_sandbox_config()?;
 
@@ -2249,16 +2110,19 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
     let uenv = user_env_path();
     crate::log_info!("user env ready");
 
-    // Inside a nested cave, overlayfs is not supported. Use the inherited
-    // /nix/store (from bwrap static_args ro-bind) without a writable overlay.
-    let (nix_merged, nix_db_dir) = if inside_cave() {
-        (String::new(), None)
+    // Give the cave its own ordinary nix store. Top-level caves get a private
+    // chroot store, seeded with the env closure and bound at /nix/store +
+    // /nix/var inside the sandbox; the cave builds into it as itself, no idmap.
+    // A nested cave (subcave) keeps using the inherited /nix/store from its
+    // host cave (bwrap static_args ro-bind) — building a separate per-cave
+    // store one level down is not supported.
+    let cave_store_root = if inside_cave() {
+        None
     } else {
-        crate::log_info!("setting up nix overlay...");
-        let merged = setup_nix_overlay(&home, &agent_id);
-        let db_dir = seed_nix_db(&home, &agent_id, &merged);
-        crate::log_info!("nix overlay ready");
-        (merged, db_dir)
+        crate::log_info!("populating cave nix store...");
+        let root = populate_cave_store(&agent_id, uenv.as_deref())?;
+        crate::log_info!("cave nix store ready");
+        Some(root)
     };
 
     // Build env map
@@ -2303,8 +2167,11 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
             config::log_anchor().to_string(),
         );
     }
-    if !nix_merged.is_empty() {
-        env.insert("CODING_CAVE_NIX_MERGED".to_string(), nix_merged.clone());
+    if let Some(root) = &cave_store_root {
+        env.insert(
+            "CODING_CAVE_STORE_ROOT".to_string(),
+            root.to_string_lossy().to_string(),
+        );
     }
     env.insert("CODING_CAVE_HOME".to_string(), home.to_string_lossy().to_string());
     env.insert("CODING_CAVE_WORKSPACES".to_string(), ws_paths);
@@ -2317,12 +2184,6 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
         std::env::var("CODING_CAVE_HOST_HOME")
             .unwrap_or_else(|_| host_home().to_string_lossy().to_string()),
     );
-    if let Some(db) = &nix_db_dir {
-        env.insert(
-            "CODING_CAVE_NIX_DB_DIR".to_string(),
-            db.to_string_lossy().to_string(),
-        );
-    }
     env.insert("CODING_CAVE_DNS_SERVER".to_string(), SLIRP_DNS.to_string());
     if !host_devices.is_empty() {
         env.insert(
@@ -2440,21 +2301,6 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
         "CODING_CAVE_NS_SYNC_FD".to_string(),
         sync_w.as_raw_fd().to_string(),
     );
-    if !inside_cave() {
-        let (upper, work, merged_pb) = nix_overlay_dirs(&home, &agent_id);
-        env.insert(
-            "CODING_CAVE_NS_OVERLAY_MERGED".to_string(),
-            merged_pb.to_string_lossy().to_string(),
-        );
-        env.insert(
-            "CODING_CAVE_NS_OVERLAY_UPPER".to_string(),
-            upper.to_string_lossy().to_string(),
-        );
-        env.insert(
-            "CODING_CAVE_NS_OVERLAY_WORK".to_string(),
-            work.to_string_lossy().to_string(),
-        );
-    }
 
     let seccomp_fd = rustix::fs::open(
         cfg.seccomp_filter.as_str(),
