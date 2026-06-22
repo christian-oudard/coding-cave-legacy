@@ -67,10 +67,19 @@ fn setup() -> Result<()> {
         bail!("cav-store setup must be run as root");
     }
     std::fs::create_dir_all(STATE_DIR).context("create /var/lib/coding-cave")?;
-    // The shared store is a root-owned chroot store. Nix initializes its
-    // database on the first `nix copy --to`, so we only ensure the directory
-    // exists. Idempotent across restarts.
-    std::fs::create_dir_all(SHARED_STORE_ROOT).context("create shared store")?;
+    init_shared_store(Path::new(SHARED_STORE_ROOT))
+}
+
+/// Create the shared store's `nix/store` and `nix/var` subdirectories.
+///
+/// Nix initializes its database (nix/var/nix/db) lazily on the first
+/// `nix copy --to`, but the cave sandbox bind-mounts nix/store and nix/var at
+/// launch — which happens before any promotion can populate them. Without
+/// these directories the first cave on a fresh host fails to launch with
+/// "bwrap: Can't find source path .../store/nix/var". Idempotent.
+fn init_shared_store(root: &Path) -> Result<()> {
+    std::fs::create_dir_all(root.join("nix/store")).context("create shared store nix/store")?;
+    std::fs::create_dir_all(root.join("nix/var")).context("create shared store nix/var")?;
     Ok(())
 }
 
@@ -809,6 +818,20 @@ mod tests {
             classify_promote(false, true),
             PromoteDecision::PromoteUntrusted
         );
+    }
+
+    #[test]
+    fn init_shared_store_creates_sandbox_bind_sources() {
+        let root = std::env::temp_dir().join(format!("cav-store-init-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        // The sandbox bind-mounts these two paths at cave launch; both must
+        // exist after setup or the first cave on a fresh host can't start.
+        init_shared_store(&root).unwrap();
+        assert!(root.join("nix/store").is_dir());
+        assert!(root.join("nix/var").is_dir());
+        // Idempotent across service restarts.
+        init_shared_store(&root).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
