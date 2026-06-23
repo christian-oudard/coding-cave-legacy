@@ -26,6 +26,7 @@ mod quota;
 mod nix_db;
 use rustix::fd::{AsFd, OwnedFd};
 use rustix::fs::inotify::{self, CreateFlags, WatchFlags};
+use rustix::fs::{flock, open, FlockOperation, Mode, OFlags};
 use rustix::io::Errno;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
@@ -472,36 +473,35 @@ fn scan_and_promote(state: &mut AgentState) -> Result<()> {
 
     let shared = PathBuf::from(shared_store_root());
     let shared_store_dir = shared.join("nix").join("store");
-    let mut to_promote = Vec::new();
+    // Every newly-valid path whose files are actually in this cave's store. A
+    // path already in the shared store is NOT skipped: the cave's own copy
+    // still has to be collapsed onto the shared inode (dedup), which is the
+    // whole point — a path absent from the cave store is nothing to do.
+    let mut cave_paths = Vec::new();
     for (_id, path) in &rows {
         let Some(name) = Path::new(path).file_name() else {
             continue;
         };
-        // Already shared (prior promotion, or it came from the shared store
-        // via substitution / launch population). Nothing to do.
-        if shared_store_dir.join(name).exists() {
-            continue;
-        }
-        // Must be a real path in this cave's store. A DB row whose file is
-        // absent is nothing to promote.
         if !state.store_dir.join(name).exists() {
             continue;
         }
-        to_promote.push((path.clone(), name.to_os_string()));
+        cave_paths.push((path.clone(), name.to_os_string()));
     }
 
     if test_mode() {
-        // Exercise the diff pipeline without nix/chattr: "promote" by
-        // copying the cave file into the shared store dir.
+        // Exercise the diff pipeline without nix/flock: "promote" not-yet-
+        // shared paths by copying them into the shared store dir.
         std::fs::create_dir_all(&shared_store_dir).ok();
-        for (_, name) in &to_promote {
-            let src = state.store_dir.join(name);
+        for (_, name) in &cave_paths {
             let dst = shared_store_dir.join(name);
-            copy_tree(&src, &dst)
-                .with_context(|| format!("copy {src:?} -> {dst:?}"))?;
+            if dst.exists() {
+                continue;
+            }
+            copy_tree(&state.store_dir.join(name), &dst)
+                .with_context(|| format!("copy -> {dst:?}"))?;
         }
-    } else if !to_promote.is_empty() {
-        promote_to_shared(state, &shared, &shared_store_dir, &to_promote)?;
+    } else if !cave_paths.is_empty() {
+        promote_and_dedup(state, &shared, &shared_store_dir, &cave_paths)?;
     }
 
     // Advance the cursor only after everything in this batch succeeded.
@@ -574,64 +574,87 @@ fn promote_trust_local() -> bool {
 /// `nix copy` the path and its closure cave-store -> shared store. After the
 /// copy, hardlink the cave's file to the shared inode (one copy on disk) and
 /// mark the shared path immutable so no cave can rewrite it.
-fn promote_to_shared(
+fn promote_and_dedup(
     state: &AgentState,
     shared_root: &Path,
     shared_store_dir: &Path,
-    to_promote: &[(String, std::ffi::OsString)],
+    cave_paths: &[(String, std::ffi::OsString)],
 ) -> Result<()> {
+    // The one point where the manager touches a live cave's store. Hold a
+    // shared lock on the cave's gc.lock for the whole pass: nix's GC takes it
+    // exclusively, so this blocks the cave from collecting a path out from
+    // under a hardlink (and the cave's GC blocks us). Released when the fd
+    // drops at end of scope.
+    let _gc_lock = lock_cave_gc(&state.cave_root)?;
     let trust_local = promote_trust_local();
     let cave_uri = format!("local?root={}", state.cave_root.display());
     let shared_uri = format!("local?root={}", shared_root.display());
 
-    for (path, name) in to_promote {
+    for (path, name) in cave_paths {
         let src = state.store_dir.join(name);
+        let shared_path = shared_store_dir.join(name);
 
-        // A symlink at the store-path root is not a legitimate store path and
-        // would point wherever the agent chose; never promote one.
-        match src.symlink_metadata() {
-            Ok(m) if m.file_type().is_symlink() => {
+        if !shared_path.exists() {
+            // Not yet shared: gate it, then copy cave -> shared.
+            //
+            // A symlink at the store-path root is not a legitimate store path
+            // and would point wherever the agent chose; never promote one.
+            match src.symlink_metadata() {
+                Ok(m) if m.file_type().is_symlink() => {
+                    eprintln!(
+                        "cav-store: refusing to promote {}: symlink",
+                        name.to_string_lossy()
+                    );
+                    continue;
+                }
+                Ok(_) => {}
+                Err(_) => continue,
+            }
+
+            // Fail loudly: a verify that couldn't even run (missing nix, etc.)
+            // is not "unauthentic" — skip the path rather than silently treat
+            // a broken check as a rejection or, worse, a trust-local pass.
+            let authentic = match verify_authentic(&cave_uri, path) {
+                Ok(a) => a,
+                Err(e) => {
+                    eprintln!(
+                        "cav-store: verify of {} failed: {e:#}",
+                        name.to_string_lossy()
+                    );
+                    continue;
+                }
+            };
+            let decision = classify_promote(authentic, trust_local);
+            if decision == PromoteDecision::Reject {
                 eprintln!(
-                    "cav-store: refusing to promote {}: symlink",
+                    "cav-store: refusing to promote {}: not content-addressed \
+                     or trusted-signed (set CODING_CAVE_PROMOTE_TRUST_LOCAL=1 \
+                     to share local builds)",
                     name.to_string_lossy()
                 );
                 continue;
             }
-            Ok(_) => {}
-            Err(_) => continue,
+
+            // Trust-local promotions are unverified, so don't carry the cave's
+            // claimed signatures into the shared store; verified ones copy with
+            // signature checking on.
+            let trusted = decision == PromoteDecision::Promote;
+            if let Err(e) = nix_copy(&cave_uri, &shared_uri, path, trusted) {
+                eprintln!(
+                    "cav-store: nix copy of {} failed: {e:#}",
+                    name.to_string_lossy()
+                );
+                continue;
+            }
         }
 
-        let authentic = verify_authentic(&cave_uri, path).unwrap_or(false);
-        let decision = classify_promote(authentic, trust_local);
-        if decision == PromoteDecision::Reject {
-            eprintln!(
-                "cav-store: refusing to promote {}: not content-addressed \
-                 or trusted-signed (set CODING_CAVE_PROMOTE_TRUST_LOCAL=1 \
-                 to share local builds)",
-                name.to_string_lossy()
-            );
-            continue;
-        }
-
-        // Trust-local promotions are unverified, so don't carry the cave's
-        // claimed signatures into the shared store: copy with --no-check-sigs
-        // and let nix recompute on substitution. Verified promotions copy
-        // with signature checking on.
-        let trusted = decision == PromoteDecision::Promote;
-        if let Err(e) = nix_copy(&cave_uri, &shared_uri, path, trusted) {
-            eprintln!(
-                "cav-store: nix copy of {} failed: {e:#}",
-                name.to_string_lossy()
-            );
-            continue;
-        }
-
-        // Collapse the cave's copy and the shared copy to one inode (same
-        // filesystem) so the package lives once on disk. The shared store is
-        // root-owned and bound read-only into caves, so a cave cannot modify
-        // shared content through its hardlink; no immutable bit is needed, and
-        // leaving the paths mutable is what lets the GC pass delete them.
-        if let Err(e) = hardlink_into_shared(&src, &shared_store_dir.join(name)) {
+        // Now in the shared store (just copied, or already there because a
+        // sibling built it first): collapse the cave's own copy onto the
+        // shared inode so the package lives once on disk. Always done, even
+        // when the path was already shared — that is what dedups a path two
+        // caves built independently. The shared store is root-owned, so the
+        // cave can't rewrite shared content through this hardlink.
+        if let Err(e) = hardlink_into_shared(&src, &shared_path) {
             eprintln!(
                 "cav-store: hardlink dedup of {} failed: {e:#}",
                 name.to_string_lossy()
@@ -639,6 +662,23 @@ fn promote_to_shared(
         }
     }
     Ok(())
+}
+
+/// Open the cave store's gc.lock and take a shared advisory lock. nix's GC
+/// holds it exclusively, so a shared lock lets the cave's normal operations
+/// proceed but blocks GC while the manager hardlinks. Opened read-only (root
+/// can open the cave-owned lock regardless of mode); released when the
+/// returned fd drops.
+fn lock_cave_gc(cave_root: &Path) -> Result<OwnedFd> {
+    let path = cave_root
+        .join("nix")
+        .join("var")
+        .join("nix")
+        .join("gc.lock");
+    let fd = open(&path, OFlags::RDONLY, Mode::empty())
+        .with_context(|| format!("open {}", path.display()))?;
+    flock(&fd, FlockOperation::LockShared).context("flock cave gc.lock")?;
+    Ok(fd)
 }
 
 /// Verify a cave store path is authentic: it is either content-addressed (the
