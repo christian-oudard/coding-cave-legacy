@@ -441,45 +441,20 @@ fn build_bwrap_argv(
     // A nested cave leaves CODING_CAVE_STORE_ROOT unset and keeps the
     // inherited read-only /nix/store from the host cave (and the base
     // NIX_CONFIG, set just below for every cave).
-    let mut nix_config = cfg.nix_config.clone();
+    let nix_config = cfg.nix_config.clone();
     if let Some(root) = env.get("CODING_CAVE_STORE_ROOT") {
         let store = format!("{root}/nix/store");
         let var = format!("{root}/nix/var");
         args.extend(["--bind".to_string(), store, "/nix/store".to_string()]);
         args.extend(["--bind".to_string(), var, "/nix/var".to_string()]);
 
-        // Configure the root-owned shared store as a substituter so the cave
-        // fetches shared packages instead of rebuilding. require-sigs is off
-        // for the cave's nix: the shared store is host-provided and trusted,
-        // and the cave's own from-source builds are unsigned, so requiring
-        // signatures would block legitimate local builds. Content integrity is
-        // enforced by the manager's content-address / trusted-sig gate on
-        // promotion plus the root-owned store paths, not by the cave.
-        //
-        // Bind the store paths read-only (a cave must not alter shared
-        // content), but its nix/var read-write: nix takes a lock under the
-        // substituter store's nix/var while substituting, so a fully read-only
-        // bind makes substitution fail with "big-lock: Permission denied".
-        // The cost is that a cave can write the shared store's metadata
-        // (db/temproots) — a DoS surface, not content poisoning (paths stay
-        // root-owned). A binary-cache server would avoid even that; see
-        // docs/nix-store-redesign.md.
-        if Path::new(SHARED_STORE_ROOT).is_dir() {
-            let shared_var = format!("{SHARED_STORE_ROOT}/nix/var");
-            args.extend([
-                "--ro-bind".to_string(),
-                SHARED_STORE_ROOT.to_string(),
-                SHARED_STORE_ROOT.to_string(),
-                "--bind".to_string(),
-                shared_var.clone(),
-                shared_var,
-            ]);
-            nix_config.push_str(&format!(
-                "\nextra-substituters = local?root={SHARED_STORE_ROOT}\n\
-                 extra-trusted-substituters = local?root={SHARED_STORE_ROOT}\n\
-                 require-sigs = false"
-            ));
-        }
+        // The cave does not substitute from the shared store. An unprivileged
+        // cave can't lock a root-owned store to substitute from it, and making
+        // the shared store writable to the cave would be a security hole. So
+        // caves fetch packages the normal way (binary cache or build); the
+        // store manager (cav-store) deduplicates identical paths across caves
+        // by hardlinking them onto a shared inode, so a re-fetched package
+        // still ends up as one copy on disk.
     }
     args.extend(["--setenv".to_string(), "NIX_CONFIG".to_string(), nix_config]);
 
@@ -1491,13 +1466,6 @@ fn seed_claude_config(home: &Path, project_slug_str: &str, comms: bool) {
         }
     }
 }
-
-// The root-owned shared store the host manager (cav-store) deduplicates into
-// and the cave substitutes from. A chroot store, so its paths are logically
-// /nix/store/... like any other. Bound read-only into the cave; configured as
-// an extra-substituter so the cave fetches shared packages instead of
-// rebuilding. Must match cav-store's SHARED_STORE_ROOT.
-const SHARED_STORE_ROOT: &str = "/var/lib/coding-cave/store";
 
 /// Populate a cave's own nix store with its environment closure before launch.
 ///
