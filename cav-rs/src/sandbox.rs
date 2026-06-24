@@ -1479,21 +1479,45 @@ fn seed_claude_config(home: &Path, project_slug_str: &str, comms: bool) {
 /// `nix copy` is incremental: paths already in the cave store (from a prior
 /// launch or substituted from the shared store) are skipped, so this is cheap
 /// on resume. Returns the cave store root for the env/bwrap wiring.
+/// Seed the cave's private chroot store with the closures it needs and root
+/// each so the cave's own GC never collects them. Two distinct concerns:
+///   - cave infrastructure: the cav package itself (cav-host,
+///     cav-comms-channel-server, cav-git, ...), referenced by absolute store
+///     path via CODING_CAVE_BIN and the comms MCP server. Every cave needs it,
+///     independent of cave.nix; with no shared-store substituter, copying it
+///     here is the only way it reaches the per-cave store.
+///   - the user environment: the user-env / claude-code closure built from
+///     cave.nix (absent on a first run that produced nothing).
+/// `nix copy` is incremental, so this is cheap on resume.
 fn populate_cave_store(agent_id: &str, user_env: Option<&Path>) -> Result<PathBuf> {
     let cave_root = workspace::cave_store_root_for(agent_id);
     std::fs::create_dir_all(cave_root.join("nix").join("store"))?;
     std::fs::create_dir_all(cave_root.join("nix").join("var").join("nix"))?;
-
-    let Some(env_path) = user_env else {
-        // No user-env built yet (e.g. first run with no cave.nix produced
-        // nothing). Nothing to seed; nix will substitute on demand.
-        return Ok(cave_root);
-    };
-    let closure = env_path.to_string_lossy().to_string();
     let cave_uri = format!("local?root={}", cave_root.display());
 
-    // Copy the closure host store -> cave store. No --from: the host's
-    // default store (daemon or local) is the source. Incremental.
+    // Cave infrastructure: the cav package's own closure (parent of its bin/).
+    if let Some(cav_store) = Path::new(&constants::build().cav_bin)
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .filter(|p| p.starts_with("/nix/store/"))
+    {
+        seed_cave_closure(&cave_uri, &cave_root, "cav", &cav_store)?;
+    }
+
+    // User environment from cave.nix.
+    if let Some(env_path) = user_env {
+        seed_cave_closure(&cave_uri, &cave_root, "user-env", &env_path.to_string_lossy())?;
+    }
+
+    Ok(cave_root)
+}
+
+/// `nix copy` a closure from the host store into the cave's chroot store and
+/// register a GC root (`gcroots/cav/<name>`) so the cave's own GC keeps it.
+/// Incremental: paths already present in the cave store are skipped.
+fn seed_cave_closure(cave_uri: &str, cave_root: &Path, name: &str, closure: &str) -> Result<()> {
+    // Copy host store -> cave store. No --from: the host's default store
+    // (daemon or local) is the source.
     let out = Command::new("nix")
         .args([
             "--extra-experimental-features",
@@ -1501,8 +1525,8 @@ fn populate_cave_store(agent_id: &str, user_env: Option<&Path>) -> Result<PathBu
             "copy",
             "--no-check-sigs",
             "--to",
-            &cave_uri,
-            &closure,
+            cave_uri,
+            closure,
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -1510,15 +1534,14 @@ fn populate_cave_store(agent_id: &str, user_env: Option<&Path>) -> Result<PathBu
         .map_err(|e| anyhow::anyhow!("spawn nix copy into cave store: {e}"))?;
     if !out.status.success() {
         bail!(
-            "nix copy of cave env closure into {} failed: {}",
+            "nix copy of {name} closure into {} failed: {}",
             cave_root.display(),
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
 
-    // Root the closure inside the cave store so its own GC never collects the
-    // environment the cave needs to run. A symlink under the store's gcroots
-    // dir is the documented persistent-root mechanism.
+    // A symlink under the store's gcroots dir is the documented persistent-root
+    // mechanism.
     let gcroots = cave_root
         .join("nix")
         .join("var")
@@ -1527,19 +1550,26 @@ fn populate_cave_store(agent_id: &str, user_env: Option<&Path>) -> Result<PathBu
         .join("cav");
     std::fs::create_dir_all(&gcroots)?;
     let out = Command::new("nix-store")
-        .args(["--store", &cave_uri, "--add-root", &gcroots.join("user-env").to_string_lossy(), "-r", &closure])
+        .args([
+            "--store",
+            cave_uri,
+            "--add-root",
+            &gcroots.join(name).to_string_lossy(),
+            "-r",
+            closure,
+        ])
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .output()
         .map_err(|e| anyhow::anyhow!("spawn nix-store --add-root in cave store: {e}"))?;
     if !out.status.success() {
         bail!(
-            "rooting cave env closure in {} failed: {}",
+            "rooting {name} closure in {} failed: {}",
             cave_root.display(),
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
-    Ok(cave_root)
+    Ok(())
 }
 
 fn user_env_path() -> Option<PathBuf> {
