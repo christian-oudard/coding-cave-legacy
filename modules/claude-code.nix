@@ -131,6 +131,10 @@ in {
       plugins = cfg.plugins;
     };
 
-    home.packages = bundlePackages;
+    # Plugins passed as built derivations (not path strings) get their bin/ on
+    # PATH, so a plugin that ships a CLI (e.g. persist) is callable by name from
+    # a terminal or a custom hook without a separate home.packages entry.
+    home.packages = bundlePackages
+      ++ builtins.filter lib.isDerivation cfg.plugins;
   };
 }
