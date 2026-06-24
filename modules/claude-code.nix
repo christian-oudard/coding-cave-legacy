@@ -14,13 +14,16 @@ let
   resolveBundle = import ../lib/resolveBundle.nix { inherit lib; };
   resolvedBundles = map resolveBundle cfg.bundles;
 
-  # Auto-derive enabledPlugins from cfg.plugins. Once any enabledPlugins
-  # entry exists in settings.json, Claude Code treats the key as an
-  # explicit allow-list and silently disables every plugin not listed,
+  # Auto-derive enabledPlugins from every registered plugin. Once any
+  # enabledPlugins entry exists in settings.json, Claude Code treats the key
+  # as an explicit allow-list and silently disables every plugin not listed,
   # including --plugin-dir entries. Reading each plugin's
-  # .claude-plugin/plugin.json and adding its name keeps every plugin in
-  # cfg.plugins active when bundles or extraSettings contribute their own
-  # entries (e.g. marketplace plugins like cave-messages@cave).
+  # .claude-plugin/plugin.json and adding its name keeps them active when
+  # bundles or extraSettings contribute their own entries (e.g. marketplace
+  # plugins like cave-messages@cave). Source the final merged plugin list, not
+  # just cfg.plugins, so plugins another module registers (e.g. via an imported
+  # home-manager module) are enabled too. Acyclic: plugin definitions never
+  # depend on settings/enabledPlugins.
   readPluginName = p:
     let manifest = p + "/.claude-plugin/plugin.json";
     in if builtins.pathExists manifest
@@ -28,7 +31,7 @@ let
        else [ ];
   autoEnabledPlugins = lib.listToAttrs
     (map (n: lib.nameValuePair n true)
-      (lib.concatMap readPluginName cfg.plugins));
+      (lib.concatMap readPluginName config.programs.claude-code.plugins));
 
   # Bundle settings merge in declaration order; user extraSettings on top.
   # Strip permissions.allow/deny: caves run --dangerously-skip-permissions,
