@@ -210,6 +210,8 @@ enum Cmd {
         recursive: bool,
         #[arg(short = 'f', long = "force")]
         force: bool,
+        #[arg(short = 'n', long = "no-clobber", conflicts_with = "force")]
+        no_clobber: bool,
     },
     /// Manage the cave environment
     Env {
@@ -512,13 +514,13 @@ fn run() -> Result<()> {
             }
             checkout::checkout(&base, &branch, agent_id.as_deref())
         }
-        Cmd::Cp { paths, recursive, force } => {
+        Cmd::Cp { paths, recursive, force, no_clobber } => {
             if paths.len() < 2 {
                 bail!("Usage: {}", style::bold_cyan("cav cp <src>... <dest>"));
             }
             let srcs = paths[..paths.len() - 1].to_vec();
             let dest = paths.last().unwrap().clone();
-            cp::cp(srcs, dest, recursive, force)
+            cp::cp(srcs, dest, recursive, force, no_clobber)
         }
         Cmd::Env { cmd } => match cmd {
             EnvCmd::Build { rebuild } => user_env::build(rebuild),

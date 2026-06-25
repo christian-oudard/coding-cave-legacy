@@ -1,4 +1,4 @@
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
@@ -35,7 +35,13 @@ fn tilde_expand(s: &str) -> PathBuf {
     }
 }
 
-pub fn cp(srcs: Vec<String>, dest: String, recursive: bool, force: bool) -> Result<()> {
+pub fn cp(
+    srcs: Vec<String>,
+    dest: String,
+    recursive: bool,
+    force: bool,
+    no_clobber: bool,
+) -> Result<()> {
     // Expand globs in cave specs
     let mut expanded: Vec<String> = vec![];
     for src in &srcs {
@@ -61,6 +67,7 @@ pub fn cp(srcs: Vec<String>, dest: String, recursive: bool, force: bool) -> Resu
             bail!("cp: base '{}': not a directory", dest);
         }
         let dest_qual = qualify_spec(&dest, dest_resolved.as_ref());
+        let mut overwrite = Overwrite::new(force, no_clobber);
         for src in &srcs {
             let src_obj = tilde_expand(src).canonicalize()
                 .unwrap_or_else(|_| tilde_expand(src));
@@ -72,19 +79,13 @@ pub fn cp(srcs: Vec<String>, dest: String, recursive: bool, force: bool) -> Resu
             } else {
                 dp.clone()
             };
-            if !force && base.exists() {
-                print!("Overwrite {}? [y/N] ", base.display());
-                io::stdout().flush()?;
-                let mut answer = String::new();
-                io::stdin().read_line(&mut answer)?;
-                if answer.trim().to_lowercase() != "y" {
-                    bail!("Aborted.");
-                }
+            if src_obj.is_dir() && !recursive {
+                bail!("cp: -R not specified; omitting directory '{src}'");
+            }
+            if !overwrite.allow(&base)? {
+                continue;
             }
             if src_obj.is_dir() {
-                if !recursive {
-                    bail!("cp: -R not specified; omitting directory '{src}'");
-                }
                 copy_tree_nofollow(&src_obj, &base)?;
             } else {
                 copy_nofollow(&src_obj, &base)?;
@@ -101,6 +102,7 @@ pub fn cp(srcs: Vec<String>, dest: String, recursive: bool, force: bool) -> Resu
         if srcs.len() > 1 && !host_dest.is_dir() {
             bail!("cp: base '{}': not a directory", dest);
         }
+        let mut overwrite = Overwrite::new(force, no_clobber);
         for (src, src_resolved) in srcs.iter().zip(resolved_srcs.iter()) {
             let sr = src_resolved.as_ref().ok_or_else(|| {
                 anyhow::anyhow!("Source not found in cave: {src}")
@@ -120,14 +122,8 @@ pub fn cp(srcs: Vec<String>, dest: String, recursive: bool, force: bool) -> Resu
             if src_path.is_dir() && !recursive {
                 bail!("cp: -R not specified; omitting directory '{src}'");
             }
-            if !force && base.exists() {
-                print!("Overwrite {}? [y/N] ", base.display());
-                io::stdout().flush()?;
-                let mut answer = String::new();
-                io::stdin().read_line(&mut answer)?;
-                if answer.trim().to_lowercase() != "y" {
-                    bail!("Aborted.");
-                }
+            if !overwrite.allow(&base)? {
+                continue;
             }
             if src_path.is_dir() {
                 copy_tree_nofollow(src_path, &base)?;
@@ -148,6 +144,98 @@ pub fn cp(srcs: Vec<String>, dest: String, recursive: bool, force: bool) -> Resu
         );
     }
     Ok(())
+}
+
+#[derive(Debug, PartialEq)]
+enum Answer {
+    Yes,
+    No,
+    All,
+    Quit,
+}
+
+fn parse_answer(s: &str) -> Option<Answer> {
+    match s.trim().to_lowercase().as_str() {
+        "y" | "yes" => Some(Answer::Yes),
+        "n" | "no" | "" => Some(Answer::No),
+        "a" | "all" => Some(Answer::All),
+        "q" | "quit" => Some(Answer::Quit),
+        _ => None,
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum Decision {
+    Copy,
+    Skip,
+    Quit,
+}
+
+/// Decides whether each existing destination may be overwritten, carrying
+/// the "all" choice across a multi-file copy. `--force` overwrites without
+/// asking, `--no-clobber` skips without asking, otherwise we prompt on a
+/// TTY and refuse to guess when stdin is not interactive.
+struct Overwrite {
+    all: bool,
+    no_clobber: bool,
+}
+
+impl Overwrite {
+    fn new(force: bool, no_clobber: bool) -> Self {
+        Overwrite { all: force, no_clobber }
+    }
+
+    /// Pure state machine mapping one answer to an action, flipping the
+    /// batch-wide "all" flag when the user picks it. Separated from `allow`
+    /// so the batch behavior is testable without a terminal.
+    fn decide(&mut self, answer: Answer) -> Decision {
+        match answer {
+            Answer::Yes => Decision::Copy,
+            Answer::No => Decision::Skip,
+            Answer::All => {
+                self.all = true;
+                Decision::Copy
+            }
+            Answer::Quit => Decision::Quit,
+        }
+    }
+
+    /// Ok(true) to copy, Ok(false) to skip this destination. Bails on quit
+    /// or on a non-interactive collision with no policy flag set.
+    fn allow(&mut self, dst: &Path) -> Result<bool> {
+        if !dst.exists() {
+            return Ok(true);
+        }
+        if self.all {
+            return Ok(true);
+        }
+        if self.no_clobber {
+            eprintln!("  skipping existing {}", dst.display());
+            return Ok(false);
+        }
+        if !io::stdin().is_terminal() {
+            bail!(
+                "{} exists; pass {} to overwrite or {} to skip",
+                dst.display(),
+                style::bold("--force"),
+                style::bold("--no-clobber"),
+            );
+        }
+        loop {
+            print!("Overwrite {}? [y]es/[N]o/[a]ll/[q]uit ", dst.display());
+            io::stdout().flush()?;
+            let mut answer = String::new();
+            io::stdin().read_line(&mut answer)?;
+            let Some(answer) = parse_answer(&answer) else {
+                continue;
+            };
+            match self.decide(answer) {
+                Decision::Copy => return Ok(true),
+                Decision::Skip => return Ok(false),
+                Decision::Quit => bail!("Aborted."),
+            }
+        }
+    }
 }
 
 #[cfg_attr(test, derive(Debug))]
@@ -784,6 +872,91 @@ mod tests {
             tilde_expand("~zzz_no_such_user_zzz/foo"),
             PathBuf::from("~zzz_no_such_user_zzz/foo")
         );
+    }
+
+    #[test]
+    fn parse_answer_variants() {
+        assert_eq!(parse_answer("y"), Some(Answer::Yes));
+        assert_eq!(parse_answer("YES"), Some(Answer::Yes));
+        assert_eq!(parse_answer(" n "), Some(Answer::No));
+        assert_eq!(parse_answer("no"), Some(Answer::No));
+        assert_eq!(parse_answer(""), Some(Answer::No));
+        assert_eq!(parse_answer("a"), Some(Answer::All));
+        assert_eq!(parse_answer("All"), Some(Answer::All));
+        assert_eq!(parse_answer("q"), Some(Answer::Quit));
+        assert_eq!(parse_answer("quit"), Some(Answer::Quit));
+        assert_eq!(parse_answer("maybe"), None);
+    }
+
+    #[test]
+    fn overwrite_allows_missing_dest() {
+        let dir = make_tmpdir("ow-missing");
+        let mut ow = Overwrite::new(false, false);
+        // Non-existent destination copies without consulting flags or TTY.
+        assert!(ow.allow(&dir.join("nope")).unwrap());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn overwrite_force_overwrites_existing() {
+        let dir = make_tmpdir("ow-force");
+        let f = dir.join("f");
+        fs::write(&f, "x").unwrap();
+        let mut ow = Overwrite::new(true, false);
+        assert!(ow.allow(&f).unwrap());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn overwrite_no_clobber_skips_existing() {
+        let dir = make_tmpdir("ow-noclobber");
+        let f = dir.join("f");
+        fs::write(&f, "x").unwrap();
+        let mut ow = Overwrite::new(false, true);
+        assert!(!ow.allow(&f).unwrap());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn overwrite_all_clears_the_batch() {
+        // "all" on the second collision must flip the batch flag so every
+        // later collision copies without consulting input again — the
+        // guarantee that one keystroke clears the rest of the batch.
+        let mut ow = Overwrite::new(false, false);
+        assert_eq!(ow.decide(Answer::Yes), Decision::Copy);
+        assert!(!ow.all);
+        assert_eq!(ow.decide(Answer::All), Decision::Copy);
+        assert!(ow.all, "'all' must set the batch-wide flag");
+        // A third colliding file: `allow` now short-circuits on `self.all`
+        // before any prompt, so an existing dest copies untouched.
+        let dir = make_tmpdir("ow-all-batch");
+        let f = dir.join("f");
+        fs::write(&f, "x").unwrap();
+        assert!(ow.allow(&f).unwrap(), "after 'all', existing dest copies");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn overwrite_quit_and_skip_decisions() {
+        let mut ow = Overwrite::new(false, false);
+        assert_eq!(ow.decide(Answer::No), Decision::Skip);
+        assert_eq!(ow.decide(Answer::Quit), Decision::Quit);
+        assert!(!ow.all, "no/quit must not set the batch flag");
+    }
+
+    #[test]
+    fn overwrite_non_interactive_collision_errors() {
+        // Under `cargo test` stdin is not a terminal, so a collision with
+        // neither flag must bail instead of blocking on an unanswerable
+        // prompt. The error names both escape-hatch flags.
+        let dir = make_tmpdir("ow-noninteractive");
+        let f = dir.join("f");
+        fs::write(&f, "x").unwrap();
+        let mut ow = Overwrite::new(false, false);
+        let err = ow.allow(&f).expect_err("must bail when not a TTY");
+        let msg = err.to_string();
+        assert!(msg.contains("--force") && msg.contains("--no-clobber"), "{msg}");
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
