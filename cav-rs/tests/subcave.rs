@@ -89,6 +89,7 @@ impl Project {
             .args(args)
             .current_dir(&self.dir)
             .env("CODING_CAVE_DATA_DIR", &self.data_dir)
+            .env("CODING_CAVE_NIX_STORES_DIR", self.data_dir.join("nix-stores"))
             .env("CODING_CAVE_NESTED", "1")
             .output()
             .expect("cav binary not found")

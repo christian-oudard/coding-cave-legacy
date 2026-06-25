@@ -28,7 +28,8 @@ impl Drop for Watcher {
 
 struct Fixture {
     root: PathBuf,
-    home: PathBuf,
+    /// Per-cave nix-store base the manager watches for `agent-*` chroot stores.
+    nix_stores: PathBuf,
     /// Shared store root (a chroot store: paths live under `<shared>/nix/store`).
     shared: PathBuf,
 }
@@ -38,11 +39,11 @@ impl Fixture {
         let uniq = format!("{}-{}", std::process::id(), name);
         let root = std::env::temp_dir().join(format!("cav-host-watch-{uniq}"));
         let _ = fs::remove_dir_all(&root);
-        let home = root.join("home");
+        let nix_stores = root.join("nix-stores");
         let shared = root.join("shared");
-        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&nix_stores).unwrap();
         fs::create_dir_all(&shared).unwrap();
-        Self { root, home, shared }
+        Self { root, nix_stores, shared }
     }
 
     /// Where a promoted path lands in the shared store.
@@ -51,10 +52,7 @@ impl Fixture {
     }
 
     fn agent(&self, id: &str) -> AgentFiles {
-        let base = self
-            .home
-            .join(".local/share/coding-cave/store")
-            .join(format!("agent-{id}"));
+        let base = self.nix_stores.join(format!("agent-{id}"));
         let store_dir = base.join("nix/store");
         let db_dir = base.join("nix/var/nix/db");
         fs::create_dir_all(&store_dir).unwrap();
@@ -67,7 +65,7 @@ impl Fixture {
     fn watcher(&self) -> Watcher {
         let mut cmd = Command::new(CAV_STORE);
         cmd.args(["watch"])
-            .env("CODING_CAVE_HOST_WATCH_HOME", &self.home)
+            .env("CODING_CAVE_NIX_STORES_DIR", &self.nix_stores)
             .env("CODING_CAVE_SHARED_STORE", &self.shared)
             .env("CODING_CAVE_HOST_WATCH_TEST_MODE", "1")
             .env_remove("CODING_CAVE_VERSION")

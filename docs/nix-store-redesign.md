@@ -192,9 +192,20 @@ root ownership plus the gate carry the guarantee, with the one live-store touch
 
 ## Decisions taken during implementation
 
-- Shared store at `/var/lib/coding-cave/store`, root-owned, on the same
-  filesystem as the per-cave stores (`<data>/store/agent-<uuid>`) so hardlink
-  dedup works. The store manager (cav-store, root) writes it.
+- Shared store at `/var/lib/coding-cave/store`, root-owned. Per-cave stores at
+  `/var/lib/coding-cave/nix-stores/agent-<uuid>`, on the same filesystem as the
+  shared store so the hardlink dedup works. Both are a single source of truth
+  (`store_paths.rs`) the launcher and the manager resolve through — an earlier
+  split, where the launcher derived its base from `$HOME` while the manager
+  hardcoded `/home/cave-coder`, made the manager watch an empty directory and
+  silently disabled dedup. The per-cave base is created by the manager
+  root-owned but **sticky and world-writable (mode 1777, like `/tmp`)**: nix
+  stores are system-level, not per-user, so they live in `/var/lib`, not a home;
+  any user that launches a cave creates its own `agent-<uuid>` store there, and
+  the sticky bit stops one user removing another's. A fixed path (not a `$HOME`)
+  lets the root daemon find every cave's store without knowing — or being
+  configured with — which user runs caves. (There is no `cave-coder` host user;
+  that name is an in-cave convention only.)
 - Integrity gate: promotion crosses only content-addressed or trusted-signed
   paths (`nix store verify --sigs-needed 1`, which accepts CA paths with no
   signature). The cave's own nix runs with `require-sigs = false` so its

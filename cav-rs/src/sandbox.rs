@@ -1491,7 +1491,24 @@ fn seed_claude_config(home: &Path, project_slug_str: &str, comms: bool) {
 /// `nix copy` is incremental, so this is cheap on resume.
 fn populate_cave_store(agent_id: &str, user_env: Option<&Path>) -> Result<PathBuf> {
     let cave_root = workspace::cave_store_root_for(agent_id);
-    std::fs::create_dir_all(cave_root.join("nix").join("store"))?;
+    // The per-cave store base is a sticky, world-writable dir the host store
+    // manager creates under root-owned /var/lib. The launcher runs unprivileged
+    // and can create its own agent-<id> store under that base, but cannot
+    // create the base itself. If the base is missing (manager never ran), the
+    // create below fails with EACCES under /var/lib; turn that into a clear
+    // message instead of an opaque permissions error.
+    if let Err(e) = std::fs::create_dir_all(cave_root.join("nix").join("store")) {
+        let base = workspace::cave_store_base();
+        if !base.exists() {
+            bail!(
+                "per-cave nix store base {} does not exist and could not be \
+                 created ({e}); the host store manager must create it (start \
+                 coding-cave-host.service, or run `cav-store setup` as root)",
+                base.display()
+            );
+        }
+        return Err(e.into());
+    }
     std::fs::create_dir_all(cave_root.join("nix").join("var").join("nix"))?;
     let cave_uri = format!("local?root={}", cave_root.display());
 

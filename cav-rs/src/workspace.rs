@@ -26,13 +26,14 @@ pub fn worktree_for(slug: &str, agent_id: &str) -> PathBuf {
     canonical
 }
 
-/// The base dir holding every per-cave nix store: `<data>/store`. Must match
-/// cav-store's `store_base_from_env` (the host manager watches this dir for
-/// `agent-*` chroot stores). `data_dir()` resolves to the cave user's
-/// `~/.local/share/coding-cave`, the same root cav-store derives from
-/// CODING_CAVE_HOST_WATCH_HOME / CAVE_USER_HOME.
+/// The base dir holding every per-cave nix store. Resolves through
+/// [`crate::store_paths::cave_stores_base`] — the single definition the host
+/// manager (`cav-store`) also watches, so the two can't desync. A fixed
+/// `/var/lib/coding-cave/nix-stores` (not under `$HOME`): nix stores are
+/// system-level, and a fixed path lets the root daemon find them without
+/// knowing which user runs caves.
 pub fn cave_store_base() -> PathBuf {
-    config::data_dir().join("store")
+    crate::store_paths::cave_stores_base()
 }
 
 /// One cave's private nix chroot store: `<data>/store/agent-<key>`. Keyed by
@@ -569,10 +570,10 @@ mod tests {
         // shared data-dir lock and use an agent id with no registry uuid so
         // the fallback (display-id keying) is deterministic without a database.
         let g = crate::test_util::DataDirGuard::new("cave-store-root");
-        assert_eq!(cave_store_base(), g.path.join("store"));
+        assert_eq!(cave_store_base(), g.stores());
         assert_eq!(
             cave_store_root_for("__no_such_agent__"),
-            g.path.join("store").join("agent-__no_such_agent__"),
+            g.stores().join("agent-__no_such_agent__"),
         );
     }
 }

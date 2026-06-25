@@ -6,16 +6,18 @@
 // instead of unit-file rewrites.
 //
 // Model (see docs/nix-store-redesign.md): each cave owns a private chroot
-// store under its home; the cave does its own builds as itself, no idmap.
-// This daemon owns the single shared store (root-owned, chroot store at
-// SHARED_STORE_ROOT). It watches each cave store's nix DB; for every new
-// valid path it gates the path through the trust logic and, if it crosses,
-// `nix copy`s the path (and closure) from the cave store into the shared
-// store, hardlinks the cave's file to the shared inode, and marks the shared
-// path immutable. Caves use the shared store as a read-only substituter to
-// fetch shared packages without rebuilding. The daemon also garbage-collects
-// the shared store, rooting the closures every live cave references so a path
-// in use is never removed.
+// store under a fixed system base (store_paths::CAVE_STORES_BASE); the cave
+// does its own builds as itself, no idmap. This daemon owns the single shared
+// store (root-owned, chroot store at store_paths::SHARED_STORE_ROOT). It
+// watches each cave store's nix DB; for every new valid path it gates the path
+// through the trust logic and, if it crosses, `nix copy`s the path (and
+// closure) from the cave store into the shared store and hardlinks the cave's
+// file to the shared inode. Caves do NOT substitute from the shared store —
+// they fetch packages normally (binary cache or build) and the hardlink dedup
+// collapses the duplicate onto one inode. Shared paths are root-owned
+// (mode 555), which is what stops a cave rewriting them; no immutable bit (it
+// only broke GC). The daemon also garbage-collects the shared store, rooting
+// the closures every live cave references so a path in use is never removed.
 
 use anyhow::{bail, Context, Result};
 use rusqlite::Connection;
@@ -24,6 +26,8 @@ use rusqlite::Connection;
 mod quota;
 #[path = "../nix_db.rs"]
 mod nix_db;
+#[path = "../store_paths.rs"]
+mod store_paths;
 use rustix::fd::{AsFd, OwnedFd};
 use rustix::fs::inotify::{self, CreateFlags, WatchFlags};
 use rustix::fs::{flock, open, FlockOperation, Mode, OFlags};
@@ -35,16 +39,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 const STATE_DIR: &str = "/var/lib/coding-cave";
-// Root-owned shared store: the deduplicated store every cave substitutes from
-// and promotes into. A chroot store ("local?root=<this>"), so its paths are
-// logically /nix/store/... like any other store's.
-const SHARED_STORE_ROOT: &str = "/var/lib/coding-cave/store";
 
 // How often the background thread garbage-collects the shared store.
 const GC_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3600);
-
-// The cave user's home, owned by the host account that runs caves.
-const CAVE_USER_HOME: &str = "/home/cave-coder";
 
 fn main() {
     if let Err(e) = run() {
@@ -68,7 +65,23 @@ fn setup() -> Result<()> {
         bail!("cav-store setup must be run as root");
     }
     std::fs::create_dir_all(STATE_DIR).context("create /var/lib/coding-cave")?;
-    init_shared_store(Path::new(SHARED_STORE_ROOT))
+    init_shared_store(&store_paths::shared_store_root())?;
+    init_cave_stores_base(&store_paths::cave_stores_base())
+}
+
+/// Create the base that holds every per-cave nix store, sticky and
+/// world-writable (mode 1777, like `/tmp`). The launcher runs unprivileged as
+/// whatever user starts a cave, so it can't create a dir under root-owned
+/// `/var/lib`; this root-side step makes the base writable to every user while
+/// the sticky bit stops one user removing another's store. Idempotent: the
+/// mode is reasserted each run in case a prior umask left it too tight.
+fn init_cave_stores_base(base: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(base)
+        .with_context(|| format!("create cave store base {}", base.display()))?;
+    std::fs::set_permissions(base, std::fs::Permissions::from_mode(0o1777))
+        .with_context(|| format!("chmod 1777 {}", base.display()))?;
+    Ok(())
 }
 
 /// Create the shared store's `nix/store` and `nix/var` subdirectories.
@@ -92,14 +105,13 @@ fn teardown() -> Result<()> {
 }
 
 /// Watch each cave's nix DB; promote newly-installed paths into the shared
-/// store so siblings can substitute them, hardlink the cave's copy to the
-/// shared inode, and mark shared paths immutable. Long-running; the ExecStart
-/// of coding-cave-host.service.
+/// store and hardlink the cave's copy to the shared inode so the package lives
+/// once on disk. Long-running; the ExecStart of coding-cave-host.service.
 fn watch() -> Result<()> {
     if !test_mode() && !rustix::process::geteuid().is_root() {
         bail!("cav-store watch must be run as root");
     }
-    let store_base = store_base_from_env();
+    let store_base = store_paths::cave_stores_base();
     std::fs::create_dir_all(&store_base).context("create cave-store base")?;
 
     let ifd = inotify::init(CreateFlags::empty()).context("inotify init")?;
@@ -339,27 +351,19 @@ fn deepest_existing(target: &Path) -> Option<PathBuf> {
     }
 }
 
-/// A cave's writable trees: its store plus its workspace clone(s) under any
-/// project slug.
+/// The cave's writable tree this daemon caps: its per-cave nix store. Worktrees
+/// used to be capped too, but they live on the user's home filesystem while the
+/// nix store now lives under /var/lib — a different filesystem the daemon
+/// reaches, and project quotas are per-filesystem. So the per-agent cap now
+/// bounds only the nix store (the shared-disk risk); worktree disk is the
+/// user's home filesystem's concern.
 fn agent_quota_dirs(store_base: &Path, agent_key: &str) -> Vec<PathBuf> {
-    let mut dirs = vec![cave_store_root(store_base, agent_key)];
-    // store_base is <data>/store; worktrees live under <data>/worktrees.
-    if let Some(data_dir) = store_base.parent() {
-        if let Ok(slugs) = std::fs::read_dir(data_dir.join("worktrees")) {
-            for slug in slugs.flatten() {
-                let cand = slug.path().join(agent_key);
-                if cand.exists() {
-                    dirs.push(cand);
-                }
-            }
-        }
-    }
-    dirs
+    vec![cave_store_root(store_base, agent_key)]
 }
 
 /// Resolve quota config at startup. Crashes if a quota is configured but the
-/// filesystem can't enforce it; applies the shared-home cap once. Returns the
-/// per-agent state (if a per-agent cap is set) for use as caves are adopted.
+/// filesystem can't enforce it. Returns the per-agent state (if a per-agent cap
+/// is set) for use as caves are adopted.
 fn setup_quota(store_base: &Path) -> Result<Option<QuotaState>> {
     let cfg = quota::HostConfig::load()?;
     if !cfg.active() {
@@ -374,15 +378,20 @@ fn setup_quota(store_base: &Path) -> Result<Option<QuotaState>> {
             mountpoint.display()
         );
     }
-    if let Some(bytes) = cfg.shared_home_bytes()? {
-        if let Some(data_dir) = store_base.parent() {
-            let home = data_dir.join("home");
-            if let Err(e) =
-                quota::apply(&[home], quota::SHARED_HOME_PROJID, bytes, &mountpoint)
-            {
-                eprintln!("cav-store quota: shared-home cap not applied: {e:#}");
-            }
-        }
+    // The shared-home cap bounded the cave home, which lives on the user's
+    // filesystem. The per-cave nix store now lives under /var/lib, so this
+    // root daemon no longer tracks the home and can't enforce that cap. Fail
+    // loudly rather than silently leave a requested cap unapplied (a quota you
+    // asked for that can't be enforced is a misconfiguration, not something to
+    // paper over). Cap the home on its own filesystem instead.
+    if cfg.shared_home_bytes()?.is_some() {
+        bail!(
+            "sharedHomeQuota is no longer enforceable by the host store \
+             manager: the cave home stays on the user's filesystem while the \
+             nix store moved to {}. Remove sharedHomeQuota and cap the cave \
+             home on its own filesystem.",
+            store_base.display()
+        );
     }
     Ok(cfg
         .per_agent_bytes()?
@@ -390,16 +399,6 @@ fn setup_quota(store_base: &Path) -> Result<Option<QuotaState>> {
             per_agent_bytes,
             mountpoint,
         }))
-}
-
-fn store_base_from_env() -> PathBuf {
-    let home = std::env::var("CODING_CAVE_HOST_WATCH_HOME")
-        .unwrap_or_else(|_| CAVE_USER_HOME.to_string());
-    PathBuf::from(home)
-        .join(".local")
-        .join("share")
-        .join("coding-cave")
-        .join("store")
 }
 
 fn agent_id_from_name(name: &OsStr) -> Option<String> {
@@ -471,7 +470,7 @@ fn scan_and_promote(state: &mut AgentState) -> Result<()> {
         return Ok(());
     }
 
-    let shared = PathBuf::from(shared_store_root());
+    let shared = store_paths::shared_store_root();
     let shared_store_dir = shared.join("nix").join("store");
     // Every newly-valid path whose files are actually in this cave's store. A
     // path already in the shared store is NOT skipped: the cave's own copy
@@ -510,12 +509,6 @@ fn scan_and_promote(state: &mut AgentState) -> Result<()> {
     // skip whatever already made it across.
     state.last_seen_id = rows.last().map(|(id, _)| *id).unwrap_or(state.last_seen_id);
     Ok(())
-}
-
-fn shared_store_root() -> String {
-    // Override only for tests; production unconditionally uses SHARED_STORE_ROOT.
-    std::env::var("CODING_CAVE_SHARED_STORE")
-        .unwrap_or_else(|_| SHARED_STORE_ROOT.to_string())
 }
 
 /// Recursively copy a tree (test-mode promotion stand-in for `nix copy`).
@@ -572,8 +565,9 @@ fn promote_trust_local() -> bool {
 /// symlinks at the top level, gate it on cryptographic authenticity
 /// (content-address or trusted signature) plus the trust-local policy, then
 /// `nix copy` the path and its closure cave-store -> shared store. After the
-/// copy, hardlink the cave's file to the shared inode (one copy on disk) and
-/// mark the shared path immutable so no cave can rewrite it.
+/// copy, hardlink the cave's file to the shared inode (one copy on disk). The
+/// shared path is root-owned (mode 555), which is what stops a cave rewriting
+/// it; no immutable bit (it only broke GC).
 fn promote_and_dedup(
     state: &AgentState,
     shared_root: &Path,
@@ -770,7 +764,7 @@ fn gc_shared_store() -> Result<()> {
     if !test_mode() && !rustix::process::geteuid().is_root() {
         bail!("cav-store gc must be run as root");
     }
-    gc_with_base(&store_base_from_env())
+    gc_with_base(&store_paths::cave_stores_base())
 }
 
 /// Garbage-collect the shared store, first rooting every store path any cave
@@ -784,7 +778,7 @@ fn gc_shared_store() -> Result<()> {
 /// shared store's own paths are rooted; a cave's private builds live in the
 /// cave store and are not the shared store's concern.
 fn gc_with_base(store_base: &Path) -> Result<()> {
-    let shared = PathBuf::from(shared_store_root());
+    let shared = store_paths::shared_store_root();
     let shared_store_dir = shared.join("nix").join("store");
     let gcroots = shared
         .join("nix")
@@ -834,7 +828,7 @@ fn gc_with_base(store_base: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Test-only escape hatch: skips the root check and the nix/chattr shell-outs.
+/// Test-only escape hatch: skips the root check and the nix shell-outs.
 /// Lets the integration test exercise the inotify/diff pipeline without root,
 /// nix, or a real nix DB. Production never sets this.
 fn test_mode() -> bool {

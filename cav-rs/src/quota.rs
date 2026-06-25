@@ -17,7 +17,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Project ID reserved for the shared cave home. Per-agent IDs are derived to
-/// avoid it (and 0, which means "no project").
+/// avoid it (and 0, which means "no project"). Currently reserved but not
+/// applied: the shared-home cap is unenforceable since the nix store moved to
+/// /var/lib and the home stayed on the user's filesystem (see cav-store's
+/// setup_quota). Kept so the reserved ID stays carved out if it returns.
+#[allow(dead_code)]
 pub const SHARED_HOME_PROJID: u32 = 1;
 
 const DEFAULT_CONFIG_PATH: &str = "/etc/coding-cave/host.json";

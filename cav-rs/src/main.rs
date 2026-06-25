@@ -22,6 +22,7 @@ mod review;
 mod sandbox;
 mod shell;
 mod status;
+mod store_paths;
 mod style;
 mod supervisor;
 mod user_env;

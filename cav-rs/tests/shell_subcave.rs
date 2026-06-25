@@ -120,6 +120,7 @@ impl Subcave {
             .args(args)
             .current_dir(&self.project_dir)
             .env("CODING_CAVE_DATA_DIR", &self.data_dir)
+            .env("CODING_CAVE_NIX_STORES_DIR", self.data_dir.join("nix-stores"))
             .env_remove("CODING_CAVE_VERSION")
             .env_remove("CODING_CAVE_AGENT_ID")
             .output()

@@ -1,9 +1,11 @@
 # Single NixOS module owning the coding-cave host-side store manager. It
 # maintains a root-owned shared nix store at /var/lib/coding-cave/store,
-# promotes each cave's packages into it (deduplicating by hardlink and marking
-# shared paths immutable so no cave can rewrite them), garbage-collects that
-# store while rooting the paths every live cave still references, and applies
-# optional per-agent disk quotas. Future host-side concerns extend `cav-store`
+# promotes each cave's packages into it (deduplicating by hardlink onto the
+# root-owned shared inode, which is what stops a cave rewriting shared content),
+# garbage-collects that store while rooting the paths every live cave still
+# references, and applies optional per-agent disk quotas. It also creates the
+# sticky per-cave store base at /var/lib/coding-cave/nix-stores. Future
+# host-side concerns extend `cav-store`
 # rather than fragmenting into separate services.
 #
 # The unit body is `cav-store <verb>` so the same logic works on
@@ -60,7 +62,8 @@ in
       unitConfig.RequiresMountsFor = "/nix/store";
       # cav-store is unwrapped (only the cav binary gets a wrapped PATH), so
       # its nix/nix-store/chattr/setquota shell-outs resolve from this unit
-      # path. chattr (e2fsprogs) marks shared store paths immutable.
+      # path. chattr (e2fsprogs, `-p +P`) and setquota apply the optional
+      # per-agent project quotas; shared paths are not marked immutable.
       path = [ pkgs.nix pkgs.e2fsprogs pkgs.quota ];
       serviceConfig = {
         Type = "simple";

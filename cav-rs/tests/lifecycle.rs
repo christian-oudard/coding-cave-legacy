@@ -102,10 +102,19 @@ impl Project {
             .args(args)
             .current_dir(&self.dir)
             .env("CODING_CAVE_DATA_DIR", &self.data_dir)
+            // Per-cave nix stores live at a fixed /var/lib path in production;
+            // redirect them under the tmp data dir so the spawned cav never
+            // touches the real system store.
+            .env("CODING_CAVE_NIX_STORES_DIR", self.nix_stores())
             .env_remove("CODING_CAVE_VERSION")
             .env_remove("CODING_CAVE_AGENT_ID")
             .output()
             .expect("cav binary not found")
+    }
+
+    /// The per-cave nix-store base the spawned cav uses (redirected for tests).
+    fn nix_stores(&self) -> PathBuf {
+        self.data_dir.join("nix-stores")
     }
 
     /// Simulate an agent committing on its branch. Returns the tip sha.
@@ -1476,7 +1485,7 @@ fn remove_agent_drops_worktree_and_cave_store() {
 
     // Seed a per-cave nix store dir; remove-agent should reclaim it
     // alongside the worktree.
-    let store = p.data_dir.join("store").join(format!("agent-{uuid}"));
+    let store = p.nix_stores().join(format!("agent-{uuid}"));
     fs::create_dir_all(store.join("nix").join("store")).unwrap();
     fs::write(store.join("nix").join("store").join("FILE"), "y\n").unwrap();
 
