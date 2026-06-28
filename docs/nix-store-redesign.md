@@ -184,10 +184,9 @@ What must hold for the redesign to be resistant:
 
 - The promotion gate stays strict. Only content-addressed paths (where the name
   binds the content) or paths signed by a trusted key cross into the shared
-  store. Never input-addressed paths, and never trust-local promotion in a
-  fleet with untrusted agents. An agent cannot forge a content address or a
-  trusted signature, so it cannot place chosen content under a path others
-  trust.
+  store. Input-addressed paths (an agent's own unsigned builds) never do. An
+  agent cannot forge a content address or a trusted signature, so it cannot
+  place chosen content under a path others trust.
 - Caves never mount or access the shared store, and its paths are root-owned
   (mode 555), so a cave cannot rewrite a shared inode even through its dedup
   hardlink. Only the manager writes the shared store.

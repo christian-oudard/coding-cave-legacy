@@ -401,14 +401,10 @@ if that fails) so the store never keeps an unregistered orphan.
 **Input-addressed local builds** (an agent's own build outputs, no
 signature) cannot be authenticated this way: the name derives from the
 derivation, not the contents, so nothing distinguishes the real build
-from forged bytes. By default they are **refused** — a malicious agent
-cannot pre-register forged content under the predictable path name a
-sibling will later want. Setting `CODING_CAVE_PROMOTE_TRUST_LOCAL=1`
-permits them, for a single-user fleet that wants to share locally-built
-packages and accepts trusting the producing agent; their agent-claimed
-signatures are stripped before they enter the host DB so they cannot
-masquerade as trusted-signed. Substituted packages (the common case)
-are signed and propagate either way.
+from forged bytes. They are **refused** — a malicious agent cannot
+pre-register forged content under the predictable path name a sibling
+will later want. Substituted packages (the common case) are signed and
+promote normally.
 
 Symlinks are never promoted: a top-level symlink is not a legitimate
 store path and would resolve wherever the agent pointed it.

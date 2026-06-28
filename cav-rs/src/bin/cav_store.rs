@@ -538,45 +538,13 @@ fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// What to do with one candidate promotion after authenticity checking.
-#[derive(Debug, PartialEq, Eq)]
-enum PromoteDecision {
-    /// Content-addressed or trusted-signed: forge-proof, promote.
-    Promote,
-    /// Not cryptographically verifiable, but the trust-local policy allows
-    /// promoting the cave's own builds anyway.
-    PromoteUntrusted,
-    /// Not verifiable and trust-local is off: refuse.
-    Reject,
-}
-
-fn classify_promote(authentic: bool, trust_local: bool) -> PromoteDecision {
-    if authentic {
-        PromoteDecision::Promote
-    } else if trust_local {
-        PromoteDecision::PromoteUntrusted
-    } else {
-        PromoteDecision::Reject
-    }
-}
-
-/// Whether to promote the cave's own unsigned, input-addressed builds.
-/// Off by default: only content-addressed or trusted-signed paths cross into
-/// the shared store other caves trust, so a malicious agent cannot poison a
-/// sibling by pre-registering forged content under a predictable path name.
-/// Set CODING_CAVE_PROMOTE_TRUST_LOCAL=1 in a single-user fleet to also share
-/// locally-built packages, accepting that this trusts the producing agent.
-fn promote_trust_local() -> bool {
-    std::env::var_os("CODING_CAVE_PROMOTE_TRUST_LOCAL").is_some()
-}
-
 /// Promote a cave's installs into the shared store. For each path: refuse
 /// symlinks at the top level, gate it on cryptographic authenticity
-/// (content-address or trusted signature) plus the trust-local policy, then
-/// `nix copy` the path and its closure cave-store -> shared store. After the
-/// copy, hardlink the cave's file to the shared inode (one copy on disk). The
-/// shared path is root-owned (mode 555), which is what stops a cave rewriting
-/// it; no immutable bit (it only broke GC).
+/// (content-address or trusted signature), then `nix copy` the path and its
+/// closure cave-store -> shared store. After the copy, hardlink the cave's
+/// file to the shared inode (one copy on disk). The shared path is root-owned
+/// (mode 555), which is what stops a cave rewriting it; no immutable bit (it
+/// only broke GC).
 fn promote_and_dedup(
     state: &AgentState,
     shared_root: &Path,
@@ -589,7 +557,6 @@ fn promote_and_dedup(
     // collecting a path out from under a hardlink (and the cave's GC blocks
     // us). Released when the fd drops at end of scope.
     let _gc_lock = lock_cave_gc(&state.cave_root)?;
-    let trust_local = promote_trust_local();
     // Read the cave store read-only so reading it as root doesn't reset its
     // ownership (see cave_read_uri). The verify/copy calls below enable the
     // read-only-local-store experimental feature this URI needs.
@@ -619,7 +586,7 @@ fn promote_and_dedup(
 
             // Fail loudly: a verify that couldn't even run (missing nix, etc.)
             // is not "unauthentic" — skip the path rather than silently treat
-            // a broken check as a rejection or, worse, a trust-local pass.
+            // a broken check as a rejection.
             let authentic = match verify_authentic(&cave_uri, path) {
                 Ok(a) => a,
                 Err(e) => {
@@ -630,22 +597,14 @@ fn promote_and_dedup(
                     continue;
                 }
             };
-            let decision = classify_promote(authentic, trust_local);
-            if decision == PromoteDecision::Reject {
-                eprintln!(
-                    "cav-store: refusing to promote {}: not content-addressed \
-                     or trusted-signed (set CODING_CAVE_PROMOTE_TRUST_LOCAL=1 \
-                     to share local builds)",
-                    name.to_string_lossy()
-                );
+            // Only content-addressed or trusted-signed paths cross into the
+            // shared store. A cave's own locally-built, unsigned paths (its
+            // generated sandbox infra) are skipped silently — that is the
+            // normal case, not an error worth logging.
+            if !authentic {
                 continue;
             }
-
-            // Trust-local promotions are unverified, so don't carry the cave's
-            // claimed signatures into the shared store; verified ones copy with
-            // signature checking on.
-            let trusted = decision == PromoteDecision::Promote;
-            if let Err(e) = nix_copy(&cave_uri, &shared_uri, path, trusted) {
+            if let Err(e) = nix_copy(&cave_uri, &shared_uri, path) {
                 eprintln!(
                     "cav-store: nix copy of {} failed: {e:#}",
                     name.to_string_lossy()
@@ -715,10 +674,10 @@ fn verify_authentic(cave_uri: &str, store_path: &str) -> Result<bool> {
     Ok(status.success())
 }
 
-/// `nix copy` a path and its closure from one chroot store to another. When
-/// `check_sigs` is false (trust-local promotions), signature checking is
-/// skipped and nix recomputes integrity from the content on the way in.
-fn nix_copy(from_uri: &str, to_uri: &str, store_path: &str, check_sigs: bool) -> Result<()> {
+/// `nix copy` a path and its closure from one chroot store to another.
+/// Signatures are checked (the default): only content-addressed or
+/// trusted-signed paths reach this call, and both satisfy nix's sig check.
+fn nix_copy(from_uri: &str, to_uri: &str, store_path: &str) -> Result<()> {
     let mut cmd = Command::new("nix");
     cmd.args([
         // read-only-local-store: the from URI (the cave store) carries
@@ -731,9 +690,6 @@ fn nix_copy(from_uri: &str, to_uri: &str, store_path: &str, check_sigs: bool) ->
         "--to",
         to_uri,
     ]);
-    if !check_sigs {
-        cmd.arg("--no-check-sigs");
-    }
     cmd.arg(store_path);
     let out = cmd
         .env("NIX_REMOTE", "")
@@ -855,21 +811,6 @@ fn test_mode() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn authentic_paths_always_promote() {
-        assert_eq!(classify_promote(true, false), PromoteDecision::Promote);
-        assert_eq!(classify_promote(true, true), PromoteDecision::Promote);
-    }
-
-    #[test]
-    fn unverifiable_paths_rejected_unless_trust_local() {
-        assert_eq!(classify_promote(false, false), PromoteDecision::Reject);
-        assert_eq!(
-            classify_promote(false, true),
-            PromoteDecision::PromoteUntrusted
-        );
-    }
 
     #[test]
     fn init_shared_store_creates_sandbox_bind_sources() {
