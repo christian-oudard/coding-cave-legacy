@@ -324,6 +324,15 @@ fn cave_store_root(store_base: &Path, agent_id: &str) -> PathBuf {
     store_base.join(format!("agent-{agent_id}"))
 }
 
+/// The nix store URI the manager uses to *read* a cave store (verify, copy
+/// --from). Always read-only: the cave store is owned by the unprivileged
+/// user that launched the cave, and nix opening a writable local store as
+/// root rewrites its dir to root:nixbld 1775, locking the owner out of its
+/// own store. read-only=true reads without taking ownership.
+fn cave_read_uri(cave_root: &Path) -> String {
+    format!("local?root={}&read-only=true", cave_root.display())
+}
+
 /// The cave's nix DB directory: `<cave-store>/nix/var/nix/db`.
 fn cave_db_dir(store_base: &Path, agent_id: &str) -> PathBuf {
     cave_store_root(store_base, agent_id)
@@ -574,14 +583,17 @@ fn promote_and_dedup(
     shared_store_dir: &Path,
     cave_paths: &[(String, std::ffi::OsString)],
 ) -> Result<()> {
-    // The one point where the manager touches a live cave's store. Hold a
-    // shared lock on the cave's gc.lock for the whole pass: nix's GC takes it
-    // exclusively, so this blocks the cave from collecting a path out from
-    // under a hardlink (and the cave's GC blocks us). Released when the fd
-    // drops at end of scope.
+    // The one point where the manager *writes* a live cave's store is the
+    // hardlink below. Hold a shared lock on the cave's gc.lock for the whole
+    // pass: nix's GC takes it exclusively, so this blocks the cave from
+    // collecting a path out from under a hardlink (and the cave's GC blocks
+    // us). Released when the fd drops at end of scope.
     let _gc_lock = lock_cave_gc(&state.cave_root)?;
     let trust_local = promote_trust_local();
-    let cave_uri = format!("local?root={}", state.cave_root.display());
+    // Read the cave store read-only so reading it as root doesn't reset its
+    // ownership (see cave_read_uri). The verify/copy calls below enable the
+    // read-only-local-store experimental feature this URI needs.
+    let cave_uri = cave_read_uri(&state.cave_root);
     let shared_uri = format!("local?root={}", shared_root.display());
 
     for (path, name) in cave_paths {
@@ -682,8 +694,11 @@ fn lock_cave_gc(cave_root: &Path) -> Result<OwnedFd> {
 fn verify_authentic(cave_uri: &str, store_path: &str) -> Result<bool> {
     let status = Command::new("nix")
         .args([
+            // read-only-local-store: cave_uri carries read-only=true so this
+            // root process reads the user-owned cave store without nix seizing
+            // ownership of it.
             "--extra-experimental-features",
-            "nix-command",
+            "nix-command read-only-local-store",
             "store",
             "verify",
             "--store",
@@ -706,8 +721,10 @@ fn verify_authentic(cave_uri: &str, store_path: &str) -> Result<bool> {
 fn nix_copy(from_uri: &str, to_uri: &str, store_path: &str, check_sigs: bool) -> Result<()> {
     let mut cmd = Command::new("nix");
     cmd.args([
+        // read-only-local-store: the from URI (the cave store) carries
+        // read-only=true, so reading it as root doesn't reset its ownership.
         "--extra-experimental-features",
-        "nix-command",
+        "nix-command read-only-local-store",
         "copy",
         "--from",
         from_uri,
@@ -866,6 +883,16 @@ mod tests {
         // Idempotent across service restarts.
         init_shared_store(&root).unwrap();
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn cave_read_uri_is_read_only() {
+        // Regression: the manager must read a cave store read-only. Opening it
+        // writable as root rewrites the store dir to root:nixbld 1775 and locks
+        // the cave's unprivileged owner out of its own store, breaking the next
+        // launch's `nix copy` with EACCES on a store lock file.
+        let uri = cave_read_uri(Path::new("/x/store/agent-7"));
+        assert_eq!(uri, "local?root=/x/store/agent-7&read-only=true");
     }
 
     #[test]
