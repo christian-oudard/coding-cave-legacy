@@ -324,15 +324,6 @@ fn cave_store_root(store_base: &Path, agent_id: &str) -> PathBuf {
     store_base.join(format!("agent-{agent_id}"))
 }
 
-/// The nix store URI the manager uses to *read* a cave store (verify, copy
-/// --from). Always read-only: the cave store is owned by the unprivileged
-/// user that launched the cave, and nix opening a writable local store as
-/// root rewrites its dir to root:nixbld 1775, locking the owner out of its
-/// own store. read-only=true reads without taking ownership.
-fn cave_read_uri(cave_root: &Path) -> String {
-    format!("local?root={}&read-only=true", cave_root.display())
-}
-
 /// The cave's nix DB directory: `<cave-store>/nix/var/nix/db`.
 fn cave_db_dir(store_base: &Path, agent_id: &str) -> PathBuf {
     cave_store_root(store_base, agent_id)
@@ -557,11 +548,6 @@ fn promote_and_dedup(
     // collecting a path out from under a hardlink (and the cave's GC blocks
     // us). Released when the fd drops at end of scope.
     let _gc_lock = lock_cave_gc(&state.cave_root)?;
-    // Read the cave store read-only so reading it as root doesn't reset its
-    // ownership (see cave_read_uri). The verify/copy calls below enable the
-    // read-only-local-store experimental feature this URI needs.
-    let cave_uri = cave_read_uri(&state.cave_root);
-    let shared_uri = format!("local?root={}", shared_root.display());
 
     for (path, name) in cave_paths {
         let src = state.store_dir.join(name);
@@ -587,7 +573,7 @@ fn promote_and_dedup(
             // Fail loudly: a verify that couldn't even run (missing nix, etc.)
             // is not "unauthentic" — skip the path rather than silently treat
             // a broken check as a rejection.
-            let authentic = match verify_authentic(&cave_uri, path) {
+            let authentic = match verify_authentic(&state.cave_root, path) {
                 Ok(a) => a,
                 Err(e) => {
                     eprintln!(
@@ -597,16 +583,17 @@ fn promote_and_dedup(
                     continue;
                 }
             };
-            // Only content-addressed or trusted-signed paths cross into the
-            // shared store. A cave's own locally-built, unsigned paths (its
-            // generated sandbox infra) are skipped silently — that is the
-            // normal case, not an error worth logging.
+            // Only paths whose whole closure is content-addressed or
+            // trusted-signed cross into the shared store. A cave's own
+            // locally-built, unsigned paths (its generated sandbox infra, or a
+            // signed leaf with an unsigned dependency) are skipped silently —
+            // that is the normal case, not an error worth logging.
             if !authentic {
                 continue;
             }
-            if let Err(e) = nix_copy(&cave_uri, &shared_uri, path) {
+            if let Err(e) = promote_via_export(&state.cave_root, shared_root, path) {
                 eprintln!(
-                    "cav-store: nix copy of {} failed: {e:#}",
+                    "cav-store: promote of {} failed: {e:#}",
                     name.to_string_lossy()
                 );
                 continue;
@@ -646,27 +633,50 @@ fn lock_cave_gc(cave_root: &Path) -> Result<OwnedFd> {
     Ok(fd)
 }
 
-/// Verify a cave store path is authentic: it is either content-addressed (the
-/// name binds the content) or carries a signature from a trusted key, and its
-/// contents hash to the recorded value. An agent cannot forge either, so this
-/// is the anti-poisoning gate. Reads from the cave's chroot store.
-fn verify_authentic(cave_uri: &str, store_path: &str) -> Result<bool> {
-    let status = Command::new("nix")
+/// A `Command` for `bin` that runs as the cave store's owning user, with a
+/// HOME nix can write. The cave store belongs to the unprivileged user that
+/// launched the cave; the manager runs as root. nix opening a writable local
+/// store as root rewrites its dir to root:nixbld 1775 (its `/nix/store`
+/// ownership contract), seizing the store from its owner. Running as the owner
+/// (non-root) gives nix no root to chown to, so the store is left alone.
+fn nix_as_owner(bin: &str, cave_root: &Path) -> Result<Command> {
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::process::CommandExt;
+    let md = cave_root
+        .metadata()
+        .with_context(|| format!("stat {}", cave_root.display()))?;
+    let mut cmd = Command::new(bin);
+    cmd.uid(md.uid())
+        .gid(md.gid())
+        // root's HOME (/root) is unreadable to the dropped uid; point nix at
+        // the owner-owned cave dir so any cache/config write it attempts lands
+        // somewhere writable.
+        .env("HOME", cave_root)
+        .env("NIX_REMOTE", "");
+    Ok(cmd)
+}
+
+/// Verify a cave store path AND its whole closure are authentic: every path is
+/// content-addressed (the name binds the content) or carries a trusted-key
+/// signature, and hashes to its recorded value. An agent can forge neither, so
+/// this is the anti-poisoning gate. Recursive (`-r`) because promotion exports
+/// the closure unsigned-checked; a signed leaf with an unsigned dependency
+/// must not pass. Run as the cave owner so the read doesn't seize the store.
+fn verify_authentic(cave_root: &Path, store_path: &str) -> Result<bool> {
+    let cave_uri = format!("local?root={}", cave_root.display());
+    let status = nix_as_owner("nix", cave_root)?
         .args([
-            // read-only-local-store: cave_uri carries read-only=true so this
-            // root process reads the user-owned cave store without nix seizing
-            // ownership of it.
             "--extra-experimental-features",
-            "nix-command read-only-local-store",
+            "nix-command",
             "store",
             "verify",
             "--store",
-            cave_uri,
+            &cave_uri,
             "--sigs-needed",
             "1",
+            "-r",
             store_path,
         ])
-        .env("NIX_REMOTE", "")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
@@ -674,31 +684,59 @@ fn verify_authentic(cave_uri: &str, store_path: &str) -> Result<bool> {
     Ok(status.success())
 }
 
-/// `nix copy` a path and its closure from one chroot store to another.
-/// Signatures are checked (the default): only content-addressed or
-/// trusted-signed paths reach this call, and both satisfy nix's sig check.
-fn nix_copy(from_uri: &str, to_uri: &str, store_path: &str) -> Result<()> {
-    let mut cmd = Command::new("nix");
-    cmd.args([
-        // read-only-local-store: the from URI (the cave store) carries
-        // read-only=true, so reading it as root doesn't reset its ownership.
-        "--extra-experimental-features",
-        "nix-command read-only-local-store",
-        "copy",
-        "--from",
-        from_uri,
-        "--to",
-        to_uri,
-    ]);
-    cmd.arg(store_path);
-    let out = cmd
-        .env("NIX_REMOTE", "")
-        .stdout(Stdio::null())
+/// Promote a path's closure from a cave store into the shared store without
+/// the manager ever opening the cave store as root (which would seize it).
+/// Export the closure as the cave's owner (non-root: no canonicalize) and pipe
+/// it to `nix-store --import` into the root-owned shared store as root. Import
+/// does not re-check signatures, which is safe because `verify_authentic` has
+/// already verified the whole closure is authentic.
+fn promote_via_export(cave_root: &Path, shared_root: &Path, store_path: &str) -> Result<()> {
+    let cave_uri = format!("local?root={}", cave_root.display());
+    let shared_uri = format!("local?root={}", shared_root.display());
+
+    // The closure, topologically ordered (deps before dependents) so import
+    // never sees a dependent before its dependency. Read as the owner.
+    let qr = nix_as_owner("nix-store", cave_root)?
+        .args(["--store", &cave_uri, "-qR", store_path])
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .context("spawn nix copy")?;
-    if !out.status.success() {
-        bail!("nix copy: {}", String::from_utf8_lossy(&out.stderr).trim());
+        .context("spawn nix-store -qR")?;
+    if !qr.status.success() {
+        bail!("nix-store -qR: {}", String::from_utf8_lossy(&qr.stderr).trim());
+    }
+    let closure: Vec<String> = String::from_utf8_lossy(&qr.stdout)
+        .lines()
+        .map(|s| s.to_string())
+        .collect();
+    if closure.is_empty() {
+        bail!("empty closure for {store_path}");
+    }
+
+    // export (owner) | import (root). Export stderr inherits to the journal;
+    // its stdout is the NAR stream piped straight into import's stdin.
+    let mut export = nix_as_owner("nix-store", cave_root)?
+        .args(["--store", &cave_uri, "--export"])
+        .args(&closure)
+        .stdout(Stdio::piped())
+        .spawn()
+        .context("spawn nix-store --export")?;
+    let export_out = export.stdout.take().expect("export stdout piped");
+
+    let import = Command::new("nix-store")
+        .args(["--store", &shared_uri, "--import"])
+        .stdin(export_out)
+        .stdout(Stdio::null())
+        .env("NIX_REMOTE", "")
+        .status()
+        .context("spawn nix-store --import")?;
+    let export_status = export.wait().context("wait nix-store --export")?;
+
+    if !export_status.success() {
+        bail!("nix-store --export failed (see log)");
+    }
+    if !import.success() {
+        bail!("nix-store --import into shared store failed (see log)");
     }
     Ok(())
 }
@@ -824,16 +862,6 @@ mod tests {
         // Idempotent across service restarts.
         init_shared_store(&root).unwrap();
         std::fs::remove_dir_all(&root).unwrap();
-    }
-
-    #[test]
-    fn cave_read_uri_is_read_only() {
-        // Regression: the manager must read a cave store read-only. Opening it
-        // writable as root rewrites the store dir to root:nixbld 1775 and locks
-        // the cave's unprivileged owner out of its own store, breaking the next
-        // launch's `nix copy` with EACCES on a store lock file.
-        let uri = cave_read_uri(Path::new("/x/store/agent-7"));
-        assert_eq!(uri, "local?root=/x/store/agent-7&read-only=true");
     }
 
     #[test]

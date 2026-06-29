@@ -93,13 +93,17 @@ that store's normal per-store locking, and the root-owned shared store has a
 single writer (the manager).
 
 The manager also *reads* a cave's store — to verify a candidate path and to
-copy it into the shared store — but always read-only (`local?root=...&read-only=true`,
-the `read-only-local-store` feature). This matters: nix opening a writable
-local store as root rewrites the store directory to its canonical `root:nixbld`
-1775 ownership, which would seize the store from the unprivileged user that owns
-it and lock that user out of its own store (a later `nix copy` into it then
-fails with EACCES on a store lock file). read-only reads without taking
-ownership, so the cave store stays owned by its launching user.
+export it into the shared store — but never as root. This matters: nix opening
+a writable local store *as root* rewrites the store directory to its canonical
+`root:nixbld` 1775 ownership, which seizes the store from the unprivileged user
+that owns it and locks that user out (a later `nix copy` into it then fails with
+EACCES on a store lock file). So the manager runs those reads (`nix store
+verify`, `nix-store --export`) as the cave's *owner* uid, dropping privileges:
+non-root nix has no root to chown to, so the cave store is left untouched. The
+single privileged step is the `nix-store --import` of the exported closure into
+the root-owned shared store, which root *should* own. (An earlier attempt used
+the `read-only-local-store` feature instead; it does not suppress the
+canonicalize as real root, so it was replaced by the privilege drop.)
 
 After a path is deduped, the cave's copy is a hardlink to the root-owned shared
 inode, so the cave can read and run it but not modify or delete it. The cave
@@ -115,13 +119,11 @@ and its paths are root-owned, so a cave can't alter shared content even through
 its dedup hardlink.
 
 What this removes versus the old idmapped-overlay design: the idmapped mount and
-its mirror, the dependency on the cave user's uid/gid, the launch-time DB seed
-and the live host->cave sync, and in-cave copy-up of root-owned files (the
-EOVERFLOW class). The only experimental Nix feature it keeps is
-`read-only-local-store`, used solely host-side so the root manager can read a
-cave's store without taking ownership of it — not in the cave's runtime store,
-so it carries none of the stability risk that rules out the local-overlay-store
-alternative below.
+its mirror, the launch-time DB seed and the live host->cave sync, in-cave
+copy-up of root-owned files (the EOVERFLOW class), and any experimental Nix
+feature. The manager does need the cave store's owner uid (it `stat`s the store
+dir) so it can drop to that user when reading the store, but it never depends on
+a *fixed* uid/gid the way the old idmap did.
 
 ## Alternative: Nix local-overlay-store (uses an experimental feature)
 
@@ -228,15 +230,19 @@ root ownership plus the gate carry the guarantee, with the one live-store touch
   live caves' paths and collects the rest hourly.
 - The store manager still runs as root (writes the root-owned shared store,
   reads each cave's DB); it no longer needs the idmapped mount.
-- The manager reads each cave store **read-only** (`&read-only=true`,
-  `read-only-local-store` feature) for verify and copy-from. Found during host
-  integration: nix opening a writable local store as root canonicalizes the
-  store dir to `root:nixbld` 1775, seizing the cave store from its unprivileged
-  owner; the owner's next `nix copy` into it then died with EACCES on a store
-  lock file. A root process reading a user-owned store must read it read-only.
-- Shared content is NOT marked immutable. Root ownership plus the read-only
-  store bind already stop a cave from altering shared paths, and `chattr +i`
-  would have blocked the GC pass from ever deleting them.
+- The manager reads each cave store as the cave's **owner uid** (drops
+  privileges for `nix store verify` and `nix-store --export`), never as root.
+  Found during host integration: nix opening a writable local store as root
+  canonicalizes the store dir to `root:nixbld` 1775, seizing the cave store from
+  its unprivileged owner; the owner's next `nix copy` into it then died with
+  EACCES on a store lock file. A read-only store URI does NOT prevent this as
+  real root — only not being root does. Promotion therefore exports the closure
+  as the owner and pipes it to a root `nix-store --import` into the shared store;
+  the recursive verify gate (`-r`) runs first, so import (which does not
+  re-check signatures) only ever takes an already-authentic closure.
+- Shared content is NOT marked immutable. Root ownership of the shared store
+  already stops a cave from altering shared paths, and `chattr +i` would have
+  blocked the GC pass from ever deleting them.
 
 ## What was built
 
