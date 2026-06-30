@@ -791,10 +791,12 @@ fn crinj_signal(sig: Signal) {
     }
 }
 
-fn crinj_register_session() -> PathBuf {
-    let d = crinj_sessions_dir();
-    let _ = std::fs::create_dir_all(&d);
-    if let Ok(entries) = std::fs::read_dir(&d) {
+/// Remove dead-pid marker files from a service's session dir. Shared by the
+/// crinj and broker refcounts, pruning is run both at registration and at
+/// unregistration so a SIGKILL'd cave never leaves a stale marker that keeps
+/// the genuinely-last cave from seeing the dir as empty.
+fn prune_dead_sessions(dir: &Path) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             if let Ok(raw) = entry.file_name().to_string_lossy().parse::<i32>() {
                 if !pid_alive(raw) {
@@ -803,9 +805,6 @@ fn crinj_register_session() -> PathBuf {
             }
         }
     }
-    let f = d.join(std::process::id().to_string());
-    let _ = std::fs::File::create(&f);
-    f
 }
 
 fn pid_alive(raw: i32) -> bool {
@@ -818,10 +817,83 @@ fn pid_alive(raw: i32) -> bool {
     }
 }
 
-fn crinj_unregister_session(session: &Path) -> bool {
+/// Register this process in a service's session dir, returning the marker path.
+fn register_session(dir: &Path) -> PathBuf {
+    let _ = std::fs::create_dir_all(dir);
+    prune_dead_sessions(dir);
+    let f = dir.join(std::process::id().to_string());
+    let _ = std::fs::File::create(&f);
+    f
+}
+
+/// Drop this process's marker and report whether no live session remains, the
+/// caller's cue to stop the shared service. Prunes dead markers first so a
+/// crashed cave's leftover marker doesn't mask the last live cave's exit.
+fn unregister_session(session: &Path, dir: &Path) -> bool {
     let _ = std::fs::remove_file(session);
-    let d = crinj_sessions_dir();
-    d.read_dir().map(|mut e| e.next().is_none()).unwrap_or(true)
+    prune_dead_sessions(dir);
+    dir.read_dir().map(|mut e| e.next().is_none()).unwrap_or(true)
+}
+
+#[cfg(test)]
+mod session_refcount_tests {
+    use super::*;
+
+    fn tmp_dir(label: &str) -> PathBuf {
+        static SEQ: AtomicI32 = AtomicI32::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let p = std::env::temp_dir()
+            .join(format!("cav-session-{}-{label}-{seq}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    fn marker(dir: &Path, pid: i32) {
+        std::fs::File::create(dir.join(pid.to_string())).unwrap();
+    }
+
+    /// A pid that has been spawned and reaped, so it is reliably not alive.
+    fn dead_pid() -> i32 {
+        let mut child = Command::new("true").spawn().unwrap();
+        let pid = child.id() as i32;
+        let _ = child.wait();
+        pid
+    }
+
+    #[test]
+    fn register_prunes_dead_marker() {
+        let dir = tmp_dir("reg-prune");
+        marker(&dir, dead_pid());
+        register_session(&dir);
+        let names: Vec<_> = dir
+            .read_dir()
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names, vec![std::process::id().to_string()]);
+    }
+
+    #[test]
+    fn unregister_not_empty_while_another_live_session_remains() {
+        let dir = tmp_dir("unreg-live");
+        let mine = register_session(&dir);
+        let mut other = Command::new("sleep").arg("30").spawn().unwrap();
+        marker(&dir, other.id() as i32);
+        assert!(!unregister_session(&mine, &dir));
+        let _ = other.kill();
+        let _ = other.wait();
+    }
+
+    #[test]
+    fn unregister_empty_despite_stale_dead_marker() {
+        // The leak fix: a SIGKILL'd cave's leftover marker must not stop the
+        // last live cave from seeing the dir as empty and stopping the service.
+        let dir = tmp_dir("unreg-stale");
+        let mine = register_session(&dir);
+        marker(&dir, dead_pid());
+        assert!(unregister_session(&mine, &dir));
+    }
 }
 
 /// Severity of a crinj log event. Ordering enables `>= Warn` etc.
@@ -947,16 +1019,29 @@ fn start_crinj() -> Result<(Option<std::process::Child>, Option<Arc<CrinjState>>
     }
     let _ = std::fs::create_dir_all(config::data_dir());
     let log_path = config::data_dir().join("crinj.log");
-    let mut proc = Command::new("crinj")
-        .args([
-            "--port",
-            &CRINJ_PORT.to_string(),
-            "--allow-empty-rules",
-            "--log-format=json",
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()?;
+    use std::os::unix::process::CommandExt;
+    let mut cmd = Command::new("crinj");
+    cmd.args([
+        "--port",
+        &CRINJ_PORT.to_string(),
+        "--allow-empty-rules",
+        "--log-format=json",
+    ])
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::piped());
+    // Detach crinj into its own session so terminal signals to the spawning
+    // cave's terminal (Ctrl-C SIGINT, close-time SIGHUP) can't reach it. The
+    // cave itself is shielded by bwrap --new-session, but crinj sits in cav's
+    // session; without setsid a Ctrl-C would kill the shared proxy and strand
+    // every other cave. Lifetime is governed solely by the session refcount.
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    let mut proc = cmd.spawn()?;
 
     let stderr = proc.stderr.take().expect("piped stderr");
     let state = Arc::new(CrinjState {
@@ -1079,29 +1164,6 @@ fn broker_pid_file() -> PathBuf {
 
 fn broker_sessions_dir() -> PathBuf {
     broker_dir().join("sessions")
-}
-
-fn broker_register_session() -> PathBuf {
-    let d = broker_sessions_dir();
-    let _ = std::fs::create_dir_all(&d);
-    if let Ok(entries) = std::fs::read_dir(&d) {
-        for entry in entries.flatten() {
-            if let Ok(raw) = entry.file_name().to_string_lossy().parse::<i32>() {
-                if !pid_alive(raw) {
-                    let _ = std::fs::remove_file(entry.path());
-                }
-            }
-        }
-    }
-    let f = d.join(std::process::id().to_string());
-    let _ = std::fs::File::create(&f);
-    f
-}
-
-fn broker_unregister_session(session: &Path) -> bool {
-    let _ = std::fs::remove_file(session);
-    let d = broker_sessions_dir();
-    d.read_dir().map(|mut e| e.next().is_none()).unwrap_or(true)
 }
 
 fn broker_alive() -> bool {
@@ -2238,7 +2300,7 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
             uep.to_string_lossy().to_string(),
         );
     }
-    let crinj_session = crinj_register_session();
+    let crinj_session = register_session(&crinj_sessions_dir());
     crate::log_info!("starting crinj proxy...");
     let (crinj_proc, crinj_state) = start_crinj()?;
     crate::log_info!("crinj proxy ready");
@@ -2255,7 +2317,7 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
 
     // Channel broker (inter-agent messaging). Gated by --comms.
     let (broker_session, broker_proc, channels_enabled) = if comms {
-        let session = broker_register_session();
+        let session = register_session(&broker_sessions_dir());
         let proc = match start_broker() {
             Ok(p) => p,
             Err(e) => {
@@ -2449,7 +2511,7 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
 
     let _ = slirp.kill();
     let _ = slirp.wait();
-    if crinj_unregister_session(&crinj_session) {
+    if unregister_session(&crinj_session, &crinj_sessions_dir()) {
         crinj_signal(Signal::Term);
         if let Some(mut cp) = crinj_proc {
             let _ = cp.wait();
@@ -2459,7 +2521,7 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
         print_crinj_session_warnings(s);
     }
     if let Some(session) = broker_session {
-        if broker_unregister_session(&session) {
+        if unregister_session(&session, &broker_sessions_dir()) {
             stop_broker();
             if let Some(mut bp) = broker_proc {
                 let _ = bp.wait();
