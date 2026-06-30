@@ -14,6 +14,7 @@ mod gpu;
 mod handler;
 mod init;
 mod proc_ns;
+mod proj_complete;
 mod project;
 mod pull;
 mod push;
@@ -227,6 +228,12 @@ enum Cmd {
     /// Emit completion candidates for `cav cp` (used by shell scripts).
     #[command(name = "__complete-cp", hide = true)]
     CompleteCp {
+        #[arg(default_value = "")]
+        word: String,
+    },
+    /// Emit project-slug candidates for `cav -p` (used by shell scripts).
+    #[command(name = "__complete-projects", hide = true)]
+    CompleteProjects {
         #[arg(default_value = "")]
         word: String,
     },
@@ -531,6 +538,12 @@ fn run() -> Result<()> {
         Cmd::Completion { shell } => completion::print_completion(shell),
         Cmd::CompleteCp { word } => {
             for c in cp_complete::complete(&word) {
+                println!("{c}");
+            }
+            Ok(())
+        }
+        Cmd::CompleteProjects { word } => {
+            for c in proj_complete::complete(&word) {
                 println!("{c}");
             }
             Ok(())

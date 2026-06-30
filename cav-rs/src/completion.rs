@@ -24,9 +24,13 @@ pub fn print_completion(shell: ShellChoice) -> Result<()> {
     Ok(())
 }
 
-/// Replace `cav cp`'s static path completion with a call to the
-/// `__complete-cp` helper, which knows about registered slugs, agent
-/// IDs, and worktree contents.
+/// Replace `cav`'s static completion for two dynamic arguments with
+/// calls to runtime helpers:
+///   - `cav cp` paths -> `__complete-cp` (registered slugs, agent IDs,
+///     worktree contents)
+///   - `cav -p`/`--project` -> `__complete-projects` (registered slugs),
+///     merged with the shell's own directory completion so paths still
+///     work.
 ///
 /// Fails loudly when an expected anchor is missing: that means
 /// clap_complete changed its template and our string-based patching
@@ -43,12 +47,36 @@ fn inject_cp_completion(shell: Shell, script: &str) -> Result<String> {
 fn inject_zsh(script: &str) -> Result<String> {
     let needle = "'*::paths:_default' \\";
     let patched = replace_once(script, needle, "'*::paths:_cav_cp_paths' \\", "zsh")?;
-    // clap emits a `_describe` entry for `__complete-cp` even though
-    // the subcommand is marked `hide = true`; drop those entries so it
-    // doesn't appear in `cav <TAB>` menus.
+    // `-p`/`--project`: swap file completion for the slug-aware helper.
+    let patched = replace_once(
+        &patched,
+        "'*-p+[Additional project to mount (repeatable)]:PATH:_default' \\",
+        "'*-p+[Additional project to mount (repeatable)]:PATH:_cav_projects' \\",
+        "zsh",
+    )?;
+    let patched = replace_once(
+        &patched,
+        "'*--project=[Additional project to mount (repeatable)]:PATH:_default' \\",
+        "'*--project=[Additional project to mount (repeatable)]:PATH:_cav_projects' \\",
+        "zsh",
+    )?;
+    // clap emits `_describe` entries for the hidden `__complete-*`
+    // subcommands even though they're marked `hide = true`; drop them so
+    // they don't appear in `cav <TAB>` menus.
     let patched = strip_lines_containing(&patched, "'__complete-cp:");
-    Ok(format!("{patched}\n{ZSH_HELPER}"))
+    let patched = strip_lines_containing(&patched, "'__complete-projects:");
+    Ok(format!("{patched}\n{ZSH_HELPER}\n{ZSH_PROJ_HELPER}"))
 }
+
+const ZSH_PROJ_HELPER: &str = r#"
+_cav_projects() {
+    local -a slugs
+    slugs=(${(f)"$(cav __complete-projects -- "${(Q)PREFIX}" 2>/dev/null)"})
+    compadd -- "${slugs[@]}"
+    # Projects can also be given as a path; keep directory completion.
+    _files -/
+}
+"#;
 
 const ZSH_HELPER: &str = r#"
 _cav_cp_paths() {
@@ -111,15 +139,19 @@ fn inject_bash(script: &str) -> Result<String> {
     out.push_str(&script[..start]);
     out.push_str(BASH_CP_ARM);
     out.push_str(&script[next_arm..]);
-    // Drop `__complete-cp` from the user-visible opts strings so it
-    // doesn't surface in `cav <TAB>` menus. Only rewrite lines that
-    // contain `opts=` so we don't mangle the literal `cav __complete-cp`
-    // invocation in the cp arm.
+    // `-p`/`--project`: swap file completion for the slug-aware helper.
+    out = replace_once(&out, BASH_PROJECT_ARM, BASH_PROJECT_ARM_NEW, "bash")?;
+    out = replace_once(&out, BASH_P_ARM, BASH_P_ARM_NEW, "bash")?;
+    out.push_str(BASH_PROJ_HELPER);
+    // Drop the hidden `__complete-*` subcommands from the user-visible
+    // opts strings so they don't surface in `cav <TAB>` menus. Only
+    // rewrite lines that contain `opts=` so we don't mangle the literal
+    // `cav __complete-*` helper invocations.
     Ok(out
         .lines()
         .map(|l| {
             if l.contains("opts=") {
-                l.replace(" __complete-cp", "")
+                l.replace(" __complete-cp", "").replace(" __complete-projects", "")
             } else {
                 l.to_string()
             }
@@ -128,6 +160,21 @@ fn inject_bash(script: &str) -> Result<String> {
         .join("\n")
         + "\n")
 }
+
+const BASH_PROJECT_ARM: &str = "                --project)\n                    COMPREPLY=($(compgen -f \"${cur}\"))\n                    return 0\n                    ;;";
+const BASH_PROJECT_ARM_NEW: &str = "                --project)\n                    _cav_complete_projects \"${cur}\"\n                    return 0\n                    ;;";
+const BASH_P_ARM: &str = "                -p)\n                    COMPREPLY=($(compgen -f \"${cur}\"))\n                    return 0\n                    ;;";
+const BASH_P_ARM_NEW: &str = "                -p)\n                    _cav_complete_projects \"${cur}\"\n                    return 0\n                    ;;";
+
+const BASH_PROJ_HELPER: &str = r#"
+_cav_complete_projects() {
+    local cur="$1"
+    local _cav_slugs
+    _cav_slugs="$(cav __complete-projects -- "${cur}" 2>/dev/null)"
+    # Registered slugs, plus directories so plain paths still complete.
+    COMPREPLY=( $(compgen -W "${_cav_slugs}" -- "${cur}") $(compgen -d -- "${cur}") )
+}
+"#;
 
 const BASH_CP_ARM: &str = r#"        cav__subcmd__cp)
             if [[ "${cur}" == -* ]]; then
@@ -178,16 +225,20 @@ fn inject_fish(script: &str) -> Result<String> {
         return Err(anchor_err("fish", needle));
     }
     let stripped = strip_lines_containing(script, needle);
-    // Append a `complete` rule that runs after the generated ones. Fish
+    let stripped = strip_lines_containing(&stripped, "-a \"__complete-projects\"");
+    // Append `complete` rules that run after the generated ones. Fish
     // honors the last matching rule, so this overrides the default
-    // file completion for `cav cp`.
+    // file completion for `cav cp`. The `-p`/`--project` rule adds slug
+    // candidates on top of the file completion clap already emits.
     Ok(format!(
         "{stripped}\n\
          function __cav_cp_complete\n    \
              cav __complete-cp -- (commandline -ct) 2>/dev/null\n\
          end\n\
          complete -c cav -n '__fish_seen_subcommand_from cp' \
-         -f -a '(__cav_cp_complete)'\n"
+         -f -a '(__cav_cp_complete)'\n\
+         complete -c cav -n '__fish_cav_using_subcommand agent' -s p -l project \
+         -r -a '(cav __complete-projects -- (commandline -ct))'\n"
     ))
 }
 
@@ -237,6 +288,14 @@ mod tests {
     }
 
     #[test]
+    fn zsh_project_anchors_present() {
+        let script = inject_zsh(&generated(Shell::Zsh)).expect("zsh injection succeeds");
+        assert!(script.contains(":PATH:_cav_projects"));
+        assert!(script.contains("cav __complete-projects -- "));
+        assert!(!script.contains("'__complete-projects:"));
+    }
+
+    #[test]
     fn bash_anchors_present() {
         let script = inject_bash(&generated(Shell::Bash)).expect("bash injection succeeds");
         assert!(script.contains("cav __complete-cp -- "));
@@ -244,9 +303,24 @@ mod tests {
     }
 
     #[test]
+    fn bash_project_anchors_present() {
+        let script = inject_bash(&generated(Shell::Bash)).expect("bash injection succeeds");
+        assert!(script.contains("_cav_complete_projects"));
+        assert!(script.contains("cav __complete-projects -- "));
+        assert!(!script.contains(" __complete-projects version"));
+    }
+
+    #[test]
     fn fish_anchors_present() {
         let script = inject_fish(&generated(Shell::Fish)).expect("fish injection succeeds");
         assert!(script.contains("__cav_cp_complete"));
         assert!(!script.contains("-a \"__complete-cp\""));
+    }
+
+    #[test]
+    fn fish_project_anchors_present() {
+        let script = inject_fish(&generated(Shell::Fish)).expect("fish injection succeeds");
+        assert!(script.contains("cav __complete-projects -- (commandline -ct)"));
+        assert!(!script.contains("-a \"__complete-projects\""));
     }
 }
