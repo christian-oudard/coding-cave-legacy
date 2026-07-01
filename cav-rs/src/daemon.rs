@@ -61,7 +61,10 @@ pub fn start(agent_id: &str, shared_repos: &[(PathBuf, String)]) -> Result<Daemo
         .arg(format!("TCP-LISTEN:{port},fork,reuseaddr,bind=127.0.0.1"))
         .arg(format!("EXEC:{handler_bin}"))
         .env_clear()
-        .env("PATH", &git_exec_path)
+        // Subcave pushes reach the host repo's pre-receive hook through here.
+        // The hook execs cav-git-pre-receive by name, so cav's bin dir must be
+        // on PATH alongside git's exec-path (env_clear drops the inherited one).
+        .env("PATH", format!("{}:{git_exec_path}", constants::build().cav_bin))
         .env("CODING_CAVE_HANDLER_AGENT_ID", agent_id)
         .env("CODING_CAVE_HANDLER_BASE_PATH", base_dir.to_str().unwrap_or(""))
         .stderr(Stdio::from(log_file))

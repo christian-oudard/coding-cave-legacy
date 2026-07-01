@@ -11,18 +11,11 @@ use crate::style;
 use crate::workspace;
 
 fn install_hooks(shared: &Path) -> Result<()> {
-    // Production: helper binaries live next to cav at build().cav_bin.
-    // Dev/test (no build config): look beside the running cav binary —
-    // current_exe() resolves to target/debug/cav under cargo, whose
-    // sibling files include cav-git-pre-receive etc.
-    let cav_bin = if !crate::constants::build().cav_bin.is_empty() {
-        PathBuf::from(&crate::constants::build().cav_bin)
-    } else {
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-            .unwrap_or_default()
-    };
+    // The hook resolves the helper by name from PATH — it holds no /nix/store
+    // path, so nothing here goes stale on a GC or cav upgrade. The helper ships
+    // beside cav in the same package bin dir, so it is on PATH wherever cav is.
+    // The subcave daemon runs with a stripped PATH, so it adds that bin dir
+    // back explicitly (see daemon.rs).
     let hooks_dir = shared.join("hooks");
     std::fs::create_dir_all(&hooks_dir)?;
 
@@ -31,13 +24,7 @@ fn install_hooks(shared: &Path) -> Result<()> {
         ("post-receive", "cav-git-post-receive"),
     ] {
         let dst = hooks_dir.join(hook_name);
-        let src_bin = cav_bin.join(binary);
-        if src_bin.exists() {
-            std::fs::copy(&src_bin, &dst)?;
-        } else {
-            // Last-resort: write a wrapper that exec's by name from PATH.
-            std::fs::write(&dst, format!("#!/bin/sh\nexec {}\n", src_bin.display()))?;
-        }
+        std::fs::write(&dst, format!("#!/bin/sh\nexec {binary} \"$@\"\n"))?;
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o755))?;
     }
@@ -173,6 +160,9 @@ pub fn init(path: &Path, reinitialize: bool) -> Result<()> {
 
     if is_bare_repo(&shared) {
         if !reinitialize {
+            // Repair the hooks even on a plain re-init: a stale baked fallback
+            // path is a one-command fix without needing --reinitialize.
+            install_hooks(&shared)?;
             registry::register_project(&base)?;
             println!("Coding Cave already initialized at {}", cav.display());
             return Ok(());

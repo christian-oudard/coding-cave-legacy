@@ -5,6 +5,17 @@ use std::process::{Command, Output};
 
 const CAV: &str = env!("CARGO_BIN_EXE_cav");
 
+/// PATH with the built binaries' dir (target/debug) prepended, so pushes made
+/// during a test can resolve the cav-git-pre-receive hook helper by name — the
+/// same way a real install has it on PATH beside cav.
+fn hook_path() -> String {
+    let bin_dir = Path::new(CAV).parent().unwrap().display().to_string();
+    match std::env::var("PATH") {
+        Ok(p) => format!("{bin_dir}:{p}"),
+        Err(_) => bin_dir,
+    }
+}
+
 struct TestRepo {
     dir: PathBuf,
     data_dir: PathBuf,
@@ -36,6 +47,7 @@ impl TestRepo {
         Command::new(CAV)
             .args(args)
             .current_dir(&self.dir)
+            .env("PATH", hook_path())
             .env("CODING_CAVE_DATA_DIR", &self.data_dir)
             .env_remove("CODING_CAVE_VERSION")
             .env_remove("CODING_CAVE_AGENT_ID")
@@ -55,6 +67,7 @@ fn git(args: &[&str], dir: &Path) {
     Command::new("git")
         .args(args)
         .current_dir(dir)
+        .env("PATH", hook_path())
         .output()
         .unwrap_or_else(|_| panic!("git {:?} failed", args));
 }
@@ -72,6 +85,7 @@ fn agent_push(args: &[&str], dir: &Path, agent_id: &str) {
     Command::new("git")
         .args(args)
         .current_dir(dir)
+        .env("PATH", hook_path())
         .env("CODING_CAVE_AGENT_ID", agent_id)
         .env("CODING_CAVE_AGENT_NAME", format!("coding-cave@{agent_id}"))
         .output()
