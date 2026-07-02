@@ -2059,13 +2059,6 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
         (aid, Some(sid), false)
     };
 
-    // Sweep any pre-uuid display-id-keyed dirs into their canonical
-    // uuid-keyed locations. Runs before load_sandbox_config so the
-    // migration completes even when the sandbox itself isn't reachable
-    // (e.g. tests, missing build config). Each call is idempotent.
-    let _ = &slug;
-    workspace::settle_uuid_keying();
-
     let cfg = load_sandbox_config()?;
 
     let agent_name = registry::display_name(&base, &agent_id);

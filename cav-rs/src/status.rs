@@ -774,8 +774,10 @@ mod tests {
         assert!(out.status.success(), "git {args:?} failed: {out:?}");
     }
 
-    fn make_worktree(data: &Path, slug: &str, aid: &str, dirty: bool) -> PathBuf {
-        let ws = data.join("worktrees").join(slug).join(aid);
+    fn make_worktree(_data: &Path, slug: &str, aid: &str, dirty: bool) -> PathBuf {
+        // Key by the agent's uuid, like production; the agent must already be
+        // registered so worktree_for resolves it.
+        let ws = crate::workspace::worktree_for(slug, aid);
         fs::create_dir_all(&ws).unwrap();
         git_in(&ws, &["init", "-q", "-b", "main"]);
         git_in(&ws, &["config", "user.email", "t@t"]);
@@ -801,9 +803,6 @@ mod tests {
         // a worktree from another project's directory under the wrong
         // === heading.
         let g = DataDirGuard::new("leak");
-        let guest_ws = make_worktree(&g.path, "proj-guest", "1", true);
-        make_worktree(&g.path, "proj-host", "1", false);
-
         let base_guest = g.path.join("proj-guest");
         fs::create_dir_all(&base_guest).unwrap();
         let base_host = g.path.join("proj-host");
@@ -811,6 +810,10 @@ mod tests {
 
         let aid = registry::acquire_agent_id(&base_guest).unwrap();
         registry::save_agent_extras(&aid, &["proj-host".to_string()]).unwrap();
+
+        // Seed worktrees after registration so they land at the uuid path.
+        let guest_ws = make_worktree(&g.path, "proj-guest", &aid, true);
+        make_worktree(&g.path, "proj-host", &aid, false);
 
         let by_agent: HashMap<String, Vec<(String, String)>> =
             [(aid.clone(), vec![])].into_iter().collect();

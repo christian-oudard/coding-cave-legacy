@@ -7,23 +7,12 @@ use crate::constants::{CAVE_SHARED_REMOTE, HOST_SHARED_REMOTE, HOST_SHARED_REPO_
 use crate::git;
 use crate::registry;
 
-/// Resolve where an agent's worktree currently lives. Prefers the
-/// canonical (uuid-keyed) path; falls back to the legacy (display-id-
-/// keyed) location if a pre-migration dir is still around. Pure: no
-/// filesystem side effects, safe for dry-run paths.
+/// Resolve where an agent's worktree lives: the uuid-keyed path. Falls back to
+/// the display id only for an id with no registry uuid (an unregistered agent).
+/// Pure: no filesystem side effects, safe for dry-run paths.
 pub fn worktree_for(slug: &str, agent_id: &str) -> PathBuf {
-    let Some(uuid) = registry::agent_uuid(agent_id).ok().flatten() else {
-        return config::worktree_dir(slug, agent_id);
-    };
-    let canonical = config::worktree_dir(slug, &uuid);
-    if canonical.exists() {
-        return canonical;
-    }
-    let legacy = config::worktree_dir(slug, agent_id);
-    if legacy != canonical && legacy.exists() {
-        return legacy;
-    }
-    canonical
+    let key = registry::agent_uuid(agent_id).ok().flatten();
+    config::worktree_dir(slug, key.as_deref().unwrap_or(agent_id))
 }
 
 /// The base dir holding every per-cave nix store. Resolves through
@@ -42,18 +31,8 @@ pub fn cave_store_base() -> PathBuf {
 /// `local?root=<this>`, so its paths are logically `/nix/store/...`. Pure.
 pub fn cave_store_root_for(agent_id: &str) -> PathBuf {
     let base = cave_store_base();
-    let Some(uuid) = registry::agent_uuid(agent_id).ok().flatten() else {
-        return base.join(format!("agent-{agent_id}"));
-    };
-    let canonical = base.join(format!("agent-{uuid}"));
-    if canonical.exists() {
-        return canonical;
-    }
-    let legacy = base.join(format!("agent-{agent_id}"));
-    if legacy != canonical && legacy.exists() {
-        return legacy;
-    }
-    canonical
+    let key = registry::agent_uuid(agent_id).ok().flatten();
+    base.join(format!("agent-{}", key.as_deref().unwrap_or(agent_id)))
 }
 
 /// First display int reserved for archived (bumped) agents. Active
@@ -107,12 +86,6 @@ pub fn wipe_agent_refs(base: &Path, agent_id: &str) {
 /// each call is a no-op once everything in 1..ARCHIVE_INT_BASE that's
 /// past the threshold has been bumped.
 pub fn archive_sweep() {
-    // Settle any pending display-id → uuid renames first. Otherwise an
-    // about-to-be-bumped agent's legacy display-id-keyed dir would never
-    // get migrated — settle keys on the current display int, which we're
-    // about to change.
-    settle_uuid_keying();
-
     let Ok(agents) = registry::all_agent_ids(None) else {
         return;
     };
@@ -186,45 +159,6 @@ pub fn archive_sweep() {
             if ws.exists() {
                 let _ = verify_layout(&ws, &new_id);
             }
-        }
-    }
-}
-
-/// Sweep every non-running agent's on-disk state, renaming display-id-
-/// keyed worktrees and nix stores into their canonical uuid-keyed
-/// locations. One-shot upgrade migration that completes lazily as the
-/// user runs cav after picking up the uuid column. Skips running agents
-/// since renaming their dirs would yank state out from under them. Safe
-/// to call repeatedly — each call is a no-op once everything's settled.
-pub fn settle_uuid_keying() {
-    let Ok(agents) = registry::all_agent_ids(None) else {
-        return;
-    };
-    for aid in agents {
-        if registry::is_agent_running(&aid).unwrap_or(false) {
-            continue;
-        }
-        let Some(uuid) = registry::agent_uuid(&aid).ok().flatten() else {
-            continue;
-        };
-        for slug in registry::agent_all_slugs(&aid).unwrap_or_default() {
-            let canonical = config::worktree_dir(&slug, &uuid);
-            let legacy = config::worktree_dir(&slug, &aid);
-            if legacy != canonical && legacy.exists() && !canonical.exists() {
-                if let Some(parent) = canonical.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                let _ = std::fs::rename(&legacy, &canonical);
-            }
-        }
-        let store_base = cave_store_base();
-        let canonical_store = store_base.join(format!("agent-{uuid}"));
-        let legacy_store = store_base.join(format!("agent-{aid}"));
-        if legacy_store != canonical_store
-            && legacy_store.exists()
-            && !canonical_store.exists()
-        {
-            let _ = std::fs::rename(&legacy_store, &canonical_store);
         }
     }
 }
@@ -358,42 +292,19 @@ pub fn force_remove_dir_all(path: &Path) {
     }
 }
 
-/// Erase on-disk state belonging to a previous occupant of an agent slot:
-/// the worktree dir, plus `refs/heads/agent-N/*` and
-/// `refs/cav/agent-tip/agent-N/*` in each project's bare repo. Called when
-/// `acquire_agent_id` reuses a slot, so a new agent doesn't inherit a stale
-/// branch, push refspec, or force-push tip from its namesake.
+/// Erase a paused agent's on-disk state: its worktree dir, plus its refs in
+/// each project's bare repo. Called from `cav gc` when collecting a paused
+/// agent (the caller removes the nix store separately). Not used for slot
+/// reuse in `acquire_agent_id`, which wipes only refs and leaves disk to
+/// `cav gc` — a reused slot gets a fresh uuid dir, so there is no stale
+/// worktree to clear eagerly.
 pub fn reclaim(agent_id: &str, targets: &[(String, PathBuf)]) {
     for (slug, base) in targets {
         let ws = worktree_for(slug, agent_id);
         if ws.exists() {
             force_remove_dir_all(&ws);
         }
-        let shared = config::shared_repo_path(base);
-        if !shared.is_dir() {
-            continue;
-        }
-        let prefix = format!("agent-{agent_id}/");
-        for area in ["refs/heads", "refs/cav/agent-tip"] {
-            let pattern = format!("{area}/{prefix}");
-            let listing = match git::git_output(
-                &["for-each-ref", "--format=%(refname)", &pattern],
-                Some(&shared),
-            ) {
-                Ok(s) => s,
-                Err(_) => continue,
-            };
-            for refname in listing.lines() {
-                git::git(
-                    &["update-ref", "-d", refname],
-                    Some(&shared),
-                    false,
-                    true,
-                    false,
-                )
-                .ok();
-            }
-        }
+        wipe_agent_refs(base, agent_id);
     }
 }
 

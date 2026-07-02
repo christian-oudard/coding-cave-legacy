@@ -61,26 +61,6 @@ fn open() -> Result<Connection> {
                 db.execute_batch(&format!("ALTER TABLE agents DROP COLUMN {dead};"))?;
             }
         }
-        // Backfill the new `uuid` column on existing rows. SQLite can't add
-        // a NOT NULL UNIQUE column to a populated table in one shot, so add
-        // nullable, fill, then enforce via a unique index.
-        if !cols.iter().any(|c| c == "uuid") {
-            db.execute_batch("ALTER TABLE agents ADD COLUMN uuid TEXT;")?;
-            let existing: Vec<String> = collect_rows(
-                &db,
-                "SELECT agent_id FROM agents WHERE uuid IS NULL",
-                |row| row.get::<_, String>(0),
-            )?;
-            for aid in existing {
-                db.execute(
-                    "UPDATE agents SET uuid = ?1 WHERE agent_id = ?2",
-                    params![Uuid::new_v4().to_string(), aid],
-                )?;
-            }
-            db.execute_batch(
-                "CREATE UNIQUE INDEX IF NOT EXISTS agents_uuid_unique ON agents(uuid);",
-            )?;
-        }
     }
     Ok(db)
 }
@@ -298,8 +278,8 @@ pub fn acquire_agent_id(base: &Path) -> Result<String> {
     }
     let aid = n.to_string();
     // If this slot was previously occupied (reclaimable row still in the
-    // table), gather the old occupant's projects so we can wipe their
-    // worktrees and dev branch refs after committing the new row.
+    // table), gather the old occupant's projects so we can wipe their dev
+    // branch refs after committing the new row.
     let reclaim_targets = collect_reclaim_targets(&db, &aid);
     let sid = Uuid::new_v4().to_string();
     let uuid = Uuid::new_v4().to_string();
@@ -310,8 +290,12 @@ pub fn acquire_agent_id(base: &Path) -> Result<String> {
         params![aid, uuid, slug, pid, ts, sid],
     )?;
     db.execute_batch("COMMIT")?;
-    if !reclaim_targets.is_empty() {
-        workspace::reclaim(&aid, &reclaim_targets);
+    // Wipe the previous occupant's refs so the reused slot's new agent doesn't
+    // inherit its branches, push refspec, or force-push tip. Refs are keyed by
+    // display id (agent-<slot>/*), so the row's replacement doesn't matter here.
+    // Leftover worktree/store disk (now unregistered) is reclaimed by `cav gc`.
+    for (_, base) in &reclaim_targets {
+        workspace::wipe_agent_refs(base, &aid);
     }
     Ok(aid)
 }

@@ -290,27 +290,21 @@ fn mountinfo_references(mountinfo: &str, dir: &Path) -> bool {
 }
 
 pub fn find_orphans() -> Orphans {
-    // Build the legitimate sets from the registry. A worktree subdir is
-    // legit if its name matches the owning agent's uuid OR its display
-    // id (the latter for pre-uuid-migration agents that settle hasn't
-    // touched yet). Same idea for overlay dirs, minus the slug scope.
+    // Build the legitimate sets from the registry. Worktree and store dirs
+    // key off the agent's uuid, so a dir is legit iff its name matches a
+    // registered agent's uuid (scoped by slug for worktrees).
     let mut legit_wt: std::collections::HashSet<(String, String)> =
         std::collections::HashSet::new();
     let mut legit_overlay: std::collections::HashSet<String> = std::collections::HashSet::new();
     if let Ok(agents) = registry::all_agent_ids(None) {
         for aid in agents {
-            let uuid = registry::agent_uuid(&aid).ok().flatten();
-            let slugs = registry::agent_all_slugs(&aid).unwrap_or_default();
-            for slug in &slugs {
-                legit_wt.insert((slug.clone(), aid.clone()));
-                if let Some(ref u) = uuid {
-                    legit_wt.insert((slug.clone(), u.clone()));
-                }
+            let Some(uuid) = registry::agent_uuid(&aid).ok().flatten() else {
+                continue;
+            };
+            for slug in registry::agent_all_slugs(&aid).unwrap_or_default() {
+                legit_wt.insert((slug, uuid.clone()));
             }
-            legit_overlay.insert(aid.clone());
-            if let Some(u) = uuid {
-                legit_overlay.insert(u);
-            }
+            legit_overlay.insert(uuid);
         }
     }
 
@@ -509,9 +503,11 @@ mod tests {
         let uuid = registry::agent_uuid(&aid).ok().flatten().unwrap();
 
         let wt = g.path.join("worktrees").join("proj");
-        // Legit: both keying styles should be recognized.
-        fs::create_dir_all(wt.join(&aid)).unwrap();
+        // Legit: the agent's dirs key off its uuid.
         fs::create_dir_all(wt.join(&uuid)).unwrap();
+        // Orphan: a display-id-keyed dir is no longer legit (dirs key on uuid).
+        let orphan_legacy = wt.join(&aid);
+        fs::create_dir_all(&orphan_legacy).unwrap();
         // Orphan: unknown id, has content.
         let orphan_ws = wt.join("999");
         fs::create_dir_all(&orphan_ws).unwrap();
@@ -521,14 +517,17 @@ mod tests {
         fs::create_dir_all(&empty_slug).unwrap();
 
         let store_root = workspace::cave_store_base();
-        fs::create_dir_all(store_root.join(format!("agent-{aid}"))).unwrap();
+        fs::create_dir_all(store_root.join(format!("agent-{uuid}"))).unwrap();
         let orphan_store = store_root.join("agent-deadbeef");
         fs::create_dir_all(&orphan_store).unwrap();
 
         let o = find_orphans();
 
-        let ws_paths: Vec<_> = o.worktrees.iter().map(|(p, _)| p.clone()).collect();
-        assert_eq!(ws_paths, vec![orphan_ws], "wrong worktree orphans");
+        let mut ws_paths: Vec<_> = o.worktrees.iter().map(|(p, _)| p.clone()).collect();
+        ws_paths.sort();
+        let mut want = vec![orphan_legacy, orphan_ws];
+        want.sort();
+        assert_eq!(ws_paths, want, "wrong worktree orphans");
 
         let store_paths: Vec<_> = o.overlays.iter().map(|(p, _)| p.clone()).collect();
         assert_eq!(store_paths, vec![orphan_store], "wrong cave-store orphans");

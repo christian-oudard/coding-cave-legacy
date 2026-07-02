@@ -221,11 +221,6 @@ pub fn rename(old_slug: &str, new_arg: &str, yes: bool) -> Result<()> {
         }
     }
 
-    // Finish any pending display-id → uuid worktree migration before we
-    // rename, otherwise legacy display-id-keyed dirs would survive the
-    // rename in their old location.
-    workspace::settle_uuid_keying();
-
     if new_slug != old_slug {
         let data = config::data_dir();
         merge_dir(

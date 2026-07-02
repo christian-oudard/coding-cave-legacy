@@ -980,8 +980,10 @@ mod tests {
             registry::acquire_agent_id(&base).unwrap()
         }
 
-        fn make_worktree(data: &Path, slug: &str, aid: &str) -> PathBuf {
-            let ws = data.join("worktrees").join(slug).join(aid);
+        fn make_worktree(_data: &Path, slug: &str, aid: &str) -> PathBuf {
+            // Key by the agent's uuid, like production; the agent must already
+            // be registered so worktree_for resolves it.
+            let ws = crate::workspace::worktree_for(slug, aid);
             fs::create_dir_all(&ws).unwrap();
             ws
         }

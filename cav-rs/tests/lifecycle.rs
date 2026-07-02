@@ -149,11 +149,11 @@ impl Project {
             .replace(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-', "-")
     }
 
+    /// Where the agent's worktree lives: keyed by its uuid, like production.
+    /// Falls back to the display id for an unregistered agent.
     fn worktree_dir(&self, agent_id: &str) -> PathBuf {
-        self.data_dir
-            .join("worktrees")
-            .join(self.slug())
-            .join(agent_id)
+        let key = self.agent_uuid(agent_id).unwrap_or_else(|| agent_id.to_string());
+        self.data_dir.join("worktrees").join(self.slug()).join(key)
     }
 
     fn shared_has_ref(&self, ref_name: &str) -> bool {
@@ -1177,19 +1177,21 @@ fn continue_after_pre_ttl_exit_still_works() {
 }
 
 #[test]
-fn acquire_reclaims_stale_worktree_and_branches() {
-    // When acquire_agent_id reuses a slot, the previous occupant's worktree
-    // dir and bare-repo refs (refs/heads/agent-N/* and
-    // refs/cav/agent-tip/agent-N/*) must be wiped so the new agent doesn't
-    // inherit them. We trigger acquire by invoking `cav agent`; it bails at
-    // load_sandbox_config (no CODING_CAVE_BUILD_CONFIG) only after the
-    // reclaim has run.
+fn acquire_wipes_stale_branches_on_slot_reuse() {
+    // When acquire_agent_id reuses a slot, the previous occupant's bare-repo
+    // refs (refs/heads/agent-N/* and refs/cav/agent-tip/agent-N/*) must be
+    // wiped so the reused display int doesn't hand the new agent a stale branch
+    // or force-push tip. The stale worktree is NOT removed here — it is keyed by
+    // the old occupant's uuid, so slot reuse can't collide with it, and its disk
+    // is reclaimed by `cav gc`. We trigger acquire by invoking `cav agent`; it
+    // bails at load_sandbox_config (no CODING_CAVE_BUILD_CONFIG) only after the
+    // ref cleanup has run.
     let p = Project::new("reclaim-stale-state");
 
     // Seed: an old agent-1 row marked exited well past the reclaim cutoff.
     p.register_agent_exited_at("1", 1.0);
 
-    // Stale worktree dir (any contents — reclaim should rm -rf it).
+    // Stale worktree dir at the old occupant's uuid path.
     let ws = p.worktree_dir("1");
     fs::create_dir_all(&ws).unwrap();
     fs::write(ws.join("MARKER"), "from a previous incarnation\n").unwrap();
@@ -1212,12 +1214,13 @@ fn acquire_reclaims_stale_worktree_and_branches() {
     assert!(p.shared_has_ref("refs/cav/agent-tip/agent-1/main"));
 
     // Trigger acquire_agent_id. Expected to fail later in run_agent without
-    // a sandbox config; that's fine — reclaim runs first.
+    // a sandbox config; that's fine — the ref wipe runs first.
     let _ = p.cav(&["agent"]);
 
+    // The uuid-keyed worktree is left for `cav gc`, not removed on reuse.
     assert!(
-        !ws.exists(),
-        "stale worktree should be removed; {} still exists",
+        ws.exists(),
+        "uuid-keyed worktree should be left in place for cav gc; {} vanished",
         ws.display()
     );
     assert!(
@@ -1227,40 +1230,6 @@ fn acquire_reclaims_stale_worktree_and_branches() {
     assert!(
         !p.shared_has_ref("refs/cav/agent-tip/agent-1/main"),
         "stale agent-tip ref should be removed from bare repo"
-    );
-}
-
-#[test]
-fn acquire_migrates_legacy_display_id_worktree_to_uuid_path() {
-    // Old data (pre-uuid-column) lives at .../worktrees/<slug>/<display_id>/.
-    // On the first cav invocation after upgrade, acquire runs settle and
-    // renames the dir to .../worktrees/<slug>/<uuid>/. Subsequent code
-    // sees the canonical path; the legacy location is empty.
-    let p = Project::new("uuid-migrate-legacy");
-    p.register_agent("3");
-    let uuid = p.agent_uuid("3").expect("registered agent should have uuid");
-
-    let legacy = p.worktree_dir("3");
-    fs::create_dir_all(&legacy).unwrap();
-    fs::write(legacy.join("MARKER"), "carry me forward\n").unwrap();
-
-    let canonical = p
-        .data_dir
-        .join("worktrees")
-        .join(p.slug())
-        .join(&uuid);
-    assert!(!canonical.exists(), "canonical path should not exist before migration");
-
-    let _ = p.cav(&["agent"]);
-
-    assert!(
-        !legacy.exists(),
-        "legacy display-id path should be renamed away"
-    );
-    assert!(canonical.is_dir(), "canonical uuid path should now hold the worktree");
-    assert!(
-        canonical.join("MARKER").is_file(),
-        "rename should preserve contents"
     );
 }
 
