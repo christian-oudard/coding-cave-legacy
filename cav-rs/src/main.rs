@@ -5,7 +5,6 @@ mod registry;
 
 mod approve;
 mod checkout;
-mod completion;
 mod cp;
 mod cp_complete;
 mod daemon;
@@ -32,13 +31,15 @@ mod workspace;
 #[cfg(test)]
 mod test_util;
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process;
 
-use anyhow::{bail, Result};
-use clap::{Parser, Subcommand};
+use anyhow::{anyhow, bail, Result};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::engine::{ArgValueCompleter, PathCompleter, ValueCompleter};
+use clap_complete::{CompleteEnv, CompletionCandidate};
 
-use crate::completion::ShellChoice;
 use crate::config::{inside_cave, shared_repo_path};
 use crate::constants::{HOST_SHARED_REPO_DIR};
 
@@ -77,7 +78,8 @@ enum Cmd {
         #[arg(short = 'r', long = "resume", value_name = "AGENT")]
         resume_agent: Option<String>,
         /// Additional project to mount (repeatable)
-        #[arg(short = 'p', long = "project", value_name = "PATH", action = clap::ArgAction::Append)]
+        #[arg(short = 'p', long = "project", value_name = "PATH", action = clap::ArgAction::Append,
+              add = ArgValueCompleter::new(complete_project))]
         extra_projects: Vec<String>,
         /// Expose a host TCP port inside the cave (repeatable)
         #[arg(long = "port", value_name = "PORT", action = clap::ArgAction::Append)]
@@ -206,7 +208,7 @@ enum Cmd {
     },
     /// Copy files to/from a cave agent worktree
     Cp {
-        #[arg(required = true)]
+        #[arg(required = true, add = ArgValueCompleter::new(complete_cp_path))]
         paths: Vec<String>,
         #[arg(short = 'R', short_alias = 'r', long = "recursive")]
         recursive: bool,
@@ -223,22 +225,28 @@ enum Cmd {
     /// Print shell completion script
     Completion {
         #[arg(value_enum)]
-        shell: ShellChoice,
-    },
-    /// Emit completion candidates for `cav cp` (used by shell scripts).
-    #[command(name = "__complete-cp", hide = true)]
-    CompleteCp {
-        #[arg(default_value = "")]
-        word: String,
-    },
-    /// Emit project-slug candidates for `cav -p` (used by shell scripts).
-    #[command(name = "__complete-projects", hide = true)]
-    CompleteProjects {
-        #[arg(default_value = "")]
-        word: String,
+        shell: Shell,
     },
     /// Show version
     Version,
+}
+
+/// Shells cav can emit a completion registration for.
+#[derive(Clone, clap::ValueEnum)]
+enum Shell {
+    Bash,
+    Zsh,
+    Fish,
+}
+
+impl Shell {
+    fn name(&self) -> &'static str {
+        match self {
+            Shell::Bash => "bash",
+            Shell::Zsh => "zsh",
+            Shell::Fish => "fish",
+        }
+    }
 }
 
 impl Cmd {
@@ -292,6 +300,17 @@ fn main() {
 fn run() -> Result<()> {
     // Anchor verbose log timestamps to process start.
     let _ = config::log_prefix();
+
+    // Serve shell completion when invoked by the completion hook (COMPLETE
+    // env var set); a no-op otherwise. Uses `completion_command`, which
+    // grafts agent's flags onto the top level so bare `cav -p<TAB>` works.
+    let cwd = std::env::current_dir().ok();
+    if CompleteEnv::with_factory(completion_command)
+        .try_complete(std::env::args_os(), cwd.as_deref())
+        .map_err(|e| anyhow!("{e}"))?
+    {
+        return Ok(());
+    }
 
     // Rewrite argv: bare `cav` -> `cav agent`; handle -v stripping.
     let raw: Vec<String> = std::env::args().collect();
@@ -535,19 +554,7 @@ fn run() -> Result<()> {
             EnvCmd::Update { input_name } => user_env::update(input_name.as_deref()),
             EnvCmd::Metadata => user_env::metadata(),
         },
-        Cmd::Completion { shell } => completion::print_completion(shell),
-        Cmd::CompleteCp { word } => {
-            for c in cp_complete::complete(&word) {
-                println!("{c}");
-            }
-            Ok(())
-        }
-        Cmd::CompleteProjects { word } => {
-            for c in proj_complete::complete(&word) {
-                println!("{c}");
-            }
-            Ok(())
-        }
+        Cmd::Completion { shell } => print_completion(shell),
         Cmd::Version => {
             let vd = constants::version_date();
             if vd.chars().all(|c| c.is_ascii_digit()) {
@@ -564,13 +571,63 @@ fn run() -> Result<()> {
     }
 }
 
+/// The clap command used to drive shell completion. `cav agent` is the
+/// runtime default subcommand (see `preprocess_args`), so its flags must
+/// complete after a bare `cav` too. Rather than mirror that rewrite in
+/// shell, graft the agent subcommand's own args onto the top-level command
+/// so clap completes them natively. clap's arg scoping then keeps them out
+/// of other subcommands' completion for free.
+fn completion_command() -> clap::Command {
+    let mut cmd = Cli::command();
+    let existing: std::collections::HashSet<clap::Id> =
+        cmd.get_arguments().map(|a| a.get_id().clone()).collect();
+    let agent_args: Vec<clap::Arg> = cmd
+        .find_subcommand("agent")
+        .map(|sc| sc.get_arguments().cloned().collect())
+        .unwrap_or_default();
+    for arg in agent_args {
+        if !existing.contains(arg.get_id()) {
+            cmd = cmd.arg(arg);
+        }
+    }
+    cmd
+}
+
+/// Candidates for `cav -p`/`--project`: registered project slugs plus
+/// directories, so both slugs and plain paths complete.
+fn complete_project(current: &OsStr) -> Vec<CompletionCandidate> {
+    let word = current.to_string_lossy();
+    let mut out: Vec<CompletionCandidate> =
+        proj_complete::complete(&word).into_iter().map(CompletionCandidate::new).collect();
+    out.extend(PathCompleter::dir().complete(current));
+    out
+}
+
+/// Candidates for `cav cp` paths: cave-side slug/agent/worktree entries
+/// and host files, computed by the same logic `cav cp` itself uses.
+fn complete_cp_path(current: &OsStr) -> Vec<CompletionCandidate> {
+    let word = current.to_string_lossy();
+    cp_complete::complete(&word).into_iter().map(CompletionCandidate::new).collect()
+}
+
+/// Emit the dynamic-completion registration script for `shell`. The script
+/// calls back into `cav` (with the `COMPLETE` env var set) on every
+/// completion, so candidates always reflect the running binary.
+fn print_completion(shell: Shell) -> Result<()> {
+    // SAFETY: single-threaded at this point.
+    unsafe { std::env::set_var("COMPLETE", shell.name()) };
+    CompleteEnv::with_factory(completion_command)
+        .bin("cav")
+        .try_complete(["cav"], None)
+        .map_err(|e| anyhow!("{e}"))?;
+    Ok(())
+}
+
 fn preprocess_args(raw: Vec<String>) -> Vec<String> {
     // raw[0] is the binary name. Rewrite bare `cav <flags>` to
     // `cav agent <flags>` so shortcuts like `cav -p ../proj` work.
     // Subcommand and top-level flag names come from clap reflection so
     // this stays correct when the `Cli` definition changes.
-    use clap::CommandFactory;
-
     let mut argv = vec![raw[0].clone()];
     let rest = &raw[1..];
     let cmd = Cli::command();
@@ -927,6 +984,41 @@ fn unix_to_ymdhm(secs: u64) -> (u64, u64, u64, u64, u64) {
         mo += 1;
     }
     (y, mo, days + 1, h, min)
+}
+
+#[cfg(test)]
+mod completion_tests {
+    use super::*;
+
+    fn top_level_arg_ids(cmd: &clap::Command) -> Vec<String> {
+        cmd.get_arguments().map(|a| a.get_id().to_string()).collect()
+    }
+
+    #[test]
+    fn factory_is_a_valid_command() {
+        // Grafting agent's args onto the root must not produce a command
+        // clap rejects (duplicate ids, conflicting shorts, etc.).
+        completion_command().debug_assert();
+    }
+
+    #[test]
+    fn agent_flags_grafted_onto_top_level() {
+        // So `cav -p foo<TAB>` completes without the literal `agent` word.
+        let ids = top_level_arg_ids(&completion_command());
+        for expected in ["resume_agent", "extra_projects", "comms", "prompt"] {
+            assert!(ids.iter().any(|i| i == expected), "missing grafted arg: {expected}");
+        }
+    }
+
+    #[test]
+    fn other_subcommands_do_not_gain_agent_flags() {
+        // clap scopes the grafted args to the root, so `cav status`
+        // completion never offers `--comms` — no hand-rolled stopwords.
+        let cmd = completion_command();
+        let status = cmd.find_subcommand("status").expect("status subcommand");
+        let ids = top_level_arg_ids(status);
+        assert!(!ids.iter().any(|i| i == "comms"));
+    }
 }
 
 #[cfg(test)]

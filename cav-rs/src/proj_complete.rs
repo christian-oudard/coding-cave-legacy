@@ -2,10 +2,9 @@
 //!
 //! `-p` accepts a registered project slug or a path to a project dir.
 //! Static clap completion can't enumerate registered slugs, so this
-//! emits them at runtime. `cav __complete-projects <word>` prints
-//! matching slugs one per line; the generated shell scripts call it and
-//! merge the result with the shell's own directory completion so plain
-//! paths still complete too.
+//! emits them at runtime. It backs the `ArgValueCompleter` attached to
+//! `-p`/`--project`, which merges these slugs with directory completion
+//! so plain paths still complete too.
 
 use std::path::Path;
 

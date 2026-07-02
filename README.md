@@ -43,9 +43,11 @@ Not yet supported by the install path. The host module is NixOS-specific; a futu
 
 ## Shell completion
 
-`cav` emits completion scripts for bash, zsh, and fish. Completion of
-`cav cp` paths is dynamic: it expands registered slugs, agent IDs, and
-worktree contents.
+`cav` supports dynamic completion for bash, zsh, and fish: the shell
+calls back into `cav` at completion time, so candidates always reflect
+the running binary. This covers `cav cp` paths (registered slugs, agent
+IDs, worktree contents), `-p`/`--project` slugs, and the flags of a bare
+`cav` (which is shorthand for `cav agent`).
 
 Add the matching line to your shell startup file:
 

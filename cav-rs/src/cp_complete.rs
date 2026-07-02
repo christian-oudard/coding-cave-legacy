@@ -2,9 +2,9 @@
 //!
 //! `cav cp` accepts cave-prefixed paths like `slug:path`, `cave:path`, or
 //! `cave@N:path`. Static clap completion can't enumerate registered slugs
-//! or list files inside a worktree, so this module does it at runtime.
-//! `cav __complete-cp <word>` prints candidates one per line; the
-//! generated shell scripts call it for the cp paths argument.
+//! or list files inside a worktree, so this module does it at runtime. It
+//! backs the `ArgValueCompleter` attached to the `cp` paths argument, which
+//! clap's dynamic completion invokes in-process as the user types.
 
 use std::path::{Path, PathBuf};
 

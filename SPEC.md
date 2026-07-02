@@ -171,7 +171,7 @@ Tab completion is supported for cave-side paths once the shell completion script
 
 ### `cav completion bash|zsh|fish`
 
-Prints a shell completion script to stdout. Source it from your shell rc to enable tab completion for `cav` commands and arguments, including cave-side path completion for `cav cp`.
+Prints a shell completion registration to stdout. Source it from your shell rc to enable tab completion for `cav` commands and arguments. Completion is dynamic: the shell calls back into `cav` as you type, so cave-side `cav cp` paths, project slugs, and the flags of a bare `cav` all complete against live state.
 
 ```
 eval "$(cav completion bash)"   # in ~/.bashrc
