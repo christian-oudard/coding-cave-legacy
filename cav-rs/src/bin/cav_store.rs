@@ -465,6 +465,12 @@ fn converge(
         }
     }
 
+    // 1b. Repair the shared copy if the store's DB claims it but the file is
+    //     gone (see repair_shared_if_missing). Source: the host copy when the
+    //     host has it, else the (already gate-verified) cave copy.
+    let source = if host_has { host_path.as_path() } else { src.as_path() };
+    repair_shared_if_missing(name, &shared_path, source)?;
+
     // 2. Relink the shared copy onto the host inode so host and shared share one
     //    copy. Skipped once EXDEV proves they're on different filesystems.
     if host_has && !HOST_RELINK_DISABLED.load(Ordering::Relaxed) {
@@ -555,6 +561,25 @@ fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
         std::fs::copy(src, dst)?;
     }
     Ok(())
+}
+
+/// Repair a shared copy that the shared store's SQLite DB claims is valid but
+/// whose file is gone — crash residue from a store manager that died mid-work,
+/// leaving the DB row while the file was deleted. nix's `copy`/`--import` trust
+/// the DB and no-op on such a path, so the file never returns on its own; copy
+/// the canonical bytes into place instead (the DB row is already right, only
+/// disk lagged). The shared store is our own level-1 cache, so this is a repair
+/// we own, not a fatal external error. No-op when the copy is already present.
+fn repair_shared_if_missing(name: &OsStr, shared_path: &Path, source: &Path) -> Result<()> {
+    if shared_path.exists() {
+        return Ok(());
+    }
+    eprintln!(
+        "cav-store: repairing shared copy of {} (DB-valid but file missing)",
+        name.to_string_lossy()
+    );
+    copy_tree(source, shared_path)
+        .with_context(|| format!("repair missing shared copy {shared_path:?} from {source:?}"))
 }
 
 /// Open the cave store's gc.lock and take a shared advisory lock. nix's GC
@@ -1141,6 +1166,43 @@ mod tests {
         assert_eq!(ino(&state.store_dir.join(pkg).join("content")),
                    ino(&shared_store_dir.join(pkg).join("content")),
                    "with the cause gone the next run should converge");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The deploy-day crash: the shared store's DB claimed a path valid but its
+    /// file was gone (crash residue), so `nix copy` no-op'd and the later
+    /// hardlink hit ENOENT. repair_shared_if_missing must restore the bytes from
+    /// the canonical source (file and directory paths), and no-op when present.
+    #[test]
+    fn repair_restores_a_shared_copy_the_db_claims_but_disk_lacks() {
+        let tmp = std::env::temp_dir().join(format!("cav-repair-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let shared = tmp.join("shared/nix/store");
+        let src = tmp.join("host/nix/store");
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::create_dir_all(&src).unwrap();
+
+        // A single-FILE store path (like the CVE patch that crashed the daemon).
+        let patch = "1cl09g0szzjgchiy7dz2xs8w5nqi2004-CVE.patch";
+        std::fs::write(src.join(patch), b"diff --git").unwrap();
+        // Shared DB "claims" it (represented here by the file simply being
+        // absent on disk); repair must copy it in.
+        repair_shared_if_missing(OsStr::new(patch), &shared.join(patch), &src.join(patch)).unwrap();
+        assert!(shared.join(patch).exists(), "single-file shared copy not repaired");
+        assert_eq!(std::fs::read(shared.join(patch)).unwrap(), b"diff --git");
+
+        // A directory store path repairs its whole tree.
+        let pkg = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-pkg";
+        std::fs::create_dir_all(src.join(pkg).join("bin")).unwrap();
+        std::fs::write(src.join(pkg).join("bin").join("hi"), b"exe").unwrap();
+        repair_shared_if_missing(OsStr::new(pkg), &shared.join(pkg), &src.join(pkg)).unwrap();
+        assert_eq!(std::fs::read(shared.join(pkg).join("bin").join("hi")).unwrap(), b"exe");
+
+        // Present already: a no-op that neither errors nor overwrites.
+        std::fs::write(shared.join(patch), b"KEEP").unwrap();
+        repair_shared_if_missing(OsStr::new(patch), &shared.join(patch), &src.join(patch)).unwrap();
+        assert_eq!(std::fs::read(shared.join(patch)).unwrap(), b"KEEP",
+                   "repair must not overwrite an existing shared copy");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
