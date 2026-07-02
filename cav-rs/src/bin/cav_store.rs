@@ -66,9 +66,11 @@ const GC_INTERVAL: Duration = Duration::from_secs(3600);
 // unsigned build staying private, a .drv staying cave-local.
 
 // Set once if hardlinking the shared store onto host inodes ever fails with
-// EXDEV (host /nix/store and the shared store on different filesystems). From
-// then on the host<->shared relink is skipped for the daemon's lifetime; the
-// shared store stays canonical and cross-cave dedup still works.
+// EXDEV. The usual cause is not a different filesystem but a mount boundary:
+// NixOS bind-mounts /nix/store read-only, and link() refuses to cross a mount
+// point even within one filesystem. From then on the host<->shared relink is
+// skipped for the daemon's lifetime; the shared store stays canonical and
+// cross-cave dedup (caves and shared share the / mount) still works.
 static HOST_RELINK_DISABLED: AtomicBool = AtomicBool::new(false);
 
 // Bounded retry for reading a nix DB that is momentarily unreadable (hot WAL)
@@ -478,8 +480,10 @@ fn converge(
             if is_exdev(&e) {
                 HOST_RELINK_DISABLED.store(true, Ordering::Relaxed);
                 eprintln!(
-                    "cav-store: host /nix/store and the shared store are on different \
-                     filesystems; host<->shared dedup disabled (cross-cave dedup unaffected)"
+                    "cav-store: cannot hardlink into the host /nix/store (EXDEV): it is a \
+                     separate mount point (NixOS mounts it as a read-only bind mount), and \
+                     link() refuses to cross a mount boundary even on the same filesystem. \
+                     host<->shared dedup disabled; cross-cave dedup unaffected"
                 );
             } else {
                 return Err(e);
@@ -839,15 +843,35 @@ fn gc_with_base(store_base: &Path) -> Result<()> {
     if test_mode() {
         return Ok(());
     }
-    let status = Command::new("nix-store")
+    // Capture instead of inherit. nix streams a `deleting '/nix/store/...'` line
+    // per collected path to stderr — thousands per run, and the paths are the
+    // shared store's *logical* names (a chroot store's paths are logically
+    // `/nix/store/...`), which reads alarmingly like the host store is being
+    // collected. Drop that; nix's one-line tally (`N store paths deleted, X
+    // freed`) goes to stdout, which we fold into our own summary. On failure the
+    // captured stderr is surfaced.
+    let out = Command::new("nix-store")
         .args(["--store", &format!("local?root={}", shared.display()), "--gc"])
-        .status()
+        .output()
         .context("nix-store --gc on shared store")?;
-    if !status.success() {
-        bail!("shared store gc failed");
+    if !out.status.success() {
+        bail!("shared store gc failed: {}", String::from_utf8_lossy(&out.stderr).trim());
     }
-    eprintln!("cav-store gc: rooted {rooted} shared paths, collected the rest");
+    eprintln!("{}", gc_summary(rooted, &String::from_utf8_lossy(&out.stdout)));
     Ok(())
+}
+
+/// One clean line for a shared-store GC: how many paths we rooted as in-use,
+/// plus nix's own tally of what it then deleted (parsed from `nix-store --gc`
+/// stdout, e.g. "3095 store paths deleted, 1.2 GiB freed"). Never repeats the
+/// per-path `/nix/store/...` spew.
+fn gc_summary(rooted: u64, gc_stdout: &str) -> String {
+    let deleted = gc_stdout
+        .lines()
+        .map(str::trim)
+        .find(|l| l.contains("store paths deleted"))
+        .unwrap_or("0 store paths deleted");
+    format!("cav-store gc: rooted {rooted} in-use shared-store paths; {deleted}")
 }
 
 /// Test-only escape hatch: skips the root check and stubs the nix shell-outs
@@ -1204,6 +1228,22 @@ mod tests {
         assert_eq!(std::fs::read(shared.join(patch)).unwrap(), b"KEEP",
                    "repair must not overwrite an existing shared copy");
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The GC summary uses nix's own tally line and never echoes the per-path
+    /// deletion spew; a missing tally degrades to "0 store paths deleted".
+    #[test]
+    fn gc_summary_folds_nix_tally_and_drops_the_path_spew() {
+        let stdout = "1234 store paths deleted, 2.7 GiB freed\n";
+        let s = gc_summary(23614, stdout);
+        assert_eq!(s, "cav-store gc: rooted 23614 in-use shared-store paths; \
+                       1234 store paths deleted, 2.7 GiB freed");
+        assert!(!s.contains("/nix/store/"), "must not print logical store paths");
+        // Nothing collected: nix still prints a zero tally.
+        assert!(gc_summary(5, "0 store paths deleted, 0 bytes freed\n")
+            .ends_with("0 store paths deleted, 0 bytes freed"));
+        // Tally absent entirely: safe fallback, no panic.
+        assert!(gc_summary(5, "").ends_with("0 store paths deleted"));
     }
 
     #[test]
