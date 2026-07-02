@@ -1,11 +1,11 @@
-/// Integration test for the store manager's promote watcher.
+/// Integration test for the store manager's converge loop.
 ///
 /// Exercises `cav-store watch` against fake per-cave stores and a shared
-/// store. The watcher's inotify-driven scan/promote loop is what we cover;
-/// the real `nix copy` + hardlink + `chattr +i` would need a real nix store
-/// and CAP_LINUX_IMMUTABLE, so we short-circuit them via
-/// CODING_CAVE_HOST_WATCH_TEST_MODE, which "promotes" by copying the cave
-/// file into the shared store dir. Production never sets that env var.
+/// store. The timer-driven convergence pass is what we cover; the real
+/// `nix copy` / verify / promote need a real nix store, so we short-circuit
+/// those via CODING_CAVE_HOST_WATCH_TEST_MODE, which stubs them with a tree
+/// copy. The hardlink collapse still runs for real, so the dedup the loop
+/// exists to perform is under test. Production never sets that env var.
 use rusqlite::Connection;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -67,13 +67,15 @@ impl Fixture {
         cmd.args(["watch"])
             .env("CODING_CAVE_NIX_STORES_DIR", &self.nix_stores)
             .env("CODING_CAVE_SHARED_STORE", &self.shared)
+            // Point the host store at paths that don't exist, so convergence is
+            // hermetic (no host_has ever true) and never reads the real host DB.
+            .env("CODING_CAVE_HOST_NIX_STORE", self.root.join("no-host-store"))
+            .env("CODING_CAVE_HOST_NIX_DB", self.root.join("no-host-db.sqlite"))
             .env("CODING_CAVE_HOST_WATCH_TEST_MODE", "1")
             .env_remove("CODING_CAVE_VERSION")
             .env_remove("CODING_CAVE_AGENT_ID");
         let child = cmd.spawn().expect("spawn cav-store watch");
-        // Give the watcher a moment to set up inotify before the first
-        // simulated install. Without this the install can land between
-        // discovery and add_watch and slip through until the next event.
+        // Let the first converge pass run before the test mutates the stores.
         thread::sleep(Duration::from_millis(300));
         Watcher { child }
     }
@@ -137,6 +139,11 @@ fn init_nix_db(path: &Path) {
     .unwrap();
 }
 
+fn ino(p: &Path) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    fs::metadata(p).ok().map(|m| m.ino())
+}
+
 fn wait_for<F: Fn() -> bool>(timeout: Duration, predicate: F) -> bool {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
@@ -158,15 +165,19 @@ fn promotes_new_install_into_shared_store() {
     agent.fake_install(pkg);
 
     let promoted = fx.shared_path(pkg);
-    // Promotion copies into the shared store; the cave keeps its own copy
-    // (the hardlink dedup that collapses them needs a real filesystem op and
-    // is skipped in test mode).
-    let kept_in_cave = agent.store_dir.join(pkg);
+    let cave_file = agent.store_dir.join(pkg).join("content");
+    let shared_file = promoted.join("content");
     assert!(
         wait_for(Duration::from_secs(5), || promoted.exists()),
         "watcher did not promote `{pkg}` into the shared store within 5s",
     );
-    assert!(kept_in_cave.exists(), "cave lost its own copy of `{pkg}`");
+    // The cave keeps the path, but convergence collapses its copy onto the
+    // shared inode: one copy on disk, shared by cave and shared store.
+    assert!(
+        wait_for(Duration::from_secs(5), || ino(&cave_file).is_some()
+            && ino(&cave_file) == ino(&shared_file)),
+        "cave copy of `{pkg}` was not collapsed onto the shared inode",
+    );
 }
 
 #[test]

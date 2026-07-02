@@ -1,12 +1,14 @@
 # Single NixOS module owning the coding-cave host-side store manager. It
-# maintains a root-owned shared nix store at /var/lib/coding-cave/store,
-# promotes each cave's packages into it (deduplicating by hardlink onto the
-# root-owned shared inode, which is what stops a cave rewriting shared content),
-# garbage-collects that store while rooting the paths every live cave still
-# references, and applies optional per-agent disk quotas. It also creates the
-# sticky per-cave store base at /var/lib/coding-cave/nix-stores. Future
-# host-side concerns extend `cav-store`
-# rather than fragmenting into separate services.
+# maintains a root-owned shared nix store at /var/lib/coding-cave/store and
+# periodically converges every cave store onto it: each package ends up as one
+# inode, canonically the host store's when the host has the path, else the
+# shared store's (the root-owned inode is what stops a cave rewriting shared
+# content). Cave-originated paths pass a signature gate before entering the
+# shared store and never reach the host store. It garbage-collects the shared
+# store while rooting the paths every live cave still references, and applies
+# optional per-agent disk quotas. It also creates the sticky per-cave store
+# base at /var/lib/coding-cave/nix-stores. Future host-side concerns extend
+# `cav-store` rather than fragmenting into separate services.
 #
 # The unit body is `cav-store <verb>` so the same logic works on
 # non-NixOS hosts (Ubuntu via `cav install-host`, etc.). Host configuration

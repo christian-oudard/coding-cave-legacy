@@ -44,6 +44,27 @@ pub fn shared_store_root() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(SHARED_STORE_ROOT))
 }
 
+/// The host's real nix store directory (level 0 of the dedup tree). The daemon
+/// reads it to decide whether a package already lives on the host, and — when it
+/// does — hardlinks the shared-store copy onto the host inodes so host and
+/// shared share one copy on disk. Cave content never flows *into* it; the daemon
+/// only ever reads it. `CODING_CAVE_HOST_NIX_STORE` overrides it for tests.
+#[allow(dead_code)] // daemon-only
+pub fn host_nix_store() -> PathBuf {
+    std::env::var_os("CODING_CAVE_HOST_NIX_STORE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/nix/store"))
+}
+
+/// The host's nix database, read (never written) to learn which paths the host
+/// has. `CODING_CAVE_HOST_NIX_DB` overrides it for tests.
+#[allow(dead_code)] // daemon-only
+pub fn host_nix_db() -> PathBuf {
+    std::env::var_os("CODING_CAVE_HOST_NIX_DB")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/nix/var/nix/db/db.sqlite"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

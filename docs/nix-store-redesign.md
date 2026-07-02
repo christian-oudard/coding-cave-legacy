@@ -284,3 +284,59 @@ To confirm on a real host (none are exercisable inside a cave):
 - Optional: a root-side fetch so a cave gets a sibling-built package without
   re-fetching it from the public cache or rebuilding (today it re-fetches, then
   the hardlink pass dedups). Only worth it if those re-fetches prove costly.
+
+## Convergence (second iteration)
+
+The first implementation promoted each newly-valid cave path once, tracked by a
+per-cave `last_seen_id` cursor and driven by an inotify watch on the cave's nix
+DB. It deduplicated caves against the shared store but left two gaps that a disk
+filling up made concrete:
+
+- **The host store was not part of the tree.** A package the host already had
+  (the cav closure, the user-env closure, toolchains) lived once in the host
+  store *and* again in the shared store. The dedup criterion is one copy across
+  the host and all caves, so the host had to become level 0.
+- **Promotion was one-shot and depended on shared inodes never moving.** The
+  shared-store GC, reading a cave DB with a hot WAL, could drop that cave's
+  references and collect a path still in use; the path was later re-imported
+  under a new inode, and every cave already collapsed onto the old inode was
+  stranded on a dead copy the one-shot cursor would never revisit. Disk
+  reaccumulated silently.
+
+The fix makes the operation idempotent and adds the host level. `converge(cave,
+path)` ensures the shared copy exists (importing from the host when the host has
+it — trusted, no gate — else promoting from the cave through the gate), relinks
+the shared copy onto the host inode when the host has it, and collapses the
+cave copy onto the shared inode. Every step is "hardlink onto the canonical
+copy, skip if already linked", so a moved inode or a late host acquisition is
+just repaired by the next pass. A timer loop runs `converge` over every cave
+path; the inotify watch and the `last_seen_id` cursor are gone. The shared-store
+GC keeps its fail-closed rooting from the first fix (refuse to collect if any
+cave DB can't be read), which is what makes idempotent convergence converge
+rather than fight a GC that deletes in-use paths.
+
+Decisions:
+
+- **Host as canonical, shared as fallback.** When the host has a path, the host
+  inode is canonical and shared + caves hardlink onto it; host and shared share
+  one copy. When the host lacks it (a cave-only package), the shared store is
+  canonical. Either way the package is one copy across its actual users.
+- **Cave content never rises into the host store.** The daemon only reads the
+  host store; a cave-originated path stops at the shared-store quarantine. This
+  keeps the poisoning surface confined to caves even if the trust gate had a
+  bug — the host store is never written by the daemon.
+- **Import from the host skips the gate; promotion from a cave keeps it.** Host
+  content is trusted level 0. This is also what lets a host-built *unsigned*
+  package dedup: promoting it from a cave would fail the signature gate, but
+  importing it from the host (where it is trusted) collapses every cave's copy
+  onto it.
+- **Hardlink onto the host inode, do not re-import a private shared copy.** An
+  earlier idea kept the shared store's own imported copy as a stable inode. But
+  hardlinking the shared copy onto the host inode is safe *because convergence
+  self-heals*: if the host later moves that inode (GC, `--optimise`), the next
+  pass relinks. Without idempotency this would reintroduce the stranding class;
+  with it, sharing the host inode is strictly better (one fewer copy).
+- **Timer, not inotify.** A full pass is cheap (stat-guarded hardlinks skip an
+  already-deduped tree) and, being stateless, self-heals drift an event-driven
+  scan would miss forever. Correctness no longer rides on catching every DB
+  write.
