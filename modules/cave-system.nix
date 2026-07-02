@@ -67,8 +67,10 @@
   # Statusline script lives outside HM's normal pipeline because the
   # cave's persistent home needs a real file (not a store symlink).
   # mkCaveEnv's `cp -rL` step dereferences this when materializing files/.
+  # mkDefault so a user cave.nix can override the script in place (e.g. to
+  # compose extra segments) by setting its own source for this path.
   home.file.".claude/statusline.sh" = {
-    source = ../defaults/statusline.sh;
+    source = lib.mkDefault ../defaults/statusline.sh;
     executable = true;
   };
 }

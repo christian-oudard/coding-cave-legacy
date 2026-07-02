@@ -9,6 +9,11 @@
 //
 // `version` prints the version of the running cave, read from the
 // CODING_CAVE_VERSION the sandbox injects at launch.
+//
+// `agent-tag` prints the cave's byline, e.g. "Coding Cave - dotfiles@10",
+// from the CODING_CAVE_AGENT_NAME the sandbox injects. It is the base
+// segment statusline scripts build on; owning it here keeps the byline
+// format in one place instead of hardcoded in every statusline.
 
 use std::io::Write;
 
@@ -19,8 +24,9 @@ fn main() {
     match std::env::args().nth(1).as_deref() {
         Some("bell") => bell(),
         Some("version") => version(),
+        Some("agent-tag") => agent_tag(),
         other => {
-            eprintln!("usage: cav-host <bell|version> (got {other:?})");
+            eprintln!("usage: cav-host <bell|version|agent-tag> (got {other:?})");
             std::process::exit(1);
         }
     }
@@ -40,4 +46,12 @@ fn version() {
             std::process::exit(1);
         }
     }
+}
+
+fn agent_tag() {
+    let agent = match std::env::var("CODING_CAVE_AGENT_NAME") {
+        Ok(a) if !a.is_empty() => a,
+        _ => "?".to_string(),
+    };
+    println!("Coding Cave - {agent}");
 }
