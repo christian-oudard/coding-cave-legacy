@@ -57,6 +57,14 @@ const CONVERGE_INTERVAL: Duration = Duration::from_secs(300);
 // How often the converge loop garbage-collects the shared store.
 const GC_INTERVAL: Duration = Duration::from_secs(3600);
 
+// Error policy: fail loudly and fast. The first serious error — an import or
+// hardlink that fails, an unreadable DB, a GC failure — exits the daemon so
+// the systemd unit lands in "failed" and points at exactly what to fix. No
+// skip lists, no best-effort passes: a store problem that is tolerated is a
+// scar that compounds (tolerating one is how the disk filled last time). The
+// only non-errors are normal lifecycle: a cave or path vanishing mid-pass, an
+// unsigned build staying private, a .drv staying cave-local.
+
 // Set once if hardlinking the shared store onto host inodes ever fails with
 // EXDEV (host /nix/store and the shared store on different filesystems). From
 // then on the host<->shared relink is skipped for the daemon's lifetime; the
@@ -162,12 +170,10 @@ fn watch() -> Result<()> {
         .unwrap_or_else(Instant::now);
 
     loop {
-        converge_pass(&store_base, quota.as_ref(), &mut quota_applied);
+        converge_pass(&store_base, quota.as_ref(), &mut quota_applied)?;
 
         if !test_mode() && last_gc.elapsed() >= GC_INTERVAL {
-            if let Err(e) = gc_with_base(&store_base) {
-                eprintln!("cav-store gc: {e:#}");
-            }
+            gc_with_base(&store_base)?;
             last_gc = Instant::now();
         }
         std::thread::sleep(converge_interval());
@@ -186,45 +192,31 @@ fn converge_interval() -> Duration {
 
 /// One convergence pass over every cave store under `store_base`. Reads the
 /// host's valid paths once (cached for the pass), then for each cave applies its
-/// quota (once per lifetime) and converges each valid path. Best-effort
-/// throughout: a cave whose DB can't be read, or a path that errors, is logged
-/// and skipped so one bad cave never wedges the rest. The next pass retries.
+/// quota (once per lifetime) and converges each valid path. Fail-fast: the
+/// first serious error aborts the pass and exits the daemon (see the error
+/// policy above). A cave that vanishes mid-pass is normal lifecycle (`cav gc`
+/// removing it), not an error.
 fn converge_pass(
     store_base: &Path,
     quota: Option<&QuotaState>,
     quota_applied: &mut HashSet<String>,
-) {
+) -> Result<()> {
     let shared = store_paths::shared_store_root();
     let shared_store_dir = shared.join("nix").join("store");
     let host_store_dir = store_paths::host_nix_store();
 
     // Which paths the host already has. Read once per pass. A missing DB is a
-    // legitimate "host has nothing" (empty set, no retry). An unreadable DB (hot
-    // WAL) is transient: treat the host as having nothing this pass — no host
-    // relink, cave promotion still runs through the gate — and retry next pass.
-    // Never wrong, just less deduped until the DB reads cleanly.
+    // legitimate "host has nothing" (empty set: hermetic tests, non-nix hosts);
+    // an unreadable one, after the bounded hot-WAL retry, is a real failure.
     let host_db = store_paths::host_nix_db();
     let host_valid = if !host_db.exists() {
         HashSet::new()
     } else {
-        match read_valid_paths_retrying(&host_db) {
-            Ok(p) => p,
-            Err(e) => {
-                if !test_mode() {
-                    eprintln!("cav-store: host nix DB unreadable this pass ({e:#}); skipping host dedup");
-                }
-                HashSet::new()
-            }
-        }
+        read_valid_paths_retrying(&host_db).context("read host nix DB")?
     };
 
-    let entries = match std::fs::read_dir(store_base) {
-        Ok(e) => e,
-        Err(e) => {
-            eprintln!("cav-store: read cave store base {}: {e}", store_base.display());
-            return;
-        }
-    };
+    let entries = std::fs::read_dir(store_base)
+        .with_context(|| format!("read cave store base {}", store_base.display()))?;
     for entry in entries.flatten() {
         let Some(id) = agent_id_from_name(&entry.file_name()) else {
             continue;
@@ -233,21 +225,28 @@ fn converge_pass(
             continue; // no DB yet: cave mid-setup, nothing valid to converge.
         };
 
-        if quota_applied.insert(id.clone()) {
-            apply_agent_quota(store_base, &id, quota);
-        }
-
-        if let Err(e) = converge_cave(&state, &shared, &shared_store_dir, &host_store_dir, &host_valid) {
-            eprintln!("cav-store: converge agent-{id}: {e:#}");
+        let mut cave = || -> Result<()> {
+            if quota_applied.insert(id.clone()) {
+                apply_agent_quota(store_base, &id, quota)?;
+            }
+            converge_cave(&state, &shared, &shared_store_dir, &host_store_dir, &host_valid)
+        };
+        if let Err(e) = cave() {
+            if !state.cave_root.exists() {
+                continue; // cave removed mid-pass: normal lifecycle.
+            }
+            return Err(e.context(format!("converge agent-{id}")));
         }
     }
+    Ok(())
 }
 
 /// Converge one cave: hold its gc.lock (so its own GC can't delete a path out
 /// from under a hardlink) and converge each valid path. The lock is the single
 /// point where we write a live cave's store; nix's GC takes it exclusively, our
-/// shared lock coexists with the cave's normal operations. Per-path errors are
-/// logged and skipped, not fatal to the cave.
+/// shared lock coexists with the cave's normal operations. Fail-fast: the
+/// first path that errors aborts (the caller distinguishes a vanished cave
+/// from a real failure).
 fn converge_cave(
     state: &AgentState,
     shared_root: &Path,
@@ -270,12 +269,19 @@ fn converge_cave(
         let Some(name) = Path::new(path).file_name() else {
             continue;
         };
+        // Derivations stay cave-private. Importing a .drv makes nix check that
+        // the drv's whole input-drv closure is valid in the destination store,
+        // a guarantee a cave that has GC'd some inputs can't meet (a dangling
+        // .drv is legal in a store; only a transfer checks it). They are
+        // kilobyte recipes, so sharing them saves nothing anyway.
+        if path.ends_with(".drv") {
+            continue;
+        }
         if !state.store_dir.join(name).exists() {
             continue; // valid in the DB but not physically here: nothing to do.
         }
-        if let Err(e) = converge(state, shared_root, shared_store_dir, host_store_dir, host_valid, path, name) {
-            eprintln!("cav-store: converge {}: {e:#}", name.to_string_lossy());
-        }
+        converge(state, shared_root, shared_store_dir, host_store_dir, host_valid, path, name)
+            .with_context(|| format!("converge {}", name.to_string_lossy()))?;
     }
     Ok(())
 }
@@ -286,22 +292,22 @@ struct QuotaState {
     mountpoint: PathBuf,
 }
 
-/// Apply the per-agent cap to a cave's writable trees. Best-effort: a failure
-/// is logged, never fatal, so a quota hiccup can't wedge a cave. No-op when no
-/// per-agent quota is configured.
-fn apply_agent_quota(store_base: &Path, agent_id: &str, quota: Option<&QuotaState>) {
+/// Apply the per-agent cap to a cave's writable trees. A configured quota that
+/// can't be applied is a violated invariant, so the error propagates and exits
+/// the daemon (error policy above). No-op when no per-agent quota is
+/// configured.
+fn apply_agent_quota(store_base: &Path, agent_id: &str, quota: Option<&QuotaState>) -> Result<()> {
     let Some(q) = quota else {
-        return;
+        return Ok(());
     };
     let dirs = agent_quota_dirs(store_base, agent_id);
-    if let Err(e) = quota::apply(
+    quota::apply(
         &dirs,
         quota::projid_for(agent_id),
         q.per_agent_bytes,
         &q.mountpoint,
-    ) {
-        eprintln!("cav-store quota: agent-{agent_id} cap not applied: {e:#}");
-    }
+    )
+    .with_context(|| format!("apply quota cap to agent-{agent_id}"))
 }
 
 /// The cave-store dir for one agent: `<store_base>/agent-<id>`.
@@ -1056,6 +1062,85 @@ mod tests {
         // daemon only ever reads the host store.
         assert_eq!(ino(&host_store_dir.join(pkg).join("content")), host_ino);
         assert_eq!(std::fs::read(host_store_dir.join(pkg).join("content")).unwrap(), b"data");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Derivations never converge: a .drv import makes nix demand the whole
+    /// input-drv closure be valid in the shared store, which caves with GC'd
+    /// inputs can't guarantee — the failure mode that flooded the journal on
+    /// first deploy. The .drv must be left untouched even when the shared
+    /// store already has it, while a normal path in the same pass converges.
+    #[test]
+    fn converge_cave_skips_derivations() {
+        let tmp = std::env::temp_dir().join(format!("cav-drv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let shared_root = tmp.join("shared");
+        let shared_store_dir = shared_root.join("nix").join("store");
+        let host_store_dir = tmp.join("no-host");
+        let host_valid = HashSet::new();
+        let drv = "dddddddddddddddddddddddddddddddd-pkg.drv";
+        let pkg = "22222222222222222222222222222222-pkg";
+        for name in [drv, pkg] {
+            std::fs::create_dir_all(shared_store_dir.join(name)).unwrap();
+            std::fs::write(shared_store_dir.join(name).join("content"), b"data").unwrap();
+        }
+
+        let state = make_cave(&tmp.join("agent-1"));
+        install_in_cave(&state, drv, b"data");
+        install_in_cave(&state, pkg, b"data");
+        std::fs::create_dir_all(state.db_path.parent().unwrap()).unwrap();
+        write_valid_paths_db(
+            &state.db_path,
+            &[&format!("/nix/store/{drv}"), &format!("/nix/store/{pkg}")],
+        );
+        let drv_ino = ino(&state.store_dir.join(drv).join("content"));
+
+        converge_cave(&state, &shared_root, &shared_store_dir,
+                      &host_store_dir, &host_valid).unwrap();
+        assert_eq!(ino(&state.store_dir.join(drv).join("content")), drv_ino,
+                   "a .drv must stay cave-private, not collapse onto shared");
+        assert_eq!(ino(&state.store_dir.join(pkg).join("content")),
+                   ino(&shared_store_dir.join(pkg).join("content")),
+                   "the normal path in the same pass should still converge");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Fail-fast: the first path that errors aborts the cave's pass with Err —
+    /// the daemon must exit on a serious error, not blacklist the path and
+    /// carry on. Once the cause is gone the next run converges normally.
+    #[test]
+    fn converge_cave_fails_fast_on_the_first_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = std::env::temp_dir().join(format!("cav-failfast-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let shared_root = tmp.join("shared");
+        let shared_store_dir = shared_root.join("nix").join("store");
+        let host_store_dir = tmp.join("no-host");
+        let host_valid = HashSet::new();
+        let pkg = "33333333333333333333333333333333-pkg";
+        std::fs::create_dir_all(shared_store_dir.join(pkg)).unwrap();
+        std::fs::write(shared_store_dir.join(pkg).join("content"), b"data").unwrap();
+
+        let state = make_cave(&tmp.join("agent-1"));
+        install_in_cave(&state, pkg, b"data");
+        std::fs::create_dir_all(state.db_path.parent().unwrap()).unwrap();
+        write_valid_paths_db(&state.db_path, &[&format!("/nix/store/{pkg}")]);
+        // Read-only package dir: the collapse can't remove the cave's file, so
+        // converge fails (the test runs unprivileged).
+        let chmod = |mode: u32| {
+            std::fs::set_permissions(state.store_dir.join(pkg),
+                                     std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        let run = || converge_cave(&state, &shared_root, &shared_store_dir,
+                                   &host_store_dir, &host_valid);
+        chmod(0o555);
+        assert!(run().is_err(), "a failing path must abort the pass with Err");
+
+        chmod(0o755);
+        run().unwrap();
+        assert_eq!(ino(&state.store_dir.join(pkg).join("content")),
+                   ino(&shared_store_dir.join(pkg).join("content")),
+                   "with the cause gone the next run should converge");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

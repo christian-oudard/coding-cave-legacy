@@ -95,6 +95,22 @@ hardlinks, and the stat guard turns an already-deduped tree into a walk that
 writes nothing. The first pass after a deploy does the real import and link
 work; later passes are nearly all skips.
 
+**Error policy: fail loudly and fast.** The first serious error — a failed
+import or hardlink, an unreadable DB, a GC or quota failure — exits the
+daemon, and the systemd unit does not restart it. A failed unit that stays
+failed points at exactly what to fix; a daemon that tolerates a store
+problem and moves on leaves a scar that compounds (tolerating one is how
+the disk filled the first time). Only normal lifecycle is a non-error: a
+cave or path vanishing mid-pass (`cav gc` removing it), an unsigned local
+build staying private behind the gate.
+
+One class is excluded rather than failed on: **derivations (`.drv`) stay
+cave-private.** Importing a `.drv` makes nix check that its entire
+input-drv closure is valid in the destination store, and a cave that has
+garbage-collected some inputs can't meet that (a dangling `.drv` is legal
+in a store; only a transfer checks it). They are kilobyte build recipes,
+so sharing them saves nothing.
+
 ### Concurrency
 
 The one place the daemon writes a live cave's store is the hardlink in

@@ -72,8 +72,11 @@ in
         ExecStartPre = "${cav}/bin/cav-store setup";
         ExecStart = "${cav}/bin/cav-store watch";
         ExecStopPost = "${cav}/bin/cav-store teardown";
-        Restart = "on-failure";
-        RestartSec = "5s";
+        # Fail-fast, no respawn: cav-store exits on the first serious error
+        # (failed import, unreadable DB, GC failure). Restarting it would
+        # re-run into the same wall every few seconds; a "failed" unit that
+        # stays failed is the loud signal to fix the cause and start it again.
+        Restart = "no";
       };
     };
   };
