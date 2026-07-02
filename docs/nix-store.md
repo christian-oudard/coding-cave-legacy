@@ -54,6 +54,19 @@ shared store's; every other copy is a hardlink onto that inode. Because
 the canonical copy is root-owned (mode 555), a cave can read and run a
 shared package but cannot modify, delete, or rename it.
 
+One wrinkle makes the host<->shared link non-trivial. NixOS enforces
+`boot.readOnlyNixStore` by bind-mounting `/nix/store` onto itself read-only,
+which turns it into a separate mount *point* from `/var/lib` even though both
+are one filesystem — and `link()` refuses to cross a mount point regardless.
+So the daemon starts by unsharing its own mount namespace and detaching that
+bind (`enter_private_namespace`), which reveals the identical underlying
+directory on the `/` mount and lets the relink hardlink freely. This is
+confined to the daemon: the namespace is made a slave of `/` (host mount
+events still propagate in, the detach never propagates out), so the system's
+`/nix/store` stays read-only and untouched. It never weakens the quarantine
+invariant, which the code enforces (the host store is only ever a copy
+*source*), not the mount.
+
 Caves do not substitute from the shared store: an unprivileged cave can't
 lock a root-owned store to substitute from it, and making the shared store
 writable to caves would be a poisoning hole. A cave fetches packages the
@@ -75,9 +88,11 @@ it, runs one idempotent `converge` operation:
    cave, which is correct.
 2. **Relink shared onto the host inode.** When the host has the path,
    hardlink the shared copy's files onto the host's inodes, so host and
-   shared share one copy. (Skipped for the daemon's lifetime if this ever
-   fails with EXDEV, meaning the host store is on a different filesystem;
-   then the shared store stays canonical and cross-cave dedup still works.)
+   shared share one copy. The daemon has already detached the `/nix/store`
+   bind in its namespace (above), so this crosses no mount boundary. If it
+   still fails with EXDEV — `/nix` genuinely on a different filesystem from
+   the shared store — the relink is skipped for the daemon's lifetime; the
+   shared store stays canonical and cross-cave dedup still works.
 3. **Collapse the cave copy onto the shared inode.** Hardlink the cave's
    files onto the shared copy (which, after step 2, is the host inode).
 

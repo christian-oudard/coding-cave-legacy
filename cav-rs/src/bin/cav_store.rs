@@ -40,7 +40,8 @@ mod store_paths;
 use rustix::fd::OwnedFd;
 use rustix::fs::{flock, open, FlockOperation, Mode, OFlags};
 use std::collections::HashSet;
-use std::ffi::OsStr;
+use std::ffi::{CString, OsStr};
+use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -65,10 +66,11 @@ const GC_INTERVAL: Duration = Duration::from_secs(3600);
 // only non-errors are normal lifecycle: a cave or path vanishing mid-pass, an
 // unsigned build staying private, a .drv staying cave-local.
 
-// Set once if hardlinking the shared store onto host inodes ever fails with
-// EXDEV. The usual cause is not a different filesystem but a mount boundary:
-// NixOS bind-mounts /nix/store read-only, and link() refuses to cross a mount
-// point even within one filesystem. From then on the host<->shared relink is
+// Set once if hardlinking the shared store onto host inodes fails with EXDEV
+// even after enter_private_namespace() has detached the /nix/store bind. With
+// the bind gone from the daemon's view, a remaining EXDEV means /nix is
+// genuinely a different filesystem from /var/lib (the shared store), so
+// host<->shared hardlinks are physically impossible. From then on the relink is
 // skipped for the daemon's lifetime; the shared store stays canonical and
 // cross-cave dedup (caves and shared share the / mount) still works.
 static HOST_RELINK_DISABLED: AtomicBool = AtomicBool::new(false);
@@ -140,6 +142,76 @@ fn teardown() -> Result<()> {
     Ok(())
 }
 
+/// Enter a private mount namespace so the daemon can hardlink shared-store
+/// files onto host-store inodes (converge step 2, the host<->shared dedup).
+///
+/// NixOS enforces `boot.readOnlyNixStore` by bind-mounting /nix/store onto
+/// itself read-only. That self-bind makes /nix/store a separate mount point
+/// from /var/lib (where the shared and cave stores live), and link() refuses to
+/// cross a mount point even when both sides are one filesystem — so the relink
+/// fails EXDEV and every shared path stays a second physical copy on disk.
+/// Detaching the bind (reveal_host_store) exposes the identical underlying
+/// directory on the / mount; then /nix/store and /var/lib share one mount and
+/// hardlink fine.
+///
+/// This is the same private-namespace move nix-daemon uses to write the
+/// read-only store, and it is confined to this process. MS_SLAVE on / lets host
+/// mount events still propagate IN (so a store build or GC on the host stays
+/// visible) while our umount never propagates OUT, leaving the system's
+/// read-only /nix/store completely untouched — only this daemon's own view
+/// changes.
+///
+/// Consequence: inside this namespace /nix/store is writable to root, so the
+/// mount no longer backstops the quarantine invariant (the daemon never writes
+/// the host store). The code already enforces it — copies target
+/// local?root=<shared>, GC runs on the chroot store, the host store is only ever
+/// named as a *source* — so the invariant holds on code, the mount having only
+/// ever been belt-and-suspenders for the daemon.
+fn enter_private_namespace() -> Result<()> {
+    if unsafe { libc::unshare(libc::CLONE_NEWNS) } != 0 {
+        return Err(anyhow::Error::from(std::io::Error::last_os_error())
+            .context("unshare mount namespace"));
+    }
+    let root = CString::new("/").unwrap();
+    let rc = unsafe {
+        libc::mount(
+            std::ptr::null(),
+            root.as_ptr(),
+            std::ptr::null(),
+            (libc::MS_REC | libc::MS_SLAVE) as libc::c_ulong,
+            std::ptr::null(),
+        )
+    };
+    if rc != 0 {
+        return Err(anyhow::Error::from(std::io::Error::last_os_error())
+            .context("make / mounts slave"));
+    }
+    Ok(())
+}
+
+/// Detach every stacked mount at the host store, revealing the underlying
+/// directory on the / mount so hardlinks into it stop crossing a mount
+/// boundary. Idempotent and cheap (a couple of syscalls): run before each
+/// converge pass, so a host that re-binds /nix/store mid-run (a nixos-rebuild
+/// activation) self-heals on the next pass instead of stranding the daemon back
+/// on EXDEV. EINVAL means the host store is not (or no longer) a mount point — a
+/// non-NixOS host, or readOnlyNixStore=false — where the relink already works
+/// and there is nothing to detach.
+fn reveal_host_store() -> Result<()> {
+    let target = CString::new(store_paths::host_nix_store().into_os_string().into_vec())
+        .context("host store path has an interior NUL")?;
+    loop {
+        if unsafe { libc::umount2(target.as_ptr(), libc::MNT_DETACH) } == 0 {
+            continue; // detached one bind; another may be stacked beneath it.
+        }
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::EINVAL) {
+            return Ok(());
+        }
+        return Err(anyhow::Error::from(err).context("umount2 host /nix/store"));
+    }
+}
+
 /// Converge every cave store onto the deduplicated three-level tree, forever.
 /// Long-running; the ExecStart of coding-cave-host.service. Each pass walks
 /// every cave, converges each of its valid paths (idempotent), and periodically
@@ -149,6 +221,11 @@ fn teardown() -> Result<()> {
 fn watch() -> Result<()> {
     if !test_mode() && !rustix::process::geteuid().is_root() {
         bail!("cav-store watch must be run as root");
+    }
+    // Give the daemon its own mount namespace so reveal_host_store can detach
+    // the read-only /nix/store bind without touching the system's view.
+    if !test_mode() {
+        enter_private_namespace()?;
     }
     let store_base = store_paths::cave_stores_base();
     std::fs::create_dir_all(&store_base).context("create cave-store base")?;
@@ -172,6 +249,13 @@ fn watch() -> Result<()> {
         .unwrap_or_else(Instant::now);
 
     loop {
+        // Re-detach the /nix/store bind each pass: if the host re-bound it (a
+        // nixos-rebuild activation), the new mount propagated into our slave
+        // namespace, and this reveals the underlying dir again so step 2 keeps
+        // hardlinking instead of falling back to EXDEV.
+        if !test_mode() {
+            reveal_host_store()?;
+        }
         converge_pass(&store_base, quota.as_ref(), &mut quota_applied)?;
 
         if !test_mode() && last_gc.elapsed() >= GC_INTERVAL {
@@ -480,10 +564,10 @@ fn converge(
             if is_exdev(&e) {
                 HOST_RELINK_DISABLED.store(true, Ordering::Relaxed);
                 eprintln!(
-                    "cav-store: cannot hardlink into the host /nix/store (EXDEV): it is a \
-                     separate mount point (NixOS mounts it as a read-only bind mount), and \
-                     link() refuses to cross a mount boundary even on the same filesystem. \
-                     host<->shared dedup disabled; cross-cave dedup unaffected"
+                    "cav-store: cannot hardlink into the host /nix/store (EXDEV) even after \
+                     detaching its bind mount, so /nix is genuinely a different filesystem \
+                     from the shared store. host<->shared dedup disabled; cross-cave dedup \
+                     unaffected"
                 );
             } else {
                 return Err(e);
@@ -540,13 +624,8 @@ fn is_exdev(e: &anyhow::Error) -> bool {
     e.chain().any(|c| {
         c.downcast_ref::<std::io::Error>()
             .and_then(|io| io.raw_os_error())
-            == Some(libc_exdev())
+            == Some(libc::EXDEV)
     })
-}
-
-/// EXDEV without a libc dep: it is 18 on Linux.
-fn libc_exdev() -> i32 {
-    18
 }
 
 /// Recursively copy a tree (test-mode stand-in for `nix copy`).
