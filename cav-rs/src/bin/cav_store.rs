@@ -327,12 +327,12 @@ fn converge_pass(
     Ok(())
 }
 
-/// Converge one cave: hold its gc.lock (so its own GC can't delete a path out
-/// from under a hardlink) and converge each valid path. The lock is the single
-/// point where we write a live cave's store; nix's GC takes it exclusively, our
-/// shared lock coexists with the cave's normal operations. Fail-fast: the
-/// first path that errors aborts (the caller distinguishes a vanished cave
-/// from a real failure).
+/// Converge one cave: compute its runtime-live set, hold its gc.lock (so its
+/// own GC can't delete a path out from under a hardlink), and converge each
+/// live path. The lock is the single point where we write a live cave's store;
+/// nix's GC takes it exclusively, our shared lock coexists with the cave's
+/// normal operations. Fail-fast: the first path that errors aborts (the caller
+/// distinguishes a vanished cave from a real failure).
 fn converge_cave(
     state: &AgentState,
     shared_root: &Path,
@@ -340,8 +340,15 @@ fn converge_cave(
     host_store_dir: &Path,
     host_valid: &HashSet<String>,
 ) -> Result<()> {
-    let paths = read_valid_paths_retrying(&state.db_path)
-        .with_context(|| format!("read cave db for agent-{}", state.agent_id))?;
+    // Compute the live set BEFORE taking our shared lock: `--gc --print-live`
+    // acquires nix's GC lock, the same file our pass then holds shared, so
+    // computing it first avoids blocking on ourselves. In test mode there is no
+    // real nix, so nothing is filtered.
+    let live = if test_mode() {
+        None
+    } else {
+        Some(live_paths(&state.cave_root)?)
+    };
 
     // In production hold the cave's gc.lock across the pass; in test mode there
     // is no real nix (and no gc.lock), so skip it.
@@ -351,15 +358,48 @@ fn converge_cave(
         Some(lock_cave_gc(&state.cave_root)?)
     };
 
+    converge_cave_paths(
+        state,
+        live.as_ref(),
+        shared_root,
+        shared_store_dir,
+        host_store_dir,
+        host_valid,
+    )
+}
+
+/// Converge each of the cave's valid paths, skipping any not in `live` when a
+/// live set is given. Split from converge_cave so a test can inject the live
+/// set without a real nix store. Fail-fast: the first failing path aborts.
+fn converge_cave_paths(
+    state: &AgentState,
+    live: Option<&HashSet<String>>,
+    shared_root: &Path,
+    shared_store_dir: &Path,
+    host_store_dir: &Path,
+    host_valid: &HashSet<String>,
+) -> Result<()> {
+    let paths = read_valid_paths_retrying(&state.db_path)
+        .with_context(|| format!("read cave db for agent-{}", state.agent_id))?;
+
     for path in &paths {
         let Some(name) = Path::new(path).file_name() else {
             continue;
         };
-        // Derivations stay cave-private. Importing a .drv makes nix check that
-        // the drv's whole input-drv closure is valid in the destination store,
-        // a guarantee a cave that has GC'd some inputs can't meet (a dangling
-        // .drv is legal in a store; only a transfer checks it). They are
-        // kilobyte recipes, so sharing them saves nothing anyway.
+        // Share only what the cave itself keeps. A path valid in the store but
+        // not reachable from its GC roots is a build-time-only input (a fetched
+        // source, a dep referenced only by a .drv) that the cave drops on its
+        // next GC. Promoting one is pure churn: the shared copy is orphaned the
+        // instant the cave collects the original, the shared GC reclaims it, and
+        // the next pass re-imports it, forever.
+        if live.is_some_and(|live| !live.contains(path)) {
+            continue;
+        }
+        // Derivations stay cave-private even when live. Importing a .drv makes
+        // nix check that the drv's whole input-drv closure is valid in the
+        // destination store, a guarantee a cave that has GC'd some inputs can't
+        // meet (a dangling .drv is legal in a store; only a transfer checks it).
+        // They are kilobyte recipes, so sharing them saves nothing anyway.
         if path.ends_with(".drv") {
             continue;
         }
@@ -370,6 +410,30 @@ fn converge_cave(
             .with_context(|| format!("converge {}", name.to_string_lossy()))?;
     }
     Ok(())
+}
+
+/// The cave's runtime-live store paths: everything reachable from its GC roots,
+/// which is exactly what the cave's own nix would keep. Used to skip build-time
+/// -only inputs (see converge_cave_paths) that would otherwise churn through the
+/// shared store. Runs as the cave owner — opening a writable store as root would
+/// seize it, like the other cave reads (see nix_as_owner).
+fn live_paths(cave_root: &Path) -> Result<HashSet<String>> {
+    let cave_uri = format!("local?root={}", cave_root.display());
+    let out = nix_as_owner("nix-store", cave_root)?
+        .args(["--store", &cave_uri, "--gc", "--print-live"])
+        .stderr(Stdio::piped())
+        .output()
+        .context("spawn nix-store --gc --print-live")?;
+    if !out.status.success() {
+        bail!(
+            "nix-store --gc --print-live on cave store: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect())
 }
 
 /// Resolved per-agent quota: the cap and the filesystem to set it on.
@@ -1223,13 +1287,54 @@ mod tests {
         );
         let drv_ino = ino(&state.store_dir.join(drv).join("content"));
 
-        converge_cave(&state, &shared_root, &shared_store_dir,
-                      &host_store_dir, &host_valid).unwrap();
+        converge_cave_paths(&state, None, &shared_root, &shared_store_dir,
+                            &host_store_dir, &host_valid).unwrap();
         assert_eq!(ino(&state.store_dir.join(drv).join("content")), drv_ino,
                    "a .drv must stay cave-private, not collapse onto shared");
         assert_eq!(ino(&state.store_dir.join(pkg).join("content")),
                    ino(&shared_store_dir.join(pkg).join("content")),
                    "the normal path in the same pass should still converge");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Build-time-only inputs (a valid `-source` the cave will GC, not in its
+    /// live set) must not converge, or they churn: promoted, orphaned when the
+    /// cave collects them, GC'd from shared, re-imported next pass. A live path
+    /// in the same call still converges.
+    #[test]
+    fn converge_cave_skips_non_live_paths() {
+        let tmp = std::env::temp_dir().join(format!("cav-live-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let shared_root = tmp.join("shared");
+        let shared_store_dir = shared_root.join("nix").join("store");
+        let host_store_dir = tmp.join("no-host");
+        let host_valid = HashSet::new();
+        let source = "44444444444444444444444444444444-source";
+        let pkg = "55555555555555555555555555555555-pkg";
+        for name in [source, pkg] {
+            std::fs::create_dir_all(shared_store_dir.join(name)).unwrap();
+            std::fs::write(shared_store_dir.join(name).join("content"), b"data").unwrap();
+        }
+
+        let state = make_cave(&tmp.join("agent-1"));
+        install_in_cave(&state, source, b"data");
+        install_in_cave(&state, pkg, b"data");
+        std::fs::create_dir_all(state.db_path.parent().unwrap()).unwrap();
+        write_valid_paths_db(
+            &state.db_path,
+            &[&format!("/nix/store/{source}"), &format!("/nix/store/{pkg}")],
+        );
+        // Only pkg is live; the source is valid but unreferenced by any root.
+        let live: HashSet<String> = [format!("/nix/store/{pkg}")].into_iter().collect();
+        let source_ino = ino(&state.store_dir.join(source).join("content"));
+
+        converge_cave_paths(&state, Some(&live), &shared_root, &shared_store_dir,
+                            &host_store_dir, &host_valid).unwrap();
+        assert_eq!(ino(&state.store_dir.join(source).join("content")), source_ino,
+                   "a non-live build input must stay cave-private, not collapse onto shared");
+        assert_eq!(ino(&state.store_dir.join(pkg).join("content")),
+                   ino(&shared_store_dir.join(pkg).join("content")),
+                   "the live path in the same call should still converge");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -1259,8 +1364,8 @@ mod tests {
             std::fs::set_permissions(state.store_dir.join(pkg),
                                      std::fs::Permissions::from_mode(mode)).unwrap();
         };
-        let run = || converge_cave(&state, &shared_root, &shared_store_dir,
-                                   &host_store_dir, &host_valid);
+        let run = || converge_cave_paths(&state, None, &shared_root, &shared_store_dir,
+                                         &host_store_dir, &host_valid);
         chmod(0o555);
         assert!(run().is_err(), "a failing path must abort the pass with Err");
 

@@ -77,8 +77,9 @@ already has, but it never becomes a second copy on disk.
 ## Convergence
 
 The daemon (`cav-store watch`, the ExecStart of the systemd unit) runs a
-timer loop. Each pass walks every cave store and, for each valid path in
-it, runs one idempotent `converge` operation:
+timer loop. Each pass walks every cave store and, for each path the cave
+keeps (its runtime-live set, see below), runs one idempotent `converge`
+operation:
 
 1. **Ensure the shared copy exists.** If the host has the path, import it
    (and its closure) straight from the host store: the host is trusted, so
@@ -105,10 +106,10 @@ inode. There is no state to keep and no invariant that inodes never move —
 the earlier design depended on exactly that invariant, and a single moved
 inode silently stranded every cave onto a dead copy until the disk filled.
 
-A full pass is cheap: it is readdir + a sqlite read per cave + stat-guarded
-hardlinks, and the stat guard turns an already-deduped tree into a walk that
-writes nothing. The first pass after a deploy does the real import and link
-work; later passes are nearly all skips.
+A full pass is cheap: per cave it is a live-set query, a sqlite read, and
+stat-guarded hardlinks, and the stat guard turns an already-deduped tree into
+a walk that writes nothing. The first pass after a deploy does the real import
+and link work; later passes are nearly all skips.
 
 **Error policy: fail loudly and fast.** The first serious error — a failed
 import or hardlink, an unreadable DB, a GC or quota failure — exits the
@@ -119,12 +120,22 @@ the disk filled the first time). Only normal lifecycle is a non-error: a
 cave or path vanishing mid-pass (`cav gc` removing it), an unsigned local
 build staying private behind the gate.
 
-One class is excluded rather than failed on: **derivations (`.drv`) stay
-cave-private.** Importing a `.drv` makes nix check that its entire
-input-drv closure is valid in the destination store, and a cave that has
-garbage-collected some inputs can't meet that (a dangling `.drv` is legal
-in a store; only a transfer checks it). They are kilobyte build recipes,
-so sharing them saves nothing.
+Two classes are excluded rather than failed on. **Non-live paths stay
+cave-private.** A pass converges only a cave's runtime-live set — the paths
+reachable from its GC roots, which is exactly what the cave's own nix keeps
+(`nix-store --gc --print-live`, run as the cave owner before the pass takes
+its shared lock, since it acquires nix's GC lock). A path valid in the store
+but not live is a build-time-only input — a fetched source, a dep referenced
+only by a `.drv` — that the cave drops on its next GC. Promoting one is pure
+churn: the shared copy is orphaned the instant the cave collects the
+original, the hourly shared GC reclaims it, and the next pass re-imports it,
+in a steady delete/re-import cycle that shares nothing durable.
+
+**Derivations (`.drv`) stay cave-private** even when live. Importing a `.drv`
+makes nix check that its entire input-drv closure is valid in the destination
+store, and a cave that has garbage-collected some inputs can't meet that (a
+dangling `.drv` is legal in a store; only a transfer checks it). They are
+kilobyte build recipes, so sharing them saves nothing.
 
 ### Concurrency
 
