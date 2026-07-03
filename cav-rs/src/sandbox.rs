@@ -1,10 +1,9 @@
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::os::fd::{AsRawFd, IntoRawFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
@@ -765,12 +764,22 @@ fn crinj_listening() -> bool {
     std::net::TcpStream::connect(format!("127.0.0.1:{CRINJ_PORT}")).is_ok()
 }
 
+/// Directory holding all crinj runtime state: the pid file, the session
+/// refcount dir, and per-instance logs.
+fn crinj_dir() -> PathBuf {
+    config::data_dir().join("crinj")
+}
+
 fn crinj_sessions_dir() -> PathBuf {
-    config::data_dir().join("crinj-sessions")
+    crinj_dir().join("sessions")
+}
+
+fn crinj_logs_dir() -> PathBuf {
+    crinj_dir().join("logs")
 }
 
 fn crinj_pid_file() -> PathBuf {
-    config::data_dir().join("crinj.pid")
+    crinj_dir().join("pid")
 }
 
 fn crinj_signal(sig: Signal) {
@@ -908,15 +917,110 @@ impl CrinjLevel {
     }
 }
 
-/// Shared state between cav's main thread and the crinj-stderr drain thread.
+/// Handle to the crinj log for the instance this cav spawned. Each instance
+/// logs to its own timestamp-named file, so the file holds exactly the
+/// current instance's output; events are read from it on demand rather than
+/// streamed.
 struct CrinjState {
-    /// Live-mirror gate. While true, the drain thread prints WARN/ERROR (and
-    /// INFO when -v) to cav's stderr. Flipped false right before claude is
-    /// exec'd: from then on, crinj output goes only to the log file.
-    mirror: AtomicBool,
-    /// Every event seen, pretty-rendered. Used for the startup-failure dump
-    /// (entire log) and for the at-exit replay (warnings only).
-    events: Mutex<Vec<(CrinjLevel, String)>>,
+    log_path: PathBuf,
+}
+
+/// Name for a new crinj instance's log file, e.g. `crinj-20260705-093042.log`.
+/// Local time, zero-padded so names sort chronologically.
+fn crinj_log_name() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0) as libc::time_t;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe { libc::localtime_r(&secs, &mut tm) };
+    format!(
+        "crinj-{:04}{:02}{:02}-{:02}{:02}{:02}.log",
+        tm.tm_year + 1900,
+        tm.tm_mon + 1,
+        tm.tm_mday,
+        tm.tm_hour,
+        tm.tm_min,
+        tm.tm_sec,
+    )
+}
+
+/// Delete all but the newest `keep` crinj logs in `dir`. The timestamp
+/// names sort chronologically, so lexicographic order is age order.
+fn prune_crinj_logs(dir: &Path, keep: usize) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut logs: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            let name = p.file_name().unwrap_or_default().to_string_lossy();
+            name.starts_with("crinj-") && name.ends_with(".log")
+        })
+        .collect();
+    logs.sort();
+    for old in logs.iter().rev().skip(keep) {
+        let _ = std::fs::remove_file(old);
+    }
+}
+
+/// Render every line crinj has logged this session.
+fn read_crinj_events(state: &CrinjState) -> Vec<(CrinjLevel, String)> {
+    let Ok(text) = std::fs::read_to_string(&state.log_path) else {
+        return Vec::new();
+    };
+    text.lines().map(render_crinj_event).collect()
+}
+
+/// Right before claude takes over the terminal: surface what crinj logged
+/// during boot (WARN/ERROR, or everything with -v). Anything crinj logs
+/// after this lands only in the log file and gets replayed at session exit
+/// if it's a warning/error.
+fn print_crinj_boot_events(state: &CrinjState) {
+    let threshold = if config::verbose() >= 1 {
+        CrinjLevel::Info
+    } else {
+        CrinjLevel::Warn
+    };
+    for (level, pretty) in read_crinj_events(state) {
+        if level >= threshold {
+            eprintln!("{pretty}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod crinj_log_tests {
+    use super::*;
+
+    #[test]
+    fn prune_keeps_newest_logs() {
+        let dir = std::env::temp_dir().join(format!("prune-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        for name in [
+            "crinj-20260101-000000.log",
+            "crinj-20260102-000000.log",
+            "crinj-20260103-000000.log",
+            "unrelated.txt",
+        ] {
+            std::fs::write(dir.join(name), "x").unwrap();
+        }
+        prune_crinj_logs(&dir, 2);
+        assert!(!dir.join("crinj-20260101-000000.log").exists());
+        assert!(dir.join("crinj-20260102-000000.log").exists());
+        assert!(dir.join("crinj-20260103-000000.log").exists());
+        assert!(dir.join("unrelated.txt").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn log_name_is_timestamped() {
+        let name = crinj_log_name();
+        assert!(name.starts_with("crinj-20"));
+        assert!(name.ends_with(".log"));
+        assert_eq!(name.len(), "crinj-20260705-093042.log".len());
+    }
 }
 
 /// Render one JSON-formatted crinj log line into a human-readable form.
@@ -990,7 +1094,7 @@ mod render_crinj_event_tests {
     }
 }
 
-fn start_crinj() -> Result<(Option<std::process::Child>, Option<Arc<CrinjState>>)> {
+fn start_crinj() -> Result<(Option<std::process::Child>, Option<CrinjState>)> {
     if !which_exists("crinj") {
         bail!("crinj not found on PATH");
     }
@@ -1009,8 +1113,16 @@ fn start_crinj() -> Result<(Option<std::process::Child>, Option<Arc<CrinjState>>
         let _ = std::fs::create_dir_all(rules.parent().unwrap());
         let _ = std::fs::File::create(&rules);
     }
-    let _ = std::fs::create_dir_all(config::data_dir());
-    let log_path = config::data_dir().join("crinj.log");
+    let logs_dir = crinj_logs_dir();
+    let _ = std::fs::create_dir_all(&logs_dir);
+    // crinj outlives this cav process (session refcount), so it must own its
+    // log destination: --log-file makes crinj write the log itself, with
+    // nothing routed through cav. A stderr pipe's reader would die with cav
+    // and crinj's next log write would hit EPIPE. Each instance gets a
+    // timestamp-named file, so a crashed instance's log survives its
+    // replacement starting up.
+    prune_crinj_logs(&logs_dir, 9);
+    let log_path = logs_dir.join(crinj_log_name());
     use std::os::unix::process::CommandExt;
     let mut cmd = Command::new("crinj");
     cmd.args([
@@ -1018,10 +1130,12 @@ fn start_crinj() -> Result<(Option<std::process::Child>, Option<Arc<CrinjState>>
         &CRINJ_PORT.to_string(),
         "--allow-empty-rules",
         "--log-format=json",
+        "--log-file",
     ])
+    .arg(&log_path)
     .stdin(Stdio::null())
     .stdout(Stdio::null())
-    .stderr(Stdio::piped());
+    .stderr(Stdio::null());
     // Detach crinj into its own session so terminal signals to the spawning
     // cave's terminal (Ctrl-C SIGINT, close-time SIGHUP) can't reach it. The
     // cave itself is shielded by bwrap --new-session, but crinj sits in cav's
@@ -1034,57 +1148,17 @@ fn start_crinj() -> Result<(Option<std::process::Child>, Option<Arc<CrinjState>>
         });
     }
     let mut proc = cmd.spawn()?;
-
-    let stderr = proc.stderr.take().expect("piped stderr");
-    let state = Arc::new(CrinjState {
-        mirror: AtomicBool::new(true),
-        events: Mutex::new(Vec::new()),
-    });
-    let state_thread = Arc::clone(&state);
-    let drain = std::thread::spawn(move || {
-        let mut log = std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&log_path)
-            .ok();
-        let reader = BufReader::new(stderr);
-        for line in reader.lines() {
-            let Ok(line) = line else { break };
-            if let Some(f) = log.as_mut() {
-                let _ = writeln!(f, "{line}");
-            }
-            let (level, pretty) = render_crinj_event(&line);
-            if let Ok(mut v) = state_thread.events.lock() {
-                v.push((level, pretty.clone()));
-            }
-            if state_thread.mirror.load(Ordering::Relaxed) {
-                let threshold = if config::verbose() >= 1 {
-                    CrinjLevel::Info
-                } else {
-                    CrinjLevel::Warn
-                };
-                if level >= threshold {
-                    eprintln!("{pretty}");
-                }
-            }
-        }
-    });
+    let state = CrinjState { log_path };
 
     let start = Instant::now();
     let deadline = start + Duration::from_secs(5);
-    let mut drain = Some(drain);
     loop {
         if crinj_listening() {
             crate::log_debug!("crinj ready after {:.1}s", start.elapsed().as_secs_f64());
             break;
         }
         if let Some(status) = proc.try_wait()? {
-            // Pipe closes when crinj exits; the drain thread finishes promptly.
-            if let Some(h) = drain.take() {
-                let _ = h.join();
-            }
-            let events = state.events.lock().unwrap();
+            let events = read_crinj_events(&state);
             let dump = if events.is_empty() {
                 "(no log output)".to_string()
             } else {
@@ -1107,12 +1181,9 @@ fn start_crinj() -> Result<(Option<std::process::Child>, Option<Arc<CrinjState>>
 
 /// At session shutdown: if crinj logged any warnings or errors during this
 /// run, print a one-time replay so the user notices issues that scrolled
-/// past during boot or happened silently after the live mirror was muted.
+/// past during boot or happened silently while claude held the terminal.
 fn print_crinj_session_warnings(state: &CrinjState) {
-    let events = match state.events.lock() {
-        Ok(g) => g,
-        Err(_) => return,
-    };
+    let events = read_crinj_events(state);
     let alerts: Vec<&String> = events
         .iter()
         .filter(|(l, _)| *l >= CrinjLevel::Warn)
@@ -2398,11 +2469,8 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
         }
     }
 
-    // Stop streaming crinj logs to the terminal once we hand off to claude.
-    // Anything crinj logs from here on lands in crinj.log and gets replayed
-    // at session exit if it's a warning/error.
     if let Some(ref s) = crinj_state {
-        s.mirror.store(false, Ordering::Relaxed);
+        print_crinj_boot_events(s);
     }
     crate::log_info!("launching sandbox...");
     let mut proc = proc_cmd.spawn()?;
