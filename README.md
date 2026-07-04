@@ -25,7 +25,7 @@ Import `nixosModules.codingCave` into your system configuration (e.g. in `nixosC
 inputs.coding-cave.nixosModules.codingCave
 ```
 
-Then `sudo nixos-rebuild switch`. That installs `cav` system-wide and brings up `coding-cave-host.service`, which provides the idmapped `/nix/store` mount caves consume as overlayfs lowerdir. Verify with `systemctl status coding-cave-host` and `cav --help`.
+Then `sudo nixos-rebuild switch`. That installs `cav` system-wide; there is no host service. Verify with `cav --help`.
 
 ### Development install
 
@@ -39,7 +39,7 @@ Installs `cav-debug` (dev profile, with `-v` timing logs and debug assertions) i
 
 ### Non-NixOS hosts
 
-Not yet supported by the install path. The host module is NixOS-specific; a future `cav install-host` subcommand will drop the equivalent systemd unit on other distros. For now, port the contents of `modules/host.nix` to your distro's service manager by hand.
+The host module is NixOS-specific, but it only installs the `cav` package; on another distro, install `cav` onto the PATH by any means (e.g. `nix profile install`).
 
 ## Shell completion
 
@@ -54,75 +54,6 @@ Add the matching line to your shell startup file:
 - bash (`~/.bashrc`): `eval "$(cav completion bash)"`
 - zsh (`~/.zshrc`): `eval "$(cav completion zsh)"`
 - fish (`~/.config/fish/config.fish`): `cav completion fish | source`
-
-## Per-agent disk quotas
-
-Every cave's writable storage (its home, its nix overlay upper, its
-per-cave nix database) lives on one shared host filesystem. Without a
-cap, a single runaway or hostile agent can fill that filesystem, and
-because the cave nix databases live there too, a full disk breaks nix
-for every cave at once. An optional per-agent quota bounds the blast
-radius to one agent.
-
-Quotas are off by default and enforced with ext4 project quotas. There
-are two independent caps: `perAgentQuota` (each agent's nix overlay and
-its workspace clones) and `sharedHomeQuota` (one global limit on the
-shared cave home, since sibling agents share a home). Both are inactive
-until you set a size. Once set, they require project quota on the
-filesystem; if a quota is configured but the filesystem can't enforce
-it, `coding-cave-host` refuses to start rather than run unprotected.
-
-To enable it:
-
-1. Turn on the ext4 `project` and `quota` features on the filesystem
-   that holds the cave state (the one where `~/.local/share/coding-cave`
-   lives, typically your home or root volume). This is a one-time offline
-   step, run from a rescue or installer boot where that filesystem is
-   unmounted. It cannot be done declaratively on an existing filesystem.
-
-   Find its device with `findmnt`, then enable the features:
-
-   ```
-   $ findmnt -no SOURCE /home          # the backing device, e.g. /dev/sda2
-   $ sudo e2fsck -f <device>
-   $ sudo tune2fs -O project,quota -Q prjquota <device>
-   ```
-
-   Back up first, or take a snapshot if your storage supports it (LVM,
-   btrfs, ZFS). The fsck on a large volume takes a while.
-
-2. Mount that filesystem with `prjquota` (declarative, in your host
-   config). NixOS merges this with the device and `fsType` from your
-   generated hardware configuration:
-
-   ```nix
-   fileSystems."/home".options = [ "prjquota" ];
-   ```
-
-3. Set the caps you want (both default to `null` = inactive):
-
-   ```nix
-   services.codingCave.perAgentQuota = "10G";    # per agent: overlay + workspace
-   services.codingCave.sharedHomeQuota = "20G";  # whole shared cave home
-   ```
-
-4. `sudo nixos-rebuild switch` and reboot, then verify:
-
-   ```
-   $ findmnt -o TARGET,OPTIONS /home   # OPTIONS lists prjquota
-   $ sudo repquota -P /home            # project quota report
-   ```
-
-If you reinstall the host with disko, you can bake the features and
-mount option into the disk layout directly instead of step 1.
-
-**With no quota configured** (the default), coding-cave behaves exactly
-as it does today: no project-quota requirement, nothing probed, no
-enforcement. **With a quota configured**, the service probes the
-cave-state filesystem at startup and refuses to start if project quota
-isn't active there, so a misconfiguration is loud rather than silently
-unprotected. Once running, applying a cap is best-effort and never on
-the launch, promote, or sync path, so it can't wedge an agent.
 
 ## Quickstart
 

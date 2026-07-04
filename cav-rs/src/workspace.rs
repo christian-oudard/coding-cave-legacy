@@ -15,19 +15,18 @@ pub fn worktree_for(slug: &str, agent_id: &str) -> PathBuf {
     config::worktree_dir(slug, key.as_deref().unwrap_or(agent_id))
 }
 
-/// The base dir holding every per-cave nix store. Resolves through
-/// [`crate::store_paths::cave_stores_base`] — the single definition the host
-/// manager (`cav-store`) also watches, so the two can't desync. A fixed
-/// `/var/lib/coding-cave/nix-stores` (not under `$HOME`): nix stores are
-/// system-level, and a fixed path lets the root daemon find them without
-/// knowing which user runs caves.
+/// The base dir holding every per-cave nix store, a sibling of the worktrees
+/// under the user's data dir. The launcher creates each cave's store here
+/// itself; no privileged setup is involved. Tests point it at a tmp dir via
+/// `CODING_CAVE_NIX_STORES_DIR`.
 pub fn cave_store_base() -> PathBuf {
-    crate::store_paths::cave_stores_base()
+    std::env::var_os("CODING_CAVE_NIX_STORES_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| config::data_dir().join("nix-stores"))
 }
 
-/// One cave's private nix chroot store: `<data>/store/agent-<key>`. Keyed by
-/// agent uuid (like the worktree and overlay dirs) so the host manager's
-/// per-agent quota dirs line up. The cave runs `nix` against this as
+/// One cave's private nix chroot store: `<base>/agent-<key>`. Keyed by
+/// agent uuid (like the worktree dirs). The cave runs `nix` against this as
 /// `local?root=<this>`, so its paths are logically `/nix/store/...`. Pure.
 pub fn cave_store_root_for(agent_id: &str) -> PathBuf {
     let base = cave_store_base();
@@ -475,11 +474,10 @@ mod tests {
     }
 
     #[test]
-    fn cave_store_root_matches_manager_layout() {
-        // The host manager (cav-store) watches `<base>/agent-<id>` as a chroot
-        // store; the cave side must produce the same path. Serialize on the
-        // shared data-dir lock and use an agent id with no registry uuid so
-        // the fallback (display-id keying) is deterministic without a database.
+    fn cave_store_root_layout() {
+        // Serialize on the shared data-dir lock and use an agent id with no
+        // registry uuid so the fallback (display-id keying) is deterministic
+        // without a database.
         let g = crate::test_util::DataDirGuard::new("cave-store-root");
         assert_eq!(cave_store_base(), g.stores());
         assert_eq!(

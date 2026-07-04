@@ -53,9 +53,8 @@ Agents can launch their own agents, creating a subcave one level deeper. Each le
 
 Each agent runs in bubblewrap sandbox.
 - The development environment is a standard POSIX environment and Bash shell.
-- Agents can install Nix packages. A package is stored once on disk and shared by the host and all caves, never re-downloaded or duplicated per agent. A package one agent installs becomes available to the other agents promptly, without waiting for the installing agent's session to end, so redundant copies do not persist on disk.
-- An agent cannot write arbitrary content into the host's packages or another agent's. Content an agent installs never enters the host's own packages; it becomes available to another agent only when its contents match its recorded hash or a trusted signature, so no agent can make others trust forged content.
-- An agent's writable storage can optionally be capped, so one agent cannot exhaust the shared host disk. Two independent caps are available: a per-agent cap on each agent's writable package storage and workspace, and a single cap on the shared cave home. Caps are off unless configured. A configured cap that the host filesystem cannot enforce is a hard error, never a silent no-op.
+- Agents can install Nix packages with ordinary nix commands. Each cave has its own private package store, seeded at launch with the cave environment; packages are not shared between caves or with the host.
+- An agent cannot write into the host's packages or another agent's: each cave's store is private to that cave.
 - Project workspaces are mounted at `/projects/<slug>`.
 - A persistent shared home directory is at `/home/cave-coder`.
 - Agents sign commits with host GPG keys, through a forwarded GPG agent extra socket. The extra socket runs in restricted mode, allowing signing but blocking secret key export and other dangerous operations.

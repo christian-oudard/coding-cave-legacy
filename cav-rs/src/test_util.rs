@@ -32,10 +32,8 @@ impl DataDirGuard {
         }
         assert!(!path.as_os_str().is_empty(), "could not allocate tmp dir");
         std::env::set_var("CODING_CAVE_DATA_DIR", &path);
-        // Per-cave nix stores live at a fixed /var/lib path in production;
-        // redirect them under the tmp data dir so tests never touch the real
-        // system store. The launcher and cav-store both resolve through
-        // store_paths, so this one override keeps them in sync.
+        // Redirect the per-cave nix stores under the tmp data dir so tests
+        // never touch the user's real data dir.
         std::env::set_var("CODING_CAVE_NIX_STORES_DIR", path.join("nix-stores"));
         Self { _lock: lock, prev, prev_stores, path }
     }

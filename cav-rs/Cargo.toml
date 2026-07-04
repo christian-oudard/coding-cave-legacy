@@ -40,10 +40,6 @@ name = "cav-comms-channel-server"
 path = "src/bin/comms_channel_server.rs"
 
 [[bin]]
-name = "cav-store"
-path = "src/bin/cav_store.rs"
-
-[[bin]]
 name = "cav-host"
 path = "src/bin/cav_host.rs"
 

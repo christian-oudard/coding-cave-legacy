@@ -132,8 +132,7 @@ let
     # FHS library path for pre-built native extensions (libstdc++ etc.)
     "--setenv" "LD_LIBRARY_PATH" gccLib
     # Nix inside the cave. NIX_CONFIG is emitted by cav at launch (from the
-    # nixConfig field below) so a top-level cave can append the shared-store
-    # substituter; here we only set NIX_PATH.
+    # nixConfig field below); here we only set NIX_PATH.
     "--setenv" "NIX_PATH" "nixpkgs=${nixpkgs}"
 
     # Environment: belt-and-braces unsets. --clearenv preserves PWD by
@@ -242,7 +241,7 @@ let
   ];
 
   # Base nix.conf for the cave's own nix. cav emits this as NIX_CONFIG at
-  # launch; a top-level cave appends the shared-store substituter to it.
+  # launch.
   nixConfig = "sandbox = false\nexperimental-features = nix-command flakes\nbuild-users-group =";
 
   config = {

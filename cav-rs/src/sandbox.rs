@@ -447,14 +447,6 @@ fn build_bwrap_argv(
         let var = format!("{root}/nix/var");
         args.extend(["--bind".to_string(), store, "/nix/store".to_string()]);
         args.extend(["--bind".to_string(), var, "/nix/var".to_string()]);
-
-        // The cave does not substitute from the shared store. An unprivileged
-        // cave can't lock a root-owned store to substitute from it, and making
-        // the shared store writable to the cave would be a security hole. So
-        // caves fetch packages the normal way (binary cache or build); the
-        // store manager (cav-store) deduplicates identical paths across caves
-        // by hardlinking them onto a shared inode, so a re-fetched package
-        // still ends up as one copy on disk.
     }
     args.extend(["--setenv".to_string(), "NIX_CONFIG".to_string(), nix_config]);
 
@@ -1529,48 +1521,23 @@ fn seed_claude_config(home: &Path, project_slug_str: &str, comms: bool) {
     }
 }
 
-/// Populate a cave's own nix store with its environment closure before launch.
+/// Populate a cave's own nix store with the closures it needs before launch.
 ///
 /// Each cave runs ordinary nix against its private chroot store at
-/// `<cave_root>` (bound to /nix/store + /nix/var inside the sandbox). The
-/// closure that must be present for the cave to function — the user-env /
-/// claude-code closure — lives in the host store, so we `nix copy` it across
-/// and register a GC root so nix never collects it. No idmap and no DB seed:
-/// nix manages the cave store's database itself.
-///
-/// `nix copy` is incremental: paths already in the cave store (from a prior
-/// launch or substituted from the shared store) are skipped, so this is cheap
-/// on resume. Returns the cave store root for the env/bwrap wiring.
-/// Seed the cave's private chroot store with the closures it needs and root
-/// each so the cave's own GC never collects them. Two distinct concerns:
+/// `<cave_root>` (bound to /nix/store + /nix/var inside the sandbox); nix
+/// manages the store's database itself. Two closures are seeded from the host
+/// store and GC-rooted so the cave's own GC never collects them:
 ///   - cave infrastructure: the cav package itself (cav-host,
 ///     cav-comms-channel-server, cav-git, ...), referenced by absolute store
 ///     path via CODING_CAVE_BIN and the comms MCP server. Every cave needs it,
-///     independent of cave.nix; with no shared-store substituter, copying it
-///     here is the only way it reaches the per-cave store.
+///     independent of cave.nix.
 ///   - the user environment: the user-env / claude-code closure built from
 ///     cave.nix (absent on a first run that produced nothing).
-/// `nix copy` is incremental, so this is cheap on resume.
+/// `nix copy` is incremental, so this is cheap on resume. Returns the cave
+/// store root for the env/bwrap wiring.
 fn populate_cave_store(agent_id: &str, user_env: Option<&Path>) -> Result<PathBuf> {
     let cave_root = workspace::cave_store_root_for(agent_id);
-    // The per-cave store base is a sticky, world-writable dir the host store
-    // manager creates under root-owned /var/lib. The launcher runs unprivileged
-    // and can create its own agent-<id> store under that base, but cannot
-    // create the base itself. If the base is missing (manager never ran), the
-    // create below fails with EACCES under /var/lib; turn that into a clear
-    // message instead of an opaque permissions error.
-    if let Err(e) = std::fs::create_dir_all(cave_root.join("nix").join("store")) {
-        let base = workspace::cave_store_base();
-        if !base.exists() {
-            bail!(
-                "per-cave nix store base {} does not exist and could not be \
-                 created ({e}); the host store manager must create it (start \
-                 coding-cave-host.service, or run `cav-store setup` as root)",
-                base.display()
-            );
-        }
-        return Err(e.into());
-    }
+    std::fs::create_dir_all(cave_root.join("nix").join("store"))?;
     std::fs::create_dir_all(cave_root.join("nix").join("var").join("nix"))?;
     let cave_uri = format!("local?root={}", cave_root.display());
 

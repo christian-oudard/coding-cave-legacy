@@ -156,19 +156,18 @@
 
           # Instantiates the host NixOS module so a broken module or broken
           # flake wiring fails here (and `nix flake check`) instead of at a
-          # user's nixos-rebuild. Forcing the rendered config string forces
-          # the whole module fixpoint without building the system or cav, so
+          # user's nixos-rebuild. Forcing the installed package names forces
+          # the module fixpoint without building the system or cav, so
           # `nix eval .#checks.<sys>.hostModuleEval.drvPath` is a cheap,
           # build-free, tree-accurate gate (see check_module.sh).
           hostModuleEval =
-            let probe = (nixpkgs.lib.nixosSystem {
+            let probe = builtins.concatStringsSep "\n" (map (p: p.name) (nixpkgs.lib.nixosSystem {
                   system = pkgs.stdenv.hostPlatform.system;
                   modules = [
                     self.nixosModules.codingCave
-                    { boot.isContainer = true; system.stateVersion = "24.11";
-                      services.codingCave = { perAgentQuota = "10G"; sharedHomeQuota = "20G"; }; }
+                    { boot.isContainer = true; system.stateVersion = "24.11"; }
                   ];
-                }).config.environment.etc."coding-cave/host.json".text;
+                }).config.environment.systemPackages);
             in pkgs.runCommand "host-module-eval" { inherit probe; } "printf '%s' \"$probe\" > $out";
 
         in {

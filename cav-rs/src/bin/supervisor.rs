@@ -1,7 +1,6 @@
 /// Namespace supervisor: signals the parent, disables tty suspend, runs bwrap,
 /// and waits. Runs as PID 1 inside a user+mount+pid+net namespace created by
-/// unshare(1). Each cave now uses its own nix store (bound by bwrap), so the
-/// supervisor no longer mounts an overlay or shadows host lock files.
+/// unshare(1). Each cave uses its own nix store, bound by bwrap.
 use std::os::fd::{BorrowedFd, FromRawFd, OwnedFd};
 use std::process::{exit, Command};
 #[cfg(debug_assertions)]
