@@ -15,6 +15,15 @@
 { pkgs, nixpkgs, cavSeccompGen }:
 
 let
+  # The cave's locale is hardcoded to en_US.UTF-8 (LANG below), so ship only
+  # that locale, not the full glibcLocales set (~233MB). LOCALE_ARCHIVE is a
+  # string in this config's JSON, so whatever it points at is reference-scanned
+  # into the cav closure and copied into every cave store.
+  locales = pkgs.glibcLocales.override {
+    allLocales = false;
+    locales = [ "en_US.UTF-8/UTF-8" ];
+  };
+
   # ---- Static files bound into the cave ----
 
   # Static /etc/passwd and /etc/group. Without these the cave inherits the
@@ -127,7 +136,7 @@ let
     "--setenv" "LOGNAME" "cave-coder"
     "--setenv" "SHELL" "${pkgs.bashInteractive}/bin/bash"
     "--setenv" "LANG" "en_US.UTF-8"
-    "--setenv" "LOCALE_ARCHIVE" "${pkgs.glibcLocales}/lib/locale/locale-archive"
+    "--setenv" "LOCALE_ARCHIVE" "${locales}/lib/locale/locale-archive"
     "--setenv" "TERMINFO_DIRS" "${pkgs.ncurses}/share/terminfo"
     # FHS library path for pre-built native extensions (libstdc++ etc.)
     "--setenv" "LD_LIBRARY_PATH" gccLib

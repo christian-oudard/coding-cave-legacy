@@ -123,7 +123,11 @@
                   --set-default CODING_CAVE_BUILD_CONFIG \
                     "$out/share/coding-cave/build.json" \
                   --prefix PATH : ${pkgs.lib.makeBinPath [
-                    pkgs.git pkgs.gnupg pkgs.socat pkgs.slirp4netns pkgs.iptables
+                    # gitMinimal, not git: cav's own git ops (worktrees, hooks,
+                    # refs) need no python/perl, which full git drags in (~190MB
+                    # into every cave store). An agent that wants full git gets
+                    # it from its cave.nix.
+                    pkgs.gitMinimal pkgs.gnupg pkgs.socat pkgs.slirp4netns pkgs.iptables
                     pkgs.util-linux
                     crinj.packages.${pkgs.stdenv.hostPlatform.system}.default
                   ]}
