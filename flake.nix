@@ -24,6 +24,7 @@
             git
             python3      # config parsing (tomllib)
             jq
+            go           # cave-vm module (host + guestd binaries)
           ];
         };
       });
