@@ -37,7 +37,7 @@
   # The guest DHCPs on its single NIC (QEMU user-net / passt). crinj on the
   # host is the only sanctioned egress; point every proxy-aware tool at it.
   # The gateway 10.0.2.2 is the host as seen from QEMU user networking.
-  networking.hostName = "cave-guest";
+  networking.hostName = "coding-cave";
   networking.useDHCP = true;
   networking.firewall.enable = false;
 
@@ -238,7 +238,8 @@
       # claude refuses --dangerously-skip-permissions as root ("cannot be
       # used with root/sudo privileges") unless it sees an already-sandboxed
       # environment. The VM is that sandbox, so declare it; without this the
-      # agent starts and immediately exits.
+      # agent starts and immediately exits. `vmcav agent` sets the same when
+      # it launches claude interactively; a plain `vmcav shell` does not.
       IS_SANDBOX = "1";
     };
     serviceConfig = {
