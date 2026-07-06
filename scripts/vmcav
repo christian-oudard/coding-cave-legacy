@@ -1,0 +1,213 @@
+#!/usr/bin/env bash
+# vmcav: manual lifecycle for the cave-guest VM.
+#
+#   vmcav start [--fresh]   build + launch the VM detached (idempotent)
+#   vmcav stop              ACPI power-down (SIGTERM/SIGKILL fallback)
+#   vmcav status            report up/down
+#   vmcav shell [cmd...]    ssh into the guest (no cmd -> interactive shell)
+#
+# The VM is long-running: `start` detaches it (new session) so it survives the
+# shell, and returns. Shutdown is manual via `stop`. Bootstrap-era shell;
+# migrates into the Go cave-vm binary later (see ../vm-cave-design.md).
+set -euo pipefail
+
+# Resolve through symlinks so vmcav works when linked onto PATH (e.g.
+# ~/.local/bin/vmcav -> repo/scripts/vmcav); it builds the repo's guest flake,
+# so it must find the repo relative to its real location. Override with REPO=.
+SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+REPO="${REPO:-$(cd "$(dirname "$SELF")/.." && pwd)}"
+GUEST_FLAKE="$REPO/guest"
+CONFIG="${CODING_CAVE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/coding-cave/config.toml}"
+STATE_DIR="${STATE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/coding-cave/vm}"
+SSH_PORT="${SSH_PORT:-2222}"
+CRINJ_PORT="${CRINJ_PORT:-10255}"
+GIT_PORT="${GIT_PORT:-9418}"
+
+DISK="$STATE_DIR/cave-guest.qcow2"
+CONSOLE="$STATE_DIR/console.log"
+PIDFILE="$STATE_DIR/vm.pid"
+# QMP is an AF_UNIX socket (108-byte sun_path limit), so keep it short in /tmp
+# rather than under a possibly-long state dir; hash the state dir for
+# uniqueness across VMs.
+QMP="/tmp/vmcav-$(id -u)-$(printf '%s' "$STATE_DIR" | cksum | cut -d' ' -f1).qmp"
+FIFO="$STATE_DIR/console.in"
+SEED="$STATE_DIR/cave-host"
+SSHKEY="$STATE_DIR/agent_ssh_key"
+GITPID="$STATE_DIR/git-daemon.pid"
+
+log() { printf '[vmcav] %s\n' "$*" >&2; }
+
+# Max disk size in MiB, from config.toml (default 100 GB). Sparse, so the cap
+# is elastic; it consumes only what the guest writes.
+config_disk_mb() {
+  python3 - "$CONFIG" <<'PY'
+import sys, os, tomllib
+p = sys.argv[1]; cfg = {}
+if os.path.exists(p):
+    with open(p, "rb") as f: cfg = tomllib.load(f)
+print(int(cfg.get("vm", {}).get("disk_size_gb", 100)) * 1024)
+PY
+}
+
+vm_pid() { [ -f "$PIDFILE" ] && cat "$PIDFILE" 2>/dev/null || true; }
+is_running() { local p; p=$(vm_pid); [ -n "$p" ] && kill -0 "$p" 2>/dev/null; }
+
+# vmcav's tools come from the dev shell (flake.nix devShell). Fail early with
+# guidance rather than silently running degraded. qemu is not required here:
+# the guest VM build bakes it and the runner calls it by absolute path.
+require_tools() {
+  local missing="" t
+  for t in setsid ssh-keygen socat git python3; do
+    command -v "$t" >/dev/null 2>&1 || missing="$missing $t"
+  done
+  [ -z "$missing" ] && return
+  log "missing tools:$missing"
+  log "enter the dev shell first:  nix develop $REPO   (or 'use flake' in .envrc)"
+  exit 1
+}
+
+# Stage host-specific runtime files into the 9p seed share. The crinj CA is
+# mandatory: it is baked into the guest's system trust store at build time
+# (security.pki), so a missing CA is a hard error, not a warning, else the
+# build throws with a less obvious message.
+stage_seed() {
+  mkdir -p "$SEED"
+  local ca=""
+  for c in "$HOME/.crinj/gateway/ca.pem" \
+           "${XDG_DATA_HOME:-$HOME/.local/share}/crinj/gateway/ca.pem"; do
+    [ -f "$c" ] && { ca="$c"; break; }
+  done
+  [ -n "$ca" ] || { log "crinj CA not found (looked in ~/.crinj/gateway/ and"; \
+    log "  \$XDG_DATA_HOME/crinj/gateway/); start crinj first"; exit 1; }
+  cp -f "$ca" "$SEED/ca.pem"
+  [ -f "$HOME/.claude.json" ] && cp -f "$HOME/.claude.json" "$SEED/claude.json" || true
+  [ -f "$SSHKEY" ] || ssh-keygen -t ed25519 -N '' -f "$SSHKEY" -C vmcav >/dev/null
+  cp -f "$SSHKEY.pub" "$SEED/authorized_keys"
+}
+
+start_git_daemon() {
+  local parent; parent=$(dirname "$REPO")
+  pgrep -f "git daemon.*--base-path=$parent" >/dev/null 2>&1 && return
+  git daemon --reuseaddr --export-all --enable=upload-pack \
+    --base-path="$parent" --port="$GIT_PORT" --detach --pid-file="$GITPID" "$parent"
+  log "git daemon serving $parent on :$GIT_PORT"
+}
+stop_git_daemon() { [ -f "$GITPID" ] && { kill "$(cat "$GITPID")" 2>/dev/null || true; rm -f "$GITPID"; }; }
+
+crinj_reachable() { (exec 3<>"/dev/tcp/127.0.0.1/$CRINJ_PORT") 2>/dev/null; }
+
+do_status() {
+  if is_running; then
+    local p; p=$(vm_pid)
+    local since; since=$(ps -o lstart= -p "$p" 2>/dev/null | sed 's/^ *//')
+    echo "vm: running (pid $p, since ${since:-?})"
+    echo "shell: vmcav shell            # or: vmcav shell tmux attach -t agent"
+    echo "console: $CONSOLE"
+  else
+    echo "vm: stopped"
+  fi
+}
+
+# ssh into the guest as root. No args -> interactive shell; extra args run as
+# a command (e.g. `vmcav shell tmux attach -t agent`). Host-key checks are off
+# and known_hosts is /dev/null: it's a localhost port-forward to our own VM,
+# and the guest key rotates on --fresh, so verification is just friction.
+do_shell() {
+  is_running || { log "vm is not running (vmcav start)"; exit 1; }
+  command -v ssh >/dev/null 2>&1 || { log "ssh not found; enter the dev shell (use flake / nix develop)"; exit 1; }
+  exec ssh -t -i "$SSHKEY" \
+    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
+    -p "$SSH_PORT" root@127.0.0.1 "$@"
+}
+
+do_start() {
+  if is_running; then log "already running (pid $(vm_pid))"; do_status; return 0; fi
+  [ "${1:-}" = "--fresh" ] && { log "--fresh: removing $DISK"; rm -f "$DISK"; }
+  mkdir -p "$STATE_DIR"
+  require_tools
+  stage_seed; start_git_daemon
+  crinj_reachable && log "crinj reachable on :$CRINJ_PORT" \
+    || log "warning: crinj not reachable on 127.0.0.1:$CRINJ_PORT (no egress/auth for the agent)"
+
+  local disk_mb; disk_mb=$(config_disk_mb)
+  export CODING_CAVE_DISK_MB="$disk_mb"
+  # The guest bakes crinj's CA into its system trust store at build time, so
+  # the PEM must be present at eval; pass it via env (the build is --impure).
+  export CODING_CAVE_CRINJ_CA; CODING_CAVE_CRINJ_CA=$(cat "$SEED/ca.pem")
+  log "building guest (disk cap $((disk_mb / 1024)) GB, sparse)"
+  local runner_link="$STATE_DIR/vm-runner"
+  nix build --impure --extra-experimental-features 'nix-command flakes' \
+    "$GUEST_FLAKE#nixosConfigurations.cave-guest-dev.config.system.build.vm" \
+    --out-link "$runner_link"
+  local runner; runner=$(echo "$runner_link"/bin/run-*-vm)
+  [ -x "$runner" ] || { log "no runner at $runner"; return 1; }
+
+  export NIX_DISK_IMAGE="$DISK"
+  export USE_TMPDIR=1 TMPDIR="$STATE_DIR/run"; mkdir -p "$TMPDIR"
+  rm -f "$QMP"
+  # The runner already passes -machine accel=kvm:tcg (KVM if present, else
+  # TCG), so don't add -accel (they conflict). Detect only for the log.
+  local accel; [ -w /dev/kvm ] && accel=kvm || accel=tcg
+  export QEMU_OPTS="-qmp unix:$QMP,server,nowait -virtfs local,path=$SEED,mount_tag=cavehost,security_model=none,readonly=on"
+  export QEMU_NET_OPTS="hostfwd=tcp::${SSH_PORT}-:22"
+  [ -p "$FIFO" ] || { rm -f "$FIFO"; mkfifo "$FIFO"; }
+
+  # Detached launch. The child writes its own PID (which becomes qemu's after
+  # exec) to the pidfile, then execs the runner. stdin is the fifo opened
+  # read-write (0<>), so qemu holds a writer on it and its serial console
+  # never hits EOF (which would otherwise exit qemu at the login prompt).
+  # setsid puts it in a new session so it outlives this command.
+  log "starting vm (accel=$accel, detached)"
+  setsid bash -c 'echo $$ > "'"$PIDFILE"'"; exec "'"$runner"'" > "'"$CONSOLE"'" 2>&1' 0<>"$FIFO" &
+  disown 2>/dev/null || true
+
+  # Give the child a moment to write the pidfile and for qemu to survive early.
+  local i=0; while [ ! -s "$PIDFILE" ] && [ "$i" -lt 20 ]; do sleep 0.2; i=$((i+1)); done
+  if is_running; then
+    log "vm started (pid $(vm_pid)); watch: tail -f $CONSOLE"
+    log "attach once up: ssh -i $SSHKEY -p $SSH_PORT root@localhost"
+  else
+    log "vm failed to start; see $CONSOLE"; tail -8 "$CONSOLE" 2>/dev/null >&2; return 1
+  fi
+}
+
+do_stop() {
+  if ! is_running; then log "not running"; stop_git_daemon; rm -f "$PIDFILE" "$QMP"; return 0; fi
+  local p; p=$(vm_pid)
+  log "stopping vm (pid $p) via ACPI power-down"
+  if [ -S "$QMP" ] && command -v socat >/dev/null 2>&1; then
+    printf '%s\n' '{"execute":"qmp_capabilities"}' '{"execute":"system_powerdown"}' \
+      | timeout 5 socat - "UNIX-CONNECT:$QMP" >/dev/null 2>&1 || true
+  fi
+  # Wait for a clean shutdown, signalled by EITHER qemu exiting OR the guest
+  # reaching power-off in the console. Watching the console matters under TCG:
+  # the guest can finish unmounting and halt ("reboot: Power down") while the
+  # emulated qemu process lingers for a while; once that marker appears the
+  # disk is safely unmounted, so killing the halted qemu is safe. On KVM qemu
+  # just exits in seconds and the PID check returns first.
+  local i=0 clean=0
+  while [ "$i" -lt 240 ]; do
+    kill -0 "$p" 2>/dev/null || { clean=1; break; }
+    if sed 's/\x1b\[[0-9;?]*[a-zA-Z]//g' "$CONSOLE" 2>/dev/null \
+         | grep -qE "reboot: Power down|Reached target System Power Off"; then clean=1; break; fi
+    sleep 1; i=$((i + 1))
+  done
+  if [ "$clean" = 1 ]; then
+    log "guest powered down cleanly in ${i}s"
+    kill -0 "$p" 2>/dev/null && { kill "$p" 2>/dev/null || true; sleep 2; kill -9 "$p" 2>/dev/null || true; }
+  else
+    log "power-down did not complete in ${i}s; forcing SIGTERM/SIGKILL"
+    kill "$p" 2>/dev/null || true; sleep 3; kill -9 "$p" 2>/dev/null || true
+  fi
+  rm -f "$PIDFILE" "$QMP"
+  stop_git_daemon
+  log "vm stopped"
+}
+
+case "${1:-}" in
+  start) shift; do_start "$@" ;;
+  stop) do_stop ;;
+  status) do_status ;;
+  shell) shift; do_shell "$@" ;;
+  *) echo "usage: vmcav {start [--fresh]|stop|status|shell [cmd...]}" >&2; exit 2 ;;
+esac

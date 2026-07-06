@@ -1,0 +1,8 @@
+# Example coding-cave config. Copy to ~/.config/coding-cave/config.toml
+# (or $XDG_CONFIG_HOME/coding-cave/config.toml) and edit. vmcav reads it.
+
+[vm]
+# Maximum guest disk size, in GB. The image is sparse ("elastic"): it only
+# consumes what the guest actually writes, up to this cap. Applies when the
+# disk is first created; `vmcav start --fresh` recreates it at the new size.
+disk_size_gb = 100
