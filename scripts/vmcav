@@ -88,16 +88,22 @@ stage_seed() {
 
 start_git_daemon() {
   local parent; parent=$(dirname "$REPO")
-  # Install the committed pre-receive hook fresh every start, so the guard
-  # tracks the repo (can't drift out of sync with what's reviewed) and a
-  # stale hook from an old checkout never lingers. It's what makes
-  # --enable=receive-pack safe against the human's own live checkout:
-  # the guest may only fast-forward branches under refs/heads/agent-*/**.
-  install -m 755 "$REPO/scripts/git-hooks/pre-receive" "$REPO/.git/hooks/pre-receive"
+  # Install both committed hooks fresh every start, so the guard tracks the
+  # repo (can't drift from what's reviewed) and no stale hook lingers. This
+  # is what makes --enable=receive-pack safe against the human's own live
+  # checkout. pre-receive enforces the agent-branch rules; post-receive
+  # maintains the agent-tip high-water refs its force-push guard reads.
+  install -m 755 "$REPO/scripts/git-hooks/pre-receive"  "$REPO/.git/hooks/pre-receive"
+  install -m 755 "$REPO/scripts/git-hooks/post-receive" "$REPO/.git/hooks/post-receive"
   pgrep -f "git daemon.*--base-path=$parent" >/dev/null 2>&1 && return
+  # Inject the guest's agent identity into the daemon: git-daemon's
+  # receive-pack children and their hooks inherit this env, so the hook reads
+  # an id the sandbox cannot forge. One guest today = one identity (the root
+  # agent, 0); per-agent daemons/ports arrive with the multi-agent work.
+  CODING_CAVE_AGENT_ID="${AGENT_ID:-0}" \
   git daemon --reuseaddr --export-all --enable=upload-pack --enable=receive-pack \
     --base-path="$parent" --port="$GIT_PORT" --detach --pid-file="$GITPID" "$parent"
-  log "git daemon serving $parent on :$GIT_PORT (receive-pack gated by scripts/git-hooks/pre-receive)"
+  log "git daemon serving $parent on :$GIT_PORT (agent ${AGENT_ID:-0}; hooks pre/post-receive)"
 }
 stop_git_daemon() { [ -f "$GITPID" ] && { kill "$(cat "$GITPID")" 2>/dev/null || true; rm -f "$GITPID"; }; }
 

@@ -1,43 +1,78 @@
 #!/usr/bin/env bash
-# pre-receive: guards the host repo that git-daemon serves to the guest VM
-# (see ../vmcav) now that receive-pack is enabled.
+# pre-receive: branch protection for the host repo git-daemon serves to the
+# guest VM (see ../vmcav).
 #
-# The served repo is the human's own live checkout, not a dedicated bare
-# repo, so this is the only thing standing between "guest has network
-# access to git://" and "guest can rewrite the user's branches". Until the
-# vsock plane + per-agent ports exist (vm-cave-design.md phase 3/7), every
-# push from the guest looks identical (one guest, one daemon, no agent
-# identity), so the rule is namespace-only: agents may fast-forward-create
-# or fast-forward-update refs/heads/agent-*/**, nothing else. Cross-agent
-# branch isolation (agent A pushing agent B's branch) is deferred to that
-# later per-agent-port work, same known limitation as the container-cave
-# git-daemon design (docs/security/daemon-design.md on main).
-set -euo pipefail
+# Agent identity is CODING_CAVE_AGENT_ID, injected by the daemon (never sent
+# by the client), so it is unforgeable from inside the sandbox and the check
+# runs on the host, outside it. Empty id means the user, who is exempt: the
+# approve/merge flow runs as the user and must be able to move base branches.
+#
+# For an agent with id N:
+#   - may push only to branch refs (refs/heads/*), not tags/notes/replace
+#   - may not push any branch whose name contains HEAD (a known bug trap)
+#   - may push only within its own namespace, agent-N/<base>
+#   - may not push a base branch (main, ...); work waits there for approval
+#   - fast-forwards its own branch freely; a non-ff (force/rebase) is allowed
+#     only over history it itself pushed (agent-tip == old), so it cannot
+#     clobber the user's changes
+#   - may delete its own agent-N/* branch (cleanup); a delete skips the
+#     force-push guard
+# Until per-agent sockets exist, one guest shares one identity, so this gates
+# by namespace, not by distinguishing co-resident agents.
+set -uo pipefail
 
-zero="0000000000000000000000000000000000000000"
+zero=0000000000000000000000000000000000000000
+agent=${CODING_CAVE_AGENT_ID:-}
 status=0
+reject() { echo "pre-receive: REJECTED: $*" >&2; status=1; }
+
+is_ancestor() { git merge-base --is-ancestor "$1" "$2" 2>/dev/null; }
+agent_tip() { git rev-parse --verify --quiet "refs/cav/agent-tip/$1"; }
 
 while read -r old new ref; do
+  [ -n "$ref" ] || continue
+
+  # Only branch refs are pushable by agents.
   case "$ref" in
-    refs/heads/agent-*/*) ;;
+    refs/heads/*) ;;
     *)
-      echo "pre-receive: refusing $ref -- guest pushes are only allowed under refs/heads/agent-*/**" >&2
-      status=1
+      if [ -n "$agent" ]; then
+        reject "agent $agent cannot push to '$ref'; agents may only push to branch refs"
+      fi
       continue
       ;;
   esac
+  branch=${ref#refs/heads/}
 
-  if [ "$new" = "$zero" ]; then
-    echo "pre-receive: refusing delete of $ref -- agents may not delete branches" >&2
-    status=1
-    continue
-  fi
+  # A branch named ...HEAD... is always a bug (for user and agent alike).
+  case "$branch" in
+    *HEAD*) reject "branch '$branch' contains HEAD (this is a bug)"; continue ;;
+  esac
 
-  if [ "$old" != "$zero" ] && ! git merge-base --is-ancestor "$old" "$new"; then
-    echo "pre-receive: refusing non-fast-forward update of $ref" >&2
-    status=1
-    continue
-  fi
+  # The user (no injected id) is unrestricted below here.
+  [ -n "$agent" ] || continue
+
+  case "$branch" in
+    agent-*/*)
+      rest=${branch#agent-}
+      n=${rest%%/*}
+      if [ "$n" != "$agent" ]; then
+        reject "agent $agent may only push to agent-$agent/*, not '$branch'"
+        continue
+      fi
+      # Non-fast-forward guard, skipped for deletes (new = zero).
+      if [ "$old" != "$zero" ] && [ "$new" != "$zero" ] && ! is_ancestor "$old" "$new"; then
+        tip=$(agent_tip "$branch") || tip=""
+        if [ -n "$tip" ] && [ "$tip" != "$old" ]; then
+          reject "agent $agent force-push would overwrite commits on '$branch' not pushed by this agent; pull the user's changes first"
+          continue
+        fi
+      fi
+      ;;
+    *)
+      reject "agent $agent cannot push to base branch '$branch'; work stays on your dev branch until the user approves it"
+      ;;
+  esac
 done
 
 exit "$status"

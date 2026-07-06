@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# post-receive: maintain the per-branch high-water ref that pre-receive's
+# force-push guard checks. Only for agent pushes (CODING_CAVE_AGENT_ID set);
+# the user's pushes don't move it.
+set -uo pipefail
+
+[ -n "${CODING_CAVE_AGENT_ID:-}" ] || exit 0
+zero=0000000000000000000000000000000000000000
+
+while read -r old new ref; do
+  case "$ref" in
+    refs/heads/*) ;;
+    *) continue ;;
+  esac
+  branch=${ref#refs/heads/}
+  tip="refs/cav/agent-tip/$branch"
+  if [ "$new" = "$zero" ]; then
+    git update-ref -d "$tip" 2>/dev/null || true
+  else
+    git update-ref "$tip" "$new" 2>/dev/null || true
+  fi
+done
+exit 0
