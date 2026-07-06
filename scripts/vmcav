@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # vmcav: manual lifecycle for the cave-guest VM.
 #
+#   vmcav [agent]           attach to the agent's claude session (default)
 #   vmcav start             build + launch the VM detached (idempotent)
 #   vmcav stop              ACPI power-down (SIGTERM/SIGKILL fallback)
 #   vmcav status            report up/down
@@ -107,25 +108,41 @@ do_status() {
     local p; p=$(vm_pid)
     local since; since=$(ps -o lstart= -p "$p" 2>/dev/null | sed 's/^ *//')
     echo "vm: running (pid $p, since ${since:-?})"
-    echo "shell: vmcav shell            # or: vmcav shell tmux attach -t agent"
+    echo "agent: vmcav agent           # attach to the claude session"
+    echo "shell: vmcav shell           # a plain root shell in the guest"
     echo "console: $CONSOLE"
   else
     echo "vm: stopped"
   fi
 }
 
-# ssh into the guest as root. No args -> interactive shell; extra args run as
-# a command (e.g. `vmcav shell tmux attach -t agent`). Host-key checks are off
+# ssh into the guest as root over the forwarded port. Host-key checks are off
 # and known_hosts is /dev/null: it's a localhost port-forward to our own VM,
 # and the guest host key changes whenever the disk is recreated, so
 # verification is just friction.
-do_shell() {
+guest_ssh() {
   is_running || { log "vm is not running (vmcav start)"; exit 1; }
   command -v ssh >/dev/null 2>&1 || { log "ssh not found; enter the dev shell (use flake / nix develop)"; exit 1; }
   exec ssh -t -i "$SSHKEY" \
     -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
     -p "$SSH_PORT" root@127.0.0.1 "$@"
 }
+
+# Drive the agent: attach to its claude session (the tmux session the
+# vm-root-agent unit runs). This is the primary command, so `vmcav` with no
+# args does it. If the session is gone (agent crashed or was killed), start a
+# fresh one; IS_SANDBOX=1 is set only here, so claude accepts
+# --dangerously-skip-permissions as root, while a plain `vmcav shell` stays a
+# normal unprivileged-of-that-guard shell.
+do_agent() {
+  guest_ssh 'tmux attach -t agent 2>/dev/null || \
+    IS_SANDBOX=1 tmux new-session -s agent \
+      "cd /root/coding-cave && exec claude --dangerously-skip-permissions"'
+}
+
+# A plain root shell in the guest. No args -> interactive shell; extra args run
+# as a command (e.g. `vmcav shell journalctl -u vm-root-agent`).
+do_shell() { guest_ssh "$@"; }
 
 do_start() {
   if is_running; then log "already running (pid $(vm_pid))"; do_status; return 0; fi
@@ -210,10 +227,12 @@ do_stop() {
   log "vm stopped"
 }
 
-case "${1:-}" in
+case "${1:-agent}" in
   start) shift; do_start "$@" ;;
   stop) do_stop ;;
   status) do_status ;;
+  agent) do_agent ;;
   shell) shift; do_shell "$@" ;;
-  *) echo "usage: vmcav {start|stop|status|shell [cmd...]}" >&2; exit 2 ;;
+  -h|--help|help) echo "usage: vmcav {agent|start|stop|status|shell [cmd...]}" >&2 ;;
+  *) echo "usage: vmcav {agent|start|stop|status|shell [cmd...]}" >&2; exit 2 ;;
 esac
