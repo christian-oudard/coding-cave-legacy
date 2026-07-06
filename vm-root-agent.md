@@ -79,8 +79,11 @@ prerequisite.
   protect from it.
 - crinj on the host is the only egress and injects the Claude OAuth
   credentials; the guest never holds a real token.
-- The host git daemon serves the repo; the agent pushes its branch, the
-  user approves on the host.
+- The host git daemon serves the repo; the agent pushes its spec ref
+  (pre-receive permits fast-forwards under refs/heads/agent-*/** and
+  nothing else). vmcav builds the guest from that ref, so a push is a
+  deploy on next boot -- no host approval in the loop. Merging into the
+  human's branches remains a host-side decision.
 
 Acceptance: attach over ssh, find claude running, ask it to make a trivial
 guest config change, watch it `nixos-rebuild switch`, commit, and push for
@@ -124,10 +127,13 @@ on, safely, without a human in the loop.
    fails to reach `boot-complete.target` N times falls back to the previous
    one automatically, and the agent wakes up in the old generation with the
    marker telling it what it was attempting.
-5. **Commit** through the normal flow once a step lands; the host user
-   approves. The guest can be rebuilt from an approved configuration at any
-   time, so the VM is cattle: deleting the disk and running `vmcav start`
-   must always produce a working agent from the last approved commit.
+5. **Commit and push** once a step lands: the agent fast-forwards its spec
+   ref (agent-1/vm-cave; root is a per-VM flag, not a reserved id, so the
+   root agent still gets a normal id), which is what vmcav builds from, so
+   pushing is deploying -- no host permission required. The VM is cattle:
+   deleting the disk and running `vmcav start` must always produce a
+   working agent from the last pushed spec commit. Merging the spec into
+   vm-cave/main is still a host decision, but the VM never waits on it.
 
 Rule 5 is the real safety net and a standing discipline: anything the agent
 does to its environment that matters must be expressed in the committed

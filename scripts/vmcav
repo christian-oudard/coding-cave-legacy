@@ -17,7 +17,19 @@ set -euo pipefail
 # so it must find the repo relative to its real location. Override with REPO=.
 SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
 REPO="${REPO:-$(cd "$(dirname "$SELF")/.." && pwd)}"
-GUEST_FLAKE="$REPO/guest"
+# The guest spec is agent-owned (cattle-not-pets: the qcow is a cache, the
+# spec ref is the truth). Build from the agent's branch, not the host working
+# tree, so the root agent deploys config changes by pushing -- pre-receive
+# already permits fast-forwards under refs/heads/agent-*/** and nothing else,
+# so the human's own branches stay out of reach. Set CAVE_GUEST_REF to build
+# a different ref, or CAVE_GUEST_WORKTREE=1 to use the host checkout (e.g.
+# when iterating on the guest config host-side before the agent exists).
+CAVE_GUEST_REF="${CAVE_GUEST_REF:-agent-1/vm-cave}"
+if [ -n "${CAVE_GUEST_WORKTREE:-}" ]; then
+  GUEST_FLAKE="$REPO/guest"
+else
+  GUEST_FLAKE="git+file://$REPO?ref=refs/heads/$CAVE_GUEST_REF&dir=guest"
+fi
 CONFIG="${CODING_CAVE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/coding-cave/config.toml}"
 STATE_DIR="${STATE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/coding-cave/vm}"
 SSH_PORT="${SSH_PORT:-2222}"

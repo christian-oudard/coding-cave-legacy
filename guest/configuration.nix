@@ -32,6 +32,15 @@
     # smoke test needs no forward and stays conflict-free.
   };
   boot.kernelParams = [ "console=ttyS0" ];
+  # qemu-vm.nix pins boot.loader.grub.device at the virtio root disk even in
+  # direct-kernel boot (useBootLoader = false), and grub.enable defaults to
+  # true, so an in-guest `nixos-rebuild switch` runs grub-install against the
+  # partition-less root image and aborts before activating. Boot state is
+  # host-injected (-kernel/-initrd/-append); the disk is a cache with no
+  # bootloader on it. Disabling GRUB lets `switch` register and activate
+  # generations (the root agent's redeploy path, vm-root-agent.md) and skip
+  # the bootloader step entirely.
+  boot.loader.grub.enable = false;
 
   # --- Networking: bootstrap-era user-mode NIC, all egress to crinj ---
   # The guest DHCPs on its single NIC (QEMU user-net / passt). crinj on the
