@@ -126,14 +126,14 @@ on, safely, without a human in the loop.
    marker telling it what it was attempting.
 5. **Commit** through the normal flow once a step lands; the host user
    approves. The guest can be rebuilt from an approved configuration at any
-   time, so the VM is cattle: `vmcav start --fresh` must always produce
-   a working agent from the last approved commit.
+   time, so the VM is cattle: deleting the disk and running `vmcav start`
+   must always produce a working agent from the last approved commit.
 
 Rule 5 is the real safety net and a standing discipline: anything the agent
 does to its environment that matters must be expressed in the committed
 flake, not in imperative drift. The health check asserts rebuildability
-indirectly; `--fresh` rebuilds in CI-fashion are the direct test and should
-be run at every graduation step.
+indirectly; from-scratch rebuilds (delete the disk, `vmcav start`) in
+CI-fashion are the direct test and should be run at every graduation step.
 
 ## Mission and guardrails
 
@@ -169,7 +169,7 @@ one bootstrap-era liberty:
 
 ## Open questions
 
-- Session continuity across `--fresh` rebuilds: resume markers survive
+- Session continuity across from-scratch rebuilds: resume markers survive
   reboots on the state volume, but a rebuilt VM has no session history.
   Acceptable (the branch is the memory), or worth persisting
   `/root/.claude` on the state volume from day one?

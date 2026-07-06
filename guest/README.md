@@ -31,9 +31,10 @@ emulation when KVM is absent (same CA requirement as the build above):
 than a temp dir, so guest state (the cloned repo, agent session, nix store
 writes) survives reboots and cave sessions. The image is sparse, so it
 consumes only what the guest actually writes, up to the cap in
-`~/.config/coding-cave/config.toml` (default 100 GB). `vmcav start --fresh`
-discards it to start clean. The smoke test uses a throwaway disk under its
-work dir, never touching this one.
+`~/.config/coding-cave/config.toml` (default 100 GB). To start clean, stop
+the VM and delete the image by hand (`rm "$STATE_DIR/cave-guest.qcow2"`);
+the next `vmcav start` recreates it. The smoke test uses a throwaway disk
+under its work dir, never touching this one.
 
 ## Environment constraint
 

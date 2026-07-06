@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # vmcav: manual lifecycle for the cave-guest VM.
 #
-#   vmcav start [--fresh]   build + launch the VM detached (idempotent)
+#   vmcav start             build + launch the VM detached (idempotent)
 #   vmcav stop              ACPI power-down (SIGTERM/SIGKILL fallback)
 #   vmcav status            report up/down
 #   vmcav shell [cmd...]    ssh into the guest (no cmd -> interactive shell)
@@ -117,7 +117,8 @@ do_status() {
 # ssh into the guest as root. No args -> interactive shell; extra args run as
 # a command (e.g. `vmcav shell tmux attach -t agent`). Host-key checks are off
 # and known_hosts is /dev/null: it's a localhost port-forward to our own VM,
-# and the guest key rotates on --fresh, so verification is just friction.
+# and the guest host key changes whenever the disk is recreated, so
+# verification is just friction.
 do_shell() {
   is_running || { log "vm is not running (vmcav start)"; exit 1; }
   command -v ssh >/dev/null 2>&1 || { log "ssh not found; enter the dev shell (use flake / nix develop)"; exit 1; }
@@ -128,7 +129,6 @@ do_shell() {
 
 do_start() {
   if is_running; then log "already running (pid $(vm_pid))"; do_status; return 0; fi
-  [ "${1:-}" = "--fresh" ] && { log "--fresh: removing $DISK"; rm -f "$DISK"; }
   mkdir -p "$STATE_DIR"
   require_tools
   stage_seed; start_git_daemon
@@ -215,5 +215,5 @@ case "${1:-}" in
   stop) do_stop ;;
   status) do_status ;;
   shell) shift; do_shell "$@" ;;
-  *) echo "usage: vmcav {start [--fresh]|stop|status|shell [cmd...]}" >&2; exit 2 ;;
+  *) echo "usage: vmcav {start|stop|status|shell [cmd...]}" >&2; exit 2 ;;
 esac
