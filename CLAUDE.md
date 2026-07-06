@@ -20,6 +20,12 @@ Lift semantics from the Rust code, not code.
 - `store-design-review.md` reviews the Rust implementation's store-sharing
   history: what was tried, why each design failed, and the option analysis
   that led to this architecture.
+- `package-dedupe-spec.md` specifies pkgdd, the standalone GC-roots tool
+  for language package caches (uv, pnpm, cargo, go). The guest ships it
+  and cave-guestd calls it; cave-vm implements none of it.
+- `vm-root-agent.md` designs the in-VM bootstrap agent: a root-in-guest
+  Claude session that builds the in-guest system from within and redeploys
+  itself via NixOS generations, behind the unchanged host boundary.
 
 ## Ground rules
 

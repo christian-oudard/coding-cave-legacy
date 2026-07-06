@@ -23,8 +23,9 @@ container caves while this is built).
    is starting", VM already up. VM cold boot is paid once per host boot.
 2. A package present anywhere on the host or in the guest is never
    re-downloaded from the internet.
-3. Caves installing the same package share one copy inside the guest. The
-   only accepted duplication is host store vs guest store, once per host.
+3. Caves installing the same package share one copy inside the guest, and
+   artifacts no surviving cave references are reclaimed. The only accepted
+   duplication is host store vs guest store, once per host.
 4. Normal dev environment: stock multi-user nix (`nix build`, `nix develop`,
    `nix profile install` work unmodified), plus uv, cargo, pnpm, go, elan or
    lake behaving normally.
@@ -163,52 +164,49 @@ have no equivalent.
 
 ## Language package managers
 
-Design stance (settled in review): agents within the one VM are cooperating,
-so shared writable caches inside the guest are acceptable; the VM boundary
-is what contains a hostile agent, and lockfile hash verification (uv, pnpm,
-cargo, go) is defense in depth against cache tampering. Network dedup
-across time and caves comes from crinj's read-through cache on the host
-(separate crinj work; until it lands, the guest-shared caches already
-prevent most re-downloads).
+Owned by package-dedupe (`pkgdd`), specified in `package-dedupe-spec.md`:
+shared per-ecosystem stores (uv, pnpm, cargo, go), GC roots derived from
+the caves' native lockfiles, and a serialized sweep that reclaims artifacts
+no surviving cave references. cave-vm consumes it and reimplements none of
+it; the earlier CacheSpec design (guestd owning cache env wiring with no
+reclamation story) is superseded. pkgdd is an independent project (Rust,
+per its spec); the cleanroom rule bans depending on cav-rs, not on new
+tools, and the guest consumes pkgdd as a packaged binary.
 
-Mechanism: one shared cache root on the guest volume, `/var/cave/cache/`,
-group `caves`, setgid dirs with a default ACL granting the group rwX, so
-files created by any cave are usable by all. Each ecosystem is one entry in
-a single Go table in `internal/guest/caches.go`:
+Deployment in the guest image:
 
-    type CacheSpec struct {
-        Name    string   // "uv", "pnpm", ...
-        Dir     string   // subdir under /var/cave/cache
-        Env     []string // per-cave env vars pointing at it
-        Symlink []string // $HOME-relative symlinks into it
-        Files   []Seed   // dotfile fragments to merge (e.g. .npmrc)
-    }
+- pkgdd binary, `/etc/pkgdedupe/config.toml` with stores under
+  `/var/cave/cache/{uv,pnpm-store,cargo,gomod}` (one filesystem with the
+  worktrees, satisfying the same-fs invariant), roots and leases dirs under
+  `/var/cave/pkgdedupe/`, the `pkgstore` user, and the `pkgdd gc` timer
+  with the disk-pressure trigger from pkgdd's NixOS module.
+- Write model A (insert-only by ownership) maps directly onto this design's
+  per-cave uids: stores mounted rw, existing artifacts owned by
+  `pkgstore` mode 444, caves can insert but not mutate. This upgrades the
+  earlier stance (tamper-tolerance among cooperating agents) to inode
+  immutability. The spec's open verification item (uv cache insertion
+  across uids) gates it; the fallback is group-writable stores with
+  tampering accepted as VM-bounded, and `pkgdd doctor` in phase 8 is where
+  the experiment runs.
 
-guestd applies the table when materializing a cave home. Initial entries:
+Integration in cave-guestd (a layer-2 caller per the spec):
 
-- uv: `UV_CACHE_DIR=/var/cave/cache/uv`, `UV_LINK_MODE=hardlink`. The cache
-  is content-addressed and concurrency-safe; hardlink mode means venvs in
-  worktrees share wheel inodes with the cache (same filesystem, the guest
-  volume), so N caves using the same wheel hold one copy.
-- pnpm: `.npmrc` fragment `store-dir=/var/cave/cache/pnpm-store`. The store
-  is content-addressed, designed for concurrent writers, and pnpm hardlinks
-  from it into node_modules: one copy per package per disk, pnpm's whole
-  premise.
-- go: `GOMODCACHE=/var/cave/cache/go-mod`, `GOCACHE=/var/cave/cache/go-build`,
-  `GOFLAGS=-modcacherw`. The module cache is verified against go.sum and
-  built for sharing; the build cache is content-addressed and safe for
-  concurrent use.
-- cargo: symlinks `~/.cargo/registry` and `~/.cargo/git` into
-  `/var/cave/cache/cargo/`. Cargo flocks the registry, so concurrent caves
-  serialize correctly. `~/.cargo` itself stays private (it can hold
-  credentials and config).
-- lean: `ELAN_HOME=/var/cave/cache/elan` (toolchains are multi-GB, the
-  single biggest win), plus `~/.cache/mathlib` symlinked into the shared
-  root for `lake exe cache get` artifacts.
-
-Adding an ecosystem later is one table row, no new machinery. What is
-deliberately NOT built: a converge-style dedup daemon for language caches.
-Sharing the cache up front makes after-the-fact dedup unnecessary.
+- Cave create: `pkgdd env create agent-<n>` with the cave's worktree as the
+  workspace (one root per extra project). guestd merges the returned env
+  file into the cave environment and renders the mount plan into the bwrap
+  invocation via `pkgdd env plan --format bwrap`.
+- Cave destroy: `pkgdd env destroy agent-<n> --keep-workspace` (worktree
+  lifecycle stays with guestd and the git flow).
+- Leases: agents run native tools unwrapped, so v0 relies on the spec's
+  grace-window fallback rather than lease integration; reclamation is
+  delayed, never unsafe.
+- nix is not routed through pkgdd. The guest nix-daemon with per-uid roots
+  already is the nix instance of the same model, and pkgdd's nix plugin
+  delegates to it anyway.
+- lean is outside pkgdd v0.1: `ELAN_HOME=/var/cave/cache/elan` and a shared
+  `~/.cache/mathlib` symlink stay as guestd-wired shared directories,
+  unswept (toolchains pinned by elan's own metadata), a candidate future
+  pkgdd plugin.
 
 ## Git, worktrees, approval
 
@@ -235,8 +233,9 @@ one raw disk image (`<state>/guest.img`, ext4, sparse, created on first
 start) mounted at `/var/cave` and holding the guest nix store
 (`/nix/store` bind from `/var/cave/nix`), cave homes, worktrees, and the
 shared caches. Image contents: systemd, nix with the daemon enabled, sshd,
-tmux, bwrap, cave-guestd, and nothing else; agent-visible tooling comes
-from the store via cave.nix, not the image. Upgrading the image is: build
+tmux, bwrap, cave-guestd, pkgdd (with its config, `pkgstore` user, and gc
+timer), and nothing else; agent-visible tooling comes from the store via
+cave.nix, not the image. Upgrading the image is: build
 new artifacts, stop VM, start VM (guest state survives on guest.img).
 
 Rootless notes: CHV runs as the user with /dev/kvm; vsock is the
@@ -315,10 +314,13 @@ wiring. Phases 0 and 1 restate the old plan's floor.
 - **7. Git.** Bridge to the host git daemon, worktree clone at cave
   creation, agent branch push, `cav approve` on the host completes the
   round trip. Accept: commit in cave, approve on host, merged on host.
-- **8. Language caches.** CacheSpec table applied; uv, pnpm, go, cargo,
-  elan wired. Accept: cave A `uv add numpy`, cave B `uv add numpy`; B does
-  zero network fetches and the cache directory grows once; same check for
-  pnpm.
+- **8. Language caches.** pkgdd in the image; guestd env create/destroy
+  integration; env file and bwrap mount plan wired; `pkgdd doctor` clean
+  (runs the write-model-A experiment from the spec). Accept: cave A
+  `uv add numpy`, cave B `uv add numpy`; B does zero network fetches and
+  one copy exists on disk (`st_nlink` >= 3); same check for pnpm; destroy
+  both caves and `pkgdd gc` frees the wheel, while a third cave still
+  locking it pins it.
 - **9. User env.** cave.nix built by the guest daemon at cave creation,
   profile linked into the cave home. Accept: cave start stays under 1 s
   when the env is already built; first-ever build is dominated by vsock
@@ -354,7 +356,9 @@ wiring. Phases 0 and 1 restate the old plan's floor.
   which of status/approve/cp grow VM awareness first.
 - crinj read-through content cache scope and eviction policy (separate
   crinj plan; the vsock bridge here does not depend on it).
-- Whether GOCACHE sharing measurably helps or just grows; drop the entry if
-  it misbehaves.
+- Where package-dedupe lives: its own repo (its layer 1 is deliberately
+  reusable beyond caves) or a crate in this one. Its spec, phases, and
+  open questions (write model A verification, lease depth, sccache
+  lifecycle) are tracked in package-dedupe-spec.md, not here.
 - Guest volume filesystem: ext4 assumed; revisit only if reflink support
   (xfs) turns out to matter for uv/pnpm patterns hardlinks don't cover.
