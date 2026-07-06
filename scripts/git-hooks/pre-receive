@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# pre-receive: guards the host repo that git-daemon serves to the guest VM
+# (see ../vmcav) now that receive-pack is enabled.
+#
+# The served repo is the human's own live checkout, not a dedicated bare
+# repo, so this is the only thing standing between "guest has network
+# access to git://" and "guest can rewrite the user's branches". Until the
+# vsock plane + per-agent ports exist (vm-cave-design.md phase 3/7), every
+# push from the guest looks identical (one guest, one daemon, no agent
+# identity), so the rule is namespace-only: agents may fast-forward-create
+# or fast-forward-update refs/heads/agent-*/**, nothing else. Cross-agent
+# branch isolation (agent A pushing agent B's branch) is deferred to that
+# later per-agent-port work, same known limitation as the container-cave
+# git-daemon design (docs/security/daemon-design.md on main).
+set -euo pipefail
+
+zero="0000000000000000000000000000000000000000"
+status=0
+
+while read -r old new ref; do
+  case "$ref" in
+    refs/heads/agent-*/*) ;;
+    *)
+      echo "pre-receive: refusing $ref -- guest pushes are only allowed under refs/heads/agent-*/**" >&2
+      status=1
+      continue
+      ;;
+  esac
+
+  if [ "$new" = "$zero" ]; then
+    echo "pre-receive: refusing delete of $ref -- agents may not delete branches" >&2
+    status=1
+    continue
+  fi
+
+  if [ "$old" != "$zero" ] && ! git merge-base --is-ancestor "$old" "$new"; then
+    echo "pre-receive: refusing non-fast-forward update of $ref" >&2
+    status=1
+    continue
+  fi
+done
+
+exit "$status"

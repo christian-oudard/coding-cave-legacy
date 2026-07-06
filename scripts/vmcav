@@ -87,10 +87,16 @@ stage_seed() {
 
 start_git_daemon() {
   local parent; parent=$(dirname "$REPO")
+  # Install the committed pre-receive hook fresh every start, so the guard
+  # tracks the repo (can't drift out of sync with what's reviewed) and a
+  # stale hook from an old checkout never lingers. It's what makes
+  # --enable=receive-pack safe against the human's own live checkout:
+  # the guest may only fast-forward branches under refs/heads/agent-*/**.
+  install -m 755 "$REPO/scripts/git-hooks/pre-receive" "$REPO/.git/hooks/pre-receive"
   pgrep -f "git daemon.*--base-path=$parent" >/dev/null 2>&1 && return
-  git daemon --reuseaddr --export-all --enable=upload-pack \
+  git daemon --reuseaddr --export-all --enable=upload-pack --enable=receive-pack \
     --base-path="$parent" --port="$GIT_PORT" --detach --pid-file="$GITPID" "$parent"
-  log "git daemon serving $parent on :$GIT_PORT"
+  log "git daemon serving $parent on :$GIT_PORT (receive-pack gated by scripts/git-hooks/pre-receive)"
 }
 stop_git_daemon() { [ -f "$GITPID" ] && { kill "$(cat "$GITPID")" 2>/dev/null || true; rm -f "$GITPID"; }; }
 
