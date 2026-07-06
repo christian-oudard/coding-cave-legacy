@@ -23,7 +23,7 @@ func newTestReg(t *testing.T) (*Registry, *float64, *bool) {
 
 func mustAcquire(t *testing.T, r *Registry, project string) string {
 	t.Helper()
-	id, err := r.Acquire(project)
+	id, err := r.Acquire(project, false)
 	if err != nil {
 		t.Fatalf("Acquire: %v", err)
 	}
@@ -164,6 +164,40 @@ func TestSessions(t *testing.T) {
 	}
 	if id, _ := r.AgentBySession("sX"); id != "2" {
 		t.Fatalf("AgentBySession(sX) = %q, want 2", id)
+	}
+}
+
+func TestSingleRootPerVM(t *testing.T) {
+	r, _, alive := newTestReg(t)
+
+	rootID, err := r.Acquire("proj", true)
+	if err != nil || rootID != "1" {
+		t.Fatalf("Acquire root = %q, %v; want 1, nil", rootID, err)
+	}
+	if id, ok, _ := r.RootAgent(); !ok || id != "1" {
+		t.Fatalf("RootAgent = %q,%v; want 1,true", id, ok)
+	}
+
+	// A non-root agent acquires fine alongside the root.
+	if id := mustAcquire(t, r, "proj"); id != "2" {
+		t.Fatalf("non-root id = %q, want 2", id)
+	}
+	// A second root while the first is running is refused.
+	if _, err := r.Acquire("proj", true); err == nil {
+		t.Fatal("acquiring a second root should fail while one runs")
+	}
+
+	// Once the root agent exits, a new root can be acquired.
+	*alive = false
+	r.IsRunning("1")
+	if id, ok, _ := r.RootAgent(); ok {
+		t.Fatalf("RootAgent after exit = %q,%v; want none", id, ok)
+	}
+	*alive = true
+	if id, err := r.Acquire("proj", true); err != nil {
+		t.Fatalf("re-acquire root after exit failed: %v", err)
+	} else if id != "3" {
+		t.Fatalf("new root id = %q, want 3", id)
 	}
 }
 

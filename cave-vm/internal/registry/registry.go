@@ -39,6 +39,22 @@ type Agent struct {
 	StartedAt float64  `json:"started_at"`
 	ExitedAt  *float64 `json:"exited_at,omitempty"`
 	SessionID string   `json:"session_id,omitempty"`
+	// Root marks the single agent per VM that runs as root. Every agent gets
+	// a normal id; root is a property, not a reserved number. The registry
+	// enforces at most one running root agent.
+	Root bool `json:"root,omitempty"`
+}
+
+// activeRoot returns the running root agent, or nil. "Running" means not
+// exited; sweepDead has already retired dead pids to exited by the time this
+// is consulted inside a locked section.
+func activeRoot(s *state) *Agent {
+	for i := range s.Agents {
+		if s.Agents[i].Root && s.Agents[i].ExitedAt == nil {
+			return &s.Agents[i]
+		}
+	}
+	return nil
 }
 
 // Registry is the agent table backed by a JSON file at Path.
@@ -156,14 +172,22 @@ func (r *Registry) sweepDead(s *state, now float64) bool {
 // --- Agent lifecycle ---
 
 // Acquire assigns the lowest free id to a new agent for project (a slug) and
-// returns it. If the id reuses a reclaimed slot, the old occupant's refs are
-// wiped via Wipe after the store lock is released.
-func (r *Registry) Acquire(project string) (string, error) {
+// returns it. With root set, the agent is the VM's root agent; Acquire fails
+// if another root agent is already running (at most one per VM). If the id
+// reuses a reclaimed slot, the old occupant's refs are wiped via Wipe after
+// the store lock is released.
+func (r *Registry) Acquire(project string, root bool) (string, error) {
 	var id, wipeProject string
 	var doWipe bool
 	err := r.withLock(func(s *state) (bool, error) {
 		now := r.now()
 		r.sweepDead(s, now)
+
+		if root {
+			if a := activeRoot(s); a != nil {
+				return false, fmt.Errorf("a root agent is already running (agent %s); only one per VM", a.ID)
+			}
+		}
 
 		cutoff := now - ReclaimableAfterSecs
 		inUse := map[string]bool{}
@@ -185,6 +209,7 @@ func (r *Registry) Acquire(project string) (string, error) {
 			HostPID:   os.Getpid(),
 			StartedAt: now,
 			SessionID: newUUID(),
+			Root:      root,
 		}
 		if old := find(s, id); old != nil {
 			// Reclaiming a stale slot: wipe the prior occupant's refs.
@@ -213,11 +238,17 @@ func (r *Registry) Continue(project, idHint string) (string, error) {
 		now := r.now()
 		r.sweepDead(s, now)
 
-		reactivate := func(a *Agent) {
+		reactivate := func(a *Agent) error {
+			if a.Root {
+				if other := activeRoot(s); other != nil && other.ID != a.ID {
+					return fmt.Errorf("cannot resume root agent %s: agent %s is already root", a.ID, other.ID)
+				}
+			}
 			a.HostPID = os.Getpid()
 			a.StartedAt = now
 			a.ExitedAt = nil
 			result = a.ID
+			return nil
 		}
 
 		if idHint != "" {
@@ -228,8 +259,7 @@ func (r *Registry) Continue(project, idHint string) (string, error) {
 			if a.ExitedAt == nil && a.HostPID != 0 && r.alive(a.HostPID) {
 				return true, fmt.Errorf("agent %s is still running", idHint)
 			}
-			reactivate(a)
-			return true, nil
+			return true, reactivate(a)
 		}
 
 		var latest *Agent
@@ -244,10 +274,23 @@ func (r *Registry) Continue(project, idHint string) (string, error) {
 		if latest == nil {
 			return true, nil // no agents to continue
 		}
-		reactivate(latest)
-		return true, nil
+		return true, reactivate(latest)
 	})
 	return result, err
+}
+
+// RootAgent returns the id of the running root agent, if any.
+func (r *Registry) RootAgent() (string, bool, error) {
+	var id string
+	var ok bool
+	err := r.withLock(func(s *state) (bool, error) {
+		changed := r.sweepDead(s, r.now())
+		if a := activeRoot(s); a != nil {
+			id, ok = a.ID, true
+		}
+		return changed, nil
+	})
+	return id, ok, err
 }
 
 // IsRunning reports whether the agent is currently alive, updating its exit

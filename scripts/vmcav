@@ -98,12 +98,15 @@ start_git_daemon() {
   pgrep -f "git daemon.*--base-path=$parent" >/dev/null 2>&1 && return
   # Inject the guest's agent identity into the daemon: git-daemon's
   # receive-pack children and their hooks inherit this env, so the hook reads
-  # an id the sandbox cannot forge. One guest today = one identity (the root
-  # agent, 0); per-agent daemons/ports arrive with the multi-agent work.
-  CODING_CAVE_AGENT_ID="${AGENT_ID:-0}" \
+  # an id the sandbox cannot forge. Every agent gets a normal number (the
+  # registry issues from 1); root is a separate property, not a reserved id.
+  # One guest today = one identity; AGENT_ID is a placeholder until vmcav
+  # draws it from the cave-vm registry, and per-agent daemons/ports arrive
+  # with the multi-agent work.
+  CODING_CAVE_AGENT_ID="${AGENT_ID:-1}" \
   git daemon --reuseaddr --export-all --enable=upload-pack --enable=receive-pack \
     --base-path="$parent" --port="$GIT_PORT" --detach --pid-file="$GITPID" "$parent"
-  log "git daemon serving $parent on :$GIT_PORT (agent ${AGENT_ID:-0}; hooks pre/post-receive)"
+  log "git daemon serving $parent on :$GIT_PORT (agent ${AGENT_ID:-1}; hooks pre/post-receive)"
 }
 stop_git_daemon() { [ -f "$GITPID" ] && { kill "$(cat "$GITPID")" 2>/dev/null || true; rm -f "$GITPID"; }; }
 
