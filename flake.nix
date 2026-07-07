@@ -148,13 +148,17 @@
             version = "0.1.0";
             inherit src;
             cargoArtifacts = cargoArtifactsDev;
-            nativeBuildInputs = [ pkgs.git pkgs.jq ];
+            nativeBuildInputs = [
+              pkgs.git pkgs.jq pkgs.sqlite
+              pkgs.zsh pkgs.bashInteractive pkgs.fish
+            ];
             cargoTestFlags = [
               "--bin" "cav"
               "--bin" "cav-git-pre-receive"
               "--test" "hook"
               "--test" "cli"
               "--test" "statusline"
+              "--test" "completion"
             ];
           };
 
@@ -208,7 +212,7 @@
           packages = with pkgs; [
             cargo rustc rustfmt clippy cargo-llvm-cov
             git jq socat iptables util-linux slirp4netns
-            pkg-config sqlite
+            pkg-config sqlite zsh bashInteractive fish
           ];
           # nixpkgs rustc omits llvm-tools-preview; point cargo-llvm-cov at the
           # version-matched llvm bundled with rustc.

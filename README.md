@@ -52,7 +52,7 @@ IDs, worktree contents), `-p`/`--project` slugs, and the flags of a bare
 Add the matching line to your shell startup file:
 
 - bash (`~/.bashrc`): `eval "$(cav completion bash)"`
-- zsh (`~/.zshrc`): `eval "$(cav completion zsh)"`
+- zsh (`~/.zshrc`, after `compinit`): `eval "$(cav completion zsh)"`
 - fish (`~/.config/fish/config.fish`): `cav completion fish | source`
 
 ## Quickstart

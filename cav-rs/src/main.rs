@@ -613,6 +613,24 @@ fn complete_cp_path(current: &OsStr) -> Vec<CompletionCandidate> {
 /// calls back into `cav` (with the `COMPLETE` env var set) on every
 /// completion, so candidates always reflect the running binary.
 fn print_completion(shell: Shell) -> Result<()> {
+    // zsh uses a hand-written registration (ZSH_COMPLETION) instead of
+    // clap's generic one: candidate *computation* still runs through clap's
+    // serving path below, but the *insertion* glue is ours because cav's
+    // `cp` candidates need semantics clap's `_describe` wrapper can't express
+    // (force-replace non-prefix shorthands, empty suffix after `:`/`/`).
+    if let Shell::Zsh = shell {
+        print!("{ZSH_COMPLETION}");
+        return Ok(());
+    }
+    // clap's bash completer tokenizes the line on $COMP_WORDBREAKS, which by
+    // default contains ':'. cav's `cp` shorthands complete to a single
+    // colon-bearing word (`cave:` -> `coding-cave@2:`), so a ':' break would
+    // split it and drop the candidate. Remove ':' from the breaks first.
+    if let Shell::Bash = shell {
+        println!(r#"COMP_WORDBREAKS="${{COMP_WORDBREAKS//:/}}""#);
+        use std::io::Write;
+        std::io::stdout().flush().ok();
+    }
     // SAFETY: single-threaded at this point.
     unsafe { std::env::set_var("COMPLETE", shell.name()) };
     CompleteEnv::with_factory(completion_command)
@@ -621,6 +639,53 @@ fn print_completion(shell: Shell) -> Result<()> {
         .map_err(|e| anyhow!("{e}"))?;
     Ok(())
 }
+
+/// zsh completion registration. Candidates come from the real `cav` binary
+/// via clap's dynamic-completion callback protocol (the same `COMPLETE=zsh`
+/// serving path clap would use), but we run `compadd` ourselves:
+///
+///   * `-U` force-inserts every candidate. clap already filtered them to the
+///     current word, and cav's `cp` shorthands (`cave:` -> `coding-cave@2:`,
+///     `cave` -> `coding-cave`) deliberately don't share the typed prefix, so
+///     compadd's own prefix check would otherwise drop them.
+///   * candidates ending in `:` or `/` get an empty suffix so the next TAB
+///     keeps descending (agent -> worktree -> subdir) instead of a space.
+///
+/// Candidates that are plain values (subcommands, flags, files) keep clap's
+/// `value:description` form and go through `_describe` so their help text
+/// still shows in the menu.
+const ZSH_COMPLETION: &str = r####"#compdef cav
+function _cav() {
+    local _CLAP_COMPLETE_INDEX=$(( CURRENT - 1 ))
+    local -a completions
+    completions=("${(@f)$( \
+        _CLAP_IFS=$'\n' \
+        _CLAP_COMPLETE_INDEX="$_CLAP_COMPLETE_INDEX" \
+        COMPLETE=zsh \
+        cav -- "${words[@]}" 2>/dev/null \
+    )}")
+    (( ${#completions} )) || return
+
+    local entry rawval
+    local -a pathvals described
+    for entry in $completions; do
+        # Value is everything up to the first UNescaped colon; clap escapes
+        # literal colons inside the value as `\:`, so guard them first.
+        local guarded=${entry//\\:/$'\0'}
+        rawval=${guarded%%:*}
+        rawval=${rawval//$'\0'/:}
+        case $rawval in
+            (*:|*/) pathvals+=("$rawval") ;;
+            (*)     described+=("$entry") ;;
+        esac
+    done
+
+    (( ${#pathvals} ))  && compadd -U -S '' -- "${pathvals[@]}"
+    (( ${#described} )) && _describe 'values' described
+}
+
+compdef _cav cav
+"####;
 
 fn preprocess_args(raw: Vec<String>) -> Vec<String> {
     // raw[0] is the binary name. Rewrite bare `cav <flags>` to
