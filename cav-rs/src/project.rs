@@ -96,6 +96,9 @@ pub fn remove(slug: &str, yes: bool) -> Result<()> {
         workspace::force_remove_dir_all(&cav_meta);
     }
 
+    // The per-project worktrees dir is now empty; drop it too.
+    let _ = std::fs::remove_dir(config::worktree_slug_dir(slug));
+
     // Finally, drop the registry rows. registry::remove_project deletes
     // every agent row whose primary == slug + the project row itself.
     registry::remove_project(slug)?;

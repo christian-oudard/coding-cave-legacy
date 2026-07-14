@@ -65,8 +65,12 @@ pub fn persistent_home() -> PathBuf {
     data_dir().join("home")
 }
 
+pub fn worktree_slug_dir(slug: &str) -> PathBuf {
+    data_dir().join("worktrees").join(slug)
+}
+
 pub fn worktree_dir(slug: &str, agent_id: &str) -> PathBuf {
-    data_dir().join("worktrees").join(slug).join(agent_id)
+    worktree_slug_dir(slug).join(agent_id)
 }
 
 pub fn claude_project_dir(slug: &str, home: Option<&Path>) -> PathBuf {

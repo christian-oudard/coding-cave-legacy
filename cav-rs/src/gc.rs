@@ -226,14 +226,11 @@ pub struct Orphans {
     /// (path, size) — per-cave store dirs under `<data>/store/agent-<X>`
     /// whose `<X>` isn't a registered agent's uuid or display id.
     pub overlays: Vec<(PathBuf, u64)>,
-    /// Empty `<data_dir>/worktrees/<slug>/` dirs — cosmetic, but no
-    /// reason to leave them around once their agents are gone.
-    pub empty_slug_dirs: Vec<PathBuf>,
 }
 
 impl Orphans {
     pub fn is_empty(&self) -> bool {
-        self.worktrees.is_empty() && self.overlays.is_empty() && self.empty_slug_dirs.is_empty()
+        self.worktrees.is_empty() && self.overlays.is_empty()
     }
     pub fn total_size(&self) -> u64 {
         self.worktrees.iter().map(|(_, s)| s).sum::<u64>()
@@ -311,7 +308,6 @@ pub fn find_orphans() -> Orphans {
     let mut out = Orphans {
         worktrees: Vec::new(),
         overlays: Vec::new(),
-        empty_slug_dirs: Vec::new(),
     };
 
     let wt_root = config::data_dir().join("worktrees");
@@ -322,13 +318,11 @@ pub fn find_orphans() -> Orphans {
             }
             let slug = slug_entry.file_name().to_string_lossy().to_string();
             let slug_path = slug_entry.path();
-            let mut had_any = false;
             if let Ok(agent_dirs) = std::fs::read_dir(&slug_path) {
                 for agent_entry in agent_dirs.flatten() {
                     if !agent_entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                         continue;
                     }
-                    had_any = true;
                     let key = agent_entry.file_name().to_string_lossy().to_string();
                     if !legit_wt.contains(&(slug.clone(), key)) {
                         let p = agent_entry.path();
@@ -341,9 +335,6 @@ pub fn find_orphans() -> Orphans {
                         out.worktrees.push((p, size));
                     }
                 }
-            }
-            if !had_any {
-                out.empty_slug_dirs.push(slug_path);
             }
         }
     }
@@ -385,12 +376,6 @@ fn print_orphans(o: &Orphans) {
             println!("  {} ({})", p.display(), style::yellow(&format_size(*s)));
         }
     }
-    if !o.empty_slug_dirs.is_empty() {
-        println!(
-            "{} (empty)",
-            style::bold(&format!("Empty slug dirs: {}", o.empty_slug_dirs.len())),
-        );
-    }
     println!("Total: {}", style::bold(&format_size(o.total_size())));
 }
 
@@ -400,9 +385,6 @@ fn remove_orphans(o: &Orphans) {
     }
     for (p, _) in &o.overlays {
         workspace::force_remove_dir_all(p);
-    }
-    for p in &o.empty_slug_dirs {
-        let _ = std::fs::remove_dir(p);
     }
 }
 
@@ -512,7 +494,8 @@ mod tests {
         let orphan_ws = wt.join("999");
         fs::create_dir_all(&orphan_ws).unwrap();
         fs::write(orphan_ws.join("blob"), b"content").unwrap();
-        // Empty slug dir, no agents at all.
+        // Empty slug dir, no agents at all: GC ignores it (a live project's
+        // slug dir is recreated on next launch; project removal cleans it up).
         let empty_slug = g.path.join("worktrees").join("ghost-slug");
         fs::create_dir_all(&empty_slug).unwrap();
 
@@ -532,7 +515,8 @@ mod tests {
         let store_paths: Vec<_> = o.overlays.iter().map(|(p, _)| p.clone()).collect();
         assert_eq!(store_paths, vec![orphan_store], "wrong cave-store orphans");
 
-        assert_eq!(o.empty_slug_dirs, vec![empty_slug]);
+        // The empty slug dir is left untouched by GC.
+        assert!(empty_slug.is_dir());
     }
 
     #[test]
