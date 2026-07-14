@@ -2539,14 +2539,17 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
 
     let _ = slirp.kill();
     let _ = slirp.wait();
+    // Read warnings before signaling crinj to shut down: crinj itself logs
+    // a WARN when it receives our SIGTERM, and that expected, self-inflicted
+    // shutdown message would otherwise be reported back as a session alert.
+    if let Some(ref s) = crinj_state {
+        print_crinj_session_warnings(s);
+    }
     if unregister_session(&crinj_session, &crinj_sessions_dir()) {
         crinj_signal(Signal::Term);
         if let Some(mut cp) = crinj_proc {
             let _ = cp.wait();
         }
-    }
-    if let Some(ref s) = crinj_state {
-        print_crinj_session_warnings(s);
     }
     if let Some(session) = broker_session {
         if unregister_session(&session, &broker_sessions_dir()) {
