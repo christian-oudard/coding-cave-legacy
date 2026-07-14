@@ -1612,30 +1612,57 @@ fn populate_cave_store(agent_id: &str, user_env: Option<&Path>) -> Result<PathBu
     std::fs::create_dir_all(cave_root.join("nix").join("var").join("nix"))?;
     let cave_uri = format!("local?root={}", cave_root.display());
 
-    // Cave infrastructure: the cav package's own closure (parent of its bin/).
+    // The closures every cave needs: the cav package's own closure (parent of
+    // its bin/), and the user environment from cave.nix (absent on a first run
+    // that produced nothing).
+    let mut closures: Vec<(&str, String)> = Vec::new();
     if let Some(cav_store) = Path::new(&constants::build().cav_bin)
         .parent()
         .map(|p| p.to_string_lossy().to_string())
         .filter(|p| p.starts_with("/nix/store/"))
     {
-        seed_cave_closure(&cave_uri, &cave_root, "cav", &cav_store)?;
+        closures.push(("cav", cav_store));
+    }
+    if let Some(env_path) = user_env {
+        closures.push(("user-env", env_path.to_string_lossy().to_string()));
     }
 
-    // User environment from cave.nix.
-    if let Some(env_path) = user_env {
-        seed_cave_closure(&cave_uri, &cave_root, "user-env", &env_path.to_string_lossy())?;
+    // Copy the closures in parallel. They overlap (the cav and user-env
+    // closures share ~dozens of paths — glibc, bash, coreutils, ...), and
+    // nix takes a per-path store lock, so concurrent `nix copy` into one
+    // chroot store is safe. Overlapping the two walks is meaningfully faster
+    // than copying them back to back.
+    let copies: Vec<(&str, std::process::Child)> = closures
+        .iter()
+        .map(|(name, closure)| Ok((*name, spawn_cave_copy(&cave_uri, closure)?)))
+        .collect::<Result<_>>()?;
+    for (name, child) in copies {
+        let out = child
+            .wait_with_output()
+            .map_err(|e| anyhow::anyhow!("wait nix copy into cave store: {e}"))?;
+        if !out.status.success() {
+            bail!(
+                "nix copy of {name} closure into {} failed: {}",
+                cave_root.display(),
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+    }
+
+    // GC-root each closure so the cave's own GC never collects it. Cheap: the
+    // paths are already present, so this just registers the root symlinks.
+    for (name, closure) in &closures {
+        root_cave_closure(&cave_uri, &cave_root, name, closure)?;
     }
 
     Ok(cave_root)
 }
 
-/// `nix copy` a closure from the host store into the cave's chroot store and
-/// register a GC root (`gcroots/cav/<name>`) so the cave's own GC keeps it.
-/// Incremental: paths already present in the cave store are skipped.
-fn seed_cave_closure(cave_uri: &str, cave_root: &Path, name: &str, closure: &str) -> Result<()> {
-    // Copy host store -> cave store. No --from: the host's default store
-    // (daemon or local) is the source.
-    let out = Command::new("nix")
+/// Spawn a `nix copy` of one closure from the host store into the cave's
+/// chroot store, without waiting. No --from: the host's default store (daemon
+/// or local) is the source. Incremental: paths already present are skipped.
+fn spawn_cave_copy(cave_uri: &str, closure: &str) -> Result<std::process::Child> {
+    Command::new("nix")
         .args([
             "--extra-experimental-features",
             "nix-command",
@@ -1647,16 +1674,13 @@ fn seed_cave_closure(cave_uri: &str, cave_root: &Path, name: &str, closure: &str
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| anyhow::anyhow!("spawn nix copy into cave store: {e}"))?;
-    if !out.status.success() {
-        bail!(
-            "nix copy of {name} closure into {} failed: {}",
-            cave_root.display(),
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("spawn nix copy into cave store: {e}"))
+}
 
+/// Register a GC root (`gcroots/cav/<name>`) for a closure already present in
+/// the cave store, so the cave's own GC keeps it.
+fn root_cave_closure(cave_uri: &str, cave_root: &Path, name: &str, closure: &str) -> Result<()> {
     // A symlink under the store's gcroots dir is the documented persistent-root
     // mechanism.
     let gcroots = cave_root
