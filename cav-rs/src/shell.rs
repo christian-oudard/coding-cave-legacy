@@ -101,10 +101,16 @@ pub fn enter(
     // while /proc is mounted for the cave's inner pid ns, so /proc/self
     // resolves to nothing and tools like direnv (readlink /proc/self/exe)
     // break. Joining --pid aligns /proc with our pid.
+    //
+    // --uts joins the cave's UTS ns so gethostname() returns "coding-cave"
+    // like it does for the bwrapped agent. Without it the entered shell
+    // keeps the host's hostname (the mount ns still shows the cave's
+    // /etc/hostname, so the file and the syscall would disagree).
     cmd_builder.args([
         "--preserve-credentials",
         &target_arg,
         "--mount",
+        "--uts",
         "--user",
         "--net",
         "--pid",
