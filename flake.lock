@@ -43,11 +43,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1784050646,
-        "narHash": "sha256-EIzZyGinpNJLmOWx6wERxZrTPTZ60knzVuEV2irfAKU=",
+        "lastModified": 1784134916,
+        "narHash": "sha256-bhcVWDWpYmme9G677Qunyrt22WkNUqm/3PZu5LhqgP0=",
         "owner": "christian-oudard",
         "repo": "crinj",
-        "rev": "a5ba044b37adbe9e217f1cb037def80ebe3f9e37",
+        "rev": "96491121e6fc77624b46ed1cfd39bde88e78b657",
         "type": "github"
       },
       "original": {
