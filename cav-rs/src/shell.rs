@@ -102,15 +102,20 @@ pub fn enter(
     // resolves to nothing and tools like direnv (readlink /proc/self/exe)
     // break. Joining --pid aligns /proc with our pid.
     //
-    // --uts joins the cave's UTS ns so gethostname() returns "coding-cave"
-    // like it does for the bwrapped agent. Without it the entered shell
-    // keeps the host's hostname (the mount ns still shows the cave's
-    // /etc/hostname, so the file and the syscall would disagree).
+    // Join every namespace the cave unshares (user/ipc/pid/uts/cgroup +
+    // mount, net shared via slirp) so the entered shell sees the same
+    // isolated view as the bwrapped agent. --uts makes gethostname()
+    // return "cave" (otherwise the mount ns shows the cave's
+    // /etc/hostname while the syscall returns the host's name); --ipc
+    // and --cgroup keep SysV/POSIX IPC and /proc/self/cgroup on the
+    // cave's view rather than leaking the host's.
     cmd_builder.args([
         "--preserve-credentials",
         &target_arg,
         "--mount",
         "--uts",
+        "--ipc",
+        "--cgroup",
         "--user",
         "--net",
         "--pid",
@@ -126,7 +131,7 @@ pub fn enter(
 /// BFS through descendants of `pid`; return the env of the first descendant
 /// whose /proc/<pid>/environ contains the cave-marker var
 /// CODING_CAVE_AGENT_NAME. That marker is set by bwrap --setenv, so any
-/// process matching it has the post-setenv cave env (PATH, HOME=/home/cave-
+/// process matching it has the post-setenv cave env (PATH, HOME=/home/
 /// coder, USER, SHELL, ...). Walking shallow-first means we prefer claude
 /// itself rather than a helper subprocess.
 fn find_cave_env(start: u32) -> Option<Vec<(String, String)>> {
