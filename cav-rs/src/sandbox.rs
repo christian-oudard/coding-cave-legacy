@@ -113,7 +113,7 @@ fn validate_host_devices(paths: Vec<String>) -> Result<Vec<String>> {
 ///
 /// bwrap creates a user_ns whose gid_map has one entry: inner-gid ->
 /// caller's primary gid. Any other host gid renders as `nogroup` (65534)
-/// inside, so the cave-coder user can't satisfy mode-660 group checks on
+/// inside, so the cave user can't satisfy mode-660 group checks on
 /// bind-mounted devices unless our primary gid IS the device's owning gid.
 /// We engineer that by `setresgid`'ing to the device's group before exec'ing
 /// bwrap. setresgid is gated on the target being one of {real, effective,
@@ -469,7 +469,7 @@ fn build_bwrap_argv(
 
     let cave_home = env.get("CODING_CAVE_HOME").cloned().unwrap_or_default();
     args.extend([
-        "--bind".to_string(), cave_home.clone(), "/home/cave-coder".to_string(),
+        "--bind".to_string(), cave_home.clone(), constants::CAVE_HOME.to_string(),
     ]);
 
     let claude_json = PathBuf::from(&cave_home).join(".claude.json");
@@ -517,7 +517,7 @@ fn build_bwrap_argv(
         if Path::new(sock).exists() {
             args.extend([
                 "--bind".to_string(), sock.clone(),
-                "/home/cave-coder/.gnupg/S.gpg-agent".to_string(),
+                format!("{}/.gnupg/S.gpg-agent", constants::CAVE_HOME),
                 "--dir".to_string(), "/run/user/1000/gnupg".to_string(),
                 "--bind".to_string(), sock.clone(),
                 "/run/user/1000/gnupg/S.gpg-agent".to_string(),
@@ -532,7 +532,7 @@ fn build_bwrap_argv(
                 .to_string_lossy();
             args.extend([
                 "--ro-bind".to_string(), pub_.clone(),
-                format!("/home/cave-coder/.gnupg/{name}"),
+                format!("{}/.gnupg/{name}", constants::CAVE_HOME),
             ]);
         }
     }
@@ -617,7 +617,7 @@ fn build_bwrap_argv(
 /// vars when a crinj proxy is wired up. Replaces what the old bash entry
 /// script exported on every launch.
 fn extend_runtime_env(args: &mut Vec<String>, env: &HashMap<String, String>) {
-    let mut path = vec!["/home/cave-coder/bin".to_string()];
+    let mut path = vec![format!("{}/bin", constants::CAVE_HOME)];
     if let Some(uenv) = env.get("CODING_CAVE_USER_ENV") {
         path.push(format!("{uenv}/home-path/bin"));
     }
@@ -652,7 +652,7 @@ fn extend_runtime_env(args: &mut Vec<String>, env: &HashMap<String, String>) {
     }
 
     if env.contains_key("CODING_CAVE_PROXY_CA") {
-        let combined = "/home/cave-coder/.cave-ca-combined.pem".to_string();
+        let combined = format!("{}/.cave-ca-combined.pem", constants::CAVE_HOME);
         for k in ["SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"] {
             args.extend(["--setenv".to_string(), k.to_string(), combined.clone()]);
         }
@@ -1716,7 +1716,7 @@ fn root_cave_closure(cave_uri: &str, cave_root: &Path, name: &str, closure: &str
 fn user_env_path() -> Option<PathBuf> {
     let result = crate::user_env::user_env_result_path();
     // Resolve the symlink to the actual nix store path so it's accessible inside bwrap
-    // (bwrap binds /home/cave-coder to agent home, shadowing the symlink)
+    // (bwrap binds the cave home over CAVE_HOME, shadowing the symlink)
     result.canonicalize().ok().filter(|p| p.exists())
 }
 
@@ -2399,7 +2399,7 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
     // Materialize cave-home contents the in-cave entry script used to do
     // each launch: HM-files merge, per-session CLAUDE.md append, gitconfig
     // copy/fallback, combined TLS-CA bundle. All endpoints are host paths
-    // (cave_home is bind-mounted at /home/cave-coder), so doing this here
+    // (cave_home is bind-mounted at CAVE_HOME), so doing this here
     // means the cave can exec claude directly without a shell wrapper.
     crate::log_info!("seeding cave home...");
     if let Some(uep) = &uenv {

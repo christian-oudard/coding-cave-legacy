@@ -69,3 +69,7 @@ pub const HOST_SHARED_REPO_DIR: &str = "host-cave-shared.git";
 
 // Networking
 pub const DAEMON_BASE_PORT: u16 = 61000;
+
+// In-cave home directory (bind-mount target). Must match caveHome in
+// lib/sandbox.nix; the cave's HOME/USER are set there.
+pub const CAVE_HOME: &str = "/home/coder";

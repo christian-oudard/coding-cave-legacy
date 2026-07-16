@@ -15,6 +15,13 @@
 { pkgs, nixpkgs, cavSeccompGen }:
 
 let
+  # Cave identity. These are the in-cave username, home path, and hostname;
+  # they are deliberately generic (not the host's) so the cave hides host
+  # identity. cave-system.nix's home.username/homeDirectory must match.
+  caveUser = "coder";
+  caveHome = "/home/${caveUser}";
+  caveHostname = "cave";
+
   # The cave's locale is hardcoded to en_US.UTF-8 (LANG below), so ship only
   # that locale, not the full glibcLocales set (~233MB). LOCALE_ARCHIVE is a
   # string in this config's JSON, so whatever it points at is reference-scanned
@@ -32,20 +39,20 @@ let
   nologin = "${pkgs.shadow}/bin/nologin";
   cavePasswd = pkgs.writeText "cave-passwd" ''
     root:x:0:0:System administrator:/root:${nologin}
-    cave-coder:x:1000:1000::/home/cave-coder:${nologin}
+    ${caveUser}:x:1000:1000::${caveHome}:${nologin}
     nobody:x:65534:65534:Unmapped user:/:${nologin}
   '';
   caveGroup = pkgs.writeText "cave-group" ''
     root:x:0:
-    cave-coder:x:1000:
+    ${caveUser}:x:1000:
     nogroup:x:65534:
   '';
 
   # Static /etc/hosts. NixOS auto-adds `127.0.0.2 <host-hostname>` which
   # would leak the host machine name.
   caveHosts = pkgs.writeText "cave-hosts" ''
-    127.0.0.1 localhost coding-cave
-    ::1       localhost coding-cave
+    127.0.0.1 localhost ${caveHostname}
+    ::1       localhost ${caveHostname}
   '';
 
   # UTC localtime. The host's /etc/localtime symlinks into zoneinfo and
@@ -54,7 +61,7 @@ let
   caveLocaltime = "${pkgs.tzdata}/share/zoneinfo/UTC";
 
   # /etc/hostname so tools that read it (vs uname) see the cave name.
-  caveHostname = pkgs.writeText "cave-hostname" "coding-cave\n";
+  caveHostnameFile = pkgs.writeText "cave-hostname" "${caveHostname}\n";
 
   # Default .claude.json to skip onboarding for caves without one yet.
   dotClaudeJsonDefault = pkgs.writeText "dot-claude.json" (builtins.toJSON {
@@ -111,7 +118,7 @@ let
     "--unshare-user" "--unshare-ipc" "--unshare-pid"
     "--unshare-uts" "--unshare-cgroup"
     "--clearenv" "--new-session"
-    "--hostname" "coding-cave"
+    "--hostname" caveHostname
     "--uid" "1000" "--gid" "1000"
     # --as-pid-1 makes the target process PID 1 directly, hiding bwrap's
     # argv (host paths in --bind flags) and environ (host HOME, consumed
@@ -131,9 +138,9 @@ let
     "--ro-bind" fhsLdLinux.loader fhsLdLinux.path
 
     # Environment: static set
-    "--setenv" "HOME" "/home/cave-coder"
-    "--setenv" "USER" "cave-coder"
-    "--setenv" "LOGNAME" "cave-coder"
+    "--setenv" "HOME" caveHome
+    "--setenv" "USER" caveUser
+    "--setenv" "LOGNAME" caveUser
     "--setenv" "SHELL" "${pkgs.bashInteractive}/bin/bash"
     "--setenv" "LANG" "en_US.UTF-8"
     "--setenv" "LOCALE_ARCHIVE" "${locales}/lib/locale/locale-archive"
@@ -178,7 +185,7 @@ let
     "--ro-bind" "${caveGroup}" "/etc/group"
     "--ro-bind" "${caveHosts}" "/etc/hosts"
     "--ro-bind" "${caveLocaltime}" "/etc/localtime"
-    "--ro-bind" "${caveHostname}" "/etc/hostname"
+    "--ro-bind" "${caveHostnameFile}" "/etc/hostname"
 
     # Shadow procfs for mount_too_revealing(). The kernel blocks a new
     # procfs mount in a user_ns when every existing procfs has locked

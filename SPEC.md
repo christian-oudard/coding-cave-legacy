@@ -56,7 +56,7 @@ Each agent runs in bubblewrap sandbox.
 - Agents can install Nix packages with ordinary nix commands. Each cave has its own private package store, seeded at launch with the cave environment; packages are not shared between caves or with the host.
 - An agent cannot write into the host's packages or another agent's: each cave's store is private to that cave.
 - Project workspaces are mounted at `/projects/<slug>`.
-- A persistent shared home directory is at `/home/cave-coder`.
+- A persistent shared home directory is at `/home/coder`.
 - Agents sign commits with host GPG keys, through a forwarded GPG agent extra socket. The extra socket runs in restricted mode, allowing signing but blocking secret key export and other dangerous operations.
 - Git commits are signed with the user's Git identity, stored in environment variables.
 - The Standard POSIX environment (SHELL, TERM, locale).

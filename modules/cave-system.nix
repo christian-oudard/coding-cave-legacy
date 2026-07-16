@@ -5,8 +5,9 @@
 { config, lib, pkgs, ... }:
 
 {
-  home.username = "cave-coder";
-  home.homeDirectory = "/home/cave-coder";
+  # Must match caveUser/caveHome in lib/sandbox.nix.
+  home.username = "coder";
+  home.homeDirectory = "/home/coder";
   home.stateVersion = "25.05";
 
   # The cave never runs `home-manager activate`, so HM's news + manual
@@ -57,7 +58,7 @@
         source = {
           source = "directory";
           name = "cave";
-          path = "/home/cave-coder/.cave-marketplace";
+          path = "${config.home.homeDirectory}/.cave-marketplace";
         };
       };
       enabledPlugins."cave-messages@cave" = true;
