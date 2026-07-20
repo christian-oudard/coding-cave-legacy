@@ -12,9 +12,10 @@ use crate::workspace::worktree_for;
 use crate::style;
 
 /// Expand a leading `~` or `~user` in a host-side path. Shell tilde
-/// expansion normally handles this, but tab completion of `~/...`
-/// inserts a backslash-escaped tilde to suppress reexpansion, so the
-/// shell hands us the literal `~/...` and we have to expand ourselves.
+/// expansion normally handles this, but a literal `~/...` can still reach
+/// us — a backslash-escaped tilde from bash/fish completion, or a quoted
+/// argument — so we expand it ourselves rather than treat it as a file
+/// named `~`.
 fn tilde_expand(s: &str) -> PathBuf {
     let Some(rest) = s.strip_prefix('~') else {
         return PathBuf::from(s);

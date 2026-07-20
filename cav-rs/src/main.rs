@@ -654,6 +654,12 @@ fn print_completion(shell: Shell) -> Result<()> {
 /// Candidates that are plain values (subcommands, flags, files) keep clap's
 /// `value:description` form and go through `_describe` so their help text
 /// still shows in the menu.
+///
+/// Host-side `cp` paths (no cave prefix, so no colon) are completed by zsh's
+/// own `_files` instead. compadd backslash-escapes a leading `~`, so feeding
+/// it `~/Downloads/foo` yielded `\~/Downloads/foo` and the completion looked
+/// dead once the common prefix was typed. `_files` handles `~`, quoting, and
+/// directory descent natively, matching every other command's path completion.
 const ZSH_COMPLETION: &str = r####"#compdef cav
 function _cav() {
     local _CLAP_COMPLETE_INDEX=$(( CURRENT - 1 ))
@@ -664,7 +670,6 @@ function _cav() {
         COMPLETE=zsh \
         cav -- "${words[@]}" 2>/dev/null \
     )}")
-    (( ${#completions} )) || return
 
     local entry rawval
     local -a pathvals described
@@ -674,6 +679,8 @@ function _cav() {
         local guarded=${entry//\\:/$'\0'}
         rawval=${guarded%%:*}
         rawval=${rawval//$'\0'/:}
+        # Non-colon candidates are host paths; `_files` completes those below.
+        [[ $rawval == *:* ]] || continue
         case $rawval in
             (*:|*/) pathvals+=("$rawval") ;;
             (*)     described+=("$entry") ;;
@@ -682,6 +689,7 @@ function _cav() {
 
     (( ${#pathvals} ))  && compadd -U -S '' -- "${pathvals[@]}"
     (( ${#described} )) && _describe 'values' described
+    [[ ${words[CURRENT]} != *:* ]] && _files
 }
 
 compdef _cav cav
