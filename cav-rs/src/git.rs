@@ -211,31 +211,47 @@ pub fn cherry_undelivered(
 
 /// Commits on `head` not yet delivered to `base`, newest first. When the
 /// two share a merge base this is `cherry_undelivered`. When they don't —
-/// a brand-new repo whose only commits live on the agent branch, so `base`
-/// doesn't exist on the remote, or genuinely unrelated histories — every
-/// commit on `head` is undelivered, so list them all.
+/// the named `base` ref is absent (a dev branch forked from a
+/// differently-named mainline, so `host-cave/<base>` never existed) or the
+/// histories are unrelated — fall back to the commits unique to `head`.
 pub fn undelivered_commits(base: &str, head: &str, cwd: Option<&Path>) -> Result<Vec<String>> {
     if has_merge_base(head, base, cwd) {
         cherry_undelivered(base, head, cwd)
     } else {
-        all_commits(head, cwd)
+        commits_unique_to(head, cwd)
     }
 }
 
-fn all_commits(head: &str, cwd: Option<&Path>) -> Result<Vec<String>> {
-    let out = git_output(&["log", "--format=%H %s", head], cwd)?;
-    if out.is_empty() {
-        return Ok(vec![]);
-    }
-    let lines = out
+/// Commits reachable from `head` but from no other ref in the repo, newest
+/// first. This is the fork point of a dev branch whose base ref is missing:
+/// the branch sits on top of some mainline (e.g. `develop`) under a target
+/// name (`experimental`) that was never pushed, so its real base is
+/// whatever other refs already contain. In a brand-new repo where `head` is
+/// the only branch, no ref excludes anything, so this is every commit on
+/// `head`.
+fn commits_unique_to(head: &str, cwd: Option<&Path>) -> Result<Vec<String>> {
+    let head_ref = git_output(&["rev-parse", "--symbolic-full-name", head], cwd)?;
+    let refs = git_output(&["for-each-ref", "--format=%(refname)"], cwd)?;
+    let excludes: Vec<String> = refs
         .lines()
+        .filter(|r| *r != head_ref)
+        .map(|r| format!("^{r}"))
+        .collect();
+    let mut args: Vec<&str> = vec!["log", "--format=%H %s", head];
+    args.extend(excludes.iter().map(|s| s.as_str()));
+    let out = git_output(&args, cwd)?;
+    Ok(format_log_lines(&out))
+}
+
+fn format_log_lines(out: &str) -> Vec<String> {
+    out.lines()
+        .filter(|l| !l.is_empty())
         .map(|l| {
             let (sha, subject) = l.split_once(' ').unwrap_or((l, ""));
             let sha_short: String = sha.chars().take(7).collect();
             format!("{sha_short} {}", subject.trim())
         })
-        .collect();
-    Ok(lines)
+        .collect()
 }
 
 pub fn commit_timestamp(ref_name: &str, cwd: Option<&Path>) -> Option<f64> {
@@ -349,6 +365,33 @@ mod tests {
             subjects(&lines),
             vec!["Add Severance episode list", "root on agent branch only"],
             "newest first, all commits surfaced",
+        );
+        fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    fn undelivered_lists_only_agent_commits_when_base_forked_from_mainline() {
+        // The dev branch targets a name (`experimental`) that was never
+        // pushed as a shared branch; it was actually forked from `develop`.
+        // With no `experimental` ref, the old fallback dumped the entire
+        // history (every commit on develop + the agent's). Undelivered must
+        // be only the commits unique to the dev branch.
+        let repo = tmp_repo("forked-base");
+        run(&repo, &["checkout", "-q", "-b", "develop"]);
+        commit(&repo, "develop 1");
+        commit(&repo, "develop 2");
+        commit(&repo, "develop 3");
+        // Dev branch forks from develop, named after a non-existent target.
+        run(&repo, &["checkout", "-q", "-b", "agent-1/experimental"]);
+        commit(&repo, "agent work 1");
+        commit(&repo, "agent work 2");
+
+        let lines = undelivered_commits("experimental", "agent-1/experimental", Some(&repo))
+            .unwrap();
+        assert_eq!(
+            subjects(&lines),
+            vec!["agent work 2", "agent work 1"],
+            "only the agent's own commits, not all of develop's history",
         );
         fs::remove_dir_all(&repo).ok();
     }
