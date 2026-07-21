@@ -222,19 +222,23 @@ pub fn undelivered_commits(base: &str, head: &str, cwd: Option<&Path>) -> Result
     }
 }
 
-/// Commits reachable from `head` but from no other ref in the repo, newest
-/// first. This is the fork point of a dev branch whose base ref is missing:
-/// the branch sits on top of some mainline (e.g. `develop`) under a target
-/// name (`experimental`) that was never pushed, so its real base is
-/// whatever other refs already contain. In a brand-new repo where `head` is
-/// the only branch, no ref excludes anything, so this is every commit on
-/// `head`.
+/// Commits on `head` past its fork point, newest first, when `head` has no
+/// merge base with its named base. The dev branch sits on top of some
+/// mainline (e.g. `develop`) under a target name (`experimental`) that was
+/// never pushed, so its real base is whatever other refs already contain.
+///
+/// The fork point is found by excluding every ref that does *not* contain
+/// `head` — the base lines and other branches. Refs that *do* contain
+/// `head` are the dev branch's own mirrors (its local base-name branch, the
+/// `refs/cav/agent-tip/*` tip ref, `head` itself); excluding those would
+/// subtract the agent's own commits and report nothing. In a brand-new repo
+/// where `head` is the only ref, nothing is excluded, so this is every
+/// commit on `head`.
 fn commits_unique_to(head: &str, cwd: Option<&Path>) -> Result<Vec<String>> {
-    let head_ref = git_output(&["rev-parse", "--symbolic-full-name", head], cwd)?;
     let refs = git_output(&["for-each-ref", "--format=%(refname)"], cwd)?;
     let excludes: Vec<String> = refs
         .lines()
-        .filter(|r| *r != head_ref)
+        .filter(|r| !is_ancestor(head, r, cwd))
         .map(|r| format!("^{r}"))
         .collect();
     let mut args: Vec<&str> = vec!["log", "--format=%H %s", head];
@@ -392,6 +396,37 @@ mod tests {
             subjects(&lines),
             vec!["agent work 2", "agent work 1"],
             "only the agent's own commits, not all of develop's history",
+        );
+        fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    fn undelivered_ignores_refs_that_mirror_the_dev_tip() {
+        // Same missing-base setup, but another ref points at the dev branch's
+        // own tip — its local base-name branch and the `refs/cav/agent-tip/*`
+        // ref both mirror it in a real cave. Excluding those mirrors would
+        // subtract the agent's own commits and report nothing. Undelivered
+        // must still be the two commits unique to the dev branch.
+        let repo = tmp_repo("mirror-tip");
+        run(&repo, &["checkout", "-q", "-b", "develop"]);
+        commit(&repo, "develop 1");
+        commit(&repo, "develop 2");
+        run(&repo, &["checkout", "-q", "-b", "agent-1/experimental"]);
+        commit(&repo, "agent work 1");
+        commit(&repo, "agent work 2");
+        // Mirrors of the dev tip: the agent's local base-name branch and its
+        // tip ref, both pointing at HEAD. The base cav compares against is the
+        // shared ref `host-cave/experimental`, which was never pushed.
+        run(&repo, &["branch", "experimental"]);
+        run(&repo, &["update-ref", "refs/cav/agent-tip/agent-1/experimental", "HEAD"]);
+
+        let lines =
+            undelivered_commits("host-cave/experimental", "agent-1/experimental", Some(&repo))
+                .unwrap();
+        assert_eq!(
+            subjects(&lines),
+            vec!["agent work 2", "agent work 1"],
+            "mirror refs at the dev tip must not zero out the agent's commits",
         );
         fs::remove_dir_all(&repo).ok();
     }
