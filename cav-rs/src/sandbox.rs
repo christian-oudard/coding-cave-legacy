@@ -45,7 +45,7 @@ fn load_sandbox_config() -> Result<SandboxConfig> {
     serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("Bad sandbox config: {e}"))
 }
 
-fn write_cpuinfo() -> Result<PathBuf> {
+fn write_cpuinfo(dir: &Path) -> Result<PathBuf> {
     let ncpu = num_cpus();
     let mut content = String::new();
     for i in 0..ncpu {
@@ -57,13 +57,13 @@ fn write_cpuinfo() -> Result<PathBuf> {
              flags\t\t:\nbogomips\t: 0.00\n\n"
         ));
     }
-    let path = temp_file("cave-cpuinfo-")?;
+    let path = dir.join("cpuinfo");
     std::fs::write(&path, content)?;
     Ok(path)
 }
 
-fn write_resolv_conf(dns_server: &str) -> Result<PathBuf> {
-    let path = temp_file("cave-resolv-")?;
+fn write_resolv_conf(dir: &Path, dns_server: &str) -> Result<PathBuf> {
+    let path = dir.join("resolv.conf");
     std::fs::write(&path, format!("nameserver {dns_server}\n"))?;
     Ok(path)
 }
@@ -72,8 +72,8 @@ fn write_resolv_conf(dns_server: &str) -> Result<PathBuf> {
 /// on Claude Code's approved-channels allowlist. Without it, --channels rejects
 /// the plugin (not on the allowlist) and the development-channels flag prompts
 /// an interactive confirmation that would wedge the headless launch.
-fn write_managed_settings() -> Result<PathBuf> {
-    let path = temp_file("cave-managed-settings-")?;
+fn write_managed_settings(dir: &Path) -> Result<PathBuf> {
+    let path = dir.join("managed-settings.json");
     let content = serde_json::json!({
         "channelsEnabled": true,
         "allowedChannelPlugins": [
@@ -396,22 +396,6 @@ mod sh_quote_tests {
     }
 }
 
-fn temp_file(prefix: &str) -> Result<PathBuf> {
-    let tmp = std::env::temp_dir();
-    for i in 0..10000 {
-        let p = tmp.join(format!("{prefix}{i}"));
-        if std::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&p)
-            .is_ok()
-        {
-            return Ok(p);
-        }
-    }
-    bail!("Could not create temp file with prefix {prefix}")
-}
-
 fn num_cpus() -> usize {
     let n = rustix::process::sched_getaffinity(None)
         .map(|s| s.count() as usize)
@@ -424,6 +408,7 @@ fn build_bwrap_argv(
     env: &HashMap<String, String>,
     claude_cmd: &[String],
     seccomp_fd: RawFd,
+    run_dir: &Path,
 ) -> Vec<String> {
     let mut args: Vec<String> = vec![cfg.bwrap.clone()];
     args.extend(cfg.static_args.iter().cloned());
@@ -558,7 +543,7 @@ fn build_bwrap_argv(
                     "--setenv".to_string(), "CAVE_AGENT_ID".to_string(), aid.clone(),
                 ]);
             }
-            if let Ok(settings) = write_managed_settings() {
+            if let Ok(settings) = write_managed_settings(run_dir) {
                 args.extend([
                     "--ro-bind".to_string(),
                     settings.to_string_lossy().to_string(),
@@ -569,7 +554,7 @@ fn build_bwrap_argv(
     }
 
     if let Some(dns) = env.get("CODING_CAVE_DNS_SERVER") {
-        if let Ok(resolv) = write_resolv_conf(dns) {
+        if let Ok(resolv) = write_resolv_conf(run_dir, dns) {
             args.extend([
                 "--ro-bind".to_string(),
                 resolv.to_string_lossy().to_string(),
@@ -594,7 +579,7 @@ fn build_bwrap_argv(
         "/proc/meminfo".to_string(),
     ]);
 
-    if let Ok(cpuinfo) = write_cpuinfo() {
+    if let Ok(cpuinfo) = write_cpuinfo(run_dir) {
         args.extend([
             "--ro-bind".to_string(),
             cpuinfo.to_string_lossy().to_string(),
@@ -1878,6 +1863,21 @@ impl Drop for DaemonGuard {
     }
 }
 
+/// Per-cave scratch dir for ephemeral host-side mount sources (fake
+/// /proc/cpuinfo, /etc/resolv.conf, managed-settings.json). Bwrap keeps the
+/// mounts open, so the files are safe to remove once the cave exits. The
+/// guard tears the whole dir down, including on an early bail.
+fn cave_run_dir(agent_id: &str) -> PathBuf {
+    config::data_dir().join("run").join(agent_id)
+}
+
+struct RunDirGuard(PathBuf);
+impl Drop for RunDirGuard {
+    fn drop(&mut self) {
+        crate::workspace::force_remove_dir_all(&self.0);
+    }
+}
+
 /// Print the cav resume commands. Claude already prints its own
 /// "Resume this session with: claude --resume <uuid>" line, so we just
 /// append the cav-flavored alternatives. Session uuid first (the
@@ -2442,7 +2442,11 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
     .map_err(|e| anyhow::anyhow!("Cannot open seccomp filter {}: {e}", cfg.seccomp_filter))?;
     rustix::io::fcntl_setfd(&seccomp_fd, rustix::io::FdFlags::empty())?;
 
-    let bwrap_argv = build_bwrap_argv(&cfg, &env, &claude_cmd, seccomp_fd.as_raw_fd());
+    let run_dir = cave_run_dir(&agent_id);
+    crate::workspace::force_remove_dir_all(&run_dir);
+    std::fs::create_dir_all(&run_dir)?;
+    let run_guard = RunDirGuard(run_dir.clone());
+    let bwrap_argv = build_bwrap_argv(&cfg, &env, &claude_cmd, seccomp_fd.as_raw_fd(), &run_dir);
     let supervisor_bin = constants::supervisor_path();
     let unshare_bin = find_bin("unshare")?;
 
@@ -2584,6 +2588,7 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
         }
     }
     drop(guard);
+    drop(run_guard);
 
     std::process::exit(rc);
 }
