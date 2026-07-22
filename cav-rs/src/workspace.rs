@@ -287,7 +287,9 @@ pub fn force_remove_dir_all(path: &Path) {
     }
     chmod_writable(path);
     if let Err(e) = std::fs::remove_dir_all(path) {
-        eprintln!("warning: failed to remove {}: {e}", path.display());
+        if e.kind() != std::io::ErrorKind::NotFound {
+            eprintln!("warning: failed to remove {}: {e}", path.display());
+        }
     }
 }
 
