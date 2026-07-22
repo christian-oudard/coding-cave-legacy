@@ -638,7 +638,13 @@ fn extend_runtime_env(args: &mut Vec<String>, env: &HashMap<String, String>) {
 
     if env.contains_key("CODING_CAVE_PROXY_CA") {
         let combined = format!("{}/.cave-ca-combined.pem", constants::CAVE_HOME);
-        for k in ["SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"] {
+        // gRPC's C-core ignores SSL_CERT_FILE and reads its own variable, which
+        // replaces the default roots entirely, so it gets the combined bundle too.
+        for k in [
+            "SSL_CERT_FILE",
+            "REQUESTS_CA_BUNDLE",
+            "GRPC_DEFAULT_SSL_ROOTS_FILE_PATH",
+        ] {
             args.extend(["--setenv".to_string(), k.to_string(), combined.clone()]);
         }
         args.extend([
