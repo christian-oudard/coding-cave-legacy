@@ -297,7 +297,7 @@ fn pick_candidate(
     }
 
     println!("\nPending work in {}:\n", style::blue(slug));
-    for (i, (branch, base_name, aid)) in candidates.iter().enumerate() {
+    for (branch, base_name, aid) in candidates.iter() {
         let name = registry::display_name(base, aid);
         let remote_dev = format!("{CAVE_SHARED_REMOTE}/{branch}");
         let remote_base = format!("{CAVE_SHARED_REMOTE}/{base_name}");
@@ -319,7 +319,7 @@ fn pick_candidate(
         let word = if n == 1 { "commit" } else { "commits" };
         println!(
             "  {}) {} → {}    {} {word}",
-            style::bold(&(i + 1).to_string()),
+            style::bold(aid),
             style::agent_name(&name),
             style::yellow(base_name),
             style::bold(&n.to_string()),
@@ -327,20 +327,19 @@ fn pick_candidate(
         print!("{}", git::format_commit_list(&commits, "     ", Some(3)));
     }
 
-    print!("\nApprove which? [1-{}] ", candidates.len());
+    let ids: Vec<&str> = candidates.iter().map(|(_, _, aid)| aid.as_str()).collect();
+    print!("\nApprove which agent? [{}] ", ids.join("/"));
     io::stdout().flush()?;
     let mut answer = String::new();
     match io::stdin().read_line(&mut answer) {
         Ok(0) | Err(_) => bail!("\nAborted."),
         Ok(_) => {}
     }
-    let idx: usize = answer
-        .trim()
-        .parse::<usize>()
-        .ok()
-        .filter(|&n| n >= 1 && n <= candidates.len())
-        .ok_or_else(|| anyhow::anyhow!("Invalid selection."))?;
-    Ok(candidates.into_iter().nth(idx - 1).unwrap())
+    let answer = answer.trim();
+    candidates
+        .into_iter()
+        .find(|(_, _, aid)| aid == answer)
+        .ok_or_else(|| anyhow::anyhow!("Invalid selection."))
 }
 
 /// Returns the full SHA of the unique commit in the candidate's pending
