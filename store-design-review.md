@@ -196,13 +196,132 @@ boundary (guest root writing ~/.zshrc is host code execution); it should
 become one-way materialization with explicit copy-out, as project worktrees
 already are via the approval gate.
 
-Orthogonal to all four, and worth doing regardless: stop shipping the
-nixpkgs checkout as a 52k-file tree in the cav runtime closure (reference
-it as a tarball or lazily), and slim the sandbox closure (glibc-locales,
-git-with-python) which pads every seed, template, and lower.
+## Options that share below the nix layer
+
+Options A to D all negotiate with nix: they hand it a daemon, an overlay
+lower, a pre-linked template, or an in-guest daemon, and each therefore
+has to satisfy a nix invariant we do not control. That is root cause 1
+above. Options E and F change the layer instead of the negotiation. Each
+cave keeps an ordinary, fully private store with its own DB, so nix sees
+nothing shared and no invariant applies; deduplication happens
+underneath, in the storage layer the VMM already interposes on. Two
+production systems have converged on this shape, which is why it is worth
+recording even though neither is cheap to build.
+
+**E. Block-level CoW under a private per-cave store (Cortex model).** The
+cave's disk is a manifest of fixed-size content-addressed chunks rather
+than a file. Cortex splits at 16 MiB, hashes with SHA-256, stores each
+distinct chunk once, skips zeroed chunks, and serves the result to
+Firecracker through a userspace NBD server; the guest sees an ordinary
+ext4 disk. Reads resolve manifest to local NVMe LRU cache to blob store
+on miss, so boot fetches only the working set instead of the advertised
+disk size. Writes copy-on-write into private chunks, so a session that
+dirties twenty chunks adds 320 MiB no matter how large the disk claims to
+be. For: every cave from the same base image shares its base bytes, and
+launch becomes a manifest hand-off rather than a copy, which is
+requirement 3 met directly. Against: it needs a block device, so it is a
+VM-only design with nothing to offer the current bwrap caves; and block
+granularity dedups the *base image* well but divergence poorly, because
+two caves that each install the same package independently produce
+byte-identical store paths at different ext4 offsets with different inode
+metadata, so the chunk hashes do not match. It is a base-image sharing
+technique, not a general package-dedup technique. Cost is a chunk store,
+an NBD server, a cache, and a GC over chunks.
+
+**F. File-level lazy CAS under a private per-cave store (Modal model).**
+Same idea one layer up: content-address whole files, not disk blocks.
+Modal ships a roughly 5 MB index of pointers into content-addressed file
+data, FUSE-mounts it in about 2 ms, and fetches file content lazily from
+memory, disk, or network on access, with a writable upper for mutations.
+For: file-level addressing removes E's main weakness. Nix store paths are
+hash-named with deterministic content, so two caves that independently
+install the same package dedup exactly, base image and runtime installs
+alike. This is the best requirement-fit of any option here: instant
+start, true sharing, and no nix invariant touched. Against: it is
+structurally era 1's shape (read-only lower, private upper), which failed
+before. The distinction that matters is that era 1's lower was the *live
+mutable host store*, and the incidents came from it drifting under
+running caves (host builds, GC, sibling promotions). An immutable
+content-addressed lower deletes that entire class. The residual risk is
+the other era 1 failure, canonicalisation-on-open provoking copy-ups,
+which needs content that is already canonical (store paths are 0555
+root:root, so this is close to free) and a DB pre-seeded to match the
+lower. The real unknown is FUSE latency in the store read path, which is
+hot on every exec; Modal's answer is aggressive local caching, and ours
+would have to be measured, not assumed.
+
+Both are large builds. Cortex and Modal each built a chunk or file store,
+a cache, a fetch path, and a GC, which is a substantial subsystem and the
+main argument for exhausting A to D first.
+
+**Not the same thing: snapshot memory sharing.** Both systems also
+deduplicate guest *memory*, and it is easy to conflate with the above.
+Cortex keeps one sparse shared-memory file per host holding an image's
+canonical memory, maps it into each guest with `MAP_PRIVATE` so clean
+pages share physical backing while writes go private through kernel CoW,
+and fills it on demand with `userfaultfd`: `UFFDIO_CONTINUE` for a
+canonical page, which preserves the sharing, and `UFFDIO_COPY` for a page
+the session has diverged. Modal's Memory Snapshots restore a container
+into post-initialization memory state, skipping work like torch's 20k
+file reads, for a claimed 3 to 10x faster start. This is orthogonal to
+package deduplication: it addresses RAM and resume latency, not disk, and
+it should not be counted toward any of the four requirements.
+
+References: Cortex, "Snapshots, copy-on-write, and the economics of agent
+sandboxes" (2026-07-23); Modal, "Fast, lazy container loading" (2024-09-08)
+and the Memory Snapshots guide.
+
+Orthogonal to all six, and worth doing regardless: stop shipping the
+nixpkgs checkout as a 52k-file tree in the cav runtime closure, and slim
+the sandbox closure (glibc-locales, git-with-python) which pads every
+seed, template, and lower.
+
+The locale and git halves of that landed in 972ed93 (978MB to 526MB).
+The nixpkgs half did not, and the attempt is worth recording.
+`build.json` embeds `nixpkgsUrl = "path:${nixpkgs}"`, a literal store
+path that nix's reference scanner turns into a runtime dep of cav, so
+`populate_cave_store` copies the checkout into every cave: measured, 467M
+of the closure's 816M on disk. (188MB of content; `du` reports 467M
+because roughly 52k small files hit the 4K block floor.) Rev-pinning that
+URL removes the reference but not the checkout, because `lib/sandbox.nix`
+holds a second and deliberate one, `NIX_PATH=nixpkgs=${nixpkgs}`, which
+is what gives caves offline `<nixpkgs>`. Rev-pinning alone therefore buys
+nothing on disk while trading a guaranteed-offline user-env build for a
+network-resolvable one, so it was tried and reverted.
+
+What remains is a real trade, recorded here undecided. The unexplored
+option is to bind the host's nixpkgs read-only at a *non-store* path and
+point NIX_PATH there: 467M per cave saved with offline evaluation
+preserved, and it avoids the era 1 failure class specifically by staying
+out of `/nix/store`, where nix's GC deletes directory entries it cannot
+reach from a root. Its costs are a host gcroot, which if botched strands
+running caves (era 3's stranding class in miniature), and a host-to-cave
+shared path in a bwrap design that is deliberately being kept minimal and
+correct rather than clever while the VM work is still distant. 972ed93
+weighed only one alternative, a lazy tarball, and rejected it for trading
+disk against a per-cave refetch; the bind option was never considered.
+
+One fix did land. The cave's flake registry was left at nix's global
+default, so `nix shell nixpkgs#pkg`, the workflow the project documents,
+resolved through channels.nixos.org and unpacked a *second* nixpkgs into
+a per-cave tarball cache while the seeded copy went unread. Pinning the
+registry to the same tree NIX_PATH uses cut that from 144MB of
+`~/.cache/nix` per cave to 68KB, measured on a cold cache.
+
+Worth recording as method: the per-cave cost turned out to be two
+independent references plus a stale registry default, and no sharing
+architecture would have addressed any of them. Measure the closure, and
+measure what actually reads it, before designing a mechanism to share it.
 
 A cross-cutting constraint from 004fef4: neither hardlinks, daemon sockets,
 nor overlayfs cross a VM boundary cleanly, so options A to C are
 container-world designs. Option D avoids the boundary problem by putting
 the entire sharing domain (daemon, store, caves) on one side of it and
 accepting exactly one host/guest duplication.
+
+E and F answer that constraint differently: rather than moving the sharing
+domain to one side of the boundary, they make the boundary itself the
+sharing mechanism, since the VMM already interposes on every guest read.
+That is also why they do not degrade to a container design. Without a
+block device (E) or a mountable index (F) there is nothing to interpose
+on, so neither offers anything to the current bwrap caves.

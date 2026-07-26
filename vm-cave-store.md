@@ -9,6 +9,18 @@ review takes as given.
 Status: review only. Options are laid out with trade-offs; the
 recommendation at the end is a recommendation, not a decision.
 
+Partly superseded. This review takes the three-level hardlink dedup tree
+and its `cav-store` daemon as the current design, but that whole
+subsystem was removed in 5ef19eb; each cave now has a private chroot
+store and nothing is shared. Read `store-design-review.md` first for why
+it was removed and for the current option set. What survives here and is
+still load-bearing is the analysis of the VM boundary itself: the five
+facts below (EXDEV, bytes-visible-is-not-paths-valid, no cross-boundary
+sqlite, references do not pin bytes, the design recurses inside the VM)
+constrain any future design, and option D's argument for projecting the
+shared store rather than raw `/nix/store` is a privacy argument that does
+not depend on the removed machinery.
+
 ## What the plan says today
 
 The plan carries this conclusion from the Nix exploration:
@@ -201,10 +213,24 @@ that share.
 
 ### Dismissed
 
-- **Block-level dedup** (reflink or ZFS/VDO between host store and the
-  VM disk image): the guest filesystem inside the image is opaque to
-  host-side file dedup, store files are small and not block-aligned,
-  and pool-wide dedup is heavy and off-stack.
+- **Block-level dedup by the host filesystem** (reflink or ZFS/VDO
+  between host store and the VM disk image): the guest filesystem inside
+  the image is opaque to host-side file dedup, store files are small and
+  not block-aligned, and pool-wide dedup is heavy and off-stack.
+
+  This dismissal is narrower than it first reads, and does not cover the
+  Cortex/Modal design. It rejects having *the host filesystem* dedup an
+  image it cannot interpret. It does not reject having *the VMM serve*
+  the disk from a content-addressed chunk store, where the base image is
+  shared by construction rather than discovered by scanning, and the
+  opacity objection therefore never arises: we choose the chunk
+  boundaries, so nothing has to be inferred from the guest's ext4
+  layout. That variant is option E in `store-design-review.md`, along
+  with the file-level (FUSE/CAS) variant F, which is the better fit for
+  nix because it dedups identical store paths across caves regardless of
+  block placement. Both remain expensive to build and neither is
+  recommended ahead of the options above; they are recorded as live
+  candidates, not as dismissed ones.
 - **Guest substitutes straight from the host store** as a
   `local?root=...&read-only=true` substituter: reads the host DB
   across the boundary (fact 3), and the redesign already found the
