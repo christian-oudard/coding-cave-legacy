@@ -264,15 +264,9 @@ pub fn pending_excludes(
         .collect())
 }
 
-/// SHAs of the commits on `head` pending delivery to `base_ref`, newest
-/// first.
-pub fn pending_shas(
-    base_ref: Option<&str>,
-    head: &str,
-    cwd: Option<&Path>,
-) -> Result<Vec<String>> {
-    let excludes = pending_excludes(base_ref, head, cwd)?;
-    let negated: Vec<String> = excludes.iter().map(|r| format!("^{r}")).collect();
+/// SHAs reachable from `head` but not from `exclude`, newest first.
+pub fn rev_list(head: &str, exclude: &[&str], cwd: Option<&Path>) -> Result<Vec<String>> {
+    let negated: Vec<String> = exclude.iter().map(|r| format!("^{r}")).collect();
     let mut args: Vec<&str> = vec!["rev-list", head];
     args.extend(negated.iter().map(|s| s.as_str()));
     Ok(git_output(&args, cwd)?

@@ -195,15 +195,20 @@ pub fn approve(
     };
     let partial = after_sha != dev_tip;
 
+    // One exclude set for the whole branch, derived from its tip: the full
+    // list, the partial list, and the approval chain all measure from the
+    // same fork point, so the "remaining" count can't drift.
     let base_ref = if creating { None } else { Some(remote_base.as_str()) };
-    let all_commits = pending_oneline(base_ref, &remote_dev, base)?;
+    let excludes = git::pending_excludes(base_ref, &remote_dev, Some(base))?;
+    let excludes: Vec<&str> = excludes.iter().map(String::as_str).collect();
+    let all_commits = git::commit_oneline(&remote_dev, Some(&excludes), Some(base))?;
 
     // Oldest first — the chain do_approve records, one row per commit.
-    let mut approval_shas = git::pending_shas(base_ref, &after_sha, Some(base))?;
+    let mut approval_shas = git::rev_list(&after_sha, &excludes, Some(base))?;
     approval_shas.reverse();
 
     if partial {
-        let commits = pending_oneline(base_ref, &after_sha, base)?;
+        let commits = git::commit_oneline(&after_sha, Some(&excludes), Some(base))?;
         let remaining = all_commits.len() - commits.len();
         let n = commits.len();
         let total = all_commits.len();
@@ -299,7 +304,12 @@ fn pick_candidate(
             false,
         )
         .is_ok();
-        let commits = pending_oneline(has_base.then_some(remote_base.as_str()), &remote_dev, base)
+        let base_ref = has_base.then_some(remote_base.as_str());
+        let commits = git::pending_excludes(base_ref, &remote_dev, Some(base))
+            .and_then(|ex| {
+                let ex: Vec<&str> = ex.iter().map(String::as_str).collect();
+                git::commit_oneline(&remote_dev, Some(&ex), Some(base))
+            })
             .unwrap_or_default();
         let n = commits.len();
         let word = if n == 1 { "commit" } else { "commits" };
@@ -347,16 +357,10 @@ fn candidate_match_commit(
     )
     .is_ok();
     let base_ref = has_base.then_some(remote_base.as_str());
-    let shas = git::pending_shas(base_ref, &remote_dev, Some(base)).ok()?;
+    let excludes = git::pending_excludes(base_ref, &remote_dev, Some(base)).ok()?;
+    let excludes: Vec<&str> = excludes.iter().map(String::as_str).collect();
+    let shas = git::rev_list(&remote_dev, &excludes, Some(base)).ok()?;
     shas.into_iter().find(|sha| sha.starts_with(prefix))
-}
-
-/// Commits pending delivery from `head` into the base, newest first.
-/// `base_ref` is None when the target branch has never been pushed.
-fn pending_oneline(base_ref: Option<&str>, head: &str, base: &Path) -> Result<Vec<String>> {
-    let excludes = git::pending_excludes(base_ref, head, Some(base))?;
-    let refs: Vec<&str> = excludes.iter().map(String::as_str).collect();
-    git::commit_oneline(head, Some(&refs), Some(base))
 }
 
 fn do_approve(
