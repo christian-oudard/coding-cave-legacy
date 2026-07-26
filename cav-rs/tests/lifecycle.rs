@@ -2253,6 +2253,51 @@ fn push_already_up_to_date_on_second_push() {
     );
 }
 
+// --- Target branch that was never pushed to the cave ---
+
+#[test]
+fn status_and_approve_agree_on_an_unpushed_target() {
+    // An agent targeting a branch that exists nowhere on the cave remote.
+    // status counts the commits past the dev branch's fork point; approve
+    // must count the same ones, not everything reachable from the dev tip.
+    let p = Project::new("unpushed-target");
+    p.register_agent("1");
+    git(&["push", "cave", "main"], &p.dir);
+
+    git(&["checkout", "-b", "agent-1/writing"], &p.dir);
+    fs::write(p.dir.join("a.txt"), "A\n").unwrap();
+    git(&["add", "a.txt"], &p.dir);
+    git(&["commit", "-m", "agent 1: a.txt"], &p.dir);
+    git(
+        &["push", "cave", "agent-1/writing:refs/heads/agent-1/writing"],
+        &p.dir,
+    );
+    git(&["checkout", "main"], &p.dir);
+    git(&["branch", "-D", "agent-1/writing"], &p.dir);
+    git(&["fetch", "cave"], &p.dir);
+
+    let st = String::from_utf8_lossy(&p.cav(&["status", "1"]).stdout).to_string();
+    assert!(st.contains("1 commit on agent-1/writing"), "status: {st}");
+
+    let out = p.cav(&["approve", "-y", "1"]);
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "approve failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        text.contains("1 commit from"),
+        "approve must count only the agent's commit: {text}"
+    );
+    assert!(
+        !text.contains("init"),
+        "approve must not list the seed history: {text}"
+    );
+    assert!(p.shared_has_ref("refs/heads/writing"));
+}
+
 // --- Partial approve remaining count message ---
 
 #[test]

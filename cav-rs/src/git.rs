@@ -235,16 +235,50 @@ pub fn undelivered_commits(base: &str, head: &str, cwd: Option<&Path>) -> Result
 /// where `head` is the only ref, nothing is excluded, so this is every
 /// commit on `head`.
 fn commits_unique_to(head: &str, cwd: Option<&Path>) -> Result<Vec<String>> {
-    let refs = git_output(&["for-each-ref", "--format=%(refname)"], cwd)?;
-    let excludes: Vec<String> = refs
-        .lines()
-        .filter(|r| !is_ancestor(head, r, cwd))
-        .map(|r| format!("^{r}"))
-        .collect();
+    let excludes = pending_excludes(None, head, cwd)?;
+    let negated: Vec<String> = excludes.iter().map(|r| format!("^{r}")).collect();
     let mut args: Vec<&str> = vec!["log", "--format=%H %s", head];
-    args.extend(excludes.iter().map(|s| s.as_str()));
+    args.extend(negated.iter().map(|s| s.as_str()));
     let out = git_output(&args, cwd)?;
     Ok(format_log_lines(&out))
+}
+
+/// Refs to exclude when listing the commits on `head` pending delivery to
+/// `base_ref`, for callers that build their own rev-list. With the base
+/// present that is just the base. Without it — a target branch that has
+/// never been pushed — it is the fork point described above, so callers
+/// list the agent's own commits instead of the branch's whole history.
+pub fn pending_excludes(
+    base_ref: Option<&str>,
+    head: &str,
+    cwd: Option<&Path>,
+) -> Result<Vec<String>> {
+    if let Some(base) = base_ref {
+        return Ok(vec![base.to_string()]);
+    }
+    let refs = git_output(&["for-each-ref", "--format=%(refname)"], cwd)?;
+    Ok(refs
+        .lines()
+        .filter(|r| !is_ancestor(head, r, cwd))
+        .map(str::to_string)
+        .collect())
+}
+
+/// SHAs of the commits on `head` pending delivery to `base_ref`, newest
+/// first.
+pub fn pending_shas(
+    base_ref: Option<&str>,
+    head: &str,
+    cwd: Option<&Path>,
+) -> Result<Vec<String>> {
+    let excludes = pending_excludes(base_ref, head, cwd)?;
+    let negated: Vec<String> = excludes.iter().map(|r| format!("^{r}")).collect();
+    let mut args: Vec<&str> = vec!["rev-list", head];
+    args.extend(negated.iter().map(|s| s.as_str()));
+    Ok(git_output(&args, cwd)?
+        .lines()
+        .map(str::to_string)
+        .collect())
 }
 
 fn format_log_lines(out: &str) -> Vec<String> {

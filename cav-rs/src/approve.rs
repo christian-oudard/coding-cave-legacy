@@ -195,26 +195,15 @@ pub fn approve(
     };
     let partial = after_sha != dev_tip;
 
-    let all_commits = if creating {
-        git::commit_oneline(&remote_dev, None, Some(base))?
-    } else {
-        git::commit_oneline(
-            &format!("{remote_base}..{remote_dev}"),
-            None,
-            Some(base),
-        )?
-    };
+    let base_ref = if creating { None } else { Some(remote_base.as_str()) };
+    let all_commits = pending_oneline(base_ref, &remote_dev, base)?;
+
+    // Oldest first — the chain do_approve records, one row per commit.
+    let mut approval_shas = git::pending_shas(base_ref, &after_sha, Some(base))?;
+    approval_shas.reverse();
 
     if partial {
-        let commits = if creating {
-            git::commit_oneline(&after_sha, None, Some(base))?
-        } else {
-            git::commit_oneline(
-                &format!("{remote_base}..{after_sha}"),
-                None,
-                Some(base),
-            )?
-        };
+        let commits = pending_oneline(base_ref, &after_sha, base)?;
         let remaining = all_commits.len() - commits.len();
         let n = commits.len();
         let total = all_commits.len();
@@ -268,6 +257,7 @@ pub fn approve(
         &resolved_agent_id,
         before_sha.as_deref(),
         &after_sha,
+        &approval_shas,
         creating,
         partial,
     )?;
@@ -301,20 +291,16 @@ fn pick_candidate(
         let name = registry::display_name(base, aid);
         let remote_dev = format!("{CAVE_SHARED_REMOTE}/{branch}");
         let remote_base = format!("{CAVE_SHARED_REMOTE}/{base_name}");
-        let commits = if git::git(
+        let has_base = git::git(
             &["rev-parse", "--verify", &remote_base],
             Some(base),
             false,
             true,
             false,
         )
-        .is_ok()
-        {
-            git::commit_oneline(&format!("{remote_base}..{remote_dev}"), None, Some(base))
-                .unwrap_or_default()
-        } else {
-            git::commit_oneline(&remote_dev, None, Some(base)).unwrap_or_default()
-        };
+        .is_ok();
+        let commits = pending_oneline(has_base.then_some(remote_base.as_str()), &remote_dev, base)
+            .unwrap_or_default();
         let n = commits.len();
         let word = if n == 1 { "commit" } else { "commits" };
         println!(
@@ -360,13 +346,17 @@ fn candidate_match_commit(
         false,
     )
     .is_ok();
-    let range = if has_base {
-        format!("{remote_base}..{remote_dev}")
-    } else {
-        remote_dev
-    };
-    let shas = git::git_output(&["rev-list", &range], Some(base)).ok()?;
-    shas.lines().find(|sha| sha.starts_with(prefix)).map(String::from)
+    let base_ref = has_base.then_some(remote_base.as_str());
+    let shas = git::pending_shas(base_ref, &remote_dev, Some(base)).ok()?;
+    shas.into_iter().find(|sha| sha.starts_with(prefix))
+}
+
+/// Commits pending delivery from `head` into the base, newest first.
+/// `base_ref` is None when the target branch has never been pushed.
+fn pending_oneline(base_ref: Option<&str>, head: &str, base: &Path) -> Result<Vec<String>> {
+    let excludes = git::pending_excludes(base_ref, head, Some(base))?;
+    let refs: Vec<&str> = excludes.iter().map(String::as_str).collect();
+    git::commit_oneline(head, Some(&refs), Some(base))
 }
 
 fn do_approve(
@@ -377,6 +367,7 @@ fn do_approve(
     agent_id: &str,
     before_sha: Option<&str>,
     after_sha: &str,
+    approval_shas: &[String],
     creating: bool,
     partial: bool,
 ) -> Result<Vec<String>> {
@@ -430,18 +421,9 @@ fn do_approve(
     )?;
 
     // Record one approval per commit
-    let range_spec = if creating {
-        after_sha.to_string()
-    } else {
-        format!("{}..{}", before_sha.unwrap(), after_sha)
-    };
-    let shas = git::git_output(
-        &["rev-list", "--reverse", &range_spec],
-        Some(project_base),
-    )?;
     let null_sha = "0".repeat(40);
     let mut prev = before_sha.unwrap_or(&null_sha).to_string();
-    for sha in shas.lines() {
+    for sha in approval_shas {
         registry::record_approval(slug, base_name, agent_id, &prev, sha)?;
         prev = sha.to_string();
     }
