@@ -15,6 +15,8 @@ The agent cave refers to the shared remote as `host-cave`, but the host refers t
 
 Each agent works on its own copy of a base branch (`main`, `develop`, `issue/123`, etc.) in its sandbox workspace. The agent sees its copy by the base branch name: inside the cave, the local branch is simply `main`. On the shared remote and the host repo, agent copies are namespaced under `agent-<n>/<base>` (e.g. `agent-1/main`) so they don't collide with the canonical base branch or with other agents' copies.
 
+An agent can work toward a base branch that does not exist yet, by starting a new line of work under a name of its own. The first time it publishes a commit toward that name, the shared remote creates the base branch at the point the work forked from the branches already there. That records where the work began, so the agent's commits are counted against it from then on rather than being confused with the history it grew from. A branch that shares no history with anything already published has no fork point to record, and every commit on it counts as the agent's.
+
 Here is how code moves through the system:
 
 **Development** The agent commits work to its sandboxed worktree. Each commit is automatically published to the shared remote as `agent-<n>/<base>`. The user runs `cav pull` to bring those commits into their host-side view of the agent's branch. If the user makes manual edits, they run `cav push` to send them through the shared remote, where they are picked up by the agent's worktree.

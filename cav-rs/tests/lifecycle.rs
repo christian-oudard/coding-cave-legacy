@@ -2291,6 +2291,12 @@ fn status_and_approve_agree_on_an_unpushed_target() {
     git(&["branch", "-D", "agent-1/writing"], &p.dir);
     git(&["fetch", "cave"], &p.dir);
 
+    // The push itself recorded where the work began.
+    assert!(
+        p.shared_has_ref("refs/heads/writing"),
+        "post-receive should have created the target at the fork point"
+    );
+
     let st = String::from_utf8_lossy(&p.cav(&["status", "1"]).stdout).to_string();
     assert!(st.contains("1 commit on agent-1/writing"), "status: {st}");
 
