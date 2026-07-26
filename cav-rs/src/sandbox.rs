@@ -28,7 +28,6 @@ struct SandboxConfig {
     proc_mask_dirs: Vec<String>,
     proc_mask: String,
     proc_mask_dir: String,
-    proc_mask_meminfo: String,
     seccomp_filter: String,
     dot_claude_json_default: String,
     ca_cert_bundle: String,
@@ -573,12 +572,6 @@ fn build_bwrap_argv(
             "--ro-bind-try".to_string(), cfg.proc_mask_dir.clone(), d.clone(),
         ]);
     }
-    args.extend([
-        "--ro-bind".to_string(),
-        cfg.proc_mask_meminfo.clone(),
-        "/proc/meminfo".to_string(),
-    ]);
-
     if let Ok(cpuinfo) = write_cpuinfo(run_dir) {
         args.extend([
             "--ro-bind".to_string(),

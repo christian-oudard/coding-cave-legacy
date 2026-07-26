@@ -37,7 +37,6 @@ fn blocked_x86_64() -> Vec<u32> {
         179,           // quotactl
         180,           // nfsservctl
         323,           // userfaultfd
-        99,            // sysinfo
     ];
     v.sort();
     v
@@ -56,7 +55,6 @@ fn blocked_aarch64() -> Vec<u32> {
         171, 266,      // adjtimex/clock_adjtime
         60,            // quotactl
         282,           // userfaultfd
-        179,           // sysinfo
     ];
     v.sort();
     v
@@ -114,6 +112,85 @@ fn generate_filter(arch: &str) -> Vec<u8> {
     out.extend_from_slice(&insn(BPF_RET | BPF_K, 0, 0, SECCOMP_RET_ERRNO | EPERM));
 
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Minimal cBPF interpreter over the generated filter, so tests assert the
+    /// action the kernel would take rather than list membership. Covers the
+    /// jump-offset arithmetic in generate_filter, which is easy to get wrong.
+    fn run_filter(arch: &str, audit_arch: u32, nr: u32) -> u32 {
+        let filter = generate_filter(arch);
+        let insns: Vec<[u8; 8]> = filter.chunks(8).map(|c| c.try_into().unwrap()).collect();
+        let mut pc = 0usize;
+        let mut acc = 0u32;
+        loop {
+            let i = &insns[pc];
+            let code = u16::from_le_bytes([i[0], i[1]]);
+            let (jt, jf) = (i[2] as usize, i[3] as usize);
+            let k = u32::from_le_bytes([i[4], i[5], i[6], i[7]]);
+            pc += 1;
+            match code {
+                c if c == BPF_LD | BPF_W | BPF_ABS => {
+                    acc = match k {
+                        OFFSET_NR => nr,
+                        OFFSET_ARCH => audit_arch,
+                        _ => panic!("load from unexpected offset {k}"),
+                    };
+                }
+                c if c == BPF_JMP | BPF_JEQ | BPF_K => {
+                    pc += if acc == k { jt } else { jf };
+                }
+                c if c == BPF_RET | BPF_K => return k,
+                other => panic!("unhandled opcode {other:#x}"),
+            }
+        }
+    }
+
+    /// sysinfo(2) must stay allowed. Answering it with EPERM made glibc's
+    /// sysconf(_SC_PHYS_PAGES) return uninitialized stack, which crashed
+    /// headless Chromium in half of all launches. It hid nothing: host
+    /// MemTotal is recoverable from the cave's own mount table.
+    /// See docs/security/host-info-leaks.md.
+    #[test]
+    fn sysinfo_is_allowed() {
+        assert_eq!(run_filter("x86_64", AUDIT_ARCH_X86_64, 99), SECCOMP_RET_ALLOW);
+        assert_eq!(run_filter("aarch64", AUDIT_ARCH_AARCH64, 179), SECCOMP_RET_ALLOW);
+    }
+
+    /// The syscall numbers adjacent to the sysinfo removal. 179 is sysinfo on
+    /// aarch64 but quotactl on x86_64, so removing the wrong one silently
+    /// unblocks quotactl.
+    #[test]
+    fn quotactl_still_blocked() {
+        let deny = SECCOMP_RET_ERRNO | EPERM;
+        assert_eq!(run_filter("x86_64", AUDIT_ARCH_X86_64, 179), deny);
+        assert_eq!(run_filter("aarch64", AUDIT_ARCH_AARCH64, 60), deny);
+    }
+
+    #[test]
+    fn blocked_syscalls_denied_and_others_allowed() {
+        let deny = SECCOMP_RET_ERRNO | EPERM;
+        for nr in blocked_x86_64() {
+            assert_eq!(run_filter("x86_64", AUDIT_ARCH_X86_64, nr), deny, "nr {nr}");
+        }
+        for nr in blocked_aarch64() {
+            assert_eq!(run_filter("aarch64", AUDIT_ARCH_AARCH64, nr), deny, "nr {nr}");
+        }
+        // read/write/openat/mmap and other everyday syscalls.
+        for nr in [0u32, 1, 2, 9, 257] {
+            assert_eq!(run_filter("x86_64", AUDIT_ARCH_X86_64, nr), SECCOMP_RET_ALLOW);
+        }
+    }
+
+    /// A foreign arch skips the syscall checks entirely (the jf on the arch
+    /// compare must land exactly on ALLOW).
+    #[test]
+    fn foreign_arch_allows_blocked_numbers() {
+        assert_eq!(run_filter("x86_64", AUDIT_ARCH_AARCH64, 321), SECCOMP_RET_ALLOW);
+    }
 }
 
 fn main() {
