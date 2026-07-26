@@ -20,6 +20,8 @@ use crate::workspace;
 /// Confirms `[y/N]` first unless `yes` is set. Source files and session
 /// logs are NOT touched.
 pub fn remove(slug: &str, yes: bool) -> Result<()> {
+    let canon = registry::canonical_slug(slug)?;
+    let slug = canon.as_str();
     let path = registry::project_path(slug)?
         .ok_or_else(|| anyhow::anyhow!("No project \"{}\" in registry.", slug))?;
     let base = PathBuf::from(&path);
@@ -121,6 +123,8 @@ pub fn remove(slug: &str, yes: bool) -> Result<()> {
 /// Never touches the source tree. Refuses if any agent is running or if the
 /// new slug collides with a different registered project.
 pub fn rename(old_slug: &str, new_arg: &str, yes: bool) -> Result<()> {
+    let canon = registry::canonical_slug(old_slug)?;
+    let old_slug = canon.as_str();
     let registered_path = registry::project_path(old_slug)?
         .ok_or_else(|| anyhow::anyhow!("No project \"{}\" in registry.", old_slug))?;
     let old_path = PathBuf::from(&registered_path);

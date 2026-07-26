@@ -897,6 +897,8 @@ fn resolve_base(
     redirect: bool,
 ) -> Result<PathBuf> {
     if let Some(slug) = project_slug {
+        let canon = registry::canonical_slug(slug)?;
+        let slug = canon.as_str();
         if let Some(aid) = agent_id {
             let slugs = registry::agent_all_slugs(aid)?;
             if slugs.is_empty() {
@@ -1155,6 +1157,40 @@ mod resolve_base_tests {
         let _ = register_project_with_agent(&g.path, "proj-b");
         let err = resolve_base(Some("999"), Some("proj-b"), true).expect_err("must error");
         assert!(err.to_string().contains("999"), "got: {err}");
+    }
+
+    #[test]
+    fn named_project_matches_ignoring_case() {
+        // Slugs are stored lowercase; typing the directory name as it looks
+        // on disk must still resolve.
+        let g = DataDirGuard::new("rb-case");
+        let base = g.path.join("IthkuilTranslator");
+        fs::create_dir_all(&base).unwrap();
+        registry::register_project(&base).unwrap();
+
+        let got = resolve_base(None, Some("IthkuilTranslator"), true).unwrap();
+        assert_eq!(got.canonicalize().unwrap(), base.canonicalize().unwrap());
+        assert_eq!(
+            registry::project_path("IthkuilTranslator").unwrap(),
+            Some(base.to_string_lossy().into_owned()),
+        );
+        assert_eq!(registry::canonical_slug("IthkuilTranslator").unwrap(), "ithkuiltranslator");
+    }
+
+    #[test]
+    fn agent_access_check_ignores_case() {
+        let g = DataDirGuard::new("rb-case-agent");
+        let (home, aid) = register_project_with_agent(&g.path, "proj-home");
+        let got = resolve_base(Some(&aid), Some("Proj-Home"), true).unwrap();
+        assert_eq!(got.canonicalize().unwrap(), home.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn unknown_project_reports_what_was_typed() {
+        let g = DataDirGuard::new("rb-case-unknown");
+        let _ = register_project_with_agent(&g.path, "proj-a");
+        let err = resolve_base(None, Some("NoSuchProj"), true).expect_err("must error");
+        assert!(err.to_string().contains("NoSuchProj"), "got: {err}");
     }
 
     #[test]

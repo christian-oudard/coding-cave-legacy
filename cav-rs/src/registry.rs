@@ -592,15 +592,29 @@ pub fn register_project(base: &Path) -> Result<String> {
     Ok(slug)
 }
 
-pub fn project_path(slug: &str) -> Result<Option<String>> {
+/// Look up a registered project by name, ignoring case. Slugs are stored
+/// lowercase, so this lets the user type the directory as it reads on disk
+/// ("MyProject") wherever a slug is expected. Returns the canonical slug
+/// and the registered path.
+pub fn find_project(name: &str) -> Result<Option<(String, String)>> {
     let db = open()?;
     Ok(db
         .query_row(
-            "SELECT path FROM projects WHERE slug = ?1",
-            params![slug],
-            |row| row.get(0),
+            "SELECT slug, path FROM projects WHERE slug = ?1 COLLATE NOCASE",
+            params![name],
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .ok())
+}
+
+pub fn project_path(slug: &str) -> Result<Option<String>> {
+    Ok(find_project(slug)?.map(|(_, path)| path))
+}
+
+/// Canonical slug for a user-typed project name. Falls back to the input
+/// unchanged when nothing matches, so callers report what was typed.
+pub fn canonical_slug(name: &str) -> Result<String> {
+    Ok(find_project(name)?.map(|(slug, _)| slug).unwrap_or_else(|| name.to_string()))
 }
 
 pub fn all_projects() -> Result<Vec<(String, String)>> {

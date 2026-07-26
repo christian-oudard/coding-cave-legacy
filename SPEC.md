@@ -33,7 +33,7 @@ Git hooks enforce that git commands run by agents are topologically correct. Age
 
 ## Projects
 
-Projects are registered with the coding-cave system with `cav init`. This creates the shared bare repo and adds the project to the project registry database table. Each project is assigned a unique slug based on its folder name. A project directory moved on disk keeps working: running any cav command from the new location re-registers the slug there once the old registered path no longer exists.
+Projects are registered with the coding-cave system with `cav init`. This creates the shared bare repo and adds the project to the project registry database table. Each project is assigned a unique slug based on its folder name. Slugs are lowercase, and commands that take a project name match it case-insensitively, so the folder name can be typed as it reads on disk. A project directory moved on disk keeps working: running any cav command from the new location re-registers the slug there once the old registered path no longer exists.
 
 ## Agent IDs
 
