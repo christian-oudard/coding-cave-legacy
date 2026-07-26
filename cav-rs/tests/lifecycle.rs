@@ -101,6 +101,7 @@ impl Project {
         Command::new(CAV)
             .args(args)
             .current_dir(&self.dir)
+            .env("PATH", hook_path())
             .env("CODING_CAVE_DATA_DIR", &self.data_dir)
             // Per-cave nix stores live at a fixed /var/lib path in production;
             // redirect them under the tmp data dir so the spawned cav never
@@ -222,10 +223,23 @@ impl Drop for Project {
     }
 }
 
+/// PATH with the built binaries' dir first, so the receive hooks in a test
+/// repo resolve to the binaries this test run built. The devShell also has an
+/// installed cav on PATH; without this the hooks would silently exercise that
+/// one instead.
+fn hook_path() -> String {
+    let bin_dir = Path::new(CAV).parent().unwrap().display().to_string();
+    match std::env::var("PATH") {
+        Ok(p) => format!("{bin_dir}:{p}"),
+        Err(_) => bin_dir,
+    }
+}
+
 fn git(args: &[&str], dir: &Path) {
     let out = Command::new("git")
         .args(args)
         .current_dir(dir)
+        .env("PATH", hook_path())
         .output()
         .unwrap_or_else(|_| panic!("git {:?} failed", args));
     assert!(
@@ -240,6 +254,7 @@ fn git_out(args: &[&str], dir: &Path) -> String {
     let out = Command::new("git")
         .args(args)
         .current_dir(dir)
+        .env("PATH", hook_path())
         .output()
         .unwrap();
     assert!(
