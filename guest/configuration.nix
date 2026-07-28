@@ -1,5 +1,17 @@
 { config, pkgs, lib, modulesPath, claudeCode, ... }:
 
+let
+  # git's gpg.program inside the guest. Signing is forwarded to the host
+  # broker over the service plane, because the secret key deliberately cannot
+  # reach the guest; everything else (notably verification) runs the real gpg
+  # locally against the seeded public keyring.
+  caveGpg = pkgs.runCommand "cave-gpg" { } ''
+    mkdir -p $out/bin
+    substitute ${./cave-gpg.py} $out/bin/cave-gpg \
+      --replace '#!/usr/bin/env python3' '#!${pkgs.python3}/bin/python3'
+    chmod +x $out/bin/cave-gpg
+  '';
+in
 {
   imports = [
     # virtio driver set for the initrd. Written for QEMU guests but it is the
@@ -149,6 +161,42 @@
     };
   };
 
+  # Signing. The gpg-agent socket is deliberately NOT forwarded: a unix socket
+  # cannot cross the VM boundary, and re-exposing the agent on a port would
+  # hand signing to every process that can reach it, which is strictly weaker
+  # than the 0600 socket a container cave gets. Instead the host runs a broker
+  # that accepts a payload, validates the arguments, pins the key, and signs.
+  systemd.services.vsock-gpg = {
+    description = "Bridge 127.0.0.1:7400 to the host gpg signing broker over vsock 7400";
+    wantedBy = [ "multi-user.target" ];
+    before = [ "vm-root-agent.service" ];
+    serviceConfig = {
+      ExecStart = "${pkgs.socat}/bin/socat "
+        + "TCP-LISTEN:7400,bind=127.0.0.1,fork,reuseaddr VSOCK-CONNECT:2:7400";
+      Restart = "always";
+      RestartSec = 1;
+    };
+  };
+
+  # Public keyring, so `git log --show-signature` and any verification the
+  # agent does resolve locally instead of round-tripping to the host. Public
+  # material only; nothing here can sign.
+  systemd.services.install-pubring = {
+    description = "Install the host public keyring for verification";
+    wantedBy = [ "multi-user.target" ];
+    before = [ "vm-root-agent.service" ];
+    unitConfig.ConditionPathExists = "/etc/cave-host/pubring.kbx";
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+      ExecStart = "${pkgs.writeShellScript "install-pubring" ''
+        set -eu
+        install -d -m 700 /root/.gnupg
+        install -m 600 /etc/cave-host/pubring.kbx /root/.gnupg/pubring.kbx
+      ''}";
+    };
+  };
+
   systemd.services.vsock-git = {
     description = "Bridge 127.0.0.1:9418 to the host git daemon over vsock 7300";
     wantedBy = [ "multi-user.target" ];
@@ -189,6 +237,8 @@
     [push]
     	default = current
     	autoSetupRemote = true
+    [gpg]
+    	program = ${caveGpg}/bin/cave-gpg
   '';
 
   # --- Git identity ---

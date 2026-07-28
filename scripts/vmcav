@@ -74,7 +74,7 @@ is_running() { local p; p=$(vm_pid); [ -n "$p" ] && kill -0 "$p" 2>/dev/null; }
 # so do_start also checks /dev/kvm before launching.
 require_tools() {
   local missing="" t
-  for t in setsid ssh-keygen socat git python3 cloud-hypervisor ch-remote mke2fs; do
+  for t in setsid ssh-keygen socat git python3 cloud-hypervisor ch-remote mke2fs gpg; do
     command -v "$t" >/dev/null 2>&1 || missing="$missing $t"
   done
   [ -z "$missing" ] && return
@@ -101,8 +101,11 @@ build_seed_image() {
 stage_seed() {
   mkdir -p "$SEED"
   local ca=""
+  # /etc/crinj-ca.pem is where a container cave mounts its own CA, so this
+  # also works when vmcav runs nested inside one.
   for c in "$HOME/.crinj/gateway/ca.pem" \
-           "${XDG_DATA_HOME:-$HOME/.local/share}/crinj/gateway/ca.pem"; do
+           "${XDG_DATA_HOME:-$HOME/.local/share}/crinj/gateway/ca.pem" \
+           "/etc/crinj-ca.pem"; do
     [ -f "$c" ] && { ca="$c"; break; }
   done
   [ -n "$ca" ] || { log "crinj CA not found (looked in ~/.crinj/gateway/ and"; \
@@ -111,6 +114,7 @@ stage_seed() {
   [ -f "$HOME/.claude.json" ] && cp -f "$HOME/.claude.json" "$SEED/claude.json" || true
   [ -f "$SSHKEY" ] || ssh-keygen -t ed25519 -N '' -f "$SSHKEY" -C vmcav >/dev/null
   cp -f "$SSHKEY.pub" "$SEED/authorized_keys"
+  stage_pubring
   stage_gitconfig
 }
 
@@ -125,6 +129,8 @@ stage_gitconfig() {
   local name email
   name=$(git config --global user.name 2>/dev/null || true)
   email=$(git config --global user.email 2>/dev/null || true)
+  SIGNING_KEY=$(git config --global user.signingkey 2>/dev/null || true)
+  local sign; sign=$(git config --global commit.gpgsign 2>/dev/null || true)
   if [ -z "$name" ] && [ -z "$email" ]; then
     rm -f "$SEED/gitconfig"
     log "warning: no global git user.name/user.email; guest will use a fallback identity"
@@ -133,7 +139,21 @@ stage_gitconfig() {
   { echo "[user]"
     [ -n "$name" ]  && printf '\tname = %s\n' "$name"
     [ -n "$email" ] && printf '\temail = %s\n' "$email"
+    # Signing is safe to carry across because the guest's gpg.program is the
+    # shim, so this only decides *whether* to sign; the key itself never
+    # leaves the host. Carrying it matters: unsigned agent commits were a
+    # known disaster for container caves.
+    [ -n "$SIGNING_KEY" ] && printf '\tsigningkey = %s\n' "$SIGNING_KEY"
+    [ "$sign" = "true" ] && printf '[commit]\n\tgpgsign = true\n'
   } > "$SEED/gitconfig"
+}
+
+# Public keyring only, for in-guest verification. Secret key material stays
+# here; the guest reaches it solely through the broker, one operation at a
+# time, and never as a key.
+stage_pubring() {
+  local hd; hd=$(gpgconf --list-dirs homedir 2>/dev/null || echo "$HOME/.gnupg")
+  [ -f "$hd/pubring.kbx" ] && cp -f "$hd/pubring.kbx" "$SEED/pubring.kbx" || true
 }
 
 start_git_daemon() {
@@ -177,13 +197,22 @@ start_bridges() {
     socat "UNIX-LISTEN:${VSOCK}_$1,fork,unlink-early" "TCP:$2" &
     echo $! >> "$BRIDGEPIDS"
   done
-  log "vsock bridges up (7200 -> $CRINJ_ADDR, 7300 -> 127.0.0.1:$GIT_PORT)"
+  # The signing broker is its own unix-socket server, so it binds the vsock
+  # path directly instead of being relayed through socat. It is the only
+  # channel by which the guest can reach the host's key, and it exposes one
+  # operation rather than the gpg-agent protocol.
+  rm -f "${VSOCK}_7400"
+  CAVE_SIGNING_KEY="${SIGNING_KEY:-}" \
+    python3 "$REPO/scripts/gpg-broker.py" "${VSOCK}_7400" \
+    >> "$STATE_DIR/gpg-broker.log" 2>&1 &
+  echo $! >> "$BRIDGEPIDS"
+  log "vsock bridges up (7200 -> $CRINJ_ADDR, 7300 -> 127.0.0.1:$GIT_PORT, 7400 -> gpg broker)"
 }
 
 stop_bridges() {
   [ -f "$BRIDGEPIDS" ] || return 0
   local p; while read -r p; do kill "$p" 2>/dev/null || true; done < "$BRIDGEPIDS"
-  rm -f "$BRIDGEPIDS" "${VSOCK}_7200" "${VSOCK}_7300"
+  rm -f "$BRIDGEPIDS" "${VSOCK}_7200" "${VSOCK}_7300" "${VSOCK}_7400"
 }
 
 crinj_reachable() { (exec 3<>"/dev/tcp/${CRINJ_ADDR%:*}/${CRINJ_ADDR##*:}") 2>/dev/null; }
@@ -192,34 +221,7 @@ crinj_reachable() { (exec 3<>"/dev/tcp/${CRINJ_ADDR%:*}/${CRINJ_ADDR##*:}") 2>/d
 # with a "CONNECT <port>" line that CHV answers "OK <n>"; after that the
 # stream is the guest's port. Becomes `cave-vm vsock-connect` in the Go CLI.
 do_vsock_connect() {
-  python3 - "$VSOCK" "${1:-22}" <<'PY'
-import os, socket, sys, selectors
-path, port = sys.argv[1], int(sys.argv[2])
-s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-s.connect(path)
-s.sendall(b"CONNECT %d\n" % port)
-buf = b""
-while not buf.endswith(b"\n"):
-    b = s.recv(1)
-    if not b:
-        sys.exit("vsock: connection closed during handshake")
-    buf += b
-if not buf.startswith(b"OK"):
-    sys.exit("vsock: handshake failed: %r" % buf)
-sel = selectors.DefaultSelector()
-sel.register(s, selectors.EVENT_READ, "sock")
-sel.register(sys.stdin.buffer, selectors.EVENT_READ, "stdin")
-while True:
-    for key, _ in sel.select():
-        if key.data == "sock":
-            d = s.recv(65536)
-            if not d: return_code = 0; sys.exit(0)
-            sys.stdout.buffer.write(d); sys.stdout.buffer.flush()
-        else:
-            d = os.read(sys.stdin.fileno(), 65536)
-            if not d: s.shutdown(socket.SHUT_WR); sel.unregister(sys.stdin.buffer); continue
-            s.sendall(d)
-PY
+  exec python3 "$REPO/scripts/vsock-connect.py" "$VSOCK" "${1:-22}"
 }
 
 do_status() {
@@ -329,7 +331,7 @@ exec cloud-hypervisor \\
   --kernel "$kernel" \\
   --initramfs "$initrd" \\
   --cmdline "console=ttyS0 root=/dev/vda rw init=$toplevel/init" \\
-  --disk path="$DISK" path="$SEEDIMG",readonly=on \\
+  --disk path="$DISK",image_type=raw path="$SEEDIMG",readonly=on,image_type=raw \\
   --memory size=4096M --cpus boot=4 \\
   --vsock cid=$GUEST_CID,socket="$VSOCK" \\
   --api-socket path="$API" \\
