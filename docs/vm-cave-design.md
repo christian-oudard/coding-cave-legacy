@@ -237,6 +237,8 @@ tmux, bwrap, cave-guestd, pkgdd (with its config, `pkgstore` user, and gc
 timer), and nothing else; agent-visible tooling comes from the store via
 cave.nix, not the image. Upgrading the image is: build
 new artifacts, stop VM, start VM (guest state survives on guest.img).
+Accepted cost: an image upgrade evicts every running agent. There is no
+online upgrade path, matching Kata and unlike containerd.
 
 Rootless notes: CHV runs as the user with /dev/kvm; vsock is the
 unix-socket hybrid (no /dev/vhost-vsock); the seed share uses an
@@ -258,6 +260,58 @@ Control RPC (port 7001, JSON over HTTP, no framework): `POST /agents`
 (create cave: project slug, base branch, prompt), `GET /agents`,
 `POST /agents/<n>/stop`, `GET /health`. cave-vm is the only client; the
 protocol is internal and versioned by the image/binary shipping together.
+
+## Prior art: containerd and Kata Containers
+
+Checked against the closest established systems. containerd is the
+general-purpose case; Kata Containers (`containerd-shim-kata-v2`) is the
+direct analogue, being VM-per-pod with an in-guest agent over vsock and
+virtio-fs for the rootfs.
+
+Where this design already matches the prior art, and can stop
+re-deriving:
+
+- `cave-guestd` is `kata-agent`: a guest supervisor reached by a small RPC
+  over vsock (port 7001 here, ttrpc there).
+- narcache is containerd's content store plus registry pull: blobs
+  addressed by digest, fetched on demand, dedup falling out of the
+  addressing rather than out of a sync protocol. A narinfo is a manifest
+  fetch, a nar is a layer.
+- pkgdd's roots-and-leases GC is containerd's GC model (`gc.root` labels,
+  leases with expiry, mark-and-sweep under a lock).
+- Worktrees on the guest volume rather than virtio-fs repeats Kata's own
+  history: 9p to virtio-fs to DAX, every step driven by build-path I/O.
+
+Where the prior art knows something this design does not yet apply:
+
+- **Lifetime decoupling is the shim's whole reason to exist.** containerd
+  never parents workloads. The shim owns the container and is re-attached
+  over its socket, so restarting or upgrading the daemon kills nothing.
+  Here, CHV is a child of the `cave-vm` supervisor. The supervisor should
+  be stateless and re-attach to a running VM through the CHV API socket
+  plus a pidfile, so it can crash or be upgraded under a live VM (phase
+  10).
+- **GC scheduling, not just the GC algorithm.** containerd schedules its
+  sweep on pause-time feedback rather than a fixed timer. Noted in
+  package-dedupe-spec.md as a reference for pkgdd's sweep.
+
+Accepted costs, recorded rather than solved:
+
+- Image upgrade evicts every agent (stop VM, start VM). containerd
+  upgrades online; Kata has the same constraint this design does.
+- Agent-agent isolation is one VM with per-uid caves, the same stance as
+  containerd namespaces (metadata separation over a shared content store,
+  not a security boundary). Kata's unit is a VM per pod. If adversarial
+  agent-agent isolation ever becomes a requirement, the migration is
+  VM-per-agent, and the fixed vsock port table plus the single-guestd
+  assumption are what bend first.
+
+Where this design beats the prior art: rootlessness. containerd rootless
+needs rootlesskit, user namespaces and slirp4netns, and still loses
+capabilities, because it wants root-shaped operations on the host. This
+design inverts that: unprivileged on the host (/dev/kvm only), ordinary
+root inside the guest. And having no NIC at all is stronger than any
+firewall-pinning arrangement Kata or firecracker-containerd ship.
 
 ## Go module layout
 
@@ -326,7 +380,12 @@ wiring. Phases 0 and 1 restate the old plan's floor.
   when the env is already built; first-ever build is dominated by vsock
   substitution, not evaluation.
 - **10. Lifecycle polish.** start-if-needed from `cave-vm agent`, image
-  upgrade flow, crash restart, log rotation under `<state>/logs/`.
+  upgrade flow, crash restart, log rotation under `<state>/logs/`. The
+  supervisor holds no state a running VM depends on: CHV is spawned
+  detached, and `cave-vm` re-attaches through the CHV API socket plus a
+  pidfile (containerd's shim model). Accept: kill the supervisor, restart
+  it, the VM and every agent session survive and `cave-vm status` is
+  correct again.
 
 ## Deletions and revisions this plan implies
 

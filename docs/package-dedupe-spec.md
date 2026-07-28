@@ -187,6 +187,8 @@ An installer may have fetched an artifact into the store that no committed lockf
 
 GC is single-writer per store (the lock). Root registration/deregistration and installs are never blocked by GC and never block each other (adds are monotone). Long stores can be swept incrementally with `--max-freed` to bound lock hold time.
 
+Prior art for *when* to sweep: containerd's collector schedules itself on measured pause time (a target fraction of wall clock with the database unlocked) plus mutation and deletion thresholds, rather than on a fixed timer. If a periodic timer plus disk-pressure trigger turns out to stall installs behind the lock, that feedback loop is the shape to borrow.
+
 ## 9. CLI
 
 ```
