@@ -32,21 +32,25 @@ else
 fi
 CONFIG="${CODING_CAVE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/coding-cave/config.toml}"
 STATE_DIR="${STATE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/coding-cave/vm}"
-SSH_PORT="${SSH_PORT:-2222}"
 CRINJ_PORT="${CRINJ_PORT:-10255}"
 GIT_PORT="${GIT_PORT:-9418}"
 
-DISK="$STATE_DIR/cave-guest.qcow2"
+DISK="$STATE_DIR/cave-guest.raw"
+SEEDIMG="$STATE_DIR/cave-seed.raw"
 CONSOLE="$STATE_DIR/console.log"
 PIDFILE="$STATE_DIR/vm.pid"
-# QMP is an AF_UNIX socket (108-byte sun_path limit), so keep it short in /tmp
-# rather than under a possibly-long state dir; hash the state dir for
-# uniqueness across VMs.
-QMP="/tmp/vmcav-$(id -u)-$(printf '%s' "$STATE_DIR" | cksum | cut -d' ' -f1).qmp"
-FIFO="$STATE_DIR/console.in"
 SEED="$STATE_DIR/cave-host"
 SSHKEY="$STATE_DIR/agent_ssh_key"
 GITPID="$STATE_DIR/git-daemon.pid"
+BRIDGEPIDS="$STATE_DIR/bridges.pid"
+# AF_UNIX sun_path is 108 bytes, so keep the CHV control sockets short by
+# hashing the state dir rather than nesting under it. VSOCK is the service
+# plane: guest-initiated port N appears as ${VSOCK}_N, host-initiated
+# connections go to $VSOCK with a "CONNECT <port>" handshake.
+SOCKBASE="/tmp/vmcav-$(id -u)-$(printf '%s' "$STATE_DIR" | cksum | cut -d' ' -f1)"
+API="$SOCKBASE.api"
+VSOCK="$SOCKBASE.vsock"
+GUEST_CID="${GUEST_CID:-3}"
 
 log() { printf '[vmcav] %s\n' "$*" >&2; }
 
@@ -66,11 +70,11 @@ vm_pid() { [ -f "$PIDFILE" ] && cat "$PIDFILE" 2>/dev/null || true; }
 is_running() { local p; p=$(vm_pid); [ -n "$p" ] && kill -0 "$p" 2>/dev/null; }
 
 # vmcav's tools come from the dev shell (flake.nix devShell). Fail early with
-# guidance rather than silently running degraded. qemu is not required here:
-# the guest VM build bakes it and the runner calls it by absolute path.
+# guidance rather than silently running degraded. cloud-hypervisor is KVM-only,
+# so do_start also checks /dev/kvm before launching.
 require_tools() {
   local missing="" t
-  for t in setsid ssh-keygen socat git python3; do
+  for t in setsid ssh-keygen socat git python3 cloud-hypervisor ch-remote mke2fs; do
     command -v "$t" >/dev/null 2>&1 || missing="$missing $t"
   done
   [ -z "$missing" ] && return
@@ -79,7 +83,18 @@ require_tools() {
   exit 1
 }
 
-# Stage host-specific runtime files into the 9p seed share. The crinj CA is
+# The seed reaches the guest as a small read-only ext4 disk on /dev/vdb. CHV
+# has no 9p and its virtio-fs needs a virtiofsd the launcher would have to
+# supervise, which is far more machinery than a few static files deserve.
+# `mke2fs -d` populates a filesystem from a directory with no mount and no
+# root, so this stays inside the rootless footprint.
+build_seed_image() {
+  rm -f "$SEEDIMG"
+  mke2fs -q -t ext4 -d "$SEED" -b 1024 "$SEEDIMG" 65536
+}
+
+# Stage host-specific runtime files into the seed dir, which build_seed_image
+# turns into the read-only /dev/vdb disk. The crinj CA is
 # mandatory: it is baked into the guest's system trust store at build time
 # (security.pki), so a missing CA is a hard error, not a warning, else the
 # build throws with a less obvious message.
@@ -145,7 +160,67 @@ start_git_daemon() {
 }
 stop_git_daemon() { [ -f "$GITPID" ] && { kill "$(cat "$GITPID")" 2>/dev/null || true; rm -f "$GITPID"; }; }
 
-crinj_reachable() { (exec 3<>"/dev/tcp/127.0.0.1/$CRINJ_PORT") 2>/dev/null; }
+# Host-side leg of the service plane. CHV's hybrid vsock turns a guest
+# connection to port N into a connection to the unix socket ${VSOCK}_N, so the
+# host has to be listening there. Each bridge just relays to the real service
+# on the host. CRINJ_ADDR is overridable because crinj is not always on
+# loopback (inside a cave it lives at the gateway address).
+CRINJ_ADDR="${CRINJ_ADDR:-127.0.0.1:$CRINJ_PORT}"
+
+start_bridges() {
+  stop_bridges
+  : > "$BRIDGEPIDS"
+  local spec
+  for spec in "7200 $CRINJ_ADDR" "7300 127.0.0.1:$GIT_PORT"; do
+    set -- $spec
+    rm -f "${VSOCK}_$1"
+    socat "UNIX-LISTEN:${VSOCK}_$1,fork,unlink-early" "TCP:$2" &
+    echo $! >> "$BRIDGEPIDS"
+  done
+  log "vsock bridges up (7200 -> $CRINJ_ADDR, 7300 -> 127.0.0.1:$GIT_PORT)"
+}
+
+stop_bridges() {
+  [ -f "$BRIDGEPIDS" ] || return 0
+  local p; while read -r p; do kill "$p" 2>/dev/null || true; done < "$BRIDGEPIDS"
+  rm -f "$BRIDGEPIDS" "${VSOCK}_7200" "${VSOCK}_7300"
+}
+
+crinj_reachable() { (exec 3<>"/dev/tcp/${CRINJ_ADDR%:*}/${CRINJ_ADDR##*:}") 2>/dev/null; }
+
+# ssh ProxyCommand. Host-initiated vsock connections go to $VSOCK and open
+# with a "CONNECT <port>" line that CHV answers "OK <n>"; after that the
+# stream is the guest's port. Becomes `cave-vm vsock-connect` in the Go CLI.
+do_vsock_connect() {
+  python3 - "$VSOCK" "${1:-22}" <<'PY'
+import os, socket, sys, selectors
+path, port = sys.argv[1], int(sys.argv[2])
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.connect(path)
+s.sendall(b"CONNECT %d\n" % port)
+buf = b""
+while not buf.endswith(b"\n"):
+    b = s.recv(1)
+    if not b:
+        sys.exit("vsock: connection closed during handshake")
+    buf += b
+if not buf.startswith(b"OK"):
+    sys.exit("vsock: handshake failed: %r" % buf)
+sel = selectors.DefaultSelector()
+sel.register(s, selectors.EVENT_READ, "sock")
+sel.register(sys.stdin.buffer, selectors.EVENT_READ, "stdin")
+while True:
+    for key, _ in sel.select():
+        if key.data == "sock":
+            d = s.recv(65536)
+            if not d: return_code = 0; sys.exit(0)
+            sys.stdout.buffer.write(d); sys.stdout.buffer.flush()
+        else:
+            d = os.read(sys.stdin.fileno(), 65536)
+            if not d: s.shutdown(socket.SHUT_WR); sel.unregister(sys.stdin.buffer); continue
+            s.sendall(d)
+PY
+}
 
 do_status() {
   if is_running; then
@@ -167,9 +242,12 @@ do_status() {
 guest_ssh() {
   is_running || { log "vm is not running (vmcav start)"; exit 1; }
   command -v ssh >/dev/null 2>&1 || { log "ssh not found; enter the dev shell (use flake / nix develop)"; exit 1; }
+  # No NIC, so ssh rides vsock via the ProxyCommand above. The hostname is a
+  # placeholder the ProxyCommand ignores.
   exec ssh -t -i "$SSHKEY" \
     -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
-    -p "$SSH_PORT" root@127.0.0.1 "$@"
+    -o "ProxyCommand=$SELF vsock-connect 22" \
+    root@cave-guest "$@"
 }
 
 # Drive the agent: attach to its claude session (the tmux session the
@@ -196,55 +274,92 @@ do_start() {
   crinj_reachable && log "crinj reachable on :$CRINJ_PORT" \
     || log "warning: crinj not reachable on 127.0.0.1:$CRINJ_PORT (no egress/auth for the agent)"
 
+  [ -w /dev/kvm ] || { log "/dev/kvm not available; Cloud Hypervisor is"; \
+    log "  KVM-only with no software fallback. Relaunch the cave with"; \
+    log "  --device /dev/kvm."; return 1; }
+
   local disk_mb; disk_mb=$(config_disk_mb)
-  export CODING_CAVE_DISK_MB="$disk_mb"
   # The guest bakes crinj's CA into its system trust store at build time, so
   # the PEM must be present at eval; pass it via env (the build is --impure).
   export CODING_CAVE_CRINJ_CA; CODING_CAVE_CRINJ_CA=$(cat "$SEED/ca.pem")
-  log "building guest (disk cap $((disk_mb / 1024)) GB, sparse)"
-  local runner_link="$STATE_DIR/vm-runner"
-  nix build --impure --extra-experimental-features 'nix-command flakes' \
-    "$GUEST_FLAKE#nixosConfigurations.cave-guest-dev.config.system.build.vm" \
-    --out-link "$runner_link"
-  local runner; runner=$(echo "$runner_link"/bin/run-*-vm)
-  [ -x "$runner" ] || { log "no runner at $runner"; return 1; }
+  log "building guest (kernel, initrd, root disk)"
+  local out kernel initrd baseimg toplevel
+  out=$(nix build --impure --no-link --print-out-paths \
+    --extra-experimental-features 'nix-command flakes' \
+    "$GUEST_FLAKE#packages.x86_64-linux.kernel" \
+    "$GUEST_FLAKE#packages.x86_64-linux.initrd" \
+    "$GUEST_FLAKE#packages.x86_64-linux.disk" \
+    "$GUEST_FLAKE#packages.x86_64-linux.toplevel") || return 1
+  kernel=$(echo "$out" | sed -n 1p)/bzImage
+  initrd=$(echo "$out" | sed -n 2p)/initrd
+  baseimg=$(echo "$out" | sed -n 3p)/nixos.img
+  # Direct kernel boot has no bootloader to pick the generation, so the
+  # cmdline names the system's init explicitly. The path is identical inside
+  # the guest because the same store lives on the root disk.
+  toplevel=$(echo "$out" | sed -n 4p)
+  for f in "$kernel" "$initrd" "$baseimg"; do
+    [ -f "$f" ] || { log "missing build artifact: $f"; return 1; }
+  done
 
-  export NIX_DISK_IMAGE="$DISK"
-  export USE_TMPDIR=1 TMPDIR="$STATE_DIR/run"; mkdir -p "$TMPDIR"
-  rm -f "$QMP"
-  # The runner already passes -machine accel=kvm:tcg (KVM if present, else
-  # TCG), so don't add -accel (they conflict). Detect only for the log.
-  local accel; [ -w /dev/kvm ] && accel=kvm || accel=tcg
-  export QEMU_OPTS="-qmp unix:$QMP,server,nowait -virtfs local,path=$SEED,mount_tag=cavehost,security_model=none,readonly=on"
-  export QEMU_NET_OPTS="hostfwd=tcp::${SSH_PORT}-:22"
-  [ -p "$FIFO" ] || { rm -f "$FIFO"; mkfifo "$FIFO"; }
+  # First start materializes the store's read-only image into a writable disk
+  # and grows it to the configured cap; after that the guest owns it and
+  # nixos-rebuild mutates it in place. Delete it to start clean (cattle).
+  if [ ! -f "$DISK" ]; then
+    log "creating guest disk from image (cap $((disk_mb / 1024)) GB, sparse)"
+    cp --sparse=always "$baseimg" "$DISK"; chmod u+w "$DISK"
+    truncate -s "${disk_mb}M" "$DISK"
+  fi
+  build_seed_image
 
-  # Detached launch. The child writes its own PID (which becomes qemu's after
-  # exec) to the pidfile, then execs the runner. stdin is the fifo opened
-  # read-write (0<>), so qemu holds a writer on it and its serial console
-  # never hits EOF (which would otherwise exit qemu at the login prompt).
-  # setsid puts it in a new session so it outlives this command.
-  log "starting vm (accel=$accel, detached)"
-  setsid bash -c 'echo $$ > "'"$PIDFILE"'"; exec "'"$runner"'" > "'"$CONSOLE"'" 2>&1' 0<>"$FIFO" &
+  rm -f "$API" "$VSOCK"
+  start_bridges
+
+  # Direct kernel boot: root is the whole of vda (no partition table), the
+  # seed rides on vdb, and the boot log goes to the 8250 serial port because
+  # virtio_console is a module and hvc0 would be silent through early boot.
+  # Emitted as a script rather than inlined into `setsid bash -c`: the nesting
+  # needed to expand host paths inside a single-quoted -c string is where
+  # quoting bugs live, and having the exact invocation on disk makes a failed
+  # boot reproducible by hand.
+  local runscript="$STATE_DIR/run-vm.sh"
+  cat > "$runscript" <<EOF
+#!/usr/bin/env bash
+echo \$\$ > "$PIDFILE"
+exec cloud-hypervisor \\
+  --kernel "$kernel" \\
+  --initramfs "$initrd" \\
+  --cmdline "console=ttyS0 root=/dev/vda rw init=$toplevel/init" \\
+  --disk path="$DISK" path="$SEEDIMG",readonly=on \\
+  --memory size=4096M --cpus boot=4 \\
+  --vsock cid=$GUEST_CID,socket="$VSOCK" \\
+  --api-socket path="$API" \\
+  --console off --serial file="$CONSOLE"
+EOF
+  chmod +x "$runscript"
+
+  log "starting vm (cloud-hypervisor, detached)"
+  setsid "$runscript" > "$STATE_DIR/chv.log" 2>&1 &
   disown 2>/dev/null || true
 
-  # Give the child a moment to write the pidfile and for qemu to survive early.
+  # Give the child a moment to write the pidfile and for CHV to survive early.
   local i=0; while [ ! -s "$PIDFILE" ] && [ "$i" -lt 20 ]; do sleep 0.2; i=$((i+1)); done
   if is_running; then
     log "vm started (pid $(vm_pid)); watch: tail -f $CONSOLE"
-    log "attach once up: ssh -i $SSHKEY -p $SSH_PORT root@localhost"
+    log "attach once up: vmcav shell"
   else
     log "vm failed to start; see $CONSOLE"; tail -8 "$CONSOLE" 2>/dev/null >&2; return 1
   fi
 }
 
 do_stop() {
-  if ! is_running; then log "not running"; stop_git_daemon; rm -f "$PIDFILE" "$QMP"; return 0; fi
+  if ! is_running; then
+    log "not running"; stop_git_daemon; stop_bridges
+    rm -f "$PIDFILE" "$API" "$VSOCK"; return 0
+  fi
   local p; p=$(vm_pid)
   log "stopping vm (pid $p) via ACPI power-down"
-  if [ -S "$QMP" ] && command -v socat >/dev/null 2>&1; then
-    printf '%s\n' '{"execute":"qmp_capabilities"}' '{"execute":"system_powerdown"}' \
-      | timeout 5 socat - "UNIX-CONNECT:$QMP" >/dev/null 2>&1 || true
+  if [ -S "$API" ] && command -v ch-remote >/dev/null 2>&1; then
+    timeout 5 ch-remote --api-socket "$API" power-button >/dev/null 2>&1 || true
   fi
   # Wait for a clean shutdown, signalled by EITHER qemu exiting OR the guest
   # reaching power-off in the console. Watching the console matters under TCG:
@@ -266,8 +381,8 @@ do_stop() {
     log "power-down did not complete in ${i}s; forcing SIGTERM/SIGKILL"
     kill "$p" 2>/dev/null || true; sleep 3; kill -9 "$p" 2>/dev/null || true
   fi
-  rm -f "$PIDFILE" "$QMP"
-  stop_git_daemon
+  rm -f "$PIDFILE" "$API" "$VSOCK"
+  stop_git_daemon; stop_bridges
   log "vm stopped"
 }
 
@@ -277,6 +392,7 @@ case "${1:-agent}" in
   status) do_status ;;
   agent) do_agent ;;
   shell) shift; do_shell "$@" ;;
+  vsock-connect) shift; do_vsock_connect "$@" ;;
   -h|--help|help) echo "usage: vmcav {agent|start|stop|status|shell [cmd...]}" >&2 ;;
   *) echo "usage: vmcav {agent|start|stop|status|shell [cmd...]}" >&2; exit 2 ;;
 esac

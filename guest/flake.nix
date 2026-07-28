@@ -22,10 +22,16 @@
         modules = [ ./configuration.nix ];
       };
 
-      # Convenience: the QEMU runner script (boots under TCG when KVM is
-      # absent, e.g. inside a cave without /dev/kvm passthrough). This is a
-      # bootstrap-era test vehicle; production boots via Cloud Hypervisor.
-      packages.${system}.vm =
-        self.nixosConfigurations.cave-guest-dev.config.system.build.vm;
+      # The three artifacts Cloud Hypervisor boots with: --kernel, --initramfs,
+      # and the root --disk. Direct kernel boot, so the kernel and initrd come
+      # from the host at every start and only the disk persists.
+      packages.${system} =
+        let cfg = self.nixosConfigurations.cave-guest-dev.config;
+        in {
+          kernel = cfg.system.build.kernel;
+          initrd = cfg.system.build.initialRamdisk;
+          disk = cfg.system.build.chvDisk;
+          toplevel = cfg.system.build.toplevel;
+        };
     };
 }

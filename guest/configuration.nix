@@ -2,66 +2,69 @@
 
 {
   imports = [
-    # Gives config.system.build.vm (QEMU runner) and provides a root
-    # filesystem + bootloader stub, so the toplevel evaluates without a
-    # hand-written disk layout during the bootstrap era.
-    "${modulesPath}/virtualisation/qemu-vm.nix"
+    # virtio driver set for the initrd. Written for QEMU guests but it is the
+    # same virtio-pci device family Cloud Hypervisor exposes.
+    "${modulesPath}/profiles/qemu-guest.nix"
   ];
 
   system.stateVersion = "24.11";
 
-  # --- VM shape (bootstrap era: QEMU runner) ---
-  # Headless server: serial console, ssh forwarded to the host so the user
-  # attaches and drives the agent's tmux. Sized to run nix builds (and
-  # claude) inside. Accelerator choice (KVM vs TCG) is left to the runner /
-  # bootstrap script, so this boots even where /dev/kvm is absent.
-  virtualisation = {
-    graphics = false;
-    memorySize = 4096;
-    cores = 4;
-    # Max disk size (MiB). Sparse, so it only consumes what the guest writes;
-    # a large cap is "elastic". cave-vm passes the configured size via
-    # CODING_CAVE_DISK_MB (an impure build); pure builds (smoke test) get the
-    # 100 GiB default.
-    diskSize =
-      let e = builtins.getEnv "CODING_CAVE_DISK_MB";
-      in if e != "" then lib.toInt e else 102400;
-    # No forwardPorts here: which host port maps to guest ssh is a host-side
-    # concern (and hardcoding one bind-conflicts across concurrent boots), so
-    # the host scripts inject `hostfwd=...` via QEMU_NET_OPTS instead. The
-    # smoke test needs no forward and stays conflict-free.
-  };
+  # --- VM shape (Cloud Hypervisor, direct kernel boot) ---
+  # Headless: the boot log goes to the 8250 serial port, which CHV exposes
+  # with `--serial file=<log>`. Deliberately NOT the virtio console (hvc0):
+  # virtio_console is a module, so hvc0 is silent until the initrd loads it
+  # and early boot failures would leave no trace. Memory and cpu count are
+  # host-side CHV flags, not guest config.
   boot.kernelParams = [ "console=ttyS0" ];
-  # qemu-vm.nix pins boot.loader.grub.device at the virtio root disk even in
-  # direct-kernel boot (useBootLoader = false), and grub.enable defaults to
-  # true, so an in-guest `nixos-rebuild switch` runs grub-install against the
-  # partition-less root image and aborts before activating. Boot state is
-  # host-injected (-kernel/-initrd/-append); the disk is a cache with no
-  # bootloader on it. Disabling GRUB lets `switch` register and activate
-  # generations (the root agent's redeploy path, docs/vm-root-agent.md) and skip
-  # the bootloader step entirely.
+
+  # Root is the whole device, no partition table (make-disk-image
+  # partitionTableType = "none"), so the kernel gets root=/dev/vda directly.
+  fileSystems."/" = {
+    device = "/dev/vda";
+    fsType = "ext4";
+  };
+
+  # Boot state is host-injected (--kernel/--initramfs/--cmdline) and the disk
+  # carries no bootloader, so grub-install would abort an in-guest
+  # `nixos-rebuild switch` before it activated anything. Disabling GRUB lets
+  # switch register and activate generations, which is the root agent's
+  # redeploy path (docs/vm-root-agent.md). The consequence to remember: a
+  # generation that changes the kernel needs the host to boot the new one,
+  # which is why bootloader boot is the graduation step in that doc.
   boot.loader.grub.enable = false;
 
-  # --- Networking: bootstrap-era user-mode NIC, all egress to crinj ---
-  # The guest DHCPs on its single NIC (QEMU user-net / passt). crinj on the
-  # host is the only sanctioned egress; point every proxy-aware tool at it.
-  # The gateway 10.0.2.2 is the host as seen from QEMU user networking.
+  # The raw root image CHV boots. Built once on the host; vmcav copies it into
+  # the state dir on first start, after which the guest owns it and
+  # nixos-rebuild mutates it in place.
+  system.build.chvDisk = import "${modulesPath}/../lib/make-disk-image.nix" {
+    inherit pkgs lib config;
+    partitionTableType = "none";
+    installBootLoader = false;
+    format = "raw";
+    diskSize = "auto";
+    additionalSpace = "3G";
+    copyChannel = false;
+  };
+
+  # --- Networking: none. Every host service arrives over vsock ---
+  # The guest has no NIC at all, so unproxied egress is impossible by
+  # construction rather than by firewall rule (vm-cave-design.md). Host
+  # services reach the guest over virtio-vsock and are re-exposed on
+  # localhost by the forwarders below, so nothing in this config, in the
+  # agent's git remotes, or in its proxy env has to know vsock exists.
   networking.hostName = "coding-cave";
-  networking.useDHCP = true;
+  networking.useDHCP = false;
   networking.firewall.enable = false;
 
-  # crinj listens on the host; QEMU user-net maps the host to 10.0.2.2.
-  # Port 10255 matches the Rust implementation's CRINJ_PORT and vmcav's
-  # default.
   environment.sessionVariables =
-    let proxy = "http://10.0.2.2:10255";
+    let proxy = "http://127.0.0.1:10255";
     in {
       HTTP_PROXY = proxy;
       HTTPS_PROXY = proxy;
       http_proxy = proxy;
       https_proxy = proxy;
-      NO_PROXY = "localhost,127.0.0.1,::1,10.0.2.2";
-      no_proxy = "localhost,127.0.0.1,::1,10.0.2.2";
+      NO_PROXY = "localhost,127.0.0.1,::1";
+      no_proxy = "localhost,127.0.0.1,::1";
       # NixOS bakes the system CA path into curl/go/nix, but node and
       # claude's runtime do not read it on their own; point them at the
       # system bundle, which includes the crinj CA (security.pki below).
@@ -92,22 +95,22 @@
          + "where ${share} is mounted"))
     ];
 
-  # Host-provided runtime seed share. Carries the files that are
-  # host-specific and must not be committed in this flake: crinj's
-  # intercepting CA (ca.pem, also read at eval time by in-guest redeploys,
-  # see security.pki below), the host's claude login state (claude.json),
-  # and the host's ssh public key. Delivered read-only over 9p; vmcav
-  # stages the files and adds the matching -virtfs, keeping host paths out
-  # of this committed flake. `nofail` + a short timeout keep a boot without
-  # the share from hanging.
-  # qemu-vm.nix rebuilds the VM's top-level fileSystems from
-  # virtualisation.fileSystems (it replaces fileSystems with
-  # mkVMOverride virtualisation.fileSystems), so a VM mount must be declared
-  # here, not at top level, or it is silently dropped.
-  virtualisation.fileSystems."/etc/cave-host" = {
-    device = "cavehost";
-    fsType = "9p";
-    options = [ "trans=virtio" "ro" "nofail" "x-systemd.device-timeout=2" ];
+  # Host-provided runtime seed. Carries the files that are host-specific and
+  # must not be committed in this flake: crinj's intercepting CA (ca.pem, also
+  # read at eval time by in-guest redeploys, see security.pki above), the
+  # host's claude login state (claude.json), its git identity, and its ssh
+  # public key. `nofail` plus a short timeout keep a seedless boot (the smoke
+  # test) from hanging.
+  #
+  # Delivered as a small read-only ext4 disk rather than a filesystem share:
+  # CHV has no 9p, and its virtio-fs would drag in a virtiofsd the launcher
+  # has to supervise (vm-cave-plan.md notes the stock one is unusable
+  # unprivileged). A handful of small static files do not justify that, and
+  # vmcav can build the image rootlessly with `mke2fs -d`.
+  fileSystems."/etc/cave-host" = {
+    device = "/dev/vdb";
+    fsType = "ext4";
+    options = [ "ro" "nofail" "x-systemd.device-timeout=2" ];
   };
 
   # --- Access: host attaches over ssh, drives the agent's tmux ---
@@ -127,10 +130,41 @@
   # one. logrotate isn't needed here (journald self-rotates), so disable it.
   services.logrotate.enable = false;
 
+  # Guest-side leg of the service plane. CHV's vsock is the unix-socket
+  # hybrid: a guest connection to port N surfaces on the host as the unix
+  # socket <vsock.sock>_N, which vmcav bridges to the real service. CID 2 is
+  # the host (VMADDR_CID_HOST). Re-exposing each service on localhost is what
+  # lets the rest of this config, the proxy env, and the agent's git remotes
+  # stay ignorant of vsock. Restart=always because the host bridge may not be
+  # listening yet when the guest boots.
+  systemd.services.vsock-crinj = {
+    description = "Bridge 127.0.0.1:10255 to host crinj over vsock 7200";
+    wantedBy = [ "multi-user.target" ];
+    before = [ "vm-root-agent.service" ];
+    serviceConfig = {
+      ExecStart = "${pkgs.socat}/bin/socat "
+        + "TCP-LISTEN:10255,bind=127.0.0.1,fork,reuseaddr VSOCK-CONNECT:2:7200";
+      Restart = "always";
+      RestartSec = 1;
+    };
+  };
+
+  systemd.services.vsock-git = {
+    description = "Bridge 127.0.0.1:9418 to the host git daemon over vsock 7300";
+    wantedBy = [ "multi-user.target" ];
+    before = [ "clone-repo.service" ];
+    serviceConfig = {
+      ExecStart = "${pkgs.socat}/bin/socat "
+        + "TCP-LISTEN:9418,bind=127.0.0.1,fork,reuseaddr VSOCK-CONNECT:2:7300";
+      Restart = "always";
+      RestartSec = 1;
+    };
+  };
+
   # Install the host's ssh public key for root login. The key is host-specific
-  # (generated by the host script), delivered over the host-seed 9p share.
-  # Copied into /root/.ssh as root:root 600 rather than pointing sshd at the
-  # 9p file, whose mount ownership/perms would trip sshd StrictModes.
+  # (generated by the host script), delivered on the seed disk. Copied into
+  # /root/.ssh as root:root 600 rather than pointing sshd at the seed file,
+  # whose mount ownership and perms would trip sshd StrictModes.
   systemd.services.install-ssh-key = {
     description = "Install host ssh key for root login";
     wantedBy = [ "multi-user.target" ];
@@ -233,8 +267,10 @@
   # loudly). CAVE_REPO_URL defaults to the host git daemon over user-net.
   systemd.services.clone-repo = {
     description = "Clone the coding-cave repo for the agent";
-    after = [ "network-online.target" ];
-    wants = [ "network-online.target" ];
+    # The git bridge, not network-online.target: there is no NIC, so
+    # networkd-wait-online would only ever time out.
+    after = [ "vsock-git.service" ];
+    wants = [ "vsock-git.service" ];
     before = [ "vm-root-agent.service" ];
     wantedBy = [ "multi-user.target" ];
     path = [ pkgs.git ];
@@ -244,7 +280,7 @@
       ExecStart = "${pkgs.writeShellScript "clone-repo" ''
         set -eu
         repo=/root/coding-cave
-        url="''${CAVE_REPO_URL:-git://10.0.2.2/coding-cave}"
+        url="''${CAVE_REPO_URL:-git://127.0.0.1/coding-cave}"
         agent="''${CAVE_AGENT_ID:-1}"
         if [ -d "$repo/.git" ]; then
           echo "clone-repo: repo already present at $repo"
@@ -275,8 +311,8 @@
   # RestartIfChanged=false so a switch doesn't kill a live session.
   systemd.services.vm-root-agent = {
     description = "Bootstrap vm-root-agent (claude as root, in tmux)";
-    after = [ "network-online.target" "seed-claude-config.service" "clone-repo.service" ];
-    wants = [ "network-online.target" ];
+    after = [ "vsock-crinj.service" "seed-claude-config.service" "clone-repo.service" ];
+    wants = [ "vsock-crinj.service" ];
     requires = [ "seed-claude-config.service" "clone-repo.service" ];
     wantedBy = [ "multi-user.target" ];
     restartIfChanged = false;
@@ -288,9 +324,9 @@
     # bundle path on its own (verified: /login gets a cert-chain error
     # without SSL_CERT_FILE, and node subprocesses need NODE_EXTRA_CA_CERTS).
     environment = {
-      HTTP_PROXY = "http://10.0.2.2:10255";
-      HTTPS_PROXY = "http://10.0.2.2:10255";
-      NO_PROXY = "localhost,127.0.0.1,::1,10.0.2.2";
+      HTTP_PROXY = "http://127.0.0.1:10255";
+      HTTPS_PROXY = "http://127.0.0.1:10255";
+      NO_PROXY = "localhost,127.0.0.1,::1";
       SSL_CERT_FILE = "/etc/ssl/certs/ca-certificates.crt";
       NODE_EXTRA_CA_CERTS = "/etc/ssl/certs/ca-certificates.crt";
       # claude refuses --dangerously-skip-permissions as root ("cannot be
