@@ -247,9 +247,24 @@ let
     "/proc/acpi" "/proc/fs" "/proc/irq" "/proc/pressure"
   ];
 
+  # Resolve the `nixpkgs` flake ref to the same tree NIX_PATH points at.
+  # Without this the cave inherits nix's global registry, where nixpkgs is
+  # https://channels.nixos.org/nixpkgs-unstable/nixexprs.tar.xz, so the
+  # documented workflow (`nix shell nixpkgs#pkg`) refetches and unpacks a
+  # second nixpkgs into a per-cave tarball cache while the copy already
+  # seeded into the cave store goes unread. Measured: 144MB of
+  # ~/.cache/nix per cave that touches nix, against 68KB when pinned.
+  caveRegistry = pkgs.writeText "cave-flake-registry.json" (builtins.toJSON {
+    version = 2;
+    flakes = [{
+      from = { type = "indirect"; id = "nixpkgs"; };
+      to = { type = "path"; path = "${nixpkgs}"; };
+    }];
+  });
+
   # Base nix.conf for the cave's own nix. cav emits this as NIX_CONFIG at
   # launch.
-  nixConfig = "sandbox = false\nexperimental-features = nix-command flakes\nbuild-users-group =";
+  nixConfig = "sandbox = false\nexperimental-features = nix-command flakes\nbuild-users-group =\nflake-registry = ${caveRegistry}";
 
   config = {
     bwrap = "${pkgs.bubblewrap}/bin/bwrap";
