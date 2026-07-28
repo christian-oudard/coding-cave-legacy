@@ -147,6 +147,42 @@
     };
   };
 
+  # System-wide git config. autoSetupRemote so the agent's first `git push` on
+  # a branch it just forked creates and tracks the remote branch instead of
+  # failing with "no upstream"; the agent branch is created locally by
+  # clone-repo below and may not exist on the host yet.
+  environment.etc."gitconfig".text = ''
+    [push]
+    	default = current
+    	autoSetupRemote = true
+  '';
+
+  # --- Git identity ---
+  # The agent's core loop ends in "commit and push", and git refuses to commit
+  # without an identity. vmcav stages the host's user.name/user.email into the
+  # seed share (host-specific, so it cannot be committed here). The fallback
+  # keeps a seedless boot (the smoke test) able to commit rather than failing
+  # at the last step of the loop; it is deliberately obviously-not-a-person.
+  systemd.services.install-gitconfig = {
+    description = "Install git identity for root";
+    wantedBy = [ "multi-user.target" ];
+    before = [ "clone-repo.service" "vm-root-agent.service" ];
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+      ExecStart = "${pkgs.writeShellScript "install-gitconfig" ''
+        set -eu
+        seed=/etc/cave-host/gitconfig
+        if [ -f "$seed" ]; then
+          install -m 644 "$seed" /root/.gitconfig
+        elif [ ! -f /root/.gitconfig ]; then
+          printf '[user]\n\tname = vm-root-agent\n\temail = vm-root-agent@coding-cave.invalid\n' \
+            > /root/.gitconfig
+        fi
+      ''}";
+    };
+  };
+
   # --- Nix: flakes + daemon, so the agent redeploys from inside ---
   nix.settings.experimental-features = [ "nix-command" "flakes" ];
   nix.settings.trusted-users = [ "root" ];
@@ -209,13 +245,26 @@
         set -eu
         repo=/root/coding-cave
         url="''${CAVE_REPO_URL:-git://10.0.2.2/coding-cave}"
+        agent="''${CAVE_AGENT_ID:-1}"
         if [ -d "$repo/.git" ]; then
           echo "clone-repo: repo already present at $repo"
-        else
-          echo "clone-repo: cloning $url"
-          git clone "$url" "$repo"
-          echo "clone-repo: cloned OK"
+          exit 0
         fi
+        echo "clone-repo: cloning $url"
+        git clone "$url" "$repo"
+        cd "$repo"
+        # Land on the agent branch, the only namespace pre-receive accepts
+        # (refs/heads/agent-N/<base>). vmcav also builds the guest from this
+        # ref, so for the agent, pushing is deploying. Track the remote branch
+        # if it already exists, else fork it from the branch just cloned.
+        base=$(git symbolic-ref --short HEAD)
+        branch="agent-$agent/$base"
+        if git rev-parse --verify --quiet "refs/remotes/origin/$branch" >/dev/null; then
+          git checkout -B "$branch" --track "origin/$branch"
+        else
+          git checkout -B "$branch"
+        fi
+        echo "clone-repo: cloned OK, on $branch (base $base)"
       ''}";
     };
   };

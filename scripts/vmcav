@@ -96,6 +96,29 @@ stage_seed() {
   [ -f "$HOME/.claude.json" ] && cp -f "$HOME/.claude.json" "$SEED/claude.json" || true
   [ -f "$SSHKEY" ] || ssh-keygen -t ed25519 -N '' -f "$SSHKEY" -C vmcav >/dev/null
   cp -f "$SSHKEY.pub" "$SEED/authorized_keys"
+  stage_gitconfig
+}
+
+# The agent has to commit before it can push, and git refuses to commit
+# without an identity. Carry the host's, the same way the Rust implementation
+# gives container caves the host's identity, rather than inventing one. Only
+# user.name/user.email are copied, not the whole host gitconfig, which
+# routinely carries signing keys, credential helpers, and includes that name
+# host paths meaningless inside the guest. Absent identity is not fatal here:
+# the guest unit falls back so a boot still yields a usable agent.
+stage_gitconfig() {
+  local name email
+  name=$(git config --global user.name 2>/dev/null || true)
+  email=$(git config --global user.email 2>/dev/null || true)
+  if [ -z "$name" ] && [ -z "$email" ]; then
+    rm -f "$SEED/gitconfig"
+    log "warning: no global git user.name/user.email; guest will use a fallback identity"
+    return
+  fi
+  { echo "[user]"
+    [ -n "$name" ]  && printf '\tname = %s\n' "$name"
+    [ -n "$email" ] && printf '\temail = %s\n' "$email"
+  } > "$SEED/gitconfig"
 }
 
 start_git_daemon() {
