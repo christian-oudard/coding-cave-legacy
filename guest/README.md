@@ -1,6 +1,6 @@
 # cave-guest-dev
 
-Minimal NixOS guest for the bootstrap vm-root-agent (see `../vm-root-agent.md`).
+Minimal NixOS guest for the bootstrap vm-root-agent (see `../docs/vm-root-agent.md`).
 
 ## Build
 

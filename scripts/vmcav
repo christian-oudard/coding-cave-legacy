@@ -9,7 +9,7 @@
 #
 # The VM is long-running: `start` detaches it (new session) so it survives the
 # shell, and returns. Shutdown is manual via `stop`. Bootstrap-era shell;
-# migrates into the Go cave-vm binary later (see ../vm-cave-design.md).
+# migrates into the Go cave-vm binary later (see ../docs/vm-cave-design.md).
 set -euo pipefail
 
 # Resolve through symlinks so vmcav works when linked onto PATH (e.g.

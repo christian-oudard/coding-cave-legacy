@@ -1,5 +1,5 @@
 // Command cave-vm is the host CLI for the single-VM cave (see
-// ../../../vm-cave-design.md). Phase-0 skeleton: only `version` for now;
+// ../../../docs/vm-cave-design.md). Phase-0 skeleton: only `version` for now;
 // start/stop/status/shell/agent land in later phases.
 package main
 

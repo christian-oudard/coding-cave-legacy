@@ -13,17 +13,18 @@ Lift semantics from the Rust code, not code.
 
 ## Documents
 
-- `vm-cave-design.md` is the authoritative plan: architecture, Go module
+- `docs/vm-cave-design.md` is the authoritative plan: architecture, Go module
   layout, and the ten implementation phases with acceptance checks.
-- `vm-cave-plan.md` and `vm-cave-store.md` are earlier planning and review
-  records carried over for their settled decisions and rationale.
-- `store-design-review.md` reviews the Rust implementation's store-sharing
+- `docs/vm-cave-plan.md` and `docs/vm-cave-store.md` are earlier planning
+  and review records carried over for their settled decisions and
+  rationale.
+- `docs/store-design-review.md` reviews the Rust implementation's store-sharing
   history: what was tried, why each design failed, and the option analysis
   that led to this architecture.
-- `package-dedupe-spec.md` specifies pkgdd, the standalone GC-roots tool
+- `docs/package-dedupe-spec.md` specifies pkgdd, the standalone GC-roots tool
   for language package caches (uv, pnpm, cargo, go). The guest ships it
   and cave-guestd calls it; cave-vm implements none of it.
-- `vm-root-agent.md` designs the in-VM bootstrap agent: a root-in-guest
+- `docs/vm-root-agent.md` designs the in-VM bootstrap agent: a root-in-guest
   Claude session that builds the in-guest system from within and redeploys
   itself via NixOS generations, behind the unchanged host boundary.
 
@@ -35,5 +36,5 @@ Lift semantics from the Rust code, not code.
   system units, no host mounts.
 - The guest has no NIC. All host/guest traffic is vsock; crinj is the only
   path to the internet.
-- Work phase by phase per vm-cave-design.md; each phase lands runnable with
+- Work phase by phase per docs/vm-cave-design.md; each phase lands runnable with
   its acceptance check before the next begins.

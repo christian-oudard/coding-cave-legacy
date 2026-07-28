@@ -38,7 +38,7 @@
   # partition-less root image and aborts before activating. Boot state is
   # host-injected (-kernel/-initrd/-append); the disk is a cache with no
   # bootloader on it. Disabling GRUB lets `switch` register and activate
-  # generations (the root agent's redeploy path, vm-root-agent.md) and skip
+  # generations (the root agent's redeploy path, docs/vm-root-agent.md) and skip
   # the bootloader step entirely.
   boot.loader.grub.enable = false;
 
