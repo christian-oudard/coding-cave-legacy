@@ -30,6 +30,9 @@ Lift semantics from the Rust code, not code.
 - `docs/vm-cave-todo.md` lists gaps the bootstrap has surfaced that are not
   phases of the design: preserving uncommitted work across a reformat,
   session and memory management, and who owns the guest spec ref.
+- `docs/vm-cave-red-team.md` records an adversarial review of the host
+  boundary run from inside the bootstrap VM: what held, what leaks, and which
+  findings `main` shares.
 
 ## Ground rules
 
