@@ -233,7 +233,7 @@ one raw disk image (`<state>/guest.img`, ext4, sparse, created on first
 start) mounted at `/var/cave` and holding the guest nix store
 (`/nix/store` bind from `/var/cave/nix`), cave homes, worktrees, and the
 shared caches. Image contents: systemd, nix with the daemon enabled, sshd,
-tmux, bwrap, cave-guestd, pkgdd (with its config, `pkgstore` user, and gc
+bwrap, cave-guestd, pkgdd (with its config, `pkgstore` user, and gc
 timer), and nothing else; agent-visible tooling comes from the store via
 cave.nix, not the image. Upgrading the image is: build
 new artifacts, stop VM, start VM (guest state survives on guest.img).
@@ -248,13 +248,24 @@ user unit is optional convenience.
 
 ## Sessions and attach
 
-Agent sessions run under tmux inside the guest, owned by cave-guestd, so
-they survive host-side detach and terminal loss (and, with the VM being
-long-lived, laptop client disconnects in the eventual remote-host setup).
-`cave-vm shell [agent]` attaches: ssh over vsock (ProxyCommand `cave-vm
-vsock-connect 22`) into `tmux attach -t agent-<n>`. Host ssh keypair
-generated at state-dir init and baked into the guest's authorized_keys at
-image build. No custom terminal mux protocol.
+cave-guestd owns each agent's pty directly, so a session survives host-side
+detach and terminal loss (and, with the VM being long-lived, laptop client
+disconnects in the eventual remote-host setup). It keeps a bounded buffer of
+each agent's recent output and replays it on attach, which is what makes a
+reattach come back to the screen the agent is on rather than a blank one;
+more than one client can watch the same agent at once.
+
+No multiplexer. tmux and dtach were both tried and dropped: tmux brings
+windows, panes, a prefix key and a scrollback worse than the terminal's own,
+and dtach buffers nothing and never resizes a session to its attaching
+client, so every reattach came back blank and at the wrong width.
+
+`cave-vm agent [n]` attaches: ssh over vsock (ProxyCommand `cave-vm
+vsock-connect 22`) into `cave-guestd attach`, which relays the terminal raw
+and forwards its size on attach and on every resize. Detach is ctrl-\ and
+leaves the agent running; attaching to an agent that has exited starts a
+fresh one under the same name. Host ssh keypair generated at state-dir init
+and baked into the guest's authorized_keys at image build.
 
 Control RPC (port 7001, JSON over HTTP, no framework): `POST /agents`
 (create cave: project slug, base branch, prompt), `GET /agents`,

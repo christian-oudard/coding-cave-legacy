@@ -22,15 +22,16 @@ reformat at all, or is a guest-side habit (autocommit unit, periodic push).
 
 ## Session management
 
-The agent's claude session lives in a tmux session on the guest disk, so it
-dies with a reformat and cannot be resumed from the host. `vm-root-agent.md`
-already needs a resume marker for the reboot-to-test-a-generation loop,
-which is the same problem seen from a different side.
+The agent's claude session lives in the pty cave-guestd holds and in
+`/root/.claude` on the guest disk, so it dies with a reformat and cannot be
+resumed from the host. `vm-root-agent.md` already needs a resume marker for
+the reboot-to-test-a-generation loop, which is the same problem seen from a
+different side.
 
 Open: whether sessions are host-visible at all (the container cave tracks
 them in the registry: session id per agent, `cav status`, resume by id), and
 whether more than one agent per VM is a thing, which decides whether "the
-agent" stays a singular tmux session named `agent`.
+agent" stays the single session the daemon names `1`.
 
 ## Agent hibernation
 
@@ -39,8 +40,8 @@ kernel, a stop at the end of a day, a crash. Every agent dies with it. There
 is no way to quiesce them first, and no way to bring them back doing what
 they were doing.
 
-The present code assumes the opposite of all of this. One tmux session named
-`agent`, one systemd unit, and `vmcav agent` attaches to "the" agent.
+The present code assumes the opposite of all of this. One session named `1`,
+one systemd unit, and `vmcav agent` attaches to "the" agent.
 
 What hibernation has to cover is at least: quiescing an agent at a point
 where its work is recoverable (which overlaps the uncommitted-work entry
@@ -79,7 +80,9 @@ placeholder for the VM up front.
 A VM is meant to hold many agents. Everything built so far assumes exactly
 one, in ways that are cheap to list and not cheap to change:
 
-- one tmux session, literally named `agent`, and one `vm-root-agent.service`
+- one `vm-root-agent.service`, starting one session the daemon names `1`.
+  cave-guestd already addresses agents by name and can hold several, so this
+  is the unit and its launcher, not the daemon
 - `vmcav agent` attaches to "the" agent, with no way to name one
 - the git daemon injects `CODING_CAVE_AGENT_ID=1` for the whole guest, so
   the pre-receive guard cannot tell co-resident agents apart (the hook says

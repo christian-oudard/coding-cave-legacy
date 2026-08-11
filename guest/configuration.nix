@@ -1,40 +1,43 @@
 { config, pkgs, lib, modulesPath, claudeCode, ... }:
 
 let
-  # The socket dtach holds the agent's pty on. /run, so a reboot cannot leave
-  # a stale one behind.
-  agentSocket = "/run/cave-agent.sock";
+  # The socket cave-guestd serves on. /run, so a reboot cannot leave a stale
+  # one behind.
+  agentSocket = "/run/cave-agentd.sock";
 
-  # One definition of "run the agent", used by the boot unit and by `vmcav
-  # agent` when it has to recreate a dead session, so the two cannot drift
+  # cave-guestd: the daemon that owns each agent's pty, and the client that
+  # attaches to one. It replaced dtach, which held a pty but buffered nothing
+  # and never resized a session to its attaching client, so every reattach
+  # came back to a blank screen at the wrong width.
+  #
+  # The Go module lives outside this flake's directory, so its source arrives
+  # impurely, the same way the crinj CA does: from the host build via
+  # $CAVE_VM_SRC, and from an in-guest redeploy out of the agent's own
+  # checkout. No silent fallback, a guest without the daemon has no agent.
+  caveVmSrc =
+    let
+      env = builtins.getEnv "CAVE_VM_SRC";
+      inGuest = "/root/coding-cave/cave-vm";
+    in
+    if env != "" then env
+    else if builtins.pathExists inGuest then inGuest
+    else throw ("cave-vm source not found: export CAVE_VM_SRC and build with "
+      + "--impure (host), or build --impure in the guest where ${inGuest} exists");
+
+  caveGuestd = pkgs.buildGoModule {
+    pname = "cave-guestd";
+    version = "0";
+    src = builtins.path { path = /. + caveVmSrc; name = "cave-vm-src"; };
+    vendorHash = null; # the module has no dependencies, by design
+    subPackages = [ "cmd/cave-guestd" ];
+  };
+
+  # One definition of "run the agent", used by the boot unit and by the
+  # daemon when it has to restart a dead session, so the two cannot drift
   # into launching claude differently.
   caveAgent = pkgs.writeShellScriptBin "cave-agent" ''
-    # A pty created with no terminal behind it has no size at all: `stty
-    # size` reports 0 0, and a program that reads it once at startup latches
-    # onto zero. Fill in a default only in that case; when dtach created this
-    # session for an attaching client, the size is already the real terminal's
-    # and must not be stomped.
-    if [ "$(${pkgs.coreutils}/bin/stty size 2>/dev/null)" = "0 0" ]; then
-      ${pkgs.coreutils}/bin/stty rows 40 cols 120 2>/dev/null || true
-    fi
     cd /root/coding-cave
     exec ${claudeCode}/bin/claude --dangerously-skip-permissions "$@"
-  '';
-
-  # dtach does not resize a session to its attaching client (measured: a
-  # 20x60 client leaves a 40x120 session at 40x120), so the agent started by
-  # the boot unit keeps its headless default forever and wraps at the wrong
-  # width. Set the size on the session's own pty instead, which is also what
-  # makes the kernel deliver SIGWINCH, so the TUI both re-reads the width and
-  # repaints. Silent and best-effort: no session yet is the normal case.
-  caveResize = pkgs.writeShellScriptBin "cave-agent-resize" ''
-    server=$(${pkgs.procps}/bin/pgrep -f 'dtach -N ${agentSocket}' | head -1) || exit 0
-    [ -n "$server" ] || exit 0
-    child=$(${pkgs.procps}/bin/pgrep -P "$server" | head -1) || exit 0
-    [ -n "$child" ] || exit 0
-    tty=$(readlink "/proc/$child/fd/0" 2>/dev/null) || exit 0
-    case "$tty" in /dev/pts/*) ;; *) exit 0 ;; esac
-    ${pkgs.coreutils}/bin/stty -F "$tty" rows "$1" cols "$2" 2>/dev/null || true
   '';
 
   # git's gpg.program inside the guest. Signing is forwarded to the host
@@ -162,7 +165,7 @@ in
     options = [ "ro" "nofail" "x-systemd.device-timeout=2" ];
   };
 
-  # --- Access: host attaches over ssh, attaches to the agent's dtach socket ---
+  # --- Access: host comes in over ssh, then attaches to the agent daemon ---
   services.openssh = {
     enable = true;
     settings = {
@@ -312,9 +315,8 @@ in
   # --- Guest toolchain: the minimal floor, nothing more ---
   environment.systemPackages = with pkgs; [
     git
-    dtach
+    caveGuestd
     caveAgent
-    caveResize
     claudeCode
     vim
   ];
@@ -413,15 +415,14 @@ in
   };
 
   # --- The agent runtime ---
-  # claude as root with bypass permissions, held by dtach so it survives the
-  # ssh connection going away. Deliberately not a multiplexer: nothing here
-  # wants windows, panes, a status bar or a prefix key, and a multiplexer's
-  # scrollback is worse than the terminal's own. dtach is a pty and a socket,
-  # which is the entire requirement. Defined here so the agent redeploys its
-  # own unit via nixos-rebuild. RestartIfChanged=false so a switch doesn't
-  # kill a live session.
+  # claude as root with bypass permissions, its pty held by cave-guestd so it
+  # survives the ssh connection going away. Deliberately not a multiplexer:
+  # nothing here wants windows, panes, a status bar or a prefix key, and a
+  # multiplexer's scrollback is worse than the terminal's own. Defined here so
+  # the agent redeploys its own unit via nixos-rebuild.
+  # RestartIfChanged=false so a switch doesn't kill a live session.
   systemd.services.vm-root-agent = {
-    description = "Bootstrap vm-root-agent (claude as root, under dtach)";
+    description = "Bootstrap vm-root-agent (claude as root, under cave-guestd)";
     after = [ "vsock-crinj.service" "seed-claude-config.service" "clone-repo.service" ];
     wants = [ "vsock-crinj.service" ];
     requires = [ "seed-claude-config.service" "clone-repo.service" ];
@@ -448,21 +449,19 @@ in
       IS_SANDBOX = "1";
       # A unit has no terminal, so TERM is unset and anything curses-ish
       # falls back to dumb rendering: no colour, no cursor addressing, and
-      # output that reads like a terminal with no scrollback. tmux used to
-      # hide this by setting TERM for its panes; dtach passes the unit's
-      # environment straight through, so it has to be stated. The pty starts
-      # 80x24 and dtach resizes it to the attaching client, so only the type
-      # needs pinning here, not the size.
+      # output that reads like a terminal with no scrollback. The daemon
+      # passes its own environment to the agent, so it has to be stated here.
+      # Only the type: the size comes from whatever terminal attaches.
       TERM = "xterm-256color";
     };
     serviceConfig = {
-      # -N is -n but with dtach staying in the foreground, so systemd tracks
-      # the real process instead of guessing a pid after a double fork.
-      # -r winch makes an attaching client trigger a redraw, so a full-screen
-      # TUI repaints instead of showing a blank terminal until the next key.
+      # The daemon stays in the foreground, so systemd tracks the real process
+      # rather than guessing a pid after a double fork. It starts the agent
+      # immediately, which is what makes the agent's own work independent of
+      # anyone being attached.
       Type = "simple";
-      ExecStart = "${pkgs.dtach}/bin/dtach -N ${agentSocket} -r winch "
-        + "${caveAgent}/bin/cave-agent";
+      ExecStart = "${caveGuestd}/bin/cave-guestd serve -socket ${agentSocket} "
+        + "-- ${caveAgent}/bin/cave-agent";
       Restart = "no";
     };
   };

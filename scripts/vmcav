@@ -22,6 +22,10 @@ REPO="${REPO:-$(git rev-parse --show-toplevel 2>/dev/null || true)}"
 # becomes the store path the package ships (docs/vm-cave-todo.md); the
 # override is already the shape that will take.
 GUEST_FLAKE="${CAVE_GUEST_SRC:-$REPO/guest}"
+# The guest builds cave-guestd from this Go module. It sits outside the guest
+# flake's directory, so the path is passed into the (already impure) eval
+# rather than being a flake input.
+CAVE_VM_SRC="${CAVE_VM_SRC:-$REPO/cave-vm}"
 CONFIG="${CODING_CAVE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/coding-cave/config.toml}"
 STATE_DIR="${STATE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/coding-cave/vm}"
 CRINJ_PORT="${CRINJ_PORT:-10255}"
@@ -175,11 +179,11 @@ guest_ready() {
     root@cave-guest true >/dev/null 2>&1
 }
 
-# The agent is up when its dtach server is holding the socket. Checking the
-# socket file alone would pass on a leftover from a crashed session.
+# The agent is up when the daemon answers and reports a running session.
+# Checking the socket file alone would pass on a leftover from a crash.
 agent_ready() {
   ssh -T -o ConnectTimeout=5 -o BatchMode=yes "${GUEST_SSH_OPTS[@]}" \
-    root@cave-guest "pgrep -f 'dtach -N /run/cave-agent.sock' >/dev/null" \
+    root@cave-guest "cave-guestd list | grep -q ' running '" \
     >/dev/null 2>&1
 }
 
@@ -356,13 +360,12 @@ do_status() {
   current=$( (GUEST_SSH_TTY=-T guest_ssh readlink -f /run/current-system) 2>/dev/null \
     | tr -d '\r' || true)
 
-  # One detached terminal is one dtach process holding one socket, so count
-  # what dtach has open rather than what sockets exist: a socket whose dtach
-  # died is a leftover file and would over-count.
+  # The daemon is the register of who is running, so ask it rather than
+  # counting sockets or processes: it reports each agent's id and its pty
+  # size, and it knows the difference between an agent and its corpse.
   local sessions n
-  sessions=$( (GUEST_SSH_TTY=-T guest_ssh \
-      "pgrep -a dtach 2>/dev/null | grep -o '/run/[^ ]*\.sock' | sort -u") 2>/dev/null \
-    | tr -d '\r' || true)
+  sessions=$( (GUEST_SSH_TTY=-T guest_ssh "cave-guestd list") 2>/dev/null \
+    | tr -d '\r' | grep ' running ' || true)
   n=$(printf '%s\n' "$sessions" | grep -c . || true)
   if [ "${n:-0}" = 0 ]; then
     echo "agents: none running (vmcav agent starts one)"
@@ -401,25 +404,18 @@ guest_ssh() {
   return "$rc"
 }
 
-# Drive the agent: attach to the pty dtach holds for the vm-root-agent unit.
-# Detach with ctrl-\ , which leaves the agent running.
+# Drive the agent: attach to the pty cave-guestd holds for the vm-root-agent
+# unit. Detach with ctrl-\ , which leaves the agent running.
 do_agent() {
-  # -A attaches, or creates the session when the unit's is gone (agent
-  # crashed, or was killed); -r winch makes the TUI repaint on attach.
-  # IS_SANDBOX is set here and not by `vmcav shell`, so only this path lets
-  # claude accept --dangerously-skip-permissions as root.
-  # Printed before the attach, not by dtach, which says nothing ever. The
+  # The client sends its own size on attach and on every SIGWINCH, and the
+  # daemon replays what the agent printed while nobody was watching, so this
+  # is a plain attach with nothing to set up first. An agent that has exited
+  # is restarted by the daemon, so this always lands on a live session.
+  # Printed before the attach, not by the client, which says nothing ever. The
   # agent paints over the screen immediately, so this is only readable in
   # scrollback afterwards -- which is exactly when you go looking for it.
   log "attaching; detach with ctrl-\\"
-  # Resize the session to this terminal before attaching, because dtach will
-  # not: it leaves the session at whatever size its pty was created with, so
-  # the unit's headless default would wrap everything. Setting the size also
-  # delivers SIGWINCH, which is what gets the TUI to repaint on attach --
-  # -r ctrl_l is the fallback for the case where the size did not change.
-  local size; size=$(stty size </dev/tty 2>/dev/null || true)
-  guest_ssh "cave-agent-resize ${size:-40 120} 2>/dev/null; \
-    IS_SANDBOX=1 dtach -A /run/cave-agent.sock -r ctrl_l cave-agent" || true
+  guest_ssh "cave-guestd attach" || true
   # Detaching is the first moment after a /login, so grab it here rather than
   # making you remember to stop the VM before reformatting.
   capture_guest_credentials; capture_guest_config
@@ -486,6 +482,7 @@ do_image_create() {
   # The guest bakes crinj's CA into its system trust store at build time, so
   # the PEM must be present at eval; pass it via env (the build is --impure).
   export CODING_CAVE_CRINJ_CA; CODING_CAVE_CRINJ_CA=$(cat "$SEED/ca.pem")
+  export CAVE_VM_SRC
   log "building guest from $GUEST_FLAKE"
   local a
   for a in kernel initrd disk toplevel; do
