@@ -1,6 +1,42 @@
 { config, pkgs, lib, modulesPath, claudeCode, ... }:
 
 let
+  # The socket dtach holds the agent's pty on. /run, so a reboot cannot leave
+  # a stale one behind.
+  agentSocket = "/run/cave-agent.sock";
+
+  # One definition of "run the agent", used by the boot unit and by `vmcav
+  # agent` when it has to recreate a dead session, so the two cannot drift
+  # into launching claude differently.
+  caveAgent = pkgs.writeShellScriptBin "cave-agent" ''
+    # A pty created with no terminal behind it has no size at all: `stty
+    # size` reports 0 0, and a program that reads it once at startup latches
+    # onto zero. Fill in a default only in that case; when dtach created this
+    # session for an attaching client, the size is already the real terminal's
+    # and must not be stomped.
+    if [ "$(${pkgs.coreutils}/bin/stty size 2>/dev/null)" = "0 0" ]; then
+      ${pkgs.coreutils}/bin/stty rows 40 cols 120 2>/dev/null || true
+    fi
+    cd /root/coding-cave
+    exec ${claudeCode}/bin/claude --dangerously-skip-permissions "$@"
+  '';
+
+  # dtach does not resize a session to its attaching client (measured: a
+  # 20x60 client leaves a 40x120 session at 40x120), so the agent started by
+  # the boot unit keeps its headless default forever and wraps at the wrong
+  # width. Set the size on the session's own pty instead, which is also what
+  # makes the kernel deliver SIGWINCH, so the TUI both re-reads the width and
+  # repaints. Silent and best-effort: no session yet is the normal case.
+  caveResize = pkgs.writeShellScriptBin "cave-agent-resize" ''
+    server=$(${pkgs.procps}/bin/pgrep -f 'dtach -N ${agentSocket}' | head -1) || exit 0
+    [ -n "$server" ] || exit 0
+    child=$(${pkgs.procps}/bin/pgrep -P "$server" | head -1) || exit 0
+    [ -n "$child" ] || exit 0
+    tty=$(readlink "/proc/$child/fd/0" 2>/dev/null) || exit 0
+    case "$tty" in /dev/pts/*) ;; *) exit 0 ;; esac
+    ${pkgs.coreutils}/bin/stty -F "$tty" rows "$1" cols "$2" 2>/dev/null || true
+  '';
+
   # git's gpg.program inside the guest. Signing is forwarded to the host
   # broker over the service plane, because the secret key deliberately cannot
   # reach the guest; everything else (notably verification) runs the real gpg
@@ -110,9 +146,10 @@ in
   # Host-provided runtime seed. Carries the files that are host-specific and
   # must not be committed in this flake: crinj's intercepting CA (ca.pem, also
   # read at eval time by in-guest redeploys, see security.pki above), the
-  # host's claude login state (claude.json), its git identity, and its ssh
-  # public key. `nofail` plus a short timeout keep a seedless boot (the smoke
-  # test) from hanging.
+  # host's claude login state (claude.json), this VM's own captured login
+  # placeholder (credentials.json), its git identity, and its ssh public key.
+  # `nofail` plus a short timeout keep a seedless boot (the smoke test) from
+  # hanging.
   #
   # Delivered as a small read-only ext4 disk rather than a filesystem share:
   # CHV has no 9p, and its virtio-fs would drag in a virtiofsd the launcher
@@ -125,7 +162,7 @@ in
     options = [ "ro" "nofail" "x-systemd.device-timeout=2" ];
   };
 
-  # --- Access: host attaches over ssh, drives the agent's tmux ---
+  # --- Access: host attaches over ssh, attaches to the agent's dtach socket ---
   services.openssh = {
     enable = true;
     settings = {
@@ -275,7 +312,9 @@ in
   # --- Guest toolchain: the minimal floor, nothing more ---
   environment.systemPackages = with pkgs; [
     git
-    tmux
+    dtach
+    caveAgent
+    caveResize
     claudeCode
     vim
   ];
@@ -295,6 +334,12 @@ in
       RemainAfterExit = true;
       ExecStart = "${pkgs.writeShellScript "seed-claude-config" ''
         set -eu
+        # The base is this VM's own previous state, captured before the last
+        # reformat, never the host's ~/.claude.json: those flags are keyed to
+        # the host's project paths, so they never applied to /root/coding-cave
+        # anyway, and the rest of that file is the host's history and MCP
+        # config, which has no business in here. An empty base is fine, the
+        # keys forced below are the ones that matter.
         seed=/root/.claude.json
         host=/etc/cave-host/claude.json
         if [ -f "$seed" ]; then base=$(cat "$seed")
@@ -306,6 +351,18 @@ in
           > "$seed.tmp"
         mv "$seed.tmp" "$seed"
         chmod 600 "$seed"
+
+        # claude.json is login *state*; the token lives beside it, and without
+        # it the agent starts logged out and stops at /login. What the host
+        # stages is this VM's own placeholder, captured after it logged in
+        # once: crinj holds the real token, and a placeholder is worthless
+        # anywhere else. Never overwritten, so an in-guest login wins.
+        cred=/root/.claude/.credentials.json
+        host_cred=/etc/cave-host/credentials.json
+        if [ ! -f "$cred" ] && [ -f "$host_cred" ]; then
+          mkdir -p /root/.claude
+          install -m600 "$host_cred" "$cred"
+        fi
       ''}";
     };
   };
@@ -356,17 +413,21 @@ in
   };
 
   # --- The agent runtime ---
-  # A tmux session running claude as root with bypass permissions. Defined
-  # here so the agent redeploys its own unit via nixos-rebuild.
-  # RestartIfChanged=false so a switch doesn't kill a live session.
+  # claude as root with bypass permissions, held by dtach so it survives the
+  # ssh connection going away. Deliberately not a multiplexer: nothing here
+  # wants windows, panes, a status bar or a prefix key, and a multiplexer's
+  # scrollback is worse than the terminal's own. dtach is a pty and a socket,
+  # which is the entire requirement. Defined here so the agent redeploys its
+  # own unit via nixos-rebuild. RestartIfChanged=false so a switch doesn't
+  # kill a live session.
   systemd.services.vm-root-agent = {
-    description = "Bootstrap vm-root-agent (claude as root, in tmux)";
+    description = "Bootstrap vm-root-agent (claude as root, under dtach)";
     after = [ "vsock-crinj.service" "seed-claude-config.service" "clone-repo.service" ];
     wants = [ "vsock-crinj.service" ];
     requires = [ "seed-claude-config.service" "clone-repo.service" ];
     wantedBy = [ "multi-user.target" ];
     restartIfChanged = false;
-    path = [ pkgs.git pkgs.tmux claudeCode pkgs.nix pkgs.bash ];
+    path = [ pkgs.git claudeCode pkgs.nix pkgs.bash ];
     # systemd services do not read environment.sessionVariables, so the
     # agent's egress + TLS trust are set here explicitly. The crinj CA is
     # already in the system bundle (security.pki above); the two cert vars
@@ -385,14 +446,23 @@ in
       # agent starts and immediately exits. `vmcav agent` sets the same when
       # it launches claude interactively; a plain `vmcav shell` does not.
       IS_SANDBOX = "1";
+      # A unit has no terminal, so TERM is unset and anything curses-ish
+      # falls back to dumb rendering: no colour, no cursor addressing, and
+      # output that reads like a terminal with no scrollback. tmux used to
+      # hide this by setting TERM for its panes; dtach passes the unit's
+      # environment straight through, so it has to be stated. The pty starts
+      # 80x24 and dtach resizes it to the attaching client, so only the type
+      # needs pinning here, not the size.
+      TERM = "xterm-256color";
     };
     serviceConfig = {
-      Type = "forking";
-      ExecStart = "${pkgs.writeShellScript "vm-root-agent-start" ''
-        set -eu
-        exec ${pkgs.tmux}/bin/tmux new-session -d -s agent \
-          "cd /root/coding-cave && exec claude --dangerously-skip-permissions"
-      ''}";
+      # -N is -n but with dtach staying in the foreground, so systemd tracks
+      # the real process instead of guessing a pid after a double fork.
+      # -r winch makes an attaching client trigger a redraw, so a full-screen
+      # TUI repaints instead of showing a blank terminal until the next key.
+      Type = "simple";
+      ExecStart = "${pkgs.dtach}/bin/dtach -N ${agentSocket} -r winch "
+        + "${caveAgent}/bin/cave-agent";
       Restart = "no";
     };
   };
