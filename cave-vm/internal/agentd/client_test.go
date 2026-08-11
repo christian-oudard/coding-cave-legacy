@@ -96,6 +96,11 @@ func TestAttachRelaysTypingAndDetachesOnTheDetachKey(t *testing.T) {
 	if !s.Running() {
 		t.Fatal("detaching killed the agent")
 	}
+	// The TUI hides the cursor and never gets to put it back, so the client
+	// has to, or you land in a shell you cannot see yourself typing in.
+	if !strings.Contains(seen.String(), "\x1b[?25h") {
+		t.Fatal("detach left the terminal without showing the cursor")
+	}
 }
 
 // When the agent exits the client comes back on its own, without waiting for

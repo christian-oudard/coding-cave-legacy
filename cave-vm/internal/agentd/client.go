@@ -16,6 +16,25 @@ import (
 // habit carries over. In raw mode it is an ordinary byte rather than SIGQUIT.
 const DetachKey = 0x1c
 
+// Detaching leaves the terminal however the agent's TUI left it: cursor
+// hidden, colours set, bracketed paste and mouse reporting on, and a scroll
+// region covering part of the screen. Restoring the termios settings does not
+// undo any of that, because none of it is a termios setting -- it is state
+// the remote program set by writing escape sequences, and the shell you land
+// back in never asked for it. So put it back:
+//
+//	[0m     attributes
+//	[?25h   show the cursor (this is the one you notice)
+//	[?2004l bracketed paste
+//	[?1000l [?1002l [?1003l [?1006l  mouse reporting
+//	[r      scroll region back to the whole screen
+//
+// Deliberately nothing that touches the screen buffer: no clear, no leaving
+// the alternate screen. The point of detaching is to leave the agent's output
+// sitting in the scrollback.
+const restoreTerminal = "\x1b[0m\x1b[?25h\x1b[?2004l" +
+	"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[r"
+
 func dialAgentd(sock string) (net.Conn, error) {
 	conn, err := net.Dial("unix", sock)
 	if err != nil {
@@ -137,6 +156,9 @@ func AttachTo(sock, id string, in, out *os.File) error {
 	}()
 
 	_, err = io.Copy(out, conn)
+	// Both ways out land here: the agent that painted the screen is no longer
+	// the one driving this terminal, whether it exited or you walked away.
+	fmt.Fprint(out, restoreTerminal)
 	select {
 	case <-detached:
 		fmt.Fprint(out, "\r\n[detached]\r\n")

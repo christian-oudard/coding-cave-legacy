@@ -269,6 +269,23 @@ in
     };
   };
 
+  # --- Claude policy settings ---
+  # The bypass-permissions warning is a different dialog from the trust one
+  # seeded below, and accepting it never touches .claude.json: claude records
+  # it as `skipDangerousModePermissionPrompt` in settings, which is why it came
+  # back at every reformat while the trust dialog stayed accepted.
+  #
+  # Stated here as policy rather than written into /root/.claude/settings.json,
+  # because that is what it is: the agent runs with
+  # --dangerously-skip-permissions by construction, and a VM with no NIC is the
+  # sandbox the dialog is asking about. Policy is also the tier the agent
+  # cannot clobber by rewriting its own settings, and being config rather than
+  # disk state it survives a reformat for free. The container cave writes the
+  # same file for its own reason (the cave-messages channel allowlist).
+  environment.etc."claude-code/managed-settings.json".text = builtins.toJSON {
+    skipDangerousModePermissionPrompt = true;
+  };
+
   # System-wide git config. autoSetupRemote so the agent's first `git push` on
   # a branch it just forked creates and tracks the remote branch instead of
   # failing with "no upstream"; the agent branch is created locally by
