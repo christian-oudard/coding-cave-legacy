@@ -20,6 +20,21 @@ series parked in the host state dir keeps the branch clean, and invents a
 second place work can live. Also unresolved whether this belongs to
 reformat at all, or is a guest-side habit (autocommit unit, periodic push).
 
+## Signature verification in the guest
+
+`git log --show-signature` crashes in the guest. `cave-gpg` forwards signing
+to the host broker and execs a real gpg for everything else, and there is no
+gpg on the guest's PATH, so `CAVE_REAL_GPG` falls back to a bare `gpg` that
+does not resolve. Signing itself is unaffected, the broker does that
+host-side; what is broken is verification, which is the entire reason
+`install-pubring` seeds the public keyring at all.
+
+Likely a one-line fix: substitute gpg's store path into `cave-gpg` at build
+time, the way the python3 shebang already is, rather than adding gnupg to
+the guest's systemPackages, so nothing else in the guest gains a gpg that
+cannot sign. Not done because nobody has checked whether the shim's
+non-signing paths do what git needs beyond `--verify`.
+
 ## Session management
 
 The agent's claude session lives in the pty cave-guestd holds and in
