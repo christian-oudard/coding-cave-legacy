@@ -12,11 +12,16 @@
 # migrates into the Go cave-vm binary later (see ../docs/vm-cave-design.md).
 set -euo pipefail
 
-# Resolve through symlinks so vmcav works when linked onto PATH (e.g.
-# ~/.local/bin/vmcav -> repo/scripts/vmcav); it builds the repo's guest flake,
-# so it must find the repo relative to its real location. Override with REPO=.
+# SELF is only for re-invoking ourselves (ssh's ProxyCommand); it must survive
+# symlinks and the nix wrapper. The repo is found the way cav finds a project
+# -- the cwd's git toplevel -- rather than relative to the script, so an
+# installed vmcav in /nix/store still operates on your checkout. Override with
+# REPO= to run from outside one.
 SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
-REPO="${REPO:-$(cd "$(dirname "$SELF")/.." && pwd)}"
+# `|| true` so the hint below is what you see outside a checkout; without it
+# set -e kills the script on git's exit 128 before it can print anything.
+REPO="${REPO:-$(git rev-parse --show-toplevel 2>/dev/null || true)}"
+[ -n "$REPO" ] || { echo "vmcav: not in a git repository (set REPO=)" >&2; exit 1; }
 # The guest spec is agent-owned (cattle-not-pets: the qcow is a cache, the
 # spec ref is the truth). Build from the agent's branch, not the host working
 # tree, so the root agent deploys config changes by pushing -- pre-receive
@@ -268,6 +273,28 @@ do_agent() {
 # as a command (e.g. `vmcav shell journalctl -u vm-root-agent`).
 do_shell() { guest_ssh "$@"; }
 
+# The commit this vmcav was built from. The nix wrapper bakes it in, because
+# an installed copy is a store path that can be older than the checkout it is
+# being run from; running from a source tree there is nothing baked, so HEAD
+# stands in. The date comes from the commit itself, so it says when the code
+# was written rather than when it was installed.
+do_version() {
+  local rev="${CAVE_VMCAV_REV:-}"
+  [ -n "$rev" ] || rev=$(git -C "$REPO" rev-parse HEAD 2>/dev/null || true)
+  [ -n "$rev" ] || { echo "vmcav unknown"; return 0; }
+  local short=${rev:0:7} date
+  # format-local, not format: the commit carries the timezone of whoever made
+  # it, and an agent in a cave commits in UTC. You want your own clock.
+  date=$(git -C "$REPO" log -1 --format=%cd --date='format-local:%Y-%m-%d %H:%M' \
+    "${rev%-dirty}" 2>/dev/null || true)
+  local dirty=""; case "$rev" in *-dirty) dirty=" dirty" ;; esac
+  echo "vmcav $short$dirty ${date:-(commit not in $REPO)}"
+  local head; head=$(git -C "$REPO" rev-parse --short=7 HEAD 2>/dev/null || true)
+  [ -n "$head" ] && [ "$head" != "$short" ] && \
+    echo "checkout is at $head -- nix profile upgrade vmcav"
+  return 0
+}
+
 do_start() {
   if is_running; then log "already running (pid $(vm_pid))"; do_status; return 0; fi
   mkdir -p "$STATE_DIR"
@@ -395,6 +422,7 @@ case "${1:-agent}" in
   agent) do_agent ;;
   shell) shift; do_shell "$@" ;;
   vsock-connect) shift; do_vsock_connect "$@" ;;
-  -h|--help|help) echo "usage: vmcav {agent|start|stop|status|shell [cmd...]}" >&2 ;;
-  *) echo "usage: vmcav {agent|start|stop|status|shell [cmd...]}" >&2; exit 2 ;;
+  version|--version|-V) do_version ;;
+  -h|--help|help) echo "usage: vmcav {agent|start|stop|status|shell [cmd...]|version}" >&2 ;;
+  *) echo "usage: vmcav {agent|start|stop|status|shell [cmd...]|version}" >&2; exit 2 ;;
 esac

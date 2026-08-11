@@ -7,25 +7,78 @@
     let
       systems = [ "x86_64-linux" ];
       forAll = f: nixpkgs.lib.genAttrs systems (s: f nixpkgs.legacyPackages.${s});
+
+      # Everything vmcav shells out to. The package pins them; the devShell
+      # gets the same list so a working-tree vmcav behaves identically.
+      # Kept in step with require_tools in scripts/vmcav.
+      runtimeDeps = pkgs: with pkgs; [
+        cloud-hypervisor  # the VMM, plus ch-remote for the ACPI power button
+        openssh           # ssh over vsock, ssh-keygen for the agent key
+        util-linux        # setsid
+        socat             # vsock <-> localhost bridges
+        e2fsprogs         # mke2fs, builds the seed image rootlessly
+        gnupg             # the host half of the guest's commit signing
+        git
+        python3           # config parsing (tomllib), vsock-connect, gpg-broker
+        jq
+        # bash is here for the `#!/usr/bin/env bash` shebang, which resolves
+        # against the PATH the wrapper sets, not the caller's.
+        bash coreutils gnused gnugrep procps  # id, cksum, truncate, ps, ...
+      ];
     in
     {
-      # Tools vmcav uses at runtime, so it need not provision them from nix
-      # ad hoc. `use flake` in .envrc loads this; then vmcav finds qemu, ssh,
-      # setsid, socat, etc. on PATH. The guest image is its own flake in guest/.
+      # No `default` alias on purpose. This flake URL also serves main's cav,
+      # and a default-attribute profile entry gets named after the directory
+      # ("coding-cave"), which reads like the stable tool rather than this
+      # branch's script. Named attribute, so the entry is named `vmcav`.
+      packages = forAll (pkgs: {
+        # Bootstrap-era: vmcav is a script, so the derivation is a wrapper
+        # that pins its PATH. It reads the guest flake and hooks out of your
+        # checkout (found via the cwd's git toplevel), so the wrapper carries
+        # no repo contents and stays valid across branches. Retired when the
+        # Go binary takes over (docs/vm-cave-design.md).
+        vmcav = pkgs.runCommand "vmcav"
+          {
+            nativeBuildInputs = [ pkgs.makeWrapper ];
+            meta.mainProgram = "vmcav";
+          }
+          ''
+            install -Dm755 ${./scripts/vmcav} $out/bin/vmcav
+            wrapProgram $out/bin/vmcav \
+              --set CAVE_VMCAV_REV ${self.rev or self.dirtyRev or "unknown"} \
+              --prefix PATH : ${pkgs.lib.makeBinPath (runtimeDeps pkgs)}
+          '';
+      });
+
+      # `nix flake check`. Offline by construction: no network in the sandbox,
+      # and neither suite makes calls. The VM smoke test is not here, it needs
+      # a build and minutes of boot.
+      checks = forAll (pkgs: {
+        go-tests = pkgs.runCommand "cave-vm-go-tests"
+          { nativeBuildInputs = [ pkgs.go ]; }
+          ''
+            cp -r ${./cave-vm} src && chmod -R u+w src && cd src
+            export HOME=$TMPDIR GOFLAGS=-mod=mod GOCACHE=$TMPDIR/go-cache
+            go test ./... && touch $out
+          '';
+        # Depends on scripts/ alone, not the flake source, so editing a doc
+        # does not invalidate it.
+        git-hooks = pkgs.runCommand "git-hooks-test"
+          { nativeBuildInputs = with pkgs; [ bash git ]; }
+          ''
+            mkdir -p repo && cp -r ${./scripts} repo/scripts
+            export HOME=$TMPDIR REPO=$PWD/repo
+            bash repo/scripts/test-git-hooks.sh && touch $out
+          '';
+      });
+
       devShells = forAll (pkgs: {
         default = pkgs.mkShell {
-          # qemu is intentionally absent: the guest VM build bakes it and the
-          # runner calls it by absolute path, so pulling the full qemu closure
-          # into the shell would just be a ~1 GB download for nothing.
-          packages = with pkgs; [
-            openssh
-            util-linux   # setsid
-            socat        # QMP control socket
-            git
-            python3      # config parsing (tomllib)
-            jq
-            go           # cave-vm module (host + guestd binaries)
-          ];
+          # vmcav itself is deliberately absent: it comes from the profile
+          # (`nix profile add .#vmcav`), so there is exactly one on PATH and
+          # no working-tree copy shadowing it. To run an unreleased edit,
+          # `nix run .#vmcav -- start`.
+          packages = runtimeDeps pkgs ++ [ pkgs.go ];
         };
       });
     };
