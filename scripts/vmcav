@@ -403,6 +403,21 @@ cave_vm() {
   cave-vm "$1" -C "$REPO" "${@:2}"
 }
 
+# Terminal state is the caller's, and a remote full-screen program is what
+# wrecks it. ssh restores termios on its own clean exit and nothing else: not
+# app-level state like a hidden cursor, and not at all if it dies on a signal.
+# So bracket every ssh with a save and an unconditional restore, and the
+# symptom stops being something you fix by hand with `tput cnorm`.
+TTY_STATE=""
+save_local_tty() { [ -t 0 ] && TTY_STATE=$(stty -g 2>/dev/null || true); return 0; }
+restore_local_tty() {
+  [ -t 0 ] || return 0
+  { [ -n "$TTY_STATE" ] && stty "$TTY_STATE" 2>/dev/null; } || stty sane 2>/dev/null || true
+  # cnorm needs a TERM terminfo can resolve; the literal escape is the fallback
+  # for the case where it can't (TERM unset, or a name this host doesn't know).
+  tput cnorm 2>/dev/null || printf '\033[?25h'
+}
+
 # ssh into the guest as root over the forwarded port. Host-key checks are off
 # and known_hosts is /dev/null: it's a localhost port-forward to our own VM,
 # and the guest host key changes whenever the disk is recreated, so
@@ -417,8 +432,14 @@ guest_ssh() {
   # situation (still booting, or panicked).
   # GUEST_SSH_TTY=-T for anything whose output gets parsed: a pty rewrites
   # LF to CRLF and turns "the command printed nothing" into a bare CR.
-  ssh "${GUEST_SSH_TTY:--t}" "${GUEST_SSH_OPTS[@]}" root@cave-guest "$@" && return 0
-  local rc=$?
+  # The trap covers what the restore below cannot: vmcav itself interrupted
+  # while ssh holds the terminal.
+  save_local_tty
+  trap restore_local_tty EXIT INT TERM QUIT
+  local rc=0
+  ssh "${GUEST_SSH_TTY:--t}" "${GUEST_SSH_OPTS[@]}" root@cave-guest "$@" || rc=$?
+  restore_local_tty
+  trap - EXIT INT TERM QUIT
   [ "$rc" = 255 ] && { log "the vm is running but the guest is not answering ssh"; \
     log "  (still booting, or it failed): tail -f $CONSOLE"; }
   return "$rc"
