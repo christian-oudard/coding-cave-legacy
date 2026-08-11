@@ -239,6 +239,18 @@ pub fn rename(old_slug: &str, new_arg: &str, yes: bool) -> Result<()> {
             &config::claude_project_dir(old_slug, None),
             &config::claude_project_dir(&new_slug, None),
         );
+        // The project's shared memory pool, and each agent's own transcript
+        // dir (keyed by uuid, so no collisions across agents). Claude Code
+        // encodes the project path from the cwd it's launched with, so
+        // without this move a renamed project's memory and every agent's
+        // resume picker would go silently empty at the new slug.
+        let _ = merge_dir(&config::memory_dir(old_slug), &config::memory_dir(&new_slug));
+        for aid in &agent_ids {
+            let _ = merge_dir(
+                &workspace::agent_project_dir(aid, old_slug),
+                &workspace::agent_project_dir(aid, &new_slug),
+            );
+        }
     }
 
     if fold {
@@ -309,8 +321,10 @@ fn print_merge_summary(
 
 /// Move `old` into `new`. If `new` does not exist, renames wholesale; if it
 /// does, moves each child not already present (worktree and session dirs are
-/// uuid-keyed, so they don't collide), then drops the emptied `old`.
-fn merge_dir(old: &Path, new: &Path) -> std::io::Result<()> {
+/// uuid-keyed, so they don't collide), then drops the emptied `old`. Also
+/// used by `sandbox::migrate_shared_claude_state`, which merges each
+/// project's per-agent memory pool the same way.
+pub(crate) fn merge_dir(old: &Path, new: &Path) -> std::io::Result<()> {
     if !old.exists() {
         return Ok(());
     }

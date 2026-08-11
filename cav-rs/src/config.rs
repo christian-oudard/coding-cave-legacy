@@ -73,19 +73,62 @@ pub fn worktree_dir(slug: &str, agent_id: &str) -> PathBuf {
     worktree_slug_dir(slug).join(agent_id)
 }
 
-pub fn claude_project_dir(slug: &str, home: Option<&Path>) -> PathBuf {
-    let home = home.map(|p| p.to_path_buf()).unwrap_or_else(persistent_home);
-    let encoded = format!("/projects/{slug}")
+/// Claude Code's directory name for a project mounted at `/projects/<slug>`.
+pub fn encoded_project(slug: &str) -> String {
+    format!("/projects/{slug}")
         .chars()
         .map(|c| if c.is_alphanumeric() { c } else { '-' })
-        .collect::<String>();
-    home.join(".claude").join("projects").join(encoded)
+        .collect()
 }
 
-pub fn session_file_exists(slug: &str, session_id: &str, home: Option<&Path>) -> bool {
-    claude_project_dir(slug, home)
-        .join(format!("{session_id}.jsonl"))
-        .is_file()
+pub fn claude_project_dir(slug: &str, home: Option<&Path>) -> PathBuf {
+    let home = home.map(|p| p.to_path_buf()).unwrap_or_else(persistent_home);
+    home.join(".claude").join("projects").join(encoded_project(slug))
+}
+
+// -- Per-agent Claude state --
+//
+// Claude Code keeps machine-scoped state (the background-job daemon, its
+// roster and lock) alongside per-agent state under `~/.claude`. Caves share
+// one persistent home, so this directory is bound per agent to keep those
+// from colliding.
+//
+// Keyed by agent uuid, like the worktree and nix-store dirs: the display int
+// is recycled by `remove-agent` and relabelled by `archive_sweep`, so keying
+// on it would hand one agent's transcripts to the next. Callers resolve the
+// uuid through `workspace::agent_claude_dir`; these take the resolved key.
+
+pub fn agent_claude_dir_for_key(key: &str) -> PathBuf {
+    data_dir().join("claude").join("agents").join(key)
+}
+
+pub fn agent_claude_json_for_key(key: &str) -> PathBuf {
+    data_dir()
+        .join("claude")
+        .join("agents")
+        .join(format!("{key}.json"))
+}
+
+pub fn agent_project_dir_for_key(key: &str, slug: &str) -> PathBuf {
+    agent_claude_dir_for_key(key)
+        .join("projects")
+        .join(encoded_project(slug))
+}
+
+// -- Shared memory and the permanent session store --
+
+pub fn memory_dir(slug: &str) -> PathBuf {
+    data_dir().join("memory").join(slug)
+}
+
+pub fn sessions_dir() -> PathBuf {
+    data_dir().join("sessions")
+}
+
+/// The permanent record for a session. Hardlinked to the live transcript at
+/// registration, so it exists for the whole life of the session.
+pub fn session_transcript(session_id: &str) -> PathBuf {
+    sessions_dir().join(format!("{session_id}.jsonl"))
 }
 
 pub fn project_slug(base: &Path) -> String {

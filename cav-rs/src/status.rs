@@ -691,6 +691,13 @@ pub fn _remove_agent(base: &Path, agent_id: &str, branches: &[String]) -> Result
     if store.exists() {
         crate::workspace::force_remove_dir_all(&store);
     }
+    // Resolve the uuid-keyed claude dir before the registry row (and with it
+    // the uuid) is gone.
+    let claude_dir = crate::workspace::agent_claude_dir(agent_id);
+    if claude_dir.exists() {
+        crate::workspace::force_remove_dir_all(&claude_dir);
+    }
+    let _ = std::fs::remove_file(crate::workspace::agent_claude_json(agent_id));
     registry::remove_agent(agent_id)?;
     Ok(())
 }

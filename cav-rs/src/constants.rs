@@ -73,3 +73,8 @@ pub const DAEMON_BASE_PORT: u16 = 61000;
 // In-cave home directory (bind-mount target). Must match caveHome in
 // lib/sandbox.nix; the cave's HOME/USER are set there.
 pub const CAVE_HOME: &str = "/home/coder";
+
+// Read-only view of the permanent session store. Deliberately outside the
+// home so Claude Code does not scan it: the resume picker stays scoped to the
+// agent's own sessions, and other agents' logs are reached by explicit path.
+pub const CAVE_SESSIONS: &str = "/cave/sessions";

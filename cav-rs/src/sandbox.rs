@@ -12,7 +12,7 @@ use serde::Deserialize;
 
 use crate::config::{self, inside_cave, parse_dev_branch, project_slug, shared_repo_path};
 use crate::constants::{self, CAVE_SHARED_REMOTE, HOST_SHARED_REMOTE};
-use crate::{daemon, git, registry, style, user_env, workspace};
+use crate::{daemon, git, registry, session_store, style, user_env, workspace};
 
 const SLIRP_DNS: &str = "10.0.2.3";
 const SLIRP_GATEWAY: &str = "10.0.2.2";
@@ -456,9 +456,63 @@ fn build_bwrap_argv(
         "--bind".to_string(), cave_home.clone(), constants::CAVE_HOME.to_string(),
     ]);
 
-    let claude_json = PathBuf::from(&cave_home).join(".claude.json");
-    if !claude_json.exists() && !cfg.dot_claude_json_default.is_empty() {
+    // Claude Code's state is bound per agent over the shared home. It mixes
+    // machine-scoped state (the background-job daemon, its roster and lock)
+    // with per-agent state, and caves share one home, so leaving it shared
+    // makes every cave see the others' jobs and fight over one daemon lock.
+    //
+    // Order is load-bearing: the agent directory must be bound before the
+    // memory directories nested inside it, or the nested binds are shadowed.
+    if let Some(dir) = env.get("CODING_CAVE_CLAUDE_DIR") {
+        args.extend([
+            "--bind".to_string(),
+            dir.clone(),
+            format!("{}/.claude", constants::CAVE_HOME),
+        ]);
+    }
+
+    // Memory is the one surface agents share read-write: it is per project,
+    // outlives every agent, and merges because each fact is its own file.
+    for entry in env
+        .get("CODING_CAVE_MEMORY_DIRS")
+        .map(|s| s.as_str())
+        .unwrap_or("")
+        .split(':')
+        .filter(|s| !s.is_empty())
+    {
+        let Some((encoded, src)) = entry.split_once('=') else {
+            continue;
+        };
+        args.extend([
+            "--bind".to_string(),
+            src.to_string(),
+            format!("{}/.claude/projects/{encoded}/memory", constants::CAVE_HOME),
+        ]);
+    }
+
+    let claude_json = env
+        .get("CODING_CAVE_CLAUDE_JSON")
+        .cloned()
+        .unwrap_or_else(|| format!("{cave_home}/.claude.json"));
+    if !Path::new(&claude_json).exists() && !cfg.dot_claude_json_default.is_empty() {
         let _ = std::fs::copy(&cfg.dot_claude_json_default, &claude_json);
+    }
+    if env.contains_key("CODING_CAVE_CLAUDE_JSON") {
+        args.extend([
+            "--bind".to_string(),
+            claude_json,
+            format!("{}/.claude.json", constants::CAVE_HOME),
+        ]);
+    }
+
+    // The permanent session store, readable by every agent and writable by
+    // none: a session log cannot be edited or deleted from inside a cave.
+    if let Some(dir) = env.get("CODING_CAVE_SESSIONS_DIR") {
+        args.extend([
+            "--ro-bind".to_string(),
+            dir.clone(),
+            constants::CAVE_SESSIONS.to_string(),
+        ]);
     }
 
     args.extend(["--dir".to_string(), "/projects".to_string()]);
@@ -1478,6 +1532,7 @@ fn forward_cave_signals(cave_pid: u32) -> Result<()> {
 fn build_claude_cmd(
     session_id: Option<&str>,
     resuming: bool,
+    fork: bool,
     prompt: Option<&str>,
     channels: bool,
     system_prompt: &str,
@@ -1499,6 +1554,12 @@ fn build_claude_cmd(
     if let Some(sid) = session_id {
         if resuming {
             cmd.extend(["--resume".to_string(), sid.to_string()]);
+            // Resuming a session another agent owns must fork: plain --resume
+            // appends in place, so two agents on one transcript would
+            // interleave into it and mutate a registered record.
+            if fork {
+                cmd.push("--fork-session".to_string());
+            }
         } else {
             cmd.extend(["--session-id".to_string(), sid.to_string()]);
         }
@@ -1509,8 +1570,10 @@ fn build_claude_cmd(
     cmd
 }
 
-fn seed_claude_config(home: &Path, project_slug_str: &str, comms: bool) {
-    let claude_json = home.join(".claude.json");
+fn seed_claude_config_at(claude_json: &Path, project_slug_str: &str, comms: bool) -> Result<()> {
+    if let Some(parent) = claude_json.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     if !claude_json.exists() {
         let host = host_home().join(".claude.json");
         if host.exists() {
@@ -1574,9 +1637,56 @@ fn seed_claude_config(home: &Path, project_slug_str: &str, comms: bool) {
 
     if changed {
         if let Ok(json) = serde_json::to_string(&cfg) {
-            let _ = std::fs::write(&claude_json, json);
+            let _ = std::fs::write(claude_json, json);
         }
     }
+    Ok(())
+}
+
+/// Move an agent's Claude state out of the shared home the first time it runs
+/// under the per-agent layout. Transcripts follow the agent that owns them,
+/// identified by the registry's session id; memory is project-scoped and moves
+/// to the shared pool. Anything unclaimed stays in the old tree.
+fn migrate_shared_claude_state(
+    home: &Path,
+    agent_id: &str,
+    workspaces: &[(PathBuf, PathBuf, String)],
+) -> Result<()> {
+    let owned = registry::read_session_id(agent_id).unwrap_or_default();
+    for (_, _, slug) in workspaces {
+        let old = config::claude_project_dir(slug, Some(home));
+        if !old.is_dir() {
+            continue;
+        }
+
+        let old_memory = old.join("memory");
+        if old_memory.is_dir() {
+            let new_memory = config::memory_dir(slug);
+            std::fs::create_dir_all(new_memory.parent().unwrap())?;
+            // Merges into an existing pool rather than skipping outright:
+            // the first agent to launch after the upgrade already created
+            // new_memory by the time a second agent's first launch gets
+            // here. Also tolerates old_memory having vanished between the
+            // is_dir() check above and this call (another agent's launch
+            // racing the same migration) instead of failing this agent's
+            // launch over a migration that already happened.
+            let _ = crate::project::merge_dir(&old_memory, &new_memory);
+        }
+
+        if let Some(sid) = &owned {
+            let src = old.join(format!("{sid}.jsonl"));
+            let dst = workspace::agent_project_dir(agent_id, slug).join(format!("{sid}.jsonl"));
+            if src.is_file() && !dst.exists() {
+                std::fs::create_dir_all(dst.parent().unwrap())?;
+                // Best-effort like the memory merge above: this agent's own
+                // session id is essentially race-free in practice (no other
+                // agent shares it), but a launch should never die over a
+                // one-time compatibility migration either way.
+                let _ = std::fs::rename(&src, &dst);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Populate a cave's own nix store with the closures it needs before launch.
@@ -1711,10 +1821,16 @@ fn user_env_path() -> Option<PathBuf> {
 /// Replaces what the old shell entry script did with find | while-read |
 /// per-file forks. fs::copy uses sendfile on Linux so this stays cheap
 /// even for thousands of small files.
-fn merge_user_files(src: &Path, dst: &Path) -> Result<()> {
+fn merge_user_files(src: &Path, dst: &Path, redirect: Option<(&str, &Path)>) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     if !src.is_dir() {
         return Ok(());
+    }
+    if let Some((name, target)) = redirect {
+        let sub = src.join(name);
+        if sub.is_dir() {
+            merge_user_files(&sub, target, None)?;
+        }
     }
     std::fs::create_dir_all(dst)?;
     if let Ok(meta) = std::fs::metadata(dst) {
@@ -1727,8 +1843,11 @@ fn merge_user_files(src: &Path, dst: &Path) -> Result<()> {
         let src_p = entry.path();
         let dst_p = dst.join(entry.file_name());
         let ft = entry.file_type()?;
+        if redirect.is_some_and(|(name, _)| entry.file_name() == name) {
+            continue;
+        }
         if ft.is_dir() {
-            merge_user_files(&src_p, &dst_p)?;
+            merge_user_files(&src_p, &dst_p, None)?;
         } else if ft.is_symlink() {
             let _ = std::fs::remove_file(&dst_p);
             let target = std::fs::read_link(&src_p)?;
@@ -2123,6 +2242,19 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
         (aid, Some(sid), false)
     };
 
+    // A resumed session's transcript may not be visible under this (possibly
+    // freshly minted) agent's own directory yet: it can still be under its
+    // true owner's dir (cross-agent resume), collected by `cav gc`, or
+    // predate the per-agent layout entirely. Restore it from wherever it
+    // actually lives before deciding how to launch -- resolve_continue
+    // already does this for its own branches, but the raw-uuid fallback
+    // below does not go through it.
+    if resuming {
+        if let Some(ref sid) = session_id {
+            session_store::ensure_live_transcript(&agent_id, &slug, sid);
+        }
+    }
+
     let cfg = load_sandbox_config()?;
 
     let agent_name = registry::display_name(&base, &agent_id);
@@ -2150,8 +2282,25 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
 
     let home = config::persistent_home();
     std::fs::create_dir_all(&home)?;
+
+    // Per-agent Claude state. Job and daemon records from this agent's last
+    // launch name a torn-down PID namespace and sockets in a /tmp tmpfs that
+    // is already gone, so they are dropped rather than carried forward.
+    let claude_dir = workspace::agent_claude_dir(&agent_id);
+    std::fs::create_dir_all(&claude_dir)?;
+    // The store is bind-mounted read-only into every cave, so it has to exist
+    // before the first session ever registers into it.
+    std::fs::create_dir_all(config::sessions_dir())?;
+    session_store::purge_launch_state(&claude_dir)?;
+    migrate_shared_claude_state(&home, &agent_id, &workspaces)?;
     for (_, _, s) in &workspaces {
-        seed_claude_config(&home, s, comms);
+        seed_claude_config_at(&workspace::agent_claude_json(&agent_id), s, comms)?;
+        // Reconcile before launch so a memory lost to a concurrent index
+        // update is relinked, and orphans become reachable again.
+        let mem = config::memory_dir(s);
+        std::fs::create_dir_all(&mem)?;
+        crate::memory::reconcile(&mem)?;
+        std::fs::create_dir_all(workspace::agent_project_dir(&agent_id, s).join("memory"))?;
     }
 
     install_git_wrapper(&home)?;
@@ -2308,6 +2457,32 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
         );
     }
     env.insert("CODING_CAVE_HOME".to_string(), home.to_string_lossy().to_string());
+    env.insert(
+        "CODING_CAVE_CLAUDE_DIR".to_string(),
+        workspace::agent_claude_dir(&agent_id).to_string_lossy().to_string(),
+    );
+    env.insert(
+        "CODING_CAVE_CLAUDE_JSON".to_string(),
+        workspace::agent_claude_json(&agent_id).to_string_lossy().to_string(),
+    );
+    env.insert(
+        "CODING_CAVE_SESSIONS_DIR".to_string(),
+        config::sessions_dir().to_string_lossy().to_string(),
+    );
+    env.insert(
+        "CODING_CAVE_MEMORY_DIRS".to_string(),
+        workspaces
+            .iter()
+            .map(|(_, _, s)| {
+                format!(
+                    "{}={}",
+                    config::encoded_project(s),
+                    config::memory_dir(s).to_string_lossy()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(":"),
+    );
     env.insert("CODING_CAVE_WORKSPACES".to_string(), ws_paths);
     env.insert("CODING_CAVE_SHARED_REPOS".to_string(), shared_repos_str);
     env.insert("CODING_CAVE_AGENT_NAME".to_string(), agent_name.clone());
@@ -2407,7 +2582,9 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
     if let Some(uep) = &uenv {
         let src = uep.join("files");
         if src.is_dir() {
-            merge_user_files(&src, &home)?;
+            // `.claude/**` is bound per agent, so mirroring it into the shared
+            // home would land under the mount and never be seen by the cave.
+            merge_user_files(&src, &home, Some((".claude", &claude_dir)))?;
         }
     }
     if let Some(gc) = host_gitconfig() {
@@ -2420,9 +2597,36 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
     crate::log_info!("cave home ready");
 
     let system_prompt = build_system_prompt(&workspaces, &agent_id, &agent_name, comms);
+    // A session belonging to another agent is forked rather than continued, so
+    // its permanent record keeps only the work its own agent did.
+    // Ownership comes from the permanent session record, not the agent row:
+    // gc removes the agent but the record, and the need to fork, outlive it.
+    // A lookup failure (lock contention, corruption) fails closed -- fork
+    // rather than risk two agents interleaving appends into one transcript
+    // on the assumption that "couldn't check" means "not borrowed".
+    let borrowed = resuming
+        && session_id.as_deref().is_some_and(|sid| {
+            match registry::session_record(sid) {
+                Ok(rec) => rec.and_then(|r| r.agent_id).is_some_and(|owner| owner != agent_id),
+                Err(_) => true,
+            }
+        });
+    // A fork writes to a session id Claude assigns, not the one passed to
+    // --resume, so the resulting id has to be discovered rather than
+    // assumed. Snapshot what's here before launch; after exit, whichever
+    // transcript is new is the fork.
+    let pre_fork_sids: std::collections::HashSet<String> = if borrowed {
+        session_store::transcripts(&claude_dir)
+            .iter()
+            .filter_map(|p| p.file_stem().and_then(|s| s.to_str()).map(str::to_string))
+            .collect()
+    } else {
+        Default::default()
+    };
     let claude_cmd = build_claude_cmd(
         session_id.as_deref(),
         resuming,
+        borrowed,
         prompt.as_deref(),
         channels_enabled,
         &system_prompt,
@@ -2530,17 +2734,70 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
 
     forward_cave_signals(proc.id())?;
 
+    // Register sessions while the cave runs, not just at teardown. A transcript
+    // is only deletable from inside the cave until it is linked into the
+    // permanent store, so the window has to be short. This runs on the host,
+    // where the cave cannot reach it. A failure here means the permanence
+    // guarantee silently isn't holding for this session, so it's surfaced
+    // rather than swallowed; a channel (not a polled flag) wakes the thread
+    // the moment the cave exits instead of after its current sleep.
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+    let watcher = {
+        let aid = agent_id.clone();
+        let primary = slug.clone();
+        let extras = extra_slugs.clone();
+        let branch = git::current_branch(Some(&workspaces[0].0)).ok();
+        std::thread::spawn(move || {
+            let register = || {
+                if let Err(e) =
+                    session_store::register_agent_sessions(&aid, &primary, &extras, branch.as_deref())
+                {
+                    eprintln!(
+                        "{} session registration failed: {e}",
+                        style::bold_yellow("Warning:")
+                    );
+                }
+            };
+            loop {
+                register();
+                use std::sync::mpsc::RecvTimeoutError;
+                match stop_rx.recv_timeout(std::time::Duration::from_secs(2)) {
+                    Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
+                    Err(RecvTimeoutError::Timeout) => continue,
+                }
+            }
+            // One more pass to catch whatever was written in the gap since
+            // the last periodic one, now that the cave has exited.
+            register();
+        })
+    };
+
     let rc = proc.wait().map(|s| s.code().unwrap_or(1)).unwrap_or(1);
+    let _ = stop_tx.send(());
+    let _ = watcher.join();
 
     // claude --session-id is binding: the .jsonl lands at the uuid we asked
     // for, or claude wrote nothing (early exit, no messages sent). No
     // post-hoc inference needed -- check the path we requested and that's
     // it. The previous "fall back to latest .jsonl" path silently stole
-    // sessions from other agents in the shared archive.
-    let actual_sid = session_id
-        .as_deref()
-        .filter(|sid| config::session_file_exists(&slug, sid, Some(&home)))
-        .map(str::to_string);
+    // sessions from other agents in the shared archive; scanning is safe
+    // here only because a fork's new id has no requested path to check and
+    // claude_dir is this agent's own, never shared.
+    let actual_sid = if borrowed {
+        session_store::transcripts(&claude_dir)
+            .into_iter()
+            .filter_map(|p| p.file_stem().and_then(|s| s.to_str()).map(str::to_string))
+            .find(|sid| !pre_fork_sids.contains(sid))
+    } else {
+        session_id
+            .as_deref()
+            .filter(|sid| {
+                workspace::agent_project_dir(&agent_id, &slug)
+                    .join(format!("{sid}.jsonl"))
+                    .is_file()
+            })
+            .map(str::to_string)
+    };
 
     // Exit always transitions to Paused. The session log, worktree, and
     // agent branches stay in place until an explicit `cav gc` (or eventual
@@ -2552,6 +2809,7 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
         if Some(sid.as_str()) != session_id.as_deref() {
             registry::write_session_id(&agent_id, sid).ok();
         }
+        registry::mark_session_ended(sid).ok();
     }
     registry::mark_agent_exited(&agent_id).ok();
     if actual_sid.is_some() {
@@ -2844,5 +3102,203 @@ mod rebase_dev_tests {
         rebase_dev_onto_base(&g.ws, "lonely");
         let after = git_out(&["rev-parse", "HEAD"], &g.ws);
         assert_eq!(before, after, "no rebase should happen without remote ref");
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    fn cfg() -> SandboxConfig {
+        SandboxConfig {
+            bwrap: "bwrap".into(),
+            ..Default::default()
+        }
+    }
+
+    fn argv(env: &[(&str, &str)]) -> Vec<String> {
+        let map: HashMap<String, String> = env
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        build_bwrap_argv(&cfg(), &map, &["claude".to_string()], -1, Path::new("/run/x"))
+    }
+
+    /// Index of a `--bind`/`--ro-bind` triple with the given destination.
+    fn mount_at(args: &[String], dest: &str) -> Option<(usize, String, String)> {
+        args.iter().enumerate().find_map(|(i, a)| {
+            if (a == "--bind" || a == "--ro-bind") && args.get(i + 2).map(String::as_str) == Some(dest)
+            {
+                Some((i, a.clone(), args[i + 1].clone()))
+            } else {
+                None
+            }
+        })
+    }
+
+    #[test]
+    fn claude_state_is_bound_per_agent_over_the_shared_home() {
+        let args = argv(&[
+            ("CODING_CAVE_HOME", "/data/home"),
+            ("CODING_CAVE_CLAUDE_DIR", "/data/claude/agents/7"),
+            ("CODING_CAVE_CLAUDE_JSON", "/data/claude/agents/7.json"),
+        ]);
+        let (_, kind, src) = mount_at(&args, "/home/coder/.claude").expect("no .claude bind");
+        assert_eq!(kind, "--bind");
+        assert_eq!(src, "/data/claude/agents/7");
+
+        let (_, _, src) = mount_at(&args, "/home/coder/.claude.json").expect("no .claude.json bind");
+        assert_eq!(src, "/data/claude/agents/7.json");
+    }
+
+    #[test]
+    fn memory_is_bound_after_the_agent_dir_it_nests_inside() {
+        let args = argv(&[
+            ("CODING_CAVE_HOME", "/data/home"),
+            ("CODING_CAVE_CLAUDE_DIR", "/data/claude/agents/7"),
+            ("CODING_CAVE_MEMORY_DIRS", "-projects-foo=/data/memory/foo"),
+        ]);
+        let (claude_at, _, _) = mount_at(&args, "/home/coder/.claude").unwrap();
+        let (mem_at, kind, src) =
+            mount_at(&args, "/home/coder/.claude/projects/-projects-foo/memory")
+                .expect("no memory bind");
+        assert_eq!(kind, "--bind", "memory is the one shared writable surface");
+        assert_eq!(src, "/data/memory/foo");
+        assert!(
+            claude_at < mem_at,
+            "memory bind must come after the agent dir or it is shadowed"
+        );
+    }
+
+    #[test]
+    fn every_mounted_project_gets_its_memory_pool() {
+        let args = argv(&[
+            ("CODING_CAVE_HOME", "/data/home"),
+            ("CODING_CAVE_CLAUDE_DIR", "/data/claude/agents/7"),
+            (
+                "CODING_CAVE_MEMORY_DIRS",
+                "-projects-foo=/data/memory/foo:-projects-bar=/data/memory/bar",
+            ),
+        ]);
+        assert!(mount_at(&args, "/home/coder/.claude/projects/-projects-foo/memory").is_some());
+        assert!(mount_at(&args, "/home/coder/.claude/projects/-projects-bar/memory").is_some());
+    }
+
+    #[test]
+    fn the_session_store_is_mounted_read_only() {
+        let args = argv(&[
+            ("CODING_CAVE_HOME", "/data/home"),
+            ("CODING_CAVE_SESSIONS_DIR", "/data/sessions"),
+        ]);
+        let (_, kind, src) = mount_at(&args, "/cave/sessions").expect("no session store mount");
+        assert_eq!(
+            kind, "--ro-bind",
+            "a session log must not be writable or deletable from a cave"
+        );
+        assert_eq!(src, "/data/sessions");
+    }
+
+    #[test]
+    fn the_session_store_is_not_where_claude_looks_for_sessions() {
+        assert!(
+            !constants::CAVE_SESSIONS.starts_with(constants::CAVE_HOME),
+            "the store must sit outside the home or it pollutes the resume picker"
+        );
+    }
+
+    #[test]
+    fn resuming_another_agents_session_forks_it() {
+        let borrowed = build_claude_cmd(Some("sid"), true, true, None, false, "sys");
+        assert!(borrowed.contains(&"--fork-session".to_string()));
+
+        let own = build_claude_cmd(Some("sid"), true, false, None, false, "sys");
+        assert!(
+            !own.contains(&"--fork-session".to_string()),
+            "an agent continuing its own session must not fork"
+        );
+
+        let fresh = build_claude_cmd(Some("sid"), false, false, None, false, "sys");
+        assert!(fresh.contains(&"--session-id".to_string()));
+        assert!(!fresh.contains(&"--fork-session".to_string()));
+    }
+
+    #[test]
+    fn user_files_for_claude_go_to_the_agent_dir_not_the_shared_home() {
+        let root = std::env::temp_dir().join(format!("cav-merge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (src, home, claude) = (root.join("src"), root.join("home"), root.join("claude"));
+        std::fs::create_dir_all(src.join(".claude/skills")).unwrap();
+        std::fs::write(src.join(".gitconfig"), "gitconfig").unwrap();
+        std::fs::write(src.join(".claude/settings.json"), "settings").unwrap();
+        std::fs::write(src.join(".claude/skills/s.md"), "skill").unwrap();
+
+        merge_user_files(&src, &home, Some((".claude", &claude))).unwrap();
+
+        assert_eq!(std::fs::read_to_string(home.join(".gitconfig")).unwrap(), "gitconfig");
+        assert_eq!(
+            std::fs::read_to_string(claude.join("settings.json")).unwrap(),
+            "settings"
+        );
+        assert_eq!(std::fs::read_to_string(claude.join("skills/s.md")).unwrap(), "skill");
+        assert!(
+            !home.join(".claude").exists(),
+            "config mirrored under the bind mount would be invisible to the cave"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod migrate_tests {
+    use super::*;
+
+    #[test]
+    fn memory_migration_merges_into_an_existing_pool() {
+        // A second agent's first post-upgrade launch finds the shared pool
+        // already created by an earlier one; the old rename-only migration
+        // skipped in that case and stranded this agent's old memory forever.
+        let g = crate::test_util::DataDirGuard::new("migrate-memory");
+        let aid = registry::acquire_agent_id(&g.path.join("proj")).unwrap();
+
+        let home = g.path.join("home");
+        let old_memory = config::claude_project_dir("proj", Some(&home)).join("memory");
+        std::fs::create_dir_all(&old_memory).unwrap();
+        std::fs::write(old_memory.join("old.md"), "old fact\n").unwrap();
+
+        let new_memory = config::memory_dir("proj");
+        std::fs::create_dir_all(&new_memory).unwrap();
+        std::fs::write(new_memory.join("existing.md"), "already there\n").unwrap();
+
+        let workspaces = vec![(PathBuf::new(), PathBuf::new(), "proj".to_string())];
+        migrate_shared_claude_state(&home, &aid, &workspaces).unwrap();
+
+        assert!(new_memory.join("old.md").is_file(), "old memory should merge in");
+        assert!(new_memory.join("existing.md").is_file(), "existing memory should survive");
+        assert!(!old_memory.exists(), "old memory dir should be drained");
+    }
+
+    #[test]
+    fn transcript_migration_claims_only_the_agents_own_session() {
+        let g = crate::test_util::DataDirGuard::new("migrate-transcript");
+        let aid = registry::acquire_agent_id(&g.path.join("proj")).unwrap();
+        let sid = registry::read_session_id(&aid).unwrap().unwrap();
+
+        let home = g.path.join("home");
+        let old = config::claude_project_dir("proj", Some(&home));
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join(format!("{sid}.jsonl")), "mine\n").unwrap();
+        // Belongs to some other, never-relaunched agent; not this agent's to
+        // claim.
+        std::fs::write(old.join("other-agent-session.jsonl"), "not mine\n").unwrap();
+
+        let workspaces = vec![(PathBuf::new(), PathBuf::new(), "proj".to_string())];
+        migrate_shared_claude_state(&home, &aid, &workspaces).unwrap();
+
+        let dst = workspace::agent_project_dir(&aid, "proj").join(format!("{sid}.jsonl"));
+        assert!(dst.is_file(), "the agent's own session should migrate");
+        assert!(
+            old.join("other-agent-session.jsonl").is_file(),
+            "an unrelated session should be left for its own agent to claim"
+        );
     }
 }

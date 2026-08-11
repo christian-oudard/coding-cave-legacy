@@ -46,8 +46,10 @@ struct Project {
 }
 
 impl Project {
-    fn new() -> Self {
-        let uniq = format!("{}-subcave", std::process::id());
+    /// `name` keeps fixtures distinct: tests in a suite share a process, so
+    /// keying the scratch dirs on the pid alone makes them collide.
+    fn new(name: &str) -> Self {
+        let uniq = format!("{}-{name}", std::process::id());
         let dir = std::env::temp_dir().join(format!("cav-subcave-{uniq}"));
         let data_dir = std::env::temp_dir().join(format!("cav-subcave-data-{uniq}"));
         let _ = fs::remove_dir_all(&dir);
@@ -124,7 +126,7 @@ fn cav_agent_launches_inside_a_cave_repeatedly() {
          must be set). Run via `cav agent` on the host first."
     );
 
-    let project = Project::new();
+    let project = Project::new("relaunch");
 
     // Two consecutive invocations. With the bwrap /proc bug present,
     // run #1 used to succeed by accident (some short-lived process
@@ -149,4 +151,41 @@ fn cav_agent_launches_inside_a_cave_repeatedly() {
              likely failed.\nstderr:\n{stderr}"
         );
     }
+}
+
+/// A real cave launch must materialize the per-agent Claude directory, the
+/// permanent session store, and the project's shared memory pool, and bwrap
+/// must accept every bind. A malformed or missing bind source kills bwrap
+/// before READY_MARKER, so reaching it is itself an assertion that the mount
+/// layout is sound.
+#[test]
+fn launch_materializes_the_session_and_memory_layout() {
+    assert!(
+        std::env::var("CODING_CAVE_VERSION").is_ok(),
+        "this test requires being inside a coding-cave"
+    );
+    let project = Project::new("layout");
+    let out = project.cav(&["-v", "agent", "--prompt", "ping"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(READY_MARKER),
+        "launch did not reach `{READY_MARKER}`; a bind source is likely \
+         missing.\nstderr:\n{stderr}"
+    );
+
+    let data = &project.data_dir;
+    assert!(
+        data.join("sessions").is_dir(),
+        "permanent session store was not created"
+    );
+    let slug = project.dir.file_name().unwrap().to_str().unwrap();
+    assert!(
+        data.join("memory").join(slug).is_dir(),
+        "shared memory pool for the project was not created"
+    );
+    let agents = data.join("claude/agents");
+    let any_agent = fs::read_dir(&agents)
+        .map(|d| d.filter_map(|e| e.ok()).any(|e| e.path().is_dir()))
+        .unwrap_or(false);
+    assert!(any_agent, "no per-agent Claude directory under {agents:?}");
 }

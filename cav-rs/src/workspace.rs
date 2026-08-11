@@ -15,6 +15,31 @@ pub fn worktree_for(slug: &str, agent_id: &str) -> PathBuf {
     config::worktree_dir(slug, key.as_deref().unwrap_or(agent_id))
 }
 
+/// The key under which an agent's persistent per-agent state is filed: its
+/// registry uuid, falling back to the display id for an unregistered agent.
+/// Display ints are recycled and relabelled; the uuid is not.
+pub fn agent_key(agent_id: &str) -> String {
+    registry::agent_uuid(agent_id)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| agent_id.to_string())
+}
+
+/// An agent's private `~/.claude`, uuid-keyed like its worktree.
+pub fn agent_claude_dir(agent_id: &str) -> PathBuf {
+    config::agent_claude_dir_for_key(&agent_key(agent_id))
+}
+
+/// An agent's private `~/.claude.json`.
+pub fn agent_claude_json(agent_id: &str) -> PathBuf {
+    config::agent_claude_json_for_key(&agent_key(agent_id))
+}
+
+/// Where Claude Code files an agent's transcripts for one project.
+pub fn agent_project_dir(agent_id: &str, slug: &str) -> PathBuf {
+    config::agent_project_dir_for_key(&agent_key(agent_id), slug)
+}
+
 /// The base dir holding every per-cave nix store, a sibling of the worktrees
 /// under the user's data dir. The launcher creates each cave's store here
 /// itself; no privileged setup is involved. Tests point it at a tmp dir via
@@ -473,6 +498,24 @@ mod tests {
 
         force_remove_dir_all(&tmp);
         assert!(!tmp.exists(), "force_remove_dir_all should clear the tree");
+    }
+
+    #[test]
+    fn agent_claude_dir_uses_the_uuid_key_not_the_recyclable_display_id() {
+        // Uuid-keyed, like the worktree and nix-store dirs: `remove-agent`
+        // frees the display id for reuse, so keying on it would hand one
+        // agent's Claude state to whichever agent claims the slot next.
+        let g = crate::test_util::DataDirGuard::new("claude-dir-key");
+        let base = g.path.join("proj");
+        let aid = registry::acquire_agent_id(&base).unwrap();
+        let uuid = registry::agent_uuid(&aid).unwrap().unwrap();
+
+        assert_eq!(agent_claude_dir(&aid), config::agent_claude_dir_for_key(&uuid));
+        assert_eq!(
+            agent_claude_json(&aid),
+            config::agent_claude_json_for_key(&uuid)
+        );
+        assert_ne!(agent_claude_dir(&aid), config::agent_claude_dir_for_key(&aid));
     }
 
     #[test]

@@ -6,6 +6,7 @@ use anyhow::{bail, Result};
 use crate::config;
 use crate::git;
 use crate::registry;
+use crate::session_store;
 use crate::style;
 use crate::workspace;
 
@@ -97,6 +98,24 @@ pub fn dir_size(path: &Path) -> u64 {
     walk(path, &seen)
 }
 
+/// Bytes gc could actually free by deleting an agent's claude dir. Excludes
+/// transcripts that are also hardlinked into the permanent session store
+/// (`session_store::link_transcript`): deleting the agent's copy drops the
+/// link count but the store's copy keeps the data on disk, so those bytes
+/// are never freed and reporting them as reclaimable overstates the total.
+fn claude_dir_reclaimable_size(claude: &Path) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    let mut size = dir_size(claude);
+    for t in session_store::transcripts(claude) {
+        if let Ok(meta) = std::fs::metadata(&t) {
+            if meta.nlink() > 1 {
+                size = size.saturating_sub(meta.blocks() * 512);
+            }
+        }
+    }
+    size
+}
+
 pub fn format_size(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = 1024 * KB;
@@ -143,6 +162,13 @@ pub fn candidates(older_than: Duration) -> Vec<Candidate> {
         let overlay = cave_store_dir(&aid);
         if overlay.exists() {
             size += dir_size(&overlay);
+        }
+        // The agent's Claude state is reclaimable too. Without it, an agent
+        // whose worktree is already gone looks collected and its transcripts
+        // and file history are never freed.
+        let claude = workspace::agent_claude_dir(&aid);
+        if claude.exists() {
+            size += claude_dir_reclaimable_size(&claude);
         }
         if size == 0 {
             // Already collected, nothing left to free.
@@ -212,6 +238,14 @@ pub fn collect(c: &Candidate) {
     if overlay.exists() {
         workspace::force_remove_dir_all(&overlay);
     }
+    // The agent's Claude state goes with it. Its session records do not: they
+    // are hardlinked into the permanent store and are the point of the store.
+    // Shared project memory outlives every agent and is never collected.
+    let claude = workspace::agent_claude_dir(&c.agent_id);
+    if claude.exists() {
+        workspace::force_remove_dir_all(&claude);
+    }
+    let _ = std::fs::remove_file(workspace::agent_claude_json(&c.agent_id));
 }
 
 /// Worktree/overlay directories on disk that don't correspond to any
@@ -551,5 +585,36 @@ mod tests {
             "expected dedup'd allocation (≤ one fs block, ~4096), got {total}"
         );
         assert!(total >= 1000, "expected at least one copy counted, got {total}");
+    }
+
+    #[test]
+    fn reclaimable_size_excludes_transcripts_archived_elsewhere() {
+        let tmp = std::env::temp_dir().join(format!("cav-reclaim-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let claude = tmp.join("claude");
+        let projects = claude.join("projects").join("-projects-p");
+        std::fs::create_dir_all(&projects).unwrap();
+        std::fs::write(claude.join("history.jsonl"), vec![b'x'; 1000]).unwrap();
+        let transcript = projects.join("sess-1.jsonl");
+        std::fs::write(&transcript, vec![b'y'; 1000]).unwrap();
+
+        // Not yet archived: the transcript's bytes are still reclaimable.
+        let before = claude_dir_reclaimable_size(&claude);
+        assert!(before >= 2000, "expected both files counted, got {before}");
+
+        // Archive it, mirroring what session_store::link_transcript does:
+        // a second hardlink to the same inode, outside the claude dir.
+        let sessions = tmp.join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::hard_link(&transcript, sessions.join("sess-1.jsonl")).unwrap();
+
+        let after = claude_dir_reclaimable_size(&claude);
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(
+            after < before,
+            "archived transcript should no longer count as reclaimable: before={before} after={after}"
+        );
+        // Only history.jsonl's one-block allocation should remain.
+        assert!(after <= 8192, "expected roughly one block left, got {after}");
     }
 }

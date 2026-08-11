@@ -1110,18 +1110,11 @@ fn dead_pid_sweep_uses_session_mtime_for_exit_time() {
     )
     .unwrap();
 
-    // Create a fake session jsonl with mtime backdated 7 days. Path matches
-    // config::claude_project_dir(slug, None) -> data_dir/home/.claude/projects/<encoded>
-    // where encoded replaces every non-alphanumeric char in /projects/<slug>.
-    let encoded = format!("/projects/{slug}")
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '-' })
-        .collect::<String>();
-    let session_dir = p.data_dir
-        .join("home")
-        .join(".claude")
-        .join("projects")
-        .join(&encoded);
+    // Create a fake session jsonl with mtime backdated 7 days, in the
+    // permanent store at data_dir/sessions/<session-id>.jsonl. That record is
+    // hardlinked to the live transcript, so its mtime tracks the session
+    // whichever agent directory the transcript itself lives in.
+    let session_dir = p.data_dir.join("sessions");
     fs::create_dir_all(&session_dir).unwrap();
     let session_file = session_dir.join(format!("{sid}.jsonl"));
     fs::write(&session_file, "{}\n").unwrap();
@@ -1737,6 +1730,84 @@ fn rename_project_after_manual_move_cascades_slug() {
         )
         .unwrap();
     assert_eq!(registered, new_path.canonicalize().unwrap().to_str().unwrap());
+
+    let _ = fs::remove_dir_all(&new_path);
+}
+
+#[test]
+fn rename_project_carries_memory_and_agent_transcripts_to_the_new_slug() {
+    let p = Project::new("rp-rename-memory");
+    let old_slug = p.slug();
+    p.register_agent("1");
+    let uuid = p
+        .agent_uuid("1")
+        .expect("registered agent should have uuid");
+
+    let encoded = |slug: &str| format!("-projects-{slug}");
+    let old_memory = p.data_dir.join("memory").join(&old_slug);
+    fs::create_dir_all(&old_memory).unwrap();
+    fs::write(old_memory.join("fact.md"), "---\nname: fact\n---\nbody\n").unwrap();
+
+    let old_transcripts = p
+        .data_dir
+        .join("claude/agents")
+        .join(&uuid)
+        .join("projects")
+        .join(encoded(&old_slug));
+    fs::create_dir_all(&old_transcripts).unwrap();
+    fs::write(old_transcripts.join("sess-1.jsonl"), "{}\n").unwrap();
+
+    let new_path = p
+        .dir
+        .parent()
+        .unwrap()
+        .join(format!("moved-mem-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&new_path);
+    fs::rename(&p.dir, &new_path).unwrap();
+
+    let out = Command::new(CAV)
+        .args([
+            "rename-project",
+            &old_slug,
+            new_path.to_str().unwrap(),
+            "--yes",
+        ])
+        .current_dir(&new_path)
+        .env("CODING_CAVE_DATA_DIR", &p.data_dir)
+        .env_remove("CODING_CAVE_VERSION")
+        .env_remove("CODING_CAVE_AGENT_ID")
+        .output()
+        .expect("cav");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "rename failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let new_slug = new_path
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_lowercase()
+        .replace(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-', "-");
+    assert_ne!(old_slug, new_slug);
+
+    let new_memory = p.data_dir.join("memory").join(&new_slug);
+    assert!(!old_memory.exists(), "old memory dir should be moved");
+    assert!(new_memory.join("fact.md").is_file(), "memory should follow the rename");
+
+    let new_transcripts = p
+        .data_dir
+        .join("claude/agents")
+        .join(&uuid)
+        .join("projects")
+        .join(encoded(&new_slug));
+    assert!(!old_transcripts.exists(), "old transcript dir should be moved");
+    assert!(
+        new_transcripts.join("sess-1.jsonl").is_file(),
+        "agent transcript should follow the rename, or the resume picker goes empty",
+    );
 
     let _ = fs::remove_dir_all(&new_path);
 }
@@ -2430,4 +2501,60 @@ fn push_drops_dev_ref_patch_equivalent_to_base() {
         !p.shared_has_ref("refs/heads/agent-4/main"),
         "patch-equivalent dev ref should be swept by push"
     );
+}
+
+/// Collecting an agent must reclaim its Claude state but never the permanent
+/// session record or the project's shared memory. Those outlive every agent.
+#[test]
+fn gc_keeps_session_records_and_memory() {
+    let p = Project::new("gc-keeps-records");
+    let slug = p.dir.file_name().unwrap().to_str().unwrap().to_string();
+    let sid = "11111111-2222-3333-4444-555555555555";
+    let uuid = uuid::Uuid::new_v4().to_string();
+
+    let conn = rusqlite::Connection::open(p.data_dir.join("coding-cave.db")).unwrap();
+    conn.execute(
+        "INSERT INTO agents (agent_id, uuid, project, session_id, host_pid, started_at, exited_at)
+         VALUES ('3', ?1, ?2, ?3, NULL, 0, 1)",
+        rusqlite::params![uuid, slug, sid],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO sessions (session_id, project, agent_id)
+         VALUES (?1, ?2, '3')",
+        rusqlite::params![sid, slug],
+    )
+    .unwrap();
+
+    // Claude state is uuid-keyed, like the worktree and nix-store dirs.
+    let claude = p.data_dir.join("claude/agents").join(&uuid);
+    fs::create_dir_all(claude.join("projects")).unwrap();
+    fs::write(claude.join("history.jsonl"), "x").unwrap();
+
+    let record = p.data_dir.join("sessions").join(format!("{sid}.jsonl"));
+    fs::create_dir_all(record.parent().unwrap()).unwrap();
+    fs::write(&record, "{}\n").unwrap();
+
+    let memory = p.data_dir.join("memory").join(&slug);
+    fs::create_dir_all(&memory).unwrap();
+    fs::write(memory.join("a.md"), "fact").unwrap();
+
+    let out = p.cav(&["gc", "--older-than", "0s", "-y"]);
+    assert!(
+        out.status.success(),
+        "gc failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert!(!claude.exists(), "agent Claude state survived gc");
+    assert!(record.is_file(), "permanent session record was collected");
+    assert!(memory.join("a.md").is_file(), "shared memory was collected");
+    let still_there: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sessions WHERE session_id = ?1",
+            rusqlite::params![sid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(still_there, 1, "session row was deleted");
 }

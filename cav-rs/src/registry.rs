@@ -43,23 +43,14 @@ fn open() -> Result<Connection> {
     std::fs::create_dir_all(&data_dir)?;
     let db = Connection::open(registry_path())?;
     db.execute_batch("PRAGMA journal_mode=WAL;")?;
-    let has_tables: bool = db
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='agents'",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .map(|n| n > 0)
-        .unwrap_or(false);
-    if !has_tables {
-        db.execute_batch(SCHEMA)?;
-    } else {
-        let cols: Vec<String> =
-            collect_rows(&db, "PRAGMA table_info(agents)", |row| row.get::<_, String>(1))?;
-        for dead in ["host_ports", "host_devices", "comms", "inner_pid"] {
-            if cols.iter().any(|c| c == dead) {
-                db.execute_batch(&format!("ALTER TABLE agents DROP COLUMN {dead};"))?;
-            }
+    // Every statement is IF NOT EXISTS, so this both creates a fresh registry
+    // and adds tables introduced since an existing one was created.
+    db.execute_batch(SCHEMA)?;
+    let cols: Vec<String> =
+        collect_rows(&db, "PRAGMA table_info(agents)", |row| row.get::<_, String>(1))?;
+    for dead in ["host_ports", "host_devices", "comms", "inner_pid"] {
+        if cols.iter().any(|c| c == dead) {
+            db.execute_batch(&format!("ALTER TABLE agents DROP COLUMN {dead};"))?;
         }
     }
     Ok(db)
@@ -85,9 +76,9 @@ fn is_pid_alive(pid: u32) -> bool {
 /// Best estimate of when an agent actually exited. Used when we discover a
 /// dead pid: prefer the session log's mtime (when the agent last did work)
 /// over now() (when we noticed). Falls back to now if no session file.
-fn estimate_exit_time(slug: &str, session_id: Option<&str>, now_ts: f64) -> f64 {
+fn estimate_exit_time(session_id: Option<&str>, now_ts: f64) -> f64 {
     if let Some(sid) = session_id {
-        let path = config::claude_project_dir(slug, None).join(format!("{sid}.jsonl"));
+        let path = config::session_transcript(sid);
         if let Ok(secs) = std::fs::metadata(&path)
             .and_then(|m| m.modified())
             .map(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
@@ -104,22 +95,21 @@ fn estimate_exit_time(slug: &str, session_id: Option<&str>, now_ts: f64) -> f64 
 }
 
 fn sweep_dead_pids(db: &Connection, ts: f64) -> Result<()> {
-    let rows: Vec<(String, u32, String, Option<String>)> = collect_rows(
+    let rows: Vec<(String, u32, Option<String>)> = collect_rows(
         db,
-        "SELECT agent_id, host_pid, project, session_id FROM agents \
+        "SELECT agent_id, host_pid, session_id FROM agents \
          WHERE exited_at IS NULL AND host_pid IS NOT NULL",
         |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, u32>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(2)?,
             ))
         },
     )?;
-    for (aid, pid, slug, sid) in rows {
+    for (aid, pid, sid) in rows {
         if !is_pid_alive(pid) {
-            let exited = estimate_exit_time(&slug, sid.as_deref(), ts);
+            let exited = estimate_exit_time(sid.as_deref(), ts);
             db.execute(
                 "UPDATE agents SET exited_at = ?1, host_pid = NULL, cave_pid = NULL \
                  WHERE agent_id = ?2",
@@ -204,25 +194,24 @@ pub fn is_agent_running(agent_id: &str) -> Result<bool> {
     let db = open()?;
     let row = db
         .query_row(
-            "SELECT host_pid, exited_at, project, session_id FROM agents WHERE agent_id = ?1",
+            "SELECT host_pid, exited_at, session_id FROM agents WHERE agent_id = ?1",
             params![agent_id],
             |row| {
                 Ok((
                     row.get::<_, Option<u32>>(0)?,
                     row.get::<_, Option<f64>>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(2)?,
                 ))
             },
         )
         .ok();
     match row {
-        None | Some((None, _, _, _)) | Some((_, Some(_), _, _)) => Ok(false),
-        Some((Some(pid), None, slug, sid)) => {
+        None | Some((None, _, _)) | Some((_, Some(_), _)) => Ok(false),
+        Some((Some(pid), None, sid)) => {
             if is_pid_alive(pid) {
                 return Ok(true);
             }
-            let exited = estimate_exit_time(&slug, sid.as_deref(), now());
+            let exited = estimate_exit_time(sid.as_deref(), now());
             db.execute(
                 "UPDATE agents SET exited_at = ?1, host_pid = NULL, cave_pid = NULL \
                  WHERE agent_id = ?2",
@@ -408,11 +397,10 @@ pub fn resolve_continue(
     base: &Path,
     agent_id_hint: Option<&str>,
 ) -> Result<ResolvedContinue> {
-    let slug = config::project_slug(base);
     let agent_id = continue_agent_id(base, agent_id_hint)?;
 
     if agent_id.is_none() {
-        let d = config::claude_project_dir(&slug, None);
+        let d = config::sessions_dir();
         if d.is_dir() {
             bail!(
                 "No agents to continue. To recover an archived session, find\n\
@@ -429,11 +417,17 @@ pub fn resolve_continue(
     }
 
     let aid = agent_id.unwrap();
-    let home = config::persistent_home();
     let session_id = read_session_id(&aid)?;
 
     if let Some(ref sid) = session_id {
-        if config::session_file_exists(&slug, sid, Some(&home)) {
+        // Whether claude will actually find a transcript to resume, not
+        // whether one exists somewhere: the permanent archive can have a
+        // copy `cav gc` or an in-cave `rm` dropped from the live per-agent
+        // dir, and a pre-upgrade agent's transcript can still be sitting
+        // under the old shared home. session_store restores either into the
+        // live path before we commit to --resume.
+        let slug = config::project_slug(base);
+        if crate::session_store::ensure_live_transcript(&aid, &slug, sid) {
             return Ok(ResolvedContinue {
                 agent_id: aid,
                 session_id: sid.clone(),
@@ -516,9 +510,110 @@ pub fn agent_all_slugs(agent_id: &str) -> Result<Vec<String>> {
 }
 
 pub fn remove_agent(agent_id: &str) -> Result<()> {
-    let db = open()?;
+    remove_agent_in(&open()?, agent_id)
+}
+
+fn remove_agent_in(db: &Connection, agent_id: &str) -> Result<()> {
     db.execute("DELETE FROM agents WHERE agent_id = ?1", params![agent_id])?;
     Ok(())
+}
+
+// -- Sessions --
+//
+// The permanent record of every session. Rows are only ever inserted or
+// stamped with an end time; nothing deletes them, so a record outlives the
+// agent that created it.
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionRecord {
+    pub session_id: String,
+    pub project: String,
+    pub extra_projects: Vec<String>,
+    pub agent_id: Option<String>,
+    pub branch: Option<String>,
+    pub started_at: Option<f64>,
+    pub ended_at: Option<f64>,
+}
+
+/// Record a session the first time it is seen. Idempotent: the watcher may
+/// see the same transcript repeatedly, and re-registering must not disturb
+/// an existing record.
+pub fn register_session(rec: &SessionRecord) -> Result<bool> {
+    register_session_in(&open()?, rec)
+}
+
+fn register_session_in(db: &Connection, rec: &SessionRecord) -> Result<bool> {
+    let extra = if rec.extra_projects.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(&rec.extra_projects)?)
+    };
+    let n = db.execute(
+        "INSERT OR IGNORE INTO sessions
+         (session_id, project, extra_projects, agent_id, branch,
+          started_at, ended_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)",
+        params![
+            rec.session_id,
+            rec.project,
+            extra,
+            rec.agent_id,
+            rec.branch,
+            rec.started_at.unwrap_or_else(now),
+        ],
+    )?;
+    Ok(n > 0)
+}
+
+pub fn mark_session_ended(session_id: &str) -> Result<()> {
+    mark_session_ended_at(&open()?, session_id, now())
+}
+
+fn mark_session_ended_at(db: &Connection, session_id: &str, ts: f64) -> Result<()> {
+    db.execute(
+        "UPDATE sessions SET ended_at = ?1 WHERE session_id = ?2 AND ended_at IS NULL",
+        params![ts, session_id],
+    )?;
+    Ok(())
+}
+
+pub fn session_record(session_id: &str) -> Result<Option<SessionRecord>> {
+    session_record_in(&open()?, session_id)
+}
+
+fn session_record_in(db: &Connection, session_id: &str) -> Result<Option<SessionRecord>> {
+    // Distinguish "no such session" from a real query failure (lock
+    // contention, corruption): callers use a missing record to decide a
+    // session is unowned and safe to resume in place, so silently folding
+    // an error into that same `None` would make a transient DB problem
+    // look like a legitimate "not borrowed".
+    match db.query_row(
+        &format!("{SESSION_SELECT} WHERE session_id = ?1"),
+        params![session_id],
+        session_from_row,
+    ) {
+        Ok(rec) => Ok(Some(rec)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+const SESSION_SELECT: &str = "SELECT session_id, project, extra_projects, agent_id, branch, \
+     started_at, ended_at FROM sessions";
+
+fn session_from_row(row: &rusqlite::Row) -> rusqlite::Result<SessionRecord> {
+    let extra: Option<String> = row.get(2)?;
+    Ok(SessionRecord {
+        session_id: row.get(0)?,
+        project: row.get(1)?,
+        extra_projects: extra
+            .and_then(|e| serde_json::from_str::<Vec<String>>(&e).ok())
+            .unwrap_or_default(),
+        agent_id: row.get(3)?,
+        branch: row.get(4)?,
+        started_at: row.get(5)?,
+        ended_at: row.get(6)?,
+    })
 }
 
 pub fn all_agent_ids(project: Option<&str>) -> Result<Vec<String>> {
@@ -882,4 +977,108 @@ pub fn delete_approvals(approval_ids: &[i64]) -> Result<()> {
     }
     tx.commit()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+
+    fn db() -> Connection {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(SCHEMA).unwrap();
+        db
+    }
+
+    fn rec(id: &str) -> SessionRecord {
+        SessionRecord {
+            session_id: id.to_string(),
+            project: "proj".into(),
+            extra_projects: vec!["other".into()],
+            agent_id: Some("7".into()),
+            branch: Some("main".into()),
+            started_at: Some(100.0),
+            ended_at: None,
+        }
+    }
+
+    #[test]
+    fn missing_session_is_ok_none_not_an_error() {
+        let db = db();
+        assert_eq!(session_record_in(&db, "nope").unwrap(), None);
+    }
+
+    #[test]
+    fn a_real_query_failure_is_not_folded_into_missing() {
+        // No schema applied: querying against a nonexistent `sessions` table
+        // is a real error, and callers that treat "unowned" and "couldn't
+        // tell" the same way risk two agents appending into one transcript.
+        let db = Connection::open_in_memory().unwrap();
+        assert!(session_record_in(&db, "s1").is_err());
+    }
+
+    #[test]
+    fn registration_is_idempotent() {
+        let db = db();
+        assert!(register_session_in(&db, &rec("s1")).unwrap());
+        assert!(!register_session_in(&db, &rec("s1")).unwrap());
+        assert_eq!(collect_rows(&db, SESSION_SELECT, session_from_row).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn re_registering_does_not_clear_an_end_time() {
+        let db = db();
+        register_session_in(&db, &rec("s1")).unwrap();
+        mark_session_ended_at(&db, "s1", 200.0).unwrap();
+        register_session_in(&db, &rec("s1")).unwrap();
+        assert_eq!(session_record_in(&db, "s1").unwrap().unwrap().ended_at, Some(200.0));
+    }
+
+    #[test]
+    fn end_time_is_stamped_once() {
+        let db = db();
+        register_session_in(&db, &rec("s1")).unwrap();
+        assert_eq!(session_record_in(&db, "s1").unwrap().unwrap().ended_at, None);
+        mark_session_ended_at(&db, "s1", 200.0).unwrap();
+        mark_session_ended_at(&db, "s1", 300.0).unwrap();
+        assert_eq!(session_record_in(&db, "s1").unwrap().unwrap().ended_at, Some(200.0));
+    }
+
+    #[test]
+    fn record_outlives_the_agent_that_created_it() {
+        let db = db();
+        db.execute(
+            "INSERT INTO agents (agent_id, uuid, project) VALUES ('7', 'u7', 'proj')",
+            [],
+        )
+        .unwrap();
+        register_session_in(&db, &rec("s1")).unwrap();
+
+        remove_agent_in(&db, "7").unwrap();
+
+        let got = session_record_in(&db, "s1").unwrap().expect("session record deleted");
+        assert_eq!(got.agent_id.as_deref(), Some("7"));
+    }
+
+    #[test]
+    fn extra_projects_round_trip() {
+        let db = db();
+        register_session_in(&db, &rec("s1")).unwrap();
+        let got = session_record_in(&db, "s1").unwrap().unwrap();
+        assert_eq!(got.extra_projects, vec!["other".to_string()]);
+        assert_eq!(got.project, "proj");
+    }
+
+    #[test]
+    fn sessions_table_is_added_to_an_existing_registry() {
+        // A registry created before the sessions table existed must gain it.
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE agents (agent_id TEXT PRIMARY KEY, uuid TEXT NOT NULL UNIQUE,
+             project TEXT NOT NULL, session_id TEXT UNIQUE, host_pid INTEGER,
+             cave_pid INTEGER, started_at REAL, exited_at REAL, extra_projects TEXT);",
+        )
+        .unwrap();
+        db.execute_batch(SCHEMA).unwrap();
+        assert!(register_session_in(&db, &rec("s1")).unwrap());
+    }
 }

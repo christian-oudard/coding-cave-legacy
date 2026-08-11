@@ -58,13 +58,23 @@ Each agent runs in bubblewrap sandbox.
 - Agents can install Nix packages with ordinary nix commands. Each cave has its own private package store, seeded at launch with the cave environment; packages are not shared between caves or with the host.
 - An agent cannot write into the host's packages or another agent's: each cave's store is private to that cave.
 - Project workspaces are mounted at `/projects/<slug>`.
-- A persistent shared home directory is at `/home/coder`.
+- A persistent shared home directory is at `/home/coder`. Claude Code's own state within it is private to each agent.
 - Agents sign commits with host GPG keys, through a forwarded GPG agent extra socket. The extra socket runs in restricted mode, allowing signing but blocking secret key export and other dangerous operations.
 - Git commits are signed with the user's Git identity, stored in environment variables.
 - The Standard POSIX environment (SHELL, TERM, locale).
 
 ## Credential Isolation
 Caves do not have access to any of your SSH keys or API tokens. Instead, all web traffic is routed through a credential injection man-in-the-middle proxy, which wraps network traffic and injects credentials.
+
+## Sessions and Memory
+
+Each agent has its own background jobs, session transcripts, and Claude Code configuration. An agent sees only its own background jobs.
+
+Every session is registered permanently as soon as it starts. A session record outlives the agent that created it, surviving `cav remove-agent` and `cav gc`.
+
+All session logs are readable by every agent at `/cave/sessions`, across every project. An agent cannot write or delete another agent's session log, and cannot delete a registered log of its own. An agent can resume another agent's session; resuming forks, leaving the original record unchanged.
+
+Memory is shared by all agents working on a project, and outlives them. The memory index is derived from the memories themselves, so a memory is never orphaned.
 
 ## User/System Configuration
 
