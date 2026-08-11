@@ -23,6 +23,11 @@ type Session struct {
 	pty  *os.File
 	ring *Ring
 
+	// How to run this agent again, kept so an agent that has exited can be
+	// brought back under the same name.
+	argv, env []string
+	dir       string
+
 	mu      sync.Mutex
 	clients map[chan []byte]struct{}
 	done    chan struct{}
@@ -72,6 +77,9 @@ func StartSession(id string, argv []string, env []string, dir string, rows, cols
 		ID:      id,
 		cmd:     cmd,
 		pty:     master,
+		argv:    argv,
+		env:     env,
+		dir:     dir,
 		ring:    NewRing(ringBytes),
 		clients: make(map[chan []byte]struct{}),
 		done:    make(chan struct{}),
