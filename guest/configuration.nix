@@ -464,6 +464,14 @@ in
       # agent starts and immediately exits. `vmcav agent` sets the same when
       # it launches claude interactively; a plain `vmcav shell` does not.
       IS_SANDBOX = "1";
+      # systemd sets HOME only for units with User=, so a root unit gets none
+      # and every tool that resolves config through $HOME misbehaves under the
+      # agent. git is the one that bites: it never reads /root/.gitconfig, so
+      # the seeded identity is invisible and `git commit` fails with "Author
+      # identity unknown" even though the seed installed it correctly. claude
+      # itself is unaffected (node's os.homedir() falls back to the passwd
+      # entry), which is why this survived bootstrap unnoticed.
+      HOME = "/root";
       # A unit has no terminal, so TERM is unset and anything curses-ish
       # falls back to dumb rendering: no colour, no cursor addressing, and
       # output that reads like a terminal with no scrollback. The daemon
