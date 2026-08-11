@@ -27,6 +27,9 @@ Lift semantics from the Rust code, not code.
 - `docs/vm-root-agent.md` designs the in-VM bootstrap agent: a root-in-guest
   Claude session that builds the in-guest system from within and redeploys
   itself via NixOS generations, behind the unchanged host boundary.
+- `docs/vm-cave-todo.md` lists gaps the bootstrap has surfaced that are not
+  phases of the design: preserving uncommitted work across a reformat,
+  session and memory management, and who owns the guest spec ref.
 
 ## Ground rules
 
