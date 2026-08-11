@@ -346,7 +346,10 @@ do_vsock_connect() {
 }
 
 do_status() {
-  if ! is_running; then echo "vm: stopped"; return 0; fi
+  # Nothing announces a push: the agent commits, the daemon accepts it, and
+  # the ref moves in silence. Status is where you find out one arrived, and it
+  # says so with the VM stopped too, because the work arrived either way.
+  if ! is_running; then echo "vm: stopped"; cave_vm pending; return 0; fi
   local p; p=$(vm_pid)
   local since; since=$(ps -o lstart= -p "$p" 2>/dev/null | sed 's/^ *//')
   echo "vm: running (pid $p, since ${since:-?})"
@@ -381,6 +384,23 @@ do_status() {
   fi
   echo "console: $CONSOLE"
   [ "${n:-0}" = 0 ] || echo "attach: vmcav agent   (detach: ctrl-\\)"
+  cave_vm pending
+}
+
+# --- Review and land what the agent pushed ---
+# The agent commits in the guest and pushes over the vsock git bridge into
+# this repo, where the pre-receive guard confines it to agent-N/<base>. That
+# last hop, agent-N/<base> into <base>, is the one it deliberately cannot make
+# itself, so it is the one command a human runs.
+#
+# Implemented in the cave-vm binary, not here: it is host-side git and nothing
+# else, so it is the first piece with no reason to stay in a shell script, and
+# the first with real tests (cave-vm/internal/approve). -C, because vmcav has
+# already resolved which checkout this is about.
+cave_vm() {
+  command -v cave-vm >/dev/null 2>&1 \
+    || { log "cave-vm not found; enter the dev shell (nix develop $REPO)"; exit 1; }
+  cave-vm "$1" -C "$REPO" "${@:2}"
 }
 
 # ssh into the guest as root over the forwarded port. Host-key checks are off
@@ -456,6 +476,9 @@ usage: vmcav <command>
   status          whether it is up, which generation, where the console is
   agent           attach to the agent's claude session (detach: ctrl-\)
   shell [cmd...]  a root shell in the guest, or run cmd there
+  review [agent]  what the agent has pushed and not had landed
+  diff [agent]    the same range, in full
+  approve [agent] fast-forward the base branch onto the agent's work
   version         the commit this vmcav was built from
   image create    build the guest and create its disk
   image reformat  destroy that disk and build a new one
@@ -622,6 +645,7 @@ case "${1:-help}" in
   stop) do_stop ;;
   status) do_status ;;
   agent) do_agent ;;
+  review|diff|approve) cave_vm "$@" ;;
   shell) shift; do_shell "$@" ;;
   vsock-connect) shift; do_vsock_connect "$@" ;;
   version|--version|-V) do_version ;;

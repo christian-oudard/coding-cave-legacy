@@ -8,10 +8,22 @@
       systems = [ "x86_64-linux" ];
       forAll = f: nixpkgs.lib.genAttrs systems (s: f nixpkgs.legacyPackages.${s});
 
+      # The Go binaries. cave-vm is the host CLI the bootstrap script is
+      # migrating into: `vmcav review|diff|approve` already run it. cave-guestd
+      # is built here too, but it ships in the guest image, not on the host.
+      caveVm = pkgs: pkgs.buildGoModule {
+        pname = "cave-vm";
+        version = "0";
+        src = ./cave-vm;
+        vendorHash = null; # no dependencies, by design
+        subPackages = [ "cmd/cave-vm" ];
+        env.CGO_ENABLED = 0;
+      };
+
       # Everything vmcav shells out to. The package pins them; the devShell
       # gets the same list so a working-tree vmcav behaves identically.
       # Kept in step with require_tools in scripts/vmcav.
-      runtimeDeps = pkgs: with pkgs; [
+      runtimeDeps = pkgs: [ (caveVm pkgs) ] ++ (with pkgs; [
         cloud-hypervisor  # the VMM, plus ch-remote for the ACPI power button
         openssh           # ssh over vsock, ssh-keygen for the agent key
         util-linux        # setsid
@@ -24,7 +36,7 @@
         # bash is here for the `#!/usr/bin/env bash` shebang, which resolves
         # against the PATH the wrapper sets, not the caller's.
         bash coreutils gnused gnugrep procps  # id, cksum, truncate, ps, ...
-      ];
+      ]);
     in
     {
       # No `default` alias on purpose. This flake URL also serves main's cav,
@@ -32,6 +44,7 @@
       # ("coding-cave"), which reads like the stable tool rather than this
       # branch's script. Named attribute, so the entry is named `vmcav`.
       packages = forAll (pkgs: {
+        cave-vm = caveVm pkgs;
         # Bootstrap-era: vmcav is a script, so the derivation is a wrapper
         # that pins its PATH. It reads the guest flake and hooks out of your
         # checkout (found via the cwd's git toplevel), so the wrapper carries
@@ -54,11 +67,17 @@
       # and neither suite makes calls. The VM smoke test is not here, it needs
       # a build and minutes of boot.
       checks = forAll (pkgs: {
+        # git is here because internal/approve drives real repos: the thing
+        # worth testing is what the ref actually does, not a mock of it.
         go-tests = pkgs.runCommand "cave-vm-go-tests"
-          { nativeBuildInputs = [ pkgs.go ]; }
+          { nativeBuildInputs = with pkgs; [ go git ]; }
           ''
             cp -r ${./cave-vm} src && chmod -R u+w src && cd src
+            # CGO_ENABLED=0 is the ground rule for these binaries anyway, and
+            # without it `net` wants a C compiler the sandbox has no reason to
+            # carry.
             export HOME=$TMPDIR GOFLAGS=-mod=mod GOCACHE=$TMPDIR/go-cache
+            export CGO_ENABLED=0
             go test ./... && touch $out
           '';
         # Depends on scripts/ alone, not the flake source, so editing a doc

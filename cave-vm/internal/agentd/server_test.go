@@ -3,6 +3,7 @@ package agentd
 import (
 	"bufio"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -12,7 +13,15 @@ import (
 func serveTest(t *testing.T) (*Registry, string) {
 	t.Helper()
 	reg := NewRegistry()
-	sock := filepath.Join(t.TempDir(), "s.sock")
+	// Not t.TempDir(): it puts the test's name in the path, and a unix socket
+	// address is capped at 108 bytes, which a long test name under a build
+	// sandbox's temp dir blows straight through.
+	dir, err := os.MkdirTemp("", "agentd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "s.sock")
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Fatal(err)

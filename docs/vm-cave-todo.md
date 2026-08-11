@@ -160,9 +160,10 @@ Settled, so that it is not re-derived:
   works on, not where the guest config comes from. `CAVE_GUEST_REF`, the
   hardcoded `agent-1`, and the spec-commit state all go away with it.
 
-Left over once that lands: nothing on the host consumes what an agent
-pushes, so there is no `cav approve` equivalent and agent commits just
-accumulate on their branch.
+Done: the host consumes what an agent pushes. `vmcav review`, `vmcav diff`
+and `vmcav approve` are the last hop, and `vmcav status` says when work is
+waiting. Fast-forward only, so a base that has moved on sends the agent back
+to rebase rather than growing a merge nobody tested.
 
 Open: whether the spec ref means "the agent's branch" (agent deploys without
 approval, human is the outsider) or "what the VM runs" (both move it, the
