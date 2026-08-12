@@ -346,3 +346,61 @@ directly bootable.
 vsock data was not proven because the borrowed Lima image drops to emergency
 mode without its cloud-init disk, so nothing listened inside the guest. That
 belongs to phase 2 against the real guest image rather than to VMM selection.
+
+## The real guest, booted under vfkit
+
+Beyond selecting the VMM, the actual cave guest was built for aarch64 and
+booted on the M1. What held and what did not:
+
+**Held.** The guest flake builds for `aarch64-linux` with only two changes
+(parameterising the system, and the console). Every artifact substituted from
+cache.nixos.org rather than compiling, including the kernel, which is emitted
+as an uncompressed `Image` exactly as vfkit's direct kernel boot requires. The
+guest then booted to a NixOS 26.11 aarch64 multi-user system under vfkit, with
+sshd up and root autologin, off the unmodified `chvDisk` raw image
+(`partitionTableType = "none"`, `root=/dev/vda`).
+
+**The service plane works end to end in the guest-initiated direction.** The
+guest's clone-repo service dialled `127.0.0.1:9418`, socat carried it to vsock
+7300, vfkit delivered it to a host unix socket, and the host received real git
+protocol:
+
+    003fgit-upload-pack /cave-shared.git\0host=127.0.0.1\0\0version=2\0
+
+Note the ownership difference from Cloud Hypervisor. CHV creates
+`vsock.sock_N` itself for guest-initiated ports. vfkit's `listen` mode is the
+other way round: the **host** creates and listens on the unix socket, and
+vfkit dials it when the guest connects. `internal/plane` has to own socket
+creation on macOS and not on Linux.
+
+**Did not hold: host-initiated vsock.** With `--device
+virtio-vsock,port=22,...,connect`, nothing answered. The guest console shows
+`systemd-ssh-generator` bound only "AF_UNIX Local" and no AF_VSOCK listener,
+where under CHV the same generator is what `vmcav agent` reaches through
+`vsock-connect.py`. So terminal attach does not work on macOS yet, and the
+cause is guest-side detection rather than vfkit refusing the connection.
+Diagnosing it needs the guest CID as vfkit presents it.
+
+The seed disk was not attached, so `/etc/cave-host` failed to mount. Building
+it needs `mke2fs`, which macOS does not have; on this host it would come from
+nix, or the image gets built in the guest.
+
+### What a darwin `vmcav` still needs
+
+The script is Linux-only in seven concrete places, none of them deep:
+
+- `packages.x86_64-linux.$a` hardcoded; the flake now offers both.
+- `$BOOT/kernel/bzImage`; aarch64 emits `Image`.
+- the `/dev/kvm` writability check.
+- `require_tools` wants `cloud-hypervisor`, `ch-remote`, `mke2fs`.
+- `cp --sparse=always` and `truncate`, neither of which macOS ships (APFS
+  `cp -c` clones, and is better).
+- `ch-remote power-button` for shutdown; vfkit uses the REST API.
+- the launch itself: `--kernel/--initramfs/--cmdline` becomes `--bootloader
+  linux,...`, `--disk path=` becomes `--device virtio-blk,path=`,
+  `--api-socket` becomes `--restful-uri`, `--serial file=` becomes `--device
+  virtio-serial,logFilePath=`, and the single `--vsock cid=N,socket=` becomes
+  one `--device virtio-vsock` per port with an explicit direction.
+
+The last of those is the only one carrying design weight, and it is the same
+plane-shape difference recorded above.
