@@ -406,7 +406,10 @@ in
       ExecStart = "${pkgs.writeShellScript "clone-repo" ''
         set -eu
         repo=/root/coding-cave
-        url="''${CAVE_REPO_URL:-git://127.0.0.1/coding-cave}"
+        # The project's shared bare repo, which is the only thing the host
+        # daemon serves. Never the human's working checkout: an agent must not
+        # be able to write a branch into the tree someone is standing in.
+        url="''${CAVE_REPO_URL:-git://127.0.0.1/cave-shared.git}"
         agent="''${CAVE_AGENT_ID:-1}"
         if [ -d "$repo/.git" ]; then
           echo "clone-repo: repo already present at $repo"

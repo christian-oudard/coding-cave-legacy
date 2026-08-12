@@ -26,6 +26,10 @@ GUEST_FLAKE="${CAVE_GUEST_SRC:-$REPO/guest}"
 # flake's directory, so the path is passed into the (already impure) eval
 # rather than being a flake input.
 CAVE_VM_SRC="${CAVE_VM_SRC:-$REPO/cave-vm}"
+# Where agent work lands: the project's shared bare repo, the same one the
+# container caves push to. Not the working checkout -- an agent must not be
+# able to write a branch into the tree someone is standing in.
+SHARED="$REPO/.coding-cave/cave-shared.git"
 CONFIG="${CODING_CAVE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/coding-cave/config.toml}"
 STATE_DIR="${STATE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/coding-cave/vm}"
 CRINJ_PORT="${CRINJ_PORT:-10255}"
@@ -273,16 +277,45 @@ stage_pubring() {
   [ -f "$hd/pubring.kbx" ] && cp -f "$hd/pubring.kbx" "$SEED/pubring.kbx" || true
 }
 
+# The agent's remote is the project's shared bare repo, never the human's
+# working checkout. Serving the checkout is what let a guest push a branch
+# straight into the tree someone is standing in, and it meant `--export-all`
+# over the directory the project happens to sit next to. The shared repo is
+# the same one the container caves use, so one project has one place agent
+# work lands and one set of branches to review.
+ensure_shared_repo() {
+  [ -d "$SHARED" ] && return 0
+  log "creating the shared repo at $SHARED"
+  mkdir -p "$(dirname "$SHARED")"
+  git clone --bare --quiet "$REPO" "$SHARED"
+  # Bare clones inherit origin; the shared repo is nobody's client.
+  git -C "$SHARED" remote remove origin 2>/dev/null || true
+}
+
+# Hooks are shims that exec a helper by name from PATH, so nothing here bakes
+# a store path that a gc or an upgrade can invalidate, and vmcav carries its
+# own hooks instead of reading them out of whichever checkout you happen to be
+# standing in.
+#
+# Only when the repo has none: on a machine that also runs the container
+# caves, their hooks already guard this repo and are the ones exercised by
+# every push it takes. Replacing them with ours would swap a live guard for an
+# equivalent-by-design one that has never seen those push paths.
+install_shared_hooks() {
+  local h="$SHARED/hooks"
+  mkdir -p "$h"
+  [ -e "$h/pre-receive" ] && return 0
+  log "installing receive hooks in $SHARED"
+  printf '#!/bin/sh\nexec cave-vm-git-pre-receive "$@"\n' > "$h/pre-receive"
+  printf '#!/bin/sh\nexec cave-vm-git-post-receive "$@"\n' > "$h/post-receive"
+  chmod 755 "$h/pre-receive" "$h/post-receive"
+}
+
 start_git_daemon() {
-  local parent; parent=$(dirname "$REPO")
-  # Install both committed hooks fresh every start, so the guard tracks the
-  # repo (can't drift from what's reviewed) and no stale hook lingers. This
-  # is what makes --enable=receive-pack safe against the human's own live
-  # checkout. pre-receive enforces the agent-branch rules; post-receive
-  # maintains the agent-tip high-water refs its force-push guard reads.
-  install -m 755 "$REPO/scripts/git-hooks/pre-receive"  "$REPO/.git/hooks/pre-receive"
-  install -m 755 "$REPO/scripts/git-hooks/post-receive" "$REPO/.git/hooks/post-receive"
-  pgrep -f "git daemon.*--base-path=$parent" >/dev/null 2>&1 && return
+  ensure_shared_repo
+  install_shared_hooks
+  local dir; dir=$(dirname "$SHARED")
+  pgrep -f "git daemon.*--base-path=$dir" >/dev/null 2>&1 && return
   # Inject the guest's agent identity into the daemon: git-daemon's
   # receive-pack children and their hooks inherit this env, so the hook reads
   # an id the sandbox cannot forge. Every agent gets a normal number (the
@@ -290,10 +323,13 @@ start_git_daemon() {
   # One guest today = one identity; AGENT_ID is a placeholder until vmcav
   # draws it from the cave-vm registry, and per-agent daemons/ports arrive
   # with the multi-agent work.
+  #
+  # One directory is whitelisted and it is the shared repo, so a request for
+  # any other path on this port resolves to nothing.
   CODING_CAVE_AGENT_ID="${AGENT_ID:-1}" \
   git daemon --reuseaddr --export-all --enable=upload-pack --enable=receive-pack \
-    --base-path="$parent" --port="$GIT_PORT" --detach --pid-file="$GITPID" "$parent"
-  log "git daemon serving $parent on :$GIT_PORT (agent ${AGENT_ID:-1}; hooks pre/post-receive)"
+    --base-path="$dir" --port="$GIT_PORT" --detach --pid-file="$GITPID" "$SHARED"
+  log "git daemon serving $SHARED on :$GIT_PORT (agent ${AGENT_ID:-1})"
 }
 stop_git_daemon() { [ -f "$GITPID" ] && { kill "$(cat "$GITPID")" 2>/dev/null || true; rm -f "$GITPID"; }; }
 
@@ -349,7 +385,7 @@ do_status() {
   # Nothing announces a push: the agent commits, the daemon accepts it, and
   # the ref moves in silence. Status is where you find out one arrived, and it
   # says so with the VM stopped too, because the work arrived either way.
-  if ! is_running; then echo "vm: stopped"; cave_vm pending; return 0; fi
+  if ! is_running; then echo "vm: stopped"; cave_vm pending || true; return 0; fi
   local p; p=$(vm_pid)
   local since; since=$(ps -o lstart= -p "$p" 2>/dev/null | sed 's/^ *//')
   echo "vm: running (pid $p, since ${since:-?})"
@@ -384,14 +420,16 @@ do_status() {
   fi
   echo "console: $CONSOLE"
   [ "${n:-0}" = 0 ] || echo "attach: vmcav agent   (detach: ctrl-\\)"
-  cave_vm pending
+  cave_vm pending || true
 }
 
 # --- Review and land what the agent pushed ---
-# The agent commits in the guest and pushes over the vsock git bridge into
-# this repo, where the pre-receive guard confines it to agent-N/<base>. That
-# last hop, agent-N/<base> into <base>, is the one it deliberately cannot make
-# itself, so it is the one command a human runs.
+# The agent commits in the guest and pushes over the vsock git bridge into the
+# project's shared repo, where the pre-receive guard confines it to
+# agent-N/<base>. That last hop, agent-N/<base> into <base>, is the one it
+# deliberately cannot make itself, so it is the one command a human runs.
+# It lands in the shared repo, not in your checkout: `git pull` is still
+# yours to run, and an approve never touches the tree you are standing in.
 #
 # Implemented in the cave-vm binary, not here: it is host-side git and nothing
 # else, so it is the first piece with no reason to stay in a shell script, and
@@ -400,7 +438,8 @@ do_status() {
 cave_vm() {
   command -v cave-vm >/dev/null 2>&1 \
     || { log "cave-vm not found; enter the dev shell (nix develop $REPO)"; exit 1; }
-  cave-vm "$1" -C "$REPO" "${@:2}"
+  [ -d "$SHARED" ] || { log "no shared repo yet at $SHARED (vmcav start creates it)"; return 1; }
+  cave-vm "$1" -C "$SHARED" "${@:2}"
 }
 
 # Terminal state is the caller's, and a remote full-screen program is what

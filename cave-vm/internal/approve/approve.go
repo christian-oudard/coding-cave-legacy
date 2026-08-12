@@ -165,7 +165,14 @@ func Land(dir string, c Candidate) (int, error) {
 	// under a checked-out worktree, leaving every landed file staged as a
 	// deletion; merge --ff-only carries the worktree along and refuses when
 	// uncommitted work would be overwritten.
+	//
+	// The shared repo is bare, which is the normal case here: nobody is
+	// standing in it, so the ref just moves. HEAD in a bare repo still names a
+	// branch, so asking about the checkout has to come first.
 	current, _ := git(dir, "symbolic-ref", "--quiet", "--short", "HEAD")
+	if bare, _ := git(dir, "rev-parse", "--is-bare-repository"); bare == "true" {
+		current = ""
+	}
 	if current == c.Base {
 		if _, err := git(dir, "merge", "--ff-only", c.Branch); err != nil {
 			return 0, err

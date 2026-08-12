@@ -20,10 +20,20 @@
         env.CGO_ENABLED = 0;
       };
 
+      # The receive hooks, as executables on PATH rather than files copied out
+      # of a checkout. What gets installed into the shared repo is a shim that
+      # execs one of these by name, so the hook holds no store path and cannot
+      # go stale on a gc or an upgrade, and vmcav works in a project that is
+      # not this one. Same shape the container caves use.
+      gitHooks = pkgs: pkgs.runCommand "cave-vm-git-hooks" { } ''
+        install -Dm755 ${./scripts/git-hooks/pre-receive}  $out/bin/cave-vm-git-pre-receive
+        install -Dm755 ${./scripts/git-hooks/post-receive} $out/bin/cave-vm-git-post-receive
+      '';
+
       # Everything vmcav shells out to. The package pins them; the devShell
       # gets the same list so a working-tree vmcav behaves identically.
       # Kept in step with require_tools in scripts/vmcav.
-      runtimeDeps = pkgs: [ (caveVm pkgs) ] ++ (with pkgs; [
+      runtimeDeps = pkgs: [ (caveVm pkgs) (gitHooks pkgs) ] ++ (with pkgs; [
         cloud-hypervisor  # the VMM, plus ch-remote for the ACPI power button
         openssh           # ssh over vsock, ssh-keygen for the agent key
         util-linux        # setsid

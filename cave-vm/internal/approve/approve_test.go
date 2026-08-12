@@ -179,6 +179,31 @@ func TestLandMovesABaseThatIsNotCheckedOut(t *testing.T) {
 	}
 }
 
+// The real target: the project's shared bare repo, where agent branches
+// actually land. Nobody is standing in it, so the ref just moves, and HEAD
+// naming the base must not be read as "the base is checked out".
+func TestLandMovesTheBaseInABareRepo(t *testing.T) {
+	src := newRepo(t)
+	bare := filepath.Join(t.TempDir(), "shared.git")
+	run(t, ".", "clone", "--bare", "-q", src, bare)
+
+	c, err := Resolve(bare, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := tip(t, bare, "agent-1/main")
+	n, err := Land(bare, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("landed %d commits, want 2", n)
+	}
+	if got := tip(t, bare, "main"); got != want {
+		t.Fatalf("main is at %s, want %s", got, want)
+	}
+}
+
 func TestLandRefusesWhenTheBaseHasMovedOn(t *testing.T) {
 	dir := newRepo(t)
 	write(t, dir, "local.txt", "local\n")

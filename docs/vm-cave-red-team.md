@@ -25,7 +25,13 @@ two-branch job, and 1 is a matter of restoring what already exists.
 
 ## 1. The git daemon exports the whole parent directory, writable
 
-Severity: critical.
+Severity: critical. Fixed: the daemon now serves one repository, the
+project's shared bare repo (`.coding-cave/cave-shared.git`), whitelisted
+explicitly rather than by `--export-all` over a directory of repos. The
+guest's remote is that repo, so a push can no longer reach the human's
+working checkout either. Probed after the change: the project repo, a
+sibling, and three traversal forms are all refused; only the shared repo
+answers.
 
 `vmcav`'s `start_git_daemon` runs `git daemon --base-path="$(dirname $REPO)"
 --export-all --enable=receive-pack`. That serves every git repository beside
