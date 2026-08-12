@@ -60,13 +60,21 @@ in
 
   system.stateVersion = "24.11";
 
-  # --- VM shape (Cloud Hypervisor, direct kernel boot) ---
-  # Headless: the boot log goes to the 8250 serial port, which CHV exposes
-  # with `--serial file=<log>`. Deliberately NOT the virtio console (hvc0):
-  # virtio_console is a module, so hvc0 is silent until the initrd loads it
-  # and early boot failures would leave no trace. Memory and cpu count are
-  # host-side CHV flags, not guest config.
-  boot.kernelParams = [ "console=ttyS0" ];
+  # --- VM shape (direct kernel boot) ---
+  # Headless: on x86_64 the boot log goes to the 8250 serial port, which CHV
+  # exposes with `--serial file=<log>`. Deliberately NOT the virtio console
+  # (hvc0): virtio_console is a module, so hvc0 is silent until the initrd
+  # loads it and early boot failures would leave no trace. Memory and cpu
+  # count are host-side VMM flags, not guest config.
+  #
+  # Apple's Virtualization.framework exposes no legacy UART, so on aarch64
+  # the virtio console is the only one there is and hvc0 is forced. The early
+  # boot blind spot above is unavoidable there; vfkit's --device
+  # virtio-serial,logFilePath is where that log lands.
+  boot.kernelParams =
+    if pkgs.stdenv.hostPlatform.isAarch64
+    then [ "console=hvc0" ]
+    else [ "console=ttyS0" ];
 
   # Root is the whole device, no partition table (make-disk-image
   # partitionTableType = "none"), so the kernel gets root=/dev/vda directly.
