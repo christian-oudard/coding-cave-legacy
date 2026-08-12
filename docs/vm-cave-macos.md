@@ -210,7 +210,7 @@ It is also not needed. The same layer exists open and permissively licensed:
 
 Cleanroom is the one worth reading closely: MIT, Go, and the closest published
 combination of microVM plus egress policy plus credential proxy, so it is
-where code could be lifted rather than only semantics.
+where code could be lifted rather than only semantics. See below.
 
 This also qualifies Docker's stated rationale. Their blog says no existing VMM
 was cross-platform and that Firecracker has "no native support for macOS or
@@ -257,3 +257,51 @@ narcache and pkgdd. And none combines multi-agent git coordination with a
 hardware boundary. The worktree projects are all containers and the microVM
 projects have no multi-agent story, so Cleanroom and container-use are each
 half of this design and neither is the whole.
+
+### Cleanroom and SporeVM
+
+Investigated together because Cleanroom is explicitly "a thin layer over
+SporeVM" and inherits its constraints. Cleanroom is Buildkite's, MIT, Go, and
+actively developed; SporeVM is the runtime beneath it, MIT, Zig, and young.
+
+**SporeVM is not adoptable, on two independent grounds.**
+
+Platform. It is ARM64-first: macOS/HVF and Linux/ARM64 both have the mature
+full lifecycle, while Linux/AMD64 is an experimental profile with one vCPU,
+512 MiB fixed, and no capture, save, restore, resume, fork or fan-out. The
+entire feature that makes it interesting is absent on an x86-64 Linux host.
+Spores also do not move between KVM and HVF.
+
+Architecture. Its warm-spore model bakes a parent with dependencies installed
+and caches hot, then forks children that "share the parent's chunk store" via a
+hard-linked `ram.backing` and take "independent disk heads, so siblings inherit
+the same bytes and then diverge." That is base sharing, not ongoing dedup: two
+children each installing the same package after the fork pay separately, in
+their own disk head and their own download, which is requirement 3 failing. The
+disk contract is block-based over "one writable rootfs device", so there is no
+natural shared `/nix/store` across siblings either. Separate VMs per agent also
+put inter-agent comms back behind a host broker.
+
+What fork optimises, VM cold start and base image duplication, this design
+already amortises to zero by running one VM per host boot. It is therefore fast
+at something we do not pay for, and silent on what we do.
+
+**Cleanroom is worth mining rather than adopting.** It owns three things this
+project would otherwise design from scratch, and it owns them in MIT-licensed
+Go:
+
+- A host-side **credential mediation gateway** brokering secrets into the guest
+  so they never enter the sandbox or its captured artifact. The artifact half
+  has no analogue here (crinj has no snapshots to leak into), but the gateway
+  design is directly comparable to crinj and the code is liftable.
+- A host-side **content cache** served to the guest through that gateway, for
+  Git and Go. This is narcache's pattern in another ecosystem, and is useful
+  independent validation of phase 4 before building it.
+- A **policy compiler that fails closed**, turning `cleanroom.yaml` into
+  enforceable runtime configuration and refusing anything the runtime cannot
+  enforce, over a `network: {default: deny, allow: [...]}` schema. That is a
+  concrete shape for the still-open per-agent crinj policy question.
+
+Also of note, with no counterpart here: **provenance**, attaching repo, commit,
+policy hash and image digest to a baked artifact and verifying them later. It
+is adjacent to what the approval gate exists to establish.
