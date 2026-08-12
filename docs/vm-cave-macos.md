@@ -305,3 +305,44 @@ Go:
 Also of note, with no counterpart here: **provenance**, attaching repo, commit,
 policy hash and image digest to a baked artifact and verifying them later. It
 is adjacent to what the approval gate exists to establish.
+
+## Decision: vfkit
+
+Settled. macOS uses **vfkit**, Linux keeps **Cloud Hypervisor**, both as
+separate processes behind one interface.
+
+The chain, shortest form: phase 10 requires the VM to outlive the supervisor,
+so the VMM is a separate process, which eliminates linking libkrun and with it
+the cgo conflict. Among macOS VMM processes only vfkit covers CHV's full
+feature set. It ships pre-signed with `com.apple.security.virtualization`,
+which a nix-built binary otherwise would not have. It is Go, Apache-2.0,
+maintained, and already load-bearing for `podman machine`.
+
+Rejected: krunkit is EFI-only, so it would force the guest flake to emit an
+EFI disk instead of the kernel, initrd and squashfs it already builds; it stays
+available later, being CLI-compatible. apple/containerization is Swift.
+Tart targets whole-VM workflows rather than a service plane. Lima carries its
+own guest agent and mount opinions.
+
+### Validated on the M1
+
+Confirmed against vfkit v0.6.4 on the `Macmini9,1`, booting the nixos-lima
+image's kernel and initrd:
+
+| Property | Result |
+| --- | --- |
+| vfkit runs, pre-signed entitlement honoured | yes |
+| Direct kernel boot of NixOS `Image` | yes |
+| virtio-blk raw disk, root mounted by UUID | yes |
+| virtio-serial console | yes |
+| REST API over unix socket, pause/resume/stop | yes |
+| vsock device, host sockets in listen and connect mode | sockets created |
+| vsock data end to end | untested |
+
+The Apple Silicon uncompressed-kernel requirement is a non-issue: nixpkgs emits
+`Image`, not `Image.gz`, for `aarch64-linux`, so `system.build.kernel` is
+directly bootable.
+
+vsock data was not proven because the borrowed Lima image drops to emergency
+mode without its cloud-init disk, so nothing listened inside the guest. That
+belongs to phase 2 against the real guest image rather than to VMM selection.
