@@ -595,7 +595,10 @@ fn build_bwrap_argv(
 /// vars when a crinj proxy is wired up. Replaces what the old bash entry
 /// script exported on every launch.
 fn extend_runtime_env(args: &mut Vec<String>, env: &HashMap<String, String>) {
-    let mut path = vec![format!("{}/bin", constants::CAVE_HOME)];
+    let mut path = vec![
+        format!("{}/bin", constants::CAVE_HOME),
+        format!("{}/.nix-profile/bin", constants::CAVE_HOME),
+    ];
     if let Some(uenv) = env.get("CODING_CAVE_USER_ENV") {
         path.push(format!("{uenv}/home-path/bin"));
     }
@@ -2594,7 +2597,36 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::format_resume_flags;
+    use super::{extend_runtime_env, format_resume_flags};
+    use std::collections::HashMap;
+
+    fn runtime_path(env: &HashMap<String, String>) -> String {
+        let mut args = Vec::new();
+        extend_runtime_env(&mut args, env);
+        let i = args.iter().position(|a| a == "PATH").unwrap();
+        args[i + 1].clone()
+    }
+
+    #[test]
+    fn path_includes_agent_nix_profile() {
+        // `nix profile add` installs into ~/.nix-profile; without it on PATH
+        // the agent installs a package and still gets "command not found".
+        let path = runtime_path(&HashMap::new());
+        assert_eq!(path, "/home/coder/bin:/home/coder/.nix-profile/bin");
+    }
+
+    #[test]
+    fn path_orders_home_before_cave_env() {
+        let env = HashMap::from([
+            ("CODING_CAVE_USER_ENV".to_string(), "/uenv".to_string()),
+            ("CODING_CAVE_BIN".to_string(), "/cav/bin".to_string()),
+        ]);
+        assert_eq!(
+            runtime_path(&env),
+            "/home/coder/bin:/home/coder/.nix-profile/bin:\
+             /uenv/home-path/bin:/cav/bin"
+        );
+    }
 
     #[test]
     fn resume_flags_empty() {
