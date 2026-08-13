@@ -357,11 +357,18 @@ in
   nixpkgs.config.allowUnfree = true;
 
   # --- Guest toolchain: the minimal floor, nothing more ---
+  # This list is also the agent's PATH: its unit resolves tools through
+  # /run/current-system/sw/bin rather than through store paths frozen when the
+  # daemon started, so anything the agent needs has to be here to be reachable
+  # after a deploy. bash and nix are named explicitly for that reason, rather
+  # than relied on as somebody else's default.
   environment.systemPackages = with pkgs; [
     git
     caveGuestd
     caveAgent
     claudeCode
+    bash
+    nix
     vim
   ];
 
@@ -475,7 +482,14 @@ in
     requires = [ "seed-claude-config.service" "clone-repo.service" ];
     wantedBy = [ "multi-user.target" ];
     restartIfChanged = false;
-    path = [ pkgs.git claudeCode pkgs.nix pkgs.bash ];
+    # Deliberately not a list of store paths. This unit is not restarted by a
+    # switch, by design, so anything resolved when it started is frozen for as
+    # long as the daemon lives: an agent that rebuilt its own system would
+    # still be running the git, nix and claude of the generation it started
+    # under. /run/current-system/sw/bin follows the generation instead, so a
+    # session begun after a deploy gets the new tools while live sessions are
+    # left alone.
+    path = [ "/run/current-system/sw" ];
     # systemd services do not read environment.sessionVariables, so the
     # agent's egress + TLS trust are set here explicitly. The crinj CA is
     # already in the system bundle (security.pki above); the two cert vars
@@ -515,8 +529,14 @@ in
       # immediately, which is what makes the agent's own work independent of
       # anyone being attached.
       Type = "simple";
+      # The daemon's own path is pinned, because nothing can swap a process
+      # that is holding ptys. The agent's is not: the daemon execs it afresh
+      # for every session, so naming it through the current system means a new
+      # session picks up whatever the last deploy installed. Baking the store
+      # path here was a self-update bug -- the agent could rebuild its own
+      # system, activate it, and still launch the previous claude forever.
       ExecStart = "${caveGuestd}/bin/cave-guestd serve -socket ${agentSocket} "
-        + "-- ${caveAgent}/bin/cave-agent";
+        + "-- /run/current-system/sw/bin/cave-agent";
       Restart = "no";
     };
   };
