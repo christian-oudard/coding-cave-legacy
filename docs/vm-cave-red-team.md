@@ -23,6 +23,9 @@ implementation) shares the same defect in 3, 5 and 6, does not have 4, and
 already solves 1 in a way vm-cave regressed. Fixing 3 and 5 is therefore a
 two-branch job, and 1 is a matter of restoring what already exists.
 
+Since the review: 1 and 3 are fixed on vm-cave, 3 still stands on `main`. 4 is
+accepted at a corrected severity of low. 5 and 6 are open on both.
+
 ## 1. The git daemon exports the whole parent directory, writable
 
 Severity: critical. Fixed: the daemon now serves one repository, the
@@ -77,7 +80,12 @@ diagnosability.
 
 ## 3. The host's whole `~/.claude.json` is handed to the guest
 
-Severity: high.
+Severity: high. Fixed on vm-cave, still open on `main`. `stage_seed` no longer
+reads `$HOME/.claude.json` at all; what it stages is the VM's own previous
+config, captured from the guest during a reformat. The host's account
+identity, its MCP server's API key and its map of project paths never reach
+the seed disk. The trust and onboarding flags the guest actually needs are set
+in the guest's own config, keyed to its own project path, where they belong.
 
 `vmcav`'s `stage_seed` copies `$HOME/.claude.json` verbatim onto the seed
 disk. It is not a small file and it is not only preferences. It carries a live
@@ -103,33 +111,43 @@ from a literal.
 
 ## 4. Reformat does not reset the guest
 
-Severity: medium-high.
+Severity: low, downgraded from the medium-high this review first gave it.
+Accepted, not fixed. Recorded so it is not re-raised.
 
 `capture_guest_credentials` reads `/root/.claude/.credentials.json` *from the
-guest*, checks only that two fields are strings matching `crinj-placeholder`,
-then stores the entire file host-side and re-seeds it into the next guest.
-Every other key round-trips verbatim. The check is also an unanchored
-substring match, so even after the key set is constrained the token strings
-themselves remain arbitrary-length carriers.
+guest* and stores the whole file host-side, re-seeding it into the next guest.
+Every key round-trips verbatim, and the placeholder check is an unanchored
+substring match, so the token strings themselves are arbitrary-length
+carriers. A guest can therefore write state that survives the one command
+documented as the way out of a broken or untrusted guest. It was never
+demonstrated, because demonstrating it means reformatting.
 
-The consequence is that a guest can write state that survives the one command
-we document as the way out of a broken or untrusted guest. This is a code
-reading; it was not demonstrated, because demonstrating it means reformatting.
+The original rating did not survive its own argument. It requires an agent
+that is already compromised, and this same review concluded that the guest
+persists across a reformat by design through its own branch in the shared
+repo. A kilobyte of JSON beside an open-ended git branch is not medium-high;
+rating it that way spends attention that belongs elsewhere.
 
-The clean fix is to remove the guest-to-host direction entirely: the
-placeholder is crinj's artifact, so the host should mint one bound to the VM
-at image-create time and stage it, and never read a credential out of the
-guest. `vm-cave-todo.md` already wants this for convenience; this is the
-security argument for it.
+Scrubbing was tried and backed out. Parsing into a struct of the fields that
+matter, checking each, and re-marshalling reduces the capacity without closing
+it, because the fields that have to survive are carriers themselves: the token
+pattern pins only the middle, leaving a 20-character prefix and 32 hex digits
+per token, and the scopes array is worth several hundred bytes on its own.
+Roughly a kilobyte still crosses.
 
-Failing that, rebuild rather than round-trip: parse the guest's file, extract
-only the named fields, validate each against an anchored and length-capped
-pattern, and write a file constructed host-side from a fixed template, so
-anything unrecognized is dropped rather than preserved.
+The fix, if this ever matters, is to stop reading the guest's file. crinj
+already holds the pair in its vault, keyed by the issued access token and
+stable across refresh, so the host can read `issued_access` and
+`issued_refresh` for the endpoint and build the rest from a fixed template.
+The guest then contributes nothing. Note that this is a read, not a mint: the
+vault stores the real tokens inline per row, so a second handle for the same
+login would copy them and then desynchronise at the first refresh. Per-VM
+revocable handles need crinj's schema split into login and handle, which is a
+change to crinj rather than a flag.
 
-Closing this only matters alongside finding 1. The guest persists across a
-reformat by design through its own branch, and today through fifteen other
-repositories with no guard at all.
+What was worth doing was cheap and is done: the capture happens during a
+reformat and nowhere else, rather than at every stop and every detach, so the
+host reaches into the guest for this once, at the last moment it can.
 
 ## 5. The host's signing key will sign bytes the guest chose
 

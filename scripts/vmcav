@@ -224,10 +224,16 @@ wait_for_guest() {
 }
 
 # Copy the guest's login out to the host, so the next disk starts logged in.
-# Captured after attaching to the agent (which is when a login happens) and
-# at stop; a VM that dies without either keeps whatever was captured last.
-# The placeholder check is what keeps this from ever persisting a real token
-# host-side: if the guest somehow holds one, leave it on the disk.
+# Taken during a reformat and nowhere else: that is the only sequence about to
+# destroy the disk it lives on, and it is the last moment a running guest can
+# still be read. Nothing else has business reaching into the guest for it.
+#
+# The file is copied as it stands. It carries no secret -- the tokens in it are
+# crinj placeholders, and crinj holds the real ones in its vault keyed by them,
+# rotating them under the same placeholders on refresh, which is what makes
+# them worth carrying at all. The placeholder check is not about the guest's
+# honesty but about not persisting a real token host-side by accident: if the
+# guest somehow holds one, leave it on the disk.
 #
 # Silent throughout, including when it declines. Every path here is either
 # routine (no login yet, an unchanged file, a token refresh) or a decision
@@ -255,7 +261,7 @@ capture_guest_credentials() {
 }
 
 # The other half of the VM's claude state: the account it is logged into and
-# every "do not ask me again" it has earned. Same lifecycle as the
+# every "do not ask me again" it has earned. Taken at the same moment as the
 # credential, so a reformat costs neither a login nor a round of dialogs.
 # Only well-formed JSON is kept, so a half-written file cannot poison the
 # next disk.
@@ -496,9 +502,6 @@ do_agent() {
   # scrollback afterwards -- which is exactly when you go looking for it.
   log "attaching; detach with ctrl-\\"
   guest_ssh "cave-guestd attach" || true
-  # Detaching is the first moment after a /login, so grab it here rather than
-  # making you remember to stop the VM before reformatting.
-  capture_guest_credentials; capture_guest_config
 }
 
 # A plain root shell in the guest. No args -> interactive shell; extra args run
@@ -582,22 +585,32 @@ do_image_create() {
 # Destroy and recreate: the disk is the only copy of everything the guest has
 # done, so this is the one command that throws work away.
 do_image_reformat() {
-  is_running && { log "the vm is running; stop it first:  vmcav stop"; return 1; }
   if [ -f "$DISK" ]; then
     echo "This destroys the guest's entire filesystem:" >&2
     echo "  $DISK ($(du -h "$DISK" 2>/dev/null | cut -f1) used)" >&2
     echo "  its nix store, /root/coding-cave and any uncommitted work in it," >&2
-    echo "  the agent's session history, and its claude login." >&2
+    echo "  and the agent's session history." >&2
     echo "It is rebuilt from $GUEST_FLAKE as it stands right now." >&2
-    echo "Whatever the agent pushed survives in the repo, as does the host seed." >&2
+    echo "Whatever the agent pushed survives in the repo, as does its login." >&2
     printf 'Destroy it? [y/N] ' >&2
     local answer; read -r answer
     case "$answer" in
       y|Y|yes|YES) ;;
       *) log "aborted"; return 1 ;;
     esac
-    rm -f "$DISK"
   fi
+  # The login lives on the disk about to be destroyed, and a running guest is
+  # the only place to read it. This is the one sequence that needs it, so it
+  # is the only one that takes it: `stop` and a detach from `agent` are not
+  # about to throw anything away and have no business reaching into the guest.
+  # Stopping is ours to do rather than yours: refusing to run because the VM
+  # is up would mean stopping it first, which is exactly when the login
+  # becomes unreadable.
+  if is_running; then
+    capture_guest_credentials; capture_guest_config
+    do_stop
+  fi
+  rm -f "$DISK"
   do_image_create
 }
 
@@ -669,7 +682,6 @@ do_stop() {
     log "not running"; stop_git_daemon; stop_bridges
     rm -f "$PIDFILE" "$API" "$VSOCK"; return 0
   fi
-  capture_guest_credentials; capture_guest_config
   local p; p=$(vm_pid)
   log "stopping vm (pid $p) via ACPI power-down"
   if [ -S "$API" ] && command -v ch-remote >/dev/null 2>&1; then
