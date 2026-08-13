@@ -404,3 +404,37 @@ The script is Linux-only in seven concrete places, none of them deep:
 
 The last of those is the only one carrying design weight, and it is the same
 plane-shape difference recorded above.
+
+## Reaching an agent on macOS: what works today
+
+Every layer below the agent has now been exercised on the M1. The recipe, and
+what each step needs:
+
+1. **VMM.** `vfkit` from its GitHub release, pre-signed. No Homebrew, no nix.
+2. **Guest artifacts.** Built for `aarch64-linux` in the Lima NixOS VM, which
+   is the aarch64 Linux builder macOS otherwise lacks. Everything substitutes;
+   the disk image builds through nested QEMU under TCG without trouble.
+3. **Seed disk.** `mke2fs -d` in the Lima VM too, since macOS has no mke2fs.
+   Carries `authorized_keys`, `ca.pem`, `gitconfig`. Without it the guest has
+   no `/etc/cave-host`, and sshd has nothing to authenticate against.
+4. **crinj.** Cross-compiles to darwin/arm64 unmodified, `CGO_ENABLED=0`,
+   because the sqlite driver is pure-Go `modernc.org/sqlite`.
+5. **A unix-to-TCP relay.** vfkit's `listen` mode makes the host own the
+   socket, so something must create it and forward to crinj. Roughly 20 lines
+   of Go, and it is exactly what `internal/plane` will own on darwin.
+
+Proven end to end, guest to internet:
+
+    guest curl -> 127.0.0.1:10255 -> socat -> vsock 7200 -> vfkit
+      -> host unix socket -> relay -> crinj -> example.com   (status=200)
+
+with crinj logging the guest's CONNECT. Terminal attach works the same way in
+reverse: `ssh -o ProxyCommand='nc -U .../ssh.sock' root@guest` lands in the
+guest, authenticated by the seed's key, over vsock 22.
+
+What is still missing is above this line, not below it. `vm-root-agent` has
+`requires = [ seed-claude-config.service clone-repo.service ]`, so an actual
+agent needs two host-side things this test deliberately did not supply:
+Claude credentials staged into the seed, and the real git daemon on vsock
+7300 rather than a bare listener. Neither is a macOS problem; both are
+`vmcav` doing its job, which is the port described above.
