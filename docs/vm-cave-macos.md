@@ -452,3 +452,63 @@ agent needs two host-side things this test deliberately did not supply:
 Claude credentials staged into the seed, and the real git daemon on vsock
 7300 rather than a bare listener. Neither is a macOS problem; both are
 `vmcav` doing its job, which is the port described above.
+
+## Remaining Linux/macOS inconsistencies
+
+Everything above the VMM is already identical: the same NixOS configuration,
+the same units, the same service plane. What follows is what is not.
+
+### Not portable away: the guest architecture
+
+A Linux host runs an `x86_64` guest, a Mac runs `aarch64`. Nix-built content
+is equivalent across both, but agents routinely pull prebuilt binaries nix
+never sees (npm optional dependencies, pip wheels, Playwright browsers,
+elan/lean toolchains, `go install` output, container images), and those
+resolve differently. A cave that works on one host can fail on the other for
+reasons the agent cannot diagnose. `aarch64-linux` cache coverage is good but
+not identical, so a package that substitutes on x86 may build from source.
+
+The mitigation is `vfkit --device rosetta`, which shares Rosetta into the
+guest over virtio-fs and registers it through `binfmt_misc`, letting the
+aarch64 guest execute x86_64 Linux binaries. Designing it in makes the two
+environments behaviourally equivalent rather than merely similar.
+
+### Unhandled on both: guest time
+
+The guest has no time synchronisation of any kind: no timesyncd, no NTP, no
+qemu-guest-agent, and no NIC to reach a time server with. It is correct today
+only because the host has not slept.
+
+x86 KVM guests get `kvm-clock`, which tracks host adjustments across suspend.
+Under HVF on aarch64 the guest uses `arch_sys_counter`, which does not, which
+is why vfkit ships `--timesync` at all. That flag wants `qemu-guest-agent` on
+a vsock port, which this guest does not run. A laptop lid closing therefore
+leaves the guest with a stale clock, and a stale clock fails TLS certificate
+validation and so every agent request.
+
+### Mechanical: `vmcav` is a Linux shell script
+
+| Break | macOS |
+| --- | --- |
+| `grep /proc/$p/cmdline` for `is_running` | no `/proc` |
+| `setsid` to detach the VM | absent |
+| `readlink -f` | BSD readlink has no `-f` |
+| `cp --sparse=always` | `cp -c` clones on APFS, and is better |
+| `truncate -s` | absent |
+| `socat`, `mke2fs`, `gpg` in `require_tools` | none present |
+| `$BOOT/kernel/bzImage` | aarch64 emits `Image` |
+| `--memory size=4096M --cpus boot=4` | half of an 8 GB machine |
+
+Nearly all of these disappear when the VM lifecycle moves from the script into
+`cave-vm`: Go's `os/exec` and `syscall.Setsid` are portable and liveness is a
+pidfile plus a signal. The script is where the portability debt lives, which
+argues for pulling that move forward rather than porting the script.
+
+### Smaller, but worth deciding deliberately
+
+- macOS `ulimit -n` defaults to 256, tight once there is a VMM plus one unix
+  socket per vsock port per agent.
+- APFS is case-insensitive by default. Safe for the guest store, which lives
+  inside a raw image, but not for host-side state.
+- XDG resolution puts state under `~/.local/share` on macOS, against platform
+  convention. Consistency across hosts is defensible; it should be a choice.
