@@ -95,5 +95,12 @@ printf '{"argv": ["--verify", "; rm -rf /"]}\n' \
   && ok "broker rejects shell-ish operands" \
   || bad "broker did NOT reject a shell-ish operand"
 
+# The broker rebuilds every request as --detach-sign, so a request that asks
+# to verify must be refused rather than answered with a signature.
+printf '{"argv": ["--verify", "--detach-sign"]}\n' \
+  | socat - "UNIX-CONNECT:$sock" 2>/dev/null | grep -q 'disallowed' \
+  && ok "broker rejects --verify" \
+  || bad "broker signed a request that asked to verify"
+
 [ "$fail" = 0 ] && echo PASS || echo FAIL
 exit "$fail"

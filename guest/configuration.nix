@@ -47,7 +47,8 @@ let
   caveGpg = pkgs.runCommand "cave-gpg" { } ''
     mkdir -p $out/bin
     substitute ${./cave-gpg.py} $out/bin/cave-gpg \
-      --replace '#!/usr/bin/env python3' '#!${pkgs.python3}/bin/python3'
+      --replace '#!/usr/bin/env python3' '#!${pkgs.python3}/bin/python3' \
+      --replace '@REAL_GPG@' '${pkgs.gnupg}/bin/gpg'
     chmod +x $out/bin/cave-gpg
   '';
 in

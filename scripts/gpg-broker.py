@@ -35,10 +35,16 @@ import threading
 # could export, decrypt, edit, or delete key material is absent by
 # construction: this is an allowlist, not a denylist, so a gpg flag we have
 # never heard of is rejected rather than passed through.
+#
+# The verification flags git uses (--verify, --keyid-format,
+# --enable-progress-filter) are deliberately absent. Verification never comes
+# here: the guest runs it locally against the seeded public keyring, and it
+# needs no secret. Allowing them was worse than useless, because the
+# invocation below is rebuilt as --detach-sign whatever arrives, so a request
+# that said --verify would have been answered with a signature.
 ALLOWED = {
     "--status-fd", "--detach-sign", "--armor", "--local-user", "--sign",
     "-b", "-s", "-a", "-u", "-bsau", "--batch", "--no-tty", "--textmode",
-    "--keyid-format", "--verify", "--enable-progress-filter",
 }
 KEYISH = re.compile(r"\A[0-9A-Fa-f]{8,40}\Z|\A[^\s<>|;&$`]+@[^\s<>|;&$`]+\Z")
 

@@ -172,7 +172,13 @@ but is still the general agent protocol rather than one operation. vm-cave's
 broker is an improvement on it; neither constrains what gets signed.
 
 Minor, in the same file: `--verify` appears in the allowlist, but the rebuilt
-command is always `--detach-sign`, so a verify request signs.
+command is always `--detach-sign`, so a verify request signs. Fixed, along
+with the two other verification flags that had no business in a signing
+allowlist. Verification never reaches the broker: the guest runs it locally
+against the seeded public keyring, which is also now possible at all, since
+`cave-gpg` was exec'ing a gpg that was not on the guest's PATH.
+
+The main finding stands: the payload is still guest-chosen and unexamined.
 
 ## 6. Host-side channels are reachable by any local uid
 

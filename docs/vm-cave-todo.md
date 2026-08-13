@@ -20,21 +20,6 @@ series parked in the host state dir keeps the branch clean, and invents a
 second place work can live. Also unresolved whether this belongs to
 reformat at all, or is a guest-side habit (autocommit unit, periodic push).
 
-## Signature verification in the guest
-
-`git log --show-signature` crashes in the guest. `cave-gpg` forwards signing
-to the host broker and execs a real gpg for everything else, and there is no
-gpg on the guest's PATH, so `CAVE_REAL_GPG` falls back to a bare `gpg` that
-does not resolve. Signing itself is unaffected, the broker does that
-host-side; what is broken is verification, which is the entire reason
-`install-pubring` seeds the public keyring at all.
-
-Likely a one-line fix: substitute gpg's store path into `cave-gpg` at build
-time, the way the python3 shebang already is, rather than adding gnupg to
-the guest's systemPackages, so nothing else in the guest gains a gpg that
-cannot sign. Not done because nobody has checked whether the shim's
-non-signing paths do what git needs beyond `--verify`.
-
 ## Session management
 
 The agent's claude session lives in the pty cave-guestd holds and in
@@ -86,9 +71,9 @@ Nothing carries `~/.claude/` memory into or out of the guest. The host seeds
 and loses whatever it accumulates at the next reformat.
 
 Open: whether guest memory is seeded from the host's, kept separate per VM,
-or committed to the repo like a project's `CLAUDE.md`. Related: the login
-lives on the disk too, so a reformat costs a `/login` until crinj mints a
-placeholder for the VM up front.
+or committed to the repo like a project's `CLAUDE.md`. The login has the same
+shape of problem and is already solved the crude way: reformat copies it out
+of the guest first and seeds it back, which memory could do too.
 
 ## Multiple agents per VM
 
@@ -120,9 +105,9 @@ property rather than a reserved id.
 Everything is claude-specific, in more places than the name suggests: the
 unit runs `claude --dangerously-skip-permissions`, `IS_SANDBOX=1` exists
 only to satisfy claude's root guard, the seed carries `claude.json`,
-`seed-claude-config` forces claude's trust and onboarding keys, `vmcav
-agent` attaches to a tmux session that is assumed to be running claude, and
-crinj's OAuth chain is configured for Anthropic's token endpoint.
+`seed-claude-config` forces claude's trust and onboarding keys, the guest's
+managed settings pre-accept claude's bypass-permissions dialog, and crinj's
+OAuth chain is configured for Anthropic's token endpoint.
 
 Codex, antigravity and whatever follows each arrive with their own version
 of all of it: an auth story (a different OAuth provider, or a plain API key,

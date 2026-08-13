@@ -19,7 +19,11 @@ import socket
 import sys
 
 BROKER = ("127.0.0.1", int(os.environ.get("CAVE_GPG_PORT", "7400")))
-REAL_GPG = os.environ.get("CAVE_REAL_GPG", "gpg")
+# Substituted with an absolute store path at build time, because the guest has
+# no gpg on PATH and should not: the only gpg it needs is the one this shim
+# execs for verification, and putting one in the agent's PATH would offer a
+# command that cannot sign and a keyring that holds no secret.
+REAL_GPG = os.environ.get("CAVE_REAL_GPG", "@REAL_GPG@")
 SIGN_FLAGS = {"-bsau", "-b", "--detach-sign", "-s", "--sign"}
 
 
