@@ -183,3 +183,43 @@ to rebase rather than growing a merge nobody tested.
 Open: whether the spec ref means "the agent's branch" (agent deploys without
 approval, human is the outsider) or "what the VM runs" (both move it, the
 human's deploy is a first-class command). That choice decides the other two.
+
+## Where the effort should go, given the field
+
+A survey of the agent-sandbox landscape (recorded in `vm-cave-macos.md`)
+changes the priority order, without changing the plan.
+
+Docker Sandboxes and the microVM crowd have commoditised the isolation
+boundary, which is most of phases 0-3 and 10. Three things nobody else does,
+and which no competitor's product can be configured into:
+
+- **A nix store shared across agents.** Nothing in the survey uses nix at all;
+  every one is OCI images or a stock distro. Note this is also unsolved on
+  `main` today, where store dedup was removed and each cave has a private
+  store. One guest with a stock multi-user daemon is the answer `main` gave
+  up on, and `narcache` plus `pkgdd` have no equivalent anywhere.
+- **Git as the coordination mechanism with a host-side gate.** Agent
+  branches, `pre-receive`, `cav approve`. Docker's `--clone` is fetch-based
+  with no gate; Dagger's `container-use` is the nearest and is containers
+  only.
+- **Inter-agent comms.** Docker forbids it outright between sandboxes.
+
+The reframe worth holding onto: the VM has been treated as an isolation
+upgrade, but on Linux bwrap already gives caves. What the VM actually buys is
+**macOS support and the one-store model**, neither of which any product on
+the market can supply. Out-hardening Docker is not the point and not
+achievable on their budget.
+
+So: keep the VMM layer boring and small (two process-backends, skip Windows),
+stop treating cold boot as a headline metric since one VM per host boot means
+never competing on it, and prioritise phase 4 (narcache) and phase 8 (pkgdd)
+over 1-3. Phase 4's acceptance check, building a host-present package in the
+guest with zero internet bytes, is the demo no competitor can reproduce. Land
+the git bridge (phase 7) early, since the approval gate is the thesis.
+
+The strongest argument against all of this, worth answering rather than
+ignoring: make cave sandbox-agnostic instead, keep bwrap on Linux, use `sbx`
+or Apple's `container` on macOS, and spend everything on coordination, comms
+and nix. Far less code. It fails on exactly one point, that the shared store
+needs one VM, so it would mean accepting per-agent stores on macOS and shared
+on Linux.
