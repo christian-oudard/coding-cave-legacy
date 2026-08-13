@@ -33,6 +33,14 @@ Lift semantics from the Rust code, not code.
 - `docs/vm-cave-red-team.md` records an adversarial review of the host
   boundary run from inside the bootstrap VM: what held, what leaks, and which
   findings `main` shares.
+- `docs/vm-cave-cross-platform.md` covers running on both a Linux host and an
+  Apple silicon host: the VMM per platform, the vsock plane delta, what the
+  differing guest architecture costs, and what is verified on real hardware.
+- `docs/agent-sandbox-field.md` surveys the agent-sandbox field (Docker
+  Sandboxes, Cleanroom, SporeVM and the rest) and why none of them substitutes
+  for this design.
+- `docs/agent-ssh-access.md` records the paused design for giving an agent ssh
+  access to one remote host, and why it is blocked on per-client crinj policy.
 
 ## Ground rules
 

@@ -1,0 +1,177 @@
+# The agent-sandbox field
+
+Status: survey, current as of August 2026. Recorded so the "should we build
+this at all" question is answered from evidence rather than re-litigated.
+Cross-platform findings live in `vm-cave-cross-platform.md`; the priority
+argument this survey produced is in `vm-cave-todo.md`.
+
+## Docker Sandboxes
+
+One microVM per agent, with the agent running directly in the VM as a non-root
+user with sudo. Containers appear only when the agent itself runs `docker
+build`; the daemon serves the agent's container work and is not the mechanism
+separating agents from each other. Their docs are explicit: "The hypervisor
+boundary is the isolation control, not in-VM privilege separation."
+
+Not a substrate for this design, for reasons that are structural rather than
+matters of taste. N agents means N kernels and N filesystems, therefore N nix
+stores, and "multiple sandboxes don't share images or layers" is stated
+outright. That is the inverse of requirements 2 and 3, and it reintroduces
+precisely the problem narcache and pkgdd exist to solve. The per-sandbox
+Docker daemon is dead weight for a nix-only guest: idle RSS plus a second
+image-distribution and GC system duplicating the store. The VMM is closed and
+`sbx login` binds it to a Docker account. And it has no opinion at all about
+multi-agent coordination, so the git daemon, agent branches, and the
+pre-receive approval gate remain ours to build regardless.
+
+Worth taking from it, though: one VMM codebase over Hypervisor.framework,
+Windows Hypervisor Platform, and KVM is evidently viable, and it runs on M1,
+confirming a non-nested design is fine.
+
+## Scored against this project's requirements
+
+Being fair to it, `sbx` solves more of these than a first read suggests. It is
+two specific requirements, both consequences of one-VM-per-agent, that rule it
+out.
+
+- *Multiple projects per agent*: solved. `sbx run claude ~/project-a
+  ~/shared-libs:ro ~/docs:ro` mounts extra workspaces at their absolute host
+  paths, with `:ro` available. Named sandboxes also allow several agents
+  against one repository.
+- *Cross-platform VM management*: solved, and better than anything we have.
+- *Git workflow out to the host repo*: partial. `--clone` gives the sandbox an
+  in-VM clone and adds a `sandbox-<name>` remote to the host repository, so
+  work moves by fetching from the sandbox. There is no approval gate, and raw
+  TCP is blocked at the network layer, so a `git://` daemon cannot be the
+  transport.
+- *Comms between agents*: ruled out by design. "Sandboxes cannot communicate
+  with each other... no shared network between sandboxes."
+- *Nix as the agents' package manager, shared*: structurally broken, per
+  above.
+
+Smaller convergences worth noting: `sbx cp` is `cav cp`, and their templates
+are OCI images (`docker/sandbox-templates:claude-code`, base `ubuntu:questing`)
+running the agent as a non-root user with sudo, so a nix installation would sit
+inside a container image inside their VM.
+
+Decision: not pursued past documentation. Package dedup requires one store,
+one store requires one VM, and one VM shared by many agents requires the
+container-within-VM pattern this design already uses. `sbx` cannot be
+configured into that shape, so measuring it would only confirm the duplication
+its own docs state.
+
+## Their code is not available
+
+`docker/sbx-releases` is a 24 KB distribution-and-issues repo (LICENSE,
+README, SECURITY.md) with binaries attached to releases. The licence reads
+"Copyright © 2026 Docker Inc. All rights reserved." The VMM they describe
+writing from scratch is closed.
+
+It is also not needed. The same layer exists open and permissively licensed:
+
+| project | licence | language | provides |
+| --- | --- | --- | --- |
+| libkrun | Apache-2.0 | Rust | KVM plus macOS HVF behind one API |
+| apple/containerization | Apache-2.0 | Swift | Apple's VMM over Virtualization.framework |
+| apple/container | Apache-2.0 | Swift | VM-per-container CLI on the above |
+| vfkit | Apache-2.0 | Go | Virtualization.framework VMM as a process |
+| microsandbox | Apache-2.0 | Rust | libkrun microVMs, sub-200 ms boot |
+| Cleanroom (Buildkite) | MIT | Go | microVM sandbox, deny-by-default egress, credential proxy |
+
+Cleanroom is the one worth reading closely: MIT, Go, and the closest published
+combination of microVM plus egress policy plus credential proxy, so it is
+where code could be lifted rather than only semantics. See below.
+
+This also qualifies Docker's stated rationale. Their blog says no existing VMM
+was cross-platform and that Firecracker has "no native support for macOS or
+Windows, full stop." libkrun already covered Linux KVM and macOS HVF behind
+one API. The claim holds for Windows, which libkrun does not support and which
+Docker wanted; it does not hold for a Linux-plus-macOS scope.
+
+## Convergence with crinj
+
+Their network model arrived independently at what crinj already does. All
+HTTP/HTTPS egress through a host-side proxy with credential injection there;
+private, loopback, and link-local destinations blocked; sandboxes cannot reach
+host localhost. Policy is per sandbox, host-side, default-deny with an
+explicit allow list, which is the same answer per-agent crinj policy was
+heading toward: policy lives with the per-agent proxy instance, not in one
+shared config.
+
+Two places they go further: raw TCP, UDP and ICMP are blocked outright, where
+crinj tunnels raw TCP through CONNECT; and DNS resolution is itself
+policy-checked at the resolver.
+
+## The wider field
+
+Docker Sandboxes' true peers are hosted APIs, a different market: E2B,
+Daytona, Modal, Vercel Sandbox, Fly Sprites, Blaxel, Runloop, CodeSandbox,
+Northflank. Locally the field is thin.
+
+- Nearest on isolation and egress: **Cleanroom** (Buildkite) is a microVM
+  sandbox with deny-by-default egress and a credential proxy, which is crinj
+  and the cave in one project. **microsandbox** is libkrun microVMs with
+  sub-200 ms boot. **Apple `container`** (v1.0, June 2026, Swift, open source)
+  is VM-per-container on Virtualization.framework, macOS-native but the wrong
+  granularity.
+- Nearest on thesis: **container-use** (Dagger) gives each agent a
+  containerized worktree and reviews parallel agents as git branches.
+  **Conductor**, **Sculptor**, and **treebeard** are variations on isolated
+  worktrees per agent.
+- Anthropic's **`srt`** uses Seatbelt on macOS and bubblewrap on Linux with a
+  network-filtering proxy: the same primitives, minus the VM.
+
+Two observations from the survey. None of them uses nix; every one is OCI
+images or a stock distro, which is why nothing off the shelf substitutes for
+narcache and pkgdd. And none combines multi-agent git coordination with a
+hardware boundary. The worktree projects are all containers and the microVM
+projects have no multi-agent story, so Cleanroom and container-use are each
+half of this design and neither is the whole.
+
+## Cleanroom and SporeVM
+
+Investigated together because Cleanroom is explicitly "a thin layer over
+SporeVM" and inherits its constraints. Cleanroom is Buildkite's, MIT, Go, and
+actively developed; SporeVM is the runtime beneath it, MIT, Zig, and young.
+
+**SporeVM is not adoptable, on two independent grounds.**
+
+Platform. It is ARM64-first: macOS/HVF and Linux/ARM64 both have the mature
+full lifecycle, while Linux/AMD64 is an experimental profile with one vCPU,
+512 MiB fixed, and no capture, save, restore, resume, fork or fan-out. The
+entire feature that makes it interesting is absent on an x86-64 Linux host.
+Spores also do not move between KVM and HVF.
+
+Architecture. Its warm-spore model bakes a parent with dependencies installed
+and caches hot, then forks children that "share the parent's chunk store" via a
+hard-linked `ram.backing` and take "independent disk heads, so siblings inherit
+the same bytes and then diverge." That is base sharing, not ongoing dedup: two
+children each installing the same package after the fork pay separately, in
+their own disk head and their own download, which is requirement 3 failing. The
+disk contract is block-based over "one writable rootfs device", so there is no
+natural shared `/nix/store` across siblings either. Separate VMs per agent also
+put inter-agent comms back behind a host broker.
+
+What fork optimises, VM cold start and base image duplication, this design
+already amortises to zero by running one VM per host boot. It is therefore fast
+at something we do not pay for, and silent on what we do.
+
+**Cleanroom is worth mining rather than adopting.** It owns three things this
+project would otherwise design from scratch, and it owns them in MIT-licensed
+Go:
+
+- A host-side **credential mediation gateway** brokering secrets into the guest
+  so they never enter the sandbox or its captured artifact. The artifact half
+  has no analogue here (crinj has no snapshots to leak into), but the gateway
+  design is directly comparable to crinj and the code is liftable.
+- A host-side **content cache** served to the guest through that gateway, for
+  Git and Go. This is narcache's pattern in another ecosystem, and is useful
+  independent validation of phase 4 before building it.
+- A **policy compiler that fails closed**, turning `cleanroom.yaml` into
+  enforceable runtime configuration and refusing anything the runtime cannot
+  enforce, over a `network: {default: deny, allow: [...]}` schema. That is a
+  concrete shape for the still-open per-agent crinj policy question.
+
+Also of note, with no counterpart here: **provenance**, attaching repo, commit,
+policy hash and image digest to a baked artifact and verifying them later. It
+is adjacent to what the approval gate exists to establish.

@@ -186,7 +186,7 @@ human's deploy is a first-class command). That choice decides the other two.
 
 ## Where the effort should go, given the field
 
-A survey of the agent-sandbox landscape (recorded in `vm-cave-macos.md`)
+A survey of the agent-sandbox landscape (recorded in `agent-sandbox-field.md`)
 changes the priority order, without changing the plan.
 
 Docker Sandboxes and the microVM crowd have commoditised the isolation
