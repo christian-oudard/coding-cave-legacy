@@ -34,7 +34,9 @@ revision broke real software while hiding nothing.
 - Host timezone and geographic region, via a UTC `/etc/localtime`.
 - Host CPU brand and model, via a synthesized `/proc/cpuinfo`. CPUID itself
   is honest, so feature detection still works; only `/proc/cpuinfo` parsers
-  see the generic values.
+  see the generic values. `flags` lists the x86-64 baseline, identical on
+  every host that can run a cave, so it identifies nothing. It must stay
+  non-empty: a valueless key crashes CMake's cpuinfo parser.
 - Kernel build, config, symbols, modules, and the live side channels
   (`interrupts`, `diskstats`, `partitions`, `swaps`, and so on), via the
   `/proc` mask list.

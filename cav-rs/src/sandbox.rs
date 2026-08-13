@@ -44,6 +44,18 @@ fn load_sandbox_config() -> Result<SandboxConfig> {
     serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("Bad sandbox config: {e}"))
 }
 
+/// The x86-64 baseline feature set, the same for every host that can run a
+/// cave, so it names no host CPU. Feature detection is CPUID's job (which the
+/// cave sees honestly); this only has to be a non-empty, plausible value.
+///
+/// Every key here must have a value: CMake's kwsys reads `/proc/cpuinfo` with
+/// `resize(newline_pos - colon_pos - 2)`, which underflows to SIZE_MAX on an
+/// empty one and aborts the process. An empty `flags` made every CMake
+/// configure in a cave die with `std::length_error`.
+const CPU_FLAGS: &str = "fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge \
+                         mca cmov pat pse36 clflush mmx fxsr sse sse2 syscall \
+                         nx lm constant_tsc";
+
 fn write_cpuinfo(dir: &Path) -> Result<PathBuf> {
     let ncpu = num_cpus();
     let mut content = String::new();
@@ -53,12 +65,33 @@ fn write_cpuinfo(dir: &Path) -> Result<PathBuf> {
              cpu family\t: 0\nmodel\t\t: 0\nmodel name\t: Generic CPU\n\
              stepping\t: 0\ncpu MHz\t\t: 0.000\ncache size\t: 0 KB\n\
              siblings\t: {ncpu}\ncore id\t\t: {i}\ncpu cores\t: {ncpu}\n\
-             flags\t\t:\nbogomips\t: 0.00\n\n"
+             flags\t\t: {CPU_FLAGS}\nbogomips\t: 0.00\n\n"
         ));
     }
     let path = dir.join("cpuinfo");
     std::fs::write(&path, content)?;
     Ok(path)
+}
+
+#[cfg(test)]
+mod cpuinfo_tests {
+    use super::*;
+
+    /// A key with no value is what broke CMake; keep every line well-formed.
+    #[test]
+    fn every_field_has_a_value() {
+        let dir = std::env::temp_dir().join(format!("cav-cpuinfo-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let text = std::fs::read_to_string(write_cpuinfo(&dir).unwrap()).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        for line in text.lines().filter(|l| !l.is_empty()) {
+            let (key, value) = line.split_once(':').expect("field has a colon");
+            assert!(
+                value.starts_with(' ') && !value.trim().is_empty(),
+                "empty value for {key:?}"
+            );
+        }
+    }
 }
 
 fn write_resolv_conf(dir: &Path, dns_server: &str) -> Result<PathBuf> {
