@@ -51,18 +51,27 @@ needs migrating. Project, agent, and branch live in the `sessions` table.
 
 ## Mounts
 
-Four per cave, one of them read-only:
+Everything in `~/.claude` is shared, because it is part of the one persistent
+home: the login, settings, skills and caches are the machine's, and a cave with
+its own copy of them would start logged out. Bound over it are only the parts
+an agent cannot share:
 
-- `claude/agents/<agent_id>` at `~/.claude` (rw)
+- `claude/agents/<agent_id>/{daemon,jobs,sessions}` at the matching name under
+  `~/.claude` (rw): the background-job daemon's state. Caves that shared it saw
+  each other's jobs and evicted each other's roster. cav deletes these before
+  every launch, since a job dies with the cave and its roster entry would
+  otherwise carry a stale PID and a socket path in a `/tmp` tmpfs that no
+  longer exists.
+- `claude/agents/<agent_id>/projects` at `~/.claude/projects` (rw): the
+  transcripts the agent owns.
 - `claude/agents/<agent_id>.json` at `~/.claude.json` (rw)
 - `memory/<project_slug>` at `~/.claude/projects/<encoded>/memory` (rw, one per
-  mounted project; nested inside the agent bind, so it is applied after)
+  mounted project; nested inside the projects bind, so it is applied after)
 - `sessions/` at `/cave/sessions` (ro)
 
-`jobs/` and the daemon files need no mount of their own: they sit inside the
-per-agent `~/.claude` and are isolated by it. cav deletes them at startup, since
-a background job dies with the cave and its roster entry would otherwise carry a
-stale PID and a socket path in a `/tmp` tmpfs that no longer exists.
+Only directories can be bound this way: a bind needs a source that exists, and
+the daemon's files are written on demand, so an empty `daemon.json` created to
+serve as a bind source would read as a roster rather than as no roster.
 
 `/cave/sessions` is deliberately not a path Claude Code scans, so the resume
 picker stays scoped to the agent's own sessions.

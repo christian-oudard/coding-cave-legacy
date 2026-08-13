@@ -489,19 +489,20 @@ fn build_bwrap_argv(
         "--bind".to_string(), cave_home.clone(), constants::CAVE_HOME.to_string(),
     ]);
 
-    // Claude Code's state is bound per agent over the shared home. It mixes
-    // machine-scoped state (the background-job daemon, its roster and lock)
-    // with per-agent state, and caves share one home, so leaving it shared
-    // makes every cave see the others' jobs and fight over one daemon lock.
-    //
-    // Order is load-bearing: the agent directory must be bound before the
-    // memory directories nested inside it, or the nested binds are shadowed.
+    // `~/.claude` itself is shared, like the rest of the home: the login, the
+    // settings, the caches and the history all belong to the machine, and a
+    // cave that had its own copy of them would start logged out. Only the
+    // handful of subdirectories an agent cannot share are bound per agent --
+    // the background-job daemon's state, which caves used to evict for each
+    // other, and the transcripts an agent owns.
     if let Some(dir) = env.get("CODING_CAVE_CLAUDE_DIR") {
-        args.extend([
-            "--bind".to_string(),
-            dir.clone(),
-            format!("{}/.claude", constants::CAVE_HOME),
-        ]);
+        for name in session_store::AGENT_SCOPED {
+            args.extend([
+                "--bind".to_string(),
+                format!("{dir}/{name}"),
+                format!("{}/.claude/{name}", constants::CAVE_HOME),
+            ]);
+        }
     }
 
     // Memory is the one surface agents share read-write: it is per project,
@@ -1871,16 +1872,10 @@ fn user_env_path() -> Option<PathBuf> {
 /// Replaces what the old shell entry script did with find | while-read |
 /// per-file forks. fs::copy uses sendfile on Linux so this stays cheap
 /// even for thousands of small files.
-fn merge_user_files(src: &Path, dst: &Path, redirect: Option<(&str, &Path)>) -> Result<()> {
+fn merge_user_files(src: &Path, dst: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     if !src.is_dir() {
         return Ok(());
-    }
-    if let Some((name, target)) = redirect {
-        let sub = src.join(name);
-        if sub.is_dir() {
-            merge_user_files(&sub, target, None)?;
-        }
     }
     std::fs::create_dir_all(dst)?;
     if let Ok(meta) = std::fs::metadata(dst) {
@@ -1893,11 +1888,8 @@ fn merge_user_files(src: &Path, dst: &Path, redirect: Option<(&str, &Path)>) -> 
         let src_p = entry.path();
         let dst_p = dst.join(entry.file_name());
         let ft = entry.file_type()?;
-        if redirect.is_some_and(|(name, _)| entry.file_name() == name) {
-            continue;
-        }
         if ft.is_dir() {
-            merge_user_files(&src_p, &dst_p, None)?;
+            merge_user_files(&src_p, &dst_p)?;
         } else if ft.is_symlink() {
             let _ = std::fs::remove_file(&dst_p);
             let target = std::fs::read_link(&src_p)?;
@@ -2333,15 +2325,19 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
     let home = config::persistent_home();
     std::fs::create_dir_all(&home)?;
 
-    // Per-agent Claude state. Job and daemon records from this agent's last
-    // launch name a torn-down PID namespace and sockets in a /tmp tmpfs that
-    // is already gone, so they are dropped rather than carried forward.
+    // The parts of ~/.claude this agent does not share with its siblings.
+    // Each is a bind source, so each has to exist before bwrap runs. Job and
+    // daemon records from this agent's last launch name a torn-down PID
+    // namespace and sockets in a /tmp tmpfs that is already gone, so they are
+    // dropped rather than carried forward.
     let claude_dir = workspace::agent_claude_dir(&agent_id);
-    std::fs::create_dir_all(&claude_dir)?;
+    session_store::purge_launch_state(&claude_dir)?;
+    for name in session_store::AGENT_SCOPED {
+        std::fs::create_dir_all(claude_dir.join(name))?;
+    }
     // The store is bind-mounted read-only into every cave, so it has to exist
     // before the first session ever registers into it.
     std::fs::create_dir_all(config::sessions_dir())?;
-    session_store::purge_launch_state(&claude_dir)?;
     migrate_shared_claude_state(&home, &agent_id, &workspaces)?;
     for (_, _, s) in &workspaces {
         seed_claude_config_at(&workspace::agent_claude_json(&agent_id), s, comms)?;
@@ -2632,9 +2628,7 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
     if let Some(uep) = &uenv {
         let src = uep.join("files");
         if src.is_dir() {
-            // `.claude/**` is bound per agent, so mirroring it into the shared
-            // home would land under the mount and never be seen by the cave.
-            merge_user_files(&src, &home, Some((".claude", &claude_dir)))?;
+            merge_user_files(&src, &home)?;
         }
     }
     if let Some(gc) = host_gitconfig() {
@@ -3186,20 +3180,35 @@ mod layout_tests {
         })
     }
 
+    /// `~/.claude` is shared like the rest of the home, so a login in one
+    /// cave is a login in all of them. Only the parts an agent cannot share
+    /// are bound over it.
     #[test]
-    fn claude_state_is_bound_per_agent_over_the_shared_home() {
+    fn only_the_unshareable_parts_of_claude_are_bound_per_agent() {
         let args = argv(&[
             ("CODING_CAVE_HOME", "/data/home"),
             ("CODING_CAVE_CLAUDE_DIR", "/data/claude/agents/7"),
             ("CODING_CAVE_CLAUDE_JSON", "/data/claude/agents/7.json"),
         ]);
-        let (_, kind, src) = mount_at(&args, "/home/coder/.claude").expect("no .claude bind");
-        assert_eq!(kind, "--bind");
-        assert_eq!(src, "/data/claude/agents/7");
+        assert!(
+            mount_at(&args, "/home/coder/.claude").is_none(),
+            "binding the whole directory takes the login with it"
+        );
+        assert!(
+            mount_at(&args, "/home/coder/.claude/.credentials.json").is_none(),
+            "the login is shared, not bound"
+        );
+        for name in session_store::AGENT_SCOPED {
+            let dest = format!("/home/coder/.claude/{name}");
+            let (_, kind, src) = mount_at(&args, &dest).unwrap_or_else(|| panic!("no {dest} bind"));
+            assert_eq!(kind, "--bind");
+            assert_eq!(src, format!("/data/claude/agents/7/{name}"));
+        }
 
         let (_, _, src) = mount_at(&args, "/home/coder/.claude.json").expect("no .claude.json bind");
         assert_eq!(src, "/data/claude/agents/7.json");
     }
+
 
     #[test]
     fn memory_is_bound_after_the_agent_dir_it_nests_inside() {
@@ -3208,15 +3217,15 @@ mod layout_tests {
             ("CODING_CAVE_CLAUDE_DIR", "/data/claude/agents/7"),
             ("CODING_CAVE_MEMORY_DIRS", "-projects-foo=/data/memory/foo"),
         ]);
-        let (claude_at, _, _) = mount_at(&args, "/home/coder/.claude").unwrap();
+        let (projects_at, _, _) = mount_at(&args, "/home/coder/.claude/projects").unwrap();
         let (mem_at, kind, src) =
             mount_at(&args, "/home/coder/.claude/projects/-projects-foo/memory")
                 .expect("no memory bind");
         assert_eq!(kind, "--bind", "memory is the one shared writable surface");
         assert_eq!(src, "/data/memory/foo");
         assert!(
-            claude_at < mem_at,
-            "memory bind must come after the agent dir or it is shadowed"
+            projects_at < mem_at,
+            "memory bind must come after the projects bind or it is shadowed"
         );
     }
 
@@ -3272,27 +3281,28 @@ mod layout_tests {
         assert!(!fresh.contains(&"--fork-session".to_string()));
     }
 
+    /// User config lands in the shared `~/.claude`, which is where the cave
+    /// reads it: only the agent-scoped subdirectories are bound over it.
     #[test]
-    fn user_files_for_claude_go_to_the_agent_dir_not_the_shared_home() {
+    fn user_files_for_claude_go_to_the_shared_home() {
         let root = std::env::temp_dir().join(format!("cav-merge-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        let (src, home, claude) = (root.join("src"), root.join("home"), root.join("claude"));
+        let (src, home) = (root.join("src"), root.join("home"));
         std::fs::create_dir_all(src.join(".claude/skills")).unwrap();
         std::fs::write(src.join(".gitconfig"), "gitconfig").unwrap();
         std::fs::write(src.join(".claude/settings.json"), "settings").unwrap();
         std::fs::write(src.join(".claude/skills/s.md"), "skill").unwrap();
 
-        merge_user_files(&src, &home, Some((".claude", &claude))).unwrap();
+        merge_user_files(&src, &home).unwrap();
 
         assert_eq!(std::fs::read_to_string(home.join(".gitconfig")).unwrap(), "gitconfig");
         assert_eq!(
-            std::fs::read_to_string(claude.join("settings.json")).unwrap(),
+            std::fs::read_to_string(home.join(".claude/settings.json")).unwrap(),
             "settings"
         );
-        assert_eq!(std::fs::read_to_string(claude.join("skills/s.md")).unwrap(), "skill");
-        assert!(
-            !home.join(".claude").exists(),
-            "config mirrored under the bind mount would be invisible to the cave"
+        assert_eq!(
+            std::fs::read_to_string(home.join(".claude/skills/s.md")).unwrap(),
+            "skill"
         );
         let _ = std::fs::remove_dir_all(&root);
     }

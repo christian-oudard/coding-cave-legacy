@@ -19,17 +19,24 @@ use crate::config;
 use crate::registry::{self, SessionRecord};
 use crate::workspace;
 
-/// Machine-scoped Claude Code state: it names PIDs and socket paths, so it is
+/// The parts of `~/.claude` an agent cannot share with its siblings, bound
+/// per agent over the otherwise shared directory. `daemon`, `jobs` and
+/// `sessions` are the background-job daemon's: caves that shared them saw
+/// each other's jobs and evicted each other's roster. `projects` holds the
+/// transcripts an agent owns. Everything else in `~/.claude` -- the login
+/// first of all -- belongs to the machine and stays shared.
+pub const AGENT_SCOPED: [&str; 4] = ["daemon", "jobs", "projects", "sessions"];
+
+/// The subset of the above that names PIDs and socket paths, so it is
 /// meaningless once the cave that produced it is gone.
-const LAUNCH_SCOPED: [&str; 7] = [
-    "daemon",
-    "daemon.json",
-    "daemon.lock",
-    "daemon.log",
-    "daemon.status.json",
-    "jobs",
-    "sessions",
-];
+///
+/// Both lists hold directories only. A bind needs a source that exists, and
+/// the daemon's files are written on demand: creating an empty `daemon.json`
+/// to bind would hand Claude Code a roster that says something rather than
+/// nothing. If a Claude version ever keeps daemon state in files at the root
+/// of `~/.claude` instead of under `daemon/`, those files are shared again
+/// and this approach needs revisiting.
+const LAUNCH_SCOPED: [&str; 3] = ["daemon", "jobs", "sessions"];
 
 /// Drop background-job and daemon state left by a previous launch of this
 /// agent. Its PIDs refer to a torn-down namespace and its sockets to a `/tmp`
@@ -240,8 +247,6 @@ mod tests {
         std::fs::create_dir_all(c.join("daemon")).unwrap();
         std::fs::create_dir_all(c.join("sessions")).unwrap();
         std::fs::create_dir_all(c.join("file-history")).unwrap();
-        std::fs::write(c.join("daemon.lock"), "{}").unwrap();
-        std::fs::write(c.join("daemon.status.json"), "{}").unwrap();
         std::fs::write(c.join("history.jsonl"), "x").unwrap();
         transcript(&c, "p", "s1", "line\n");
 
@@ -249,8 +254,6 @@ mod tests {
 
         assert!(!c.join("jobs").exists());
         assert!(!c.join("daemon").exists());
-        assert!(!c.join("daemon.lock").exists());
-        assert!(!c.join("daemon.status.json").exists());
         assert!(!c.join("sessions").exists());
         assert!(c.join("file-history").is_dir(), "agent state was purged");
         assert!(c.join("history.jsonl").is_file(), "agent state was purged");
