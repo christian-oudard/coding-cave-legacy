@@ -164,7 +164,7 @@ in
   #
   # Delivered as a small read-only ext4 disk rather than a filesystem share:
   # CHV has no 9p, and its virtio-fs would drag in a virtiofsd the launcher
-  # has to supervise (vm-cave-plan.md notes the stock one is unusable
+  # has to supervise (vm-cave-design.md notes the stock one is unusable
   # unprivileged). A handful of small static files do not justify that, and
   # vmcav can build the image rootlessly with `mke2fs -d`.
   fileSystems."/etc/cave-host" = {

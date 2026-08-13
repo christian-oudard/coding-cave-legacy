@@ -1,10 +1,10 @@
 # VM cave: host store passthrough review
 
-Reviews the store-sharing portion of `vm-cave-plan.md` (Phase 3 and the
-"Store sharing" carry-over conclusion) against the nix-store redesign
-that landed on `main` after the plan was written. See `docs/nix-store.md`
-and `docs/nix-store-redesign.md` on `main` for the current design this
-review takes as given.
+Reviews the store-sharing portion of the since-deleted bring-up plan (its
+Phase 3 and "Store sharing" carry-over conclusion) against the nix-store
+redesign that landed on `main` after the plan was written. See
+`docs/nix-store.md` and `docs/nix-store-redesign.md` on `main` for the
+current design this review takes as given.
 
 Status: resolved. `vm-cave-design.md` took the decision, adopting option B in
 on-demand form: the host projection became a binary cache served over vsock
@@ -258,7 +258,7 @@ latency before a host package becomes locally available to the guest.
 If either is unacceptable from day one, C is forced, and its
 live-lower risks have to be engineered through rather than avoided.
 
-## Impact on vm-cave-plan.md
+## Impact on the bring-up plan (since deleted)
 
 - The "Store sharing" carry-over conclusion should name the host
   shared store, not host `/nix/store`, as the shared tree.

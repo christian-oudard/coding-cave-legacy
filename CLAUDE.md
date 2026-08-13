@@ -15,9 +15,9 @@ Lift semantics from the Rust code, not code.
 
 - `docs/vm-cave-design.md` is the authoritative plan: architecture, Go module
   layout, and the ten implementation phases with acceptance checks.
-- `docs/vm-cave-plan.md` and `docs/vm-cave-store.md` are earlier planning
-  and review records carried over for their settled decisions and
-  rationale.
+- `docs/vm-cave-store.md` is an earlier review, retained for the five VM
+  boundary constraints it establishes, which bind any future zero-copy
+  store sharing.
 - `docs/store-design-review.md` reviews the Rust implementation's store-sharing
   history: what was tried, why each design failed, and the option analysis
   that led to this architecture.

@@ -4,9 +4,9 @@ Status: the target design. Parts of it are built; see "Where the
 implementation actually is" below, which is the one section to read before
 trusting any other against the tree.
 
-This document supersedes the phase list in `vm-cave-plan.md` (its settled
-decisions carry forward and are restated here) and resolves the
-recommendation in `vm-cave-store.md` (option B reshaped: the host projection
+This document supersedes the deleted `vm-cave-plan.md`, whose settled
+decisions are restated here, and resolves the recommendation in
+`vm-cave-store.md` (option B reshaped: the host projection
 becomes an on-demand binary cache instead of a mounted tree).
 
 ## Scope
@@ -37,21 +37,49 @@ container caves while this is built).
    worst. The host is reachable only through enumerated vsock channels, and
    credentials never enter the guest.
 
-## Carried-over decisions (from vm-cave-plan.md)
+## Carried-over decisions (from the superseded bring-up plan)
 
-- VMM: Cloud Hypervisor on Linux; ~130 ms plain boot measured. Kernel config
-  invariants and the symbol-assertion build check carry over verbatim. The
+- VMM: Cloud Hypervisor on Linux; ~130 ms plain boot measured, ~550 ms for
+  CHV-in-CHV nested cold start. Kernel config invariants and the
+  symbol-assertion build check carry over verbatim, and are restated under
+  "Kernel invariants" below because they were expensive to learn. The
   original reason to prefer it, that nested KVM keeps the subcave workflow,
   has since narrowed: Apple gates nested virtualization to M3 and later, so
   on earlier hardware there is no subcave workflow for any VMM to keep.
   macOS uses vfkit, as a second process backend behind one interface;
   `vm-cave-cross-platform.md` has the argument and the measurements.
-- Language: Go, module at `cave-vm/` at the repo root.
+- Language: Go, module at `cave-vm/` at the repo root. Chosen as a vehicle
+  for learning the ecosystem, not for a technical reason; a future reader
+  should not go looking for a hidden one.
 - One VM for everyone, lifecycle implicit (first agent brings it up), state
   under `$CODING_CAVE_DATA_DIR`, default `~/.local/share/coding-cave/`.
 - crinj is the sole network authority. Every byte of guest egress goes
   through it; API keys exist only on the host.
 - VM lifecycle is decoupled from any shell session.
+
+## Kernel invariants
+
+Lifted from the Nix exploration that preceded the rewrite, because silent
+Kconfig drops cost multiple 12-minute rebuild cycles to diagnose:
+
+- `CONFIG_VIRTUALIZATION` is the Kconfig parent gating the entire KVM
+  subtree. With it off, everything below drops silently.
+- `CONFIG_KVM` plus `CONFIG_KVM_INTEL` and `CONFIG_KVM_AMD`, for nested.
+- `CONFIG_PCI` and `CONFIG_VIRTIO_PCI`, because CHV puts every device on
+  virtio-pci.
+- `CONFIG_PVPANIC_PCI`, for defence in depth.
+- `CONFIG_ACPI_SLEEP`, so `poweroff` triggers ACPI S5 and the VMM exits
+  cleanly.
+
+**Do not trust Kconfig; assert on the linked kernel.** The build check
+asserts the required symbols are present (`vmx_init`, `pvpanic_pci_probe`,
+`__pci_register_driver`, and the rest). This exists because a Kconfig option
+can be dropped without error and the failure only appears at boot.
+
+One related finding worth not rediscovering: microvm.nix's stock
+`virtiofsd-run` is unusable in an unprivileged cave, because it wants
+`supervisord --dropPrivileges` and `chown :kvm` on the socket. A launcher
+must drive virtiofsd directly.
 
 ## Where the implementation actually is
 
@@ -436,7 +464,13 @@ wiring. Phases 0 and 1 restate the old plan's floor.
 
 ## Deletions and revisions this plan implies
 
-- vm-cave-plan.md: Phase 3's store-sharing sketch and acceptance criterion
+- `vm-cave-plan.md` is deleted. It asked to be, once the Go bring-up was
+  real and its load-bearing decisions were folded in, which is what the
+  carried-over decisions and the kernel invariants above are. Its own
+  standing instruction survives it: do not re-add `vm-transition-plan.md`,
+  which was a moving target during exploration.
+
+- The bring-up plan's Phase 3 store-sharing sketch and acceptance criterion
   are replaced by phase 4 above (as vm-cave-store.md already argued); the
   RW home mirror is replaced by one-way seed materialization; the
   "store sharing: virtio-fs of host /nix/store RO plus overlay" carry-over
