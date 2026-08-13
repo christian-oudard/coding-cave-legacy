@@ -86,23 +86,28 @@ must drive virtiofsd directly.
 The bootstrap took a different route to the same place, so the tree does not
 match the Go module layout below and will not for a while. What exists:
 
-- **`scripts/vmcav`**, a shell script, owns the whole VM lifecycle:
-  `start`, `stop`, `status`, `agent`, `shell`, `image create|reformat`, and
-  it delegates `review|diff|approve` to the Go binary. Everything the layout
-  below assigns to `internal/chv`, `internal/plane` and `internal/state`
-  lives here for now. It is also the single largest piece of portability
-  debt, being Linux-only in several places.
-- **`cave-vm/internal/`** is `agentd`, `approve` and `registry`, not the
-  six packages listed below. `cmd/cave-guestd` runs in the guest and owns
+- **`scripts/vmcav`**, a shell script, still owns everything above the VMM:
+  seed staging, the git daemon, the gpg broker, `agent`, `shell`,
+  `image create|reformat`, and the prose of `status`. It delegates the VM
+  itself and every `review|diff|approve` to the Go binary. What remains of
+  its portability debt is `mke2fs` for the seed image and the assumption
+  that guest store paths exist on the host.
+- **`cave-vm/internal/`** is `agentd`, `approve`, `registry` and `vmm`, not
+  the packages listed below. `cmd/cave-guestd` runs in the guest and owns
   each agent's pty so a session survives a lost terminal; `cmd/cave-vm` is
-  host-side git and nothing else, which is the part worth real tests.
+  host-side git plus `start|stop|serve|running|socket|vsock-connect`.
+  `internal/state` and `internal/guest` do not exist yet.
 - **`guest/`** is a mutable NixOS flake on a disk image, not the sealed
   squashfs the image section describes. That is deliberate and temporary;
   `vm-root-agent.md` records each bootstrap-era divergence with its
   graduation step.
 - **The service plane works** end to end on both host platforms: crinj on
   7200, the git daemon on 7300, the gpg signing broker on 7400, and sshd
-  inbound on 22.
+  inbound on 22. Verified under `cave-vm` on each: on Linux the guest boots
+  to a running agent, clones the shared repo over 7300, reaches the internet
+  through crinj on 7200, and has no NIC (`ip -br link` shows only `lo`); on
+  an M1 the same relays carry the same traffic under vfkit. The host-side
+  relays are Go, so `socat` is no longer a host dependency on either.
 - **`internal/narcache` does not exist.** Phase 4 is the largest unbuilt
   piece and, per `vm-cave-todo.md`, the most differentiated.
 
@@ -138,8 +143,8 @@ egress is impossible by construction, not by firewall rule.
 
 CHV exposes guest-initiated vsock connections as host unix sockets at
 `<state>/vsock/vsock.sock_<port>`, and host-initiated ones through
-`vsock.sock` with a `CONNECT <port>` handshake. Fixed port map, one Go
-constant table (`internal/plane/ports.go`):
+`vsock.sock` with a `CONNECT <port>` handshake; vfkit gives each port its own
+socket. Fixed port map, one Go constant table (`internal/vmm`):
 
 - 22   guest sshd (host-initiated; terminal attach)
 - 7001 control RPC: cave-guestd gRPC-free JSON over HTTP (host-initiated)
@@ -394,11 +399,10 @@ firewall-pinning arrangement Kata or firecracker-containerd ship.
       go.mod
       cmd/cave-vm/        host CLI: start stop status shell agent vsock-connect
       cmd/cave-guestd/    guest supervisor (built into the image)
-      internal/chv/       Cloud Hypervisor process control: config, launch,
-                          API socket client, clean shutdown (ACPI), crash
-                          detection
-      internal/plane/     vsock port map, host unix-socket dialer/listener,
-                          guest forwarder
+      internal/vmm/       VMM process control and the vsock plane: launch,
+                          clean shutdown (ACPI), crash detection, port map,
+                          host unix-socket dialer/listener. One Backend per
+                          platform (Cloud Hypervisor, vfkit).
       internal/narcache/  binary cache HTTP server, narinfo signing,
                           nix CLI exec wrappers
       internal/guest/     guestd internals: cave lifecycle, uid allocation,
@@ -407,6 +411,15 @@ firewall-pinning arrangement Kata or firecracker-containerd ship.
       internal/state/     state dir layout, key generation, guest.img
                           creation, image artifact resolution
       internal/rpc/       control protocol types shared by CLI and guestd
+
+`internal/vmm` was two packages in an earlier draft of this layout, `chv` and
+`plane`, written when Cloud Hypervisor was the only backend. CHV selects a
+host-initiated port with a `CONNECT <port>` handshake at connect time, so a
+plane really could dial a port the VMM knew nothing about. vfkit takes one
+`--device virtio-vsock` per port, with number, socket path and direction all
+fixed in the launch argv, which leaves the two halves unable to be built
+without each other. The constraint that survives, and which binds on Linux
+too: no feature may allocate a host-initiated vsock port after boot.
 
 Shared types live in internal/rpc only; host-only and guest-only code do
 not import each other. Both binaries build from one module, cross-compiled

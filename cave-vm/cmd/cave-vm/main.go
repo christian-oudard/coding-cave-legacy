@@ -1,7 +1,8 @@
 // Command cave-vm is the host CLI for the single-VM cave (see
-// ../../../docs/vm-cave-design.md). The VM lifecycle still lives in the
-// bootstrap `vmcav` script; what has moved here is the part that is host-side
-// git and nothing else, which is also the part worth having real tests for.
+// ../../../docs/vm-cave-design.md). Two things live here: host-side git, which
+// is what `vmcav review|diff|approve` delegates to, and the VM lifecycle,
+// which is the part that differs between a Linux host and an Apple silicon
+// host. `vmcav` still owns everything above the VMM.
 package main
 
 import (
@@ -21,17 +22,38 @@ func main() {
 	if len(os.Args) < 2 {
 		usage()
 	}
-	// -C, so the caller decides which checkout this is about. vmcav passes
-	// the repo it already resolved; a bare invocation means the cwd's.
-	fs := flag.NewFlagSet(os.Args[1], flag.ExitOnError)
-	dir := fs.String("C", ".", "repository to work in")
-	yes := fs.Bool("y", false, "skip the confirmation (approve)")
-	fs.Parse(os.Args[2:])
-	agent := fs.Arg(0)
-
-	switch os.Args[1] {
+	switch cmd := os.Args[1]; cmd {
 	case "version":
 		fmt.Println(version)
+	case "pending", "review", "diff", "approve":
+		gitCommand(cmd, os.Args[2:])
+	case "start":
+		vmStart(os.Args[2:])
+	case "stop":
+		vmStop(os.Args[2:])
+	case "serve":
+		vmServe(os.Args[2:])
+	case "running":
+		vmRunning(os.Args[2:])
+	case "socket":
+		vmSocket(os.Args[2:])
+	case "vsock-connect":
+		vmVsockConnect(os.Args[2:])
+	default:
+		usage()
+	}
+}
+
+func gitCommand(cmd string, args []string) {
+	// -C, so the caller decides which checkout this is about. vmcav passes
+	// the repo it already resolved; a bare invocation means the cwd's.
+	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
+	dir := fs.String("C", ".", "repository to work in")
+	yes := fs.Bool("y", false, "skip the confirmation (approve)")
+	fs.Parse(args)
+	agent := fs.Arg(0)
+
+	switch cmd {
 	case "pending":
 		pending(*dir)
 	case "review":
@@ -40,8 +62,6 @@ func main() {
 		showDiff(*dir, agent)
 	case "approve":
 		land(*dir, agent, *yes)
-	default:
-		usage()
 	}
 }
 
@@ -54,6 +74,7 @@ func plural(n int) string {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage: cave-vm [pending|review|diff|approve|version]")
+	fmt.Fprintln(os.Stderr, "       cave-vm [start|stop|serve|running|socket|vsock-connect] --state DIR ...")
 	os.Exit(2)
 }
 

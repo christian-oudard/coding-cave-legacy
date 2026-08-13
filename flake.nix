@@ -34,18 +34,20 @@
       # gets the same list so a working-tree vmcav behaves identically.
       # Kept in step with require_tools in scripts/vmcav.
       runtimeDeps = pkgs: [ (caveVm pkgs) (gitHooks pkgs) ] ++ (with pkgs; [
-        cloud-hypervisor  # the VMM, plus ch-remote for the ACPI power button
+        # The VMM, plus ch-remote for the ACPI power button. Named here rather
+        # than in require_tools because it is per-platform: an Apple silicon
+        # host runs vfkit instead, and cave-vm is what knows the difference.
+        cloud-hypervisor
         openssh           # ssh over vsock, ssh-keygen for the agent key
-        util-linux        # setsid
-        socat             # vsock <-> localhost bridges
+        socat             # scripts/test-gpg-broker.sh only; the plane is Go now
         e2fsprogs         # mke2fs, builds the seed image rootlessly
         gnupg             # the host half of the guest's commit signing
         git
-        python3           # config parsing (tomllib), vsock-connect, gpg-broker
+        python3           # config parsing (tomllib), gpg-broker
         jq
         # bash is here for the `#!/usr/bin/env bash` shebang, which resolves
         # against the PATH the wrapper sets, not the caller's.
-        bash coreutils gnused gnugrep procps  # id, cksum, truncate, ps, ...
+        bash coreutils gnused gnugrep procps  # truncate, readlink, ps, ...
       ]);
     in
     {

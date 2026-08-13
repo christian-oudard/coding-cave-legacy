@@ -44,7 +44,6 @@ BOOT="$STATE_DIR/boot"
 BOOTCACHE="$STATE_DIR/boot-disk"
 SEEDIMG="$STATE_DIR/cave-seed.raw"
 CONSOLE="$STATE_DIR/console.log"
-PIDFILE="$STATE_DIR/vm.pid"
 SEED="$STATE_DIR/cave-host"
 SSHKEY="$STATE_DIR/agent_ssh_key"
 # The VM's own claude login, kept outside the disk so it outlives a reformat.
@@ -59,14 +58,11 @@ GUESTCRED="$STATE_DIR/guest-credentials.json"
 # paths and never applied to /root/coding-cave anyway.
 GUESTCFG="$STATE_DIR/guest-claude.json"
 GITPID="$STATE_DIR/git-daemon.pid"
-BRIDGEPIDS="$STATE_DIR/bridges.pid"
-# AF_UNIX sun_path is 108 bytes, so keep the CHV control sockets short by
-# hashing the state dir rather than nesting under it. VSOCK is the service
-# plane: guest-initiated port N appears as ${VSOCK}_N, host-initiated
-# connections go to $VSOCK with a "CONNECT <port>" handshake.
-SOCKBASE="/tmp/vmcav-$(id -u)-$(printf '%s' "$STATE_DIR" | cksum | cut -d' ' -f1)"
-API="$SOCKBASE.api"
-VSOCK="$SOCKBASE.vsock"
+GPGPID="$STATE_DIR/gpg-broker.pid"
+# The VMM and the whole vsock service plane belong to `cave-vm`, which is where
+# the difference between a Linux host (Cloud Hypervisor) and an Apple silicon
+# host (vfkit) lives. Socket paths are its business too, so ask rather than
+# recompute them here: two derivations of the same path is one bug waiting.
 GUEST_CID="${GUEST_CID:-3}"
 # One definition of how to reach the guest, in a file rather than an argument
 # list, because ssh is not the only thing that has to use it: `nix copy` takes
@@ -108,23 +104,16 @@ print(int(cfg.get("vm", {}).get("disk_size_gb", 100)) * 1024)
 PY
 }
 
-vm_pid() { [ -f "$PIDFILE" ] && cat "$PIDFILE" 2>/dev/null || true; }
-# A live pid is not enough: once the VM exits, the pidfile outlives it and
-# the kernel hands that number to something else, which then reads as a
-# running VM until the first vsock connection fails in a confusing way.
-# Confirm the pid is still our VMM.
-is_running() {
-  local p; p=$(vm_pid); [ -n "$p" ] || return 1
-  grep -qa cloud-hypervisor "/proc/$p/cmdline" 2>/dev/null
-}
+vm_pid() { cave-vm running --state "$STATE_DIR" 2>/dev/null || true; }
+is_running() { cave-vm running --state "$STATE_DIR" >/dev/null 2>&1; }
 
 # vmcav's tools come from the dev shell (flake.nix devShell). Fail early with
-# guidance rather than silently running degraded. cloud-hypervisor is KVM-only,
-# so do_start also checks /dev/kvm before launching.
+# guidance rather than silently running degraded. The VMM itself is not in this
+# list: which one is needed depends on the host platform, and `cave-vm start`
+# checks for it (and for /dev/kvm, which Cloud Hypervisor cannot do without).
 require_tools() {
   local missing="" t
-  for t in setsid ssh-keygen socat git python3 cloud-hypervisor ch-remote mke2fs \
-           debugfs gpg; do
+  for t in ssh-keygen git python3 cave-vm mke2fs debugfs gpg; do
     command -v "$t" >/dev/null 2>&1 || missing="$missing $t"
   done
   [ -z "$missing" ] && return
@@ -362,52 +351,40 @@ start_git_daemon() {
 }
 stop_git_daemon() { [ -f "$GITPID" ] && { kill "$(cat "$GITPID")" 2>/dev/null || true; rm -f "$GITPID"; }; }
 
-# Host-side leg of the service plane. CHV's hybrid vsock turns a guest
-# connection to port N into a connection to the unix socket ${VSOCK}_N, so the
-# host has to be listening there. Each bridge just relays to the real service
-# on the host. CRINJ_ADDR is overridable because crinj is not always on
-# loopback (inside a cave it lives at the gateway address).
+# crinj is not always on loopback: inside a cave it lives at the gateway
+# address. `cave-vm start` relays vsock 7200 here.
 CRINJ_ADDR="${CRINJ_ADDR:-127.0.0.1:$CRINJ_PORT}"
 
-start_bridges() {
-  stop_bridges
-  : > "$BRIDGEPIDS"
-  local spec
-  for spec in "7200 $CRINJ_ADDR" "7300 127.0.0.1:$GIT_PORT"; do
-    set -- $spec
-    rm -f "${VSOCK}_$1"
-    # Logged, not inherited: these outlive `start`, and a guest hanging up
-    # mid-transfer is a routine broken pipe that would otherwise land in
-    # whatever terminal happened to launch the VM, minutes later.
-    socat "UNIX-LISTEN:${VSOCK}_$1,fork,unlink-early" "TCP:$2" \
-      >> "$STATE_DIR/bridges.log" 2>&1 &
-    echo $! >> "$BRIDGEPIDS"
-  done
-  # The signing broker is its own unix-socket server, so it binds the vsock
-  # path directly instead of being relayed through socat. It is the only
-  # channel by which the guest can reach the host's key, and it exposes one
-  # operation rather than the gpg-agent protocol.
-  rm -f "${VSOCK}_7400"
+# The signing broker is its own unix-socket server, so it binds the vsock path
+# directly rather than being a relay target like crinj and git. It is the only
+# channel by which the guest can reach the host's key, and it exposes one
+# operation rather than the whole gpg-agent protocol.
+#
+# Started before the VM, not after: the socket has to be there when the guest
+# first looks. `cave-vm start` leaves sockets it does not own alone, so the
+# order is safe.
+start_gpg_broker() {
+  stop_gpg_broker
+  local sock; sock=$(cave-vm socket --state "$STATE_DIR" 7400)
+  rm -f "$sock"
   CAVE_SIGNING_KEY="${SIGNING_KEY:-}" \
-    python3 "$REPO/scripts/gpg-broker.py" "${VSOCK}_7400" \
+    python3 "$REPO/scripts/gpg-broker.py" "$sock" \
     >> "$STATE_DIR/gpg-broker.log" 2>&1 &
-  echo $! >> "$BRIDGEPIDS"
-  log "vsock bridges up (7200 -> $CRINJ_ADDR, 7300 -> 127.0.0.1:$GIT_PORT, 7400 -> gpg broker)"
+  echo $! > "$GPGPID"
 }
 
-stop_bridges() {
-  [ -f "$BRIDGEPIDS" ] || return 0
-  local p; while read -r p; do kill "$p" 2>/dev/null || true; done < "$BRIDGEPIDS"
-  rm -f "$BRIDGEPIDS" "${VSOCK}_7200" "${VSOCK}_7300" "${VSOCK}_7400"
+stop_gpg_broker() {
+  [ -f "$GPGPID" ] || return 0
+  kill "$(cat "$GPGPID")" 2>/dev/null || true
+  rm -f "$GPGPID"
 }
 
 crinj_reachable() { (exec 3<>"/dev/tcp/${CRINJ_ADDR%:*}/${CRINJ_ADDR##*:}") 2>/dev/null; }
 
-# ssh ProxyCommand. Host-initiated vsock connections go to $VSOCK and open
-# with a "CONNECT <port>" line that CHV answers "OK <n>"; after that the
-# stream is the guest's port. Becomes `cave-vm vsock-connect` in the Go CLI.
+# ssh ProxyCommand. How a host-initiated connection reaches the guest differs
+# per VMM, which is exactly why it is not written out here any more.
 do_vsock_connect() {
-  exec python3 "$REPO/scripts/vsock-connect.py" "$VSOCK" "${1:-22}"
+  exec cave-vm vsock-connect --state "$STATE_DIR" "${1:-22}"
 }
 
 do_status() {
@@ -765,87 +742,34 @@ do_start() {
   kernel=$(guest_boot_file "$kpath") || return 1
   initrd=$(guest_boot_file "$ipath") || return 1
 
-  [ -w /dev/kvm ] || { log "/dev/kvm not available; Cloud Hypervisor is"; \
-    log "  KVM-only with no software fallback. Relaunch the cave with"; \
-    log "  --device /dev/kvm."; return 1; }
-
   # Preconditions are past; from here on start has side effects.
   stage_seed; build_seed_image; start_git_daemon
   crinj_reachable && log "crinj reachable on :$CRINJ_PORT" \
     || log "warning: crinj not reachable on 127.0.0.1:$CRINJ_PORT (no egress/auth for the agent)"
+  start_gpg_broker
 
-  rm -f "$API" "$VSOCK"
-  start_bridges
-
-  # Direct kernel boot: root is the whole of vda (no partition table), the
-  # seed rides on vdb, and the boot log goes to the 8250 serial port because
-  # virtio_console is a module and hvc0 would be silent through early boot.
-  # Emitted as a script rather than inlined into `setsid bash -c`: the nesting
-  # needed to expand host paths inside a single-quoted -c string is where
-  # quoting bugs live, and having the exact invocation on disk makes a failed
-  # boot reproducible by hand.
-  local runscript="$STATE_DIR/run-vm.sh"
-  cat > "$runscript" <<EOF
-#!/usr/bin/env bash
-echo \$\$ > "$PIDFILE"
-exec cloud-hypervisor \\
-  --kernel "$kernel" \\
-  --initramfs "$initrd" \\
-  --cmdline "console=ttyS0 root=/dev/vda rw init=$toplevel/init" \\
-  --disk path="$DISK",image_type=raw path="$SEEDIMG",readonly=on,image_type=raw \\
-  --memory size=4096M --cpus boot=4 \\
-  --vsock cid=$GUEST_CID,socket="$VSOCK" \\
-  --api-socket path="$API" \\
-  --console off --serial file="$CONSOLE"
-EOF
-  chmod +x "$runscript"
-
-  log "starting vm (cloud-hypervisor, detached)"
-  setsid "$runscript" > "$STATE_DIR/chv.log" 2>&1 &
-  disown 2>/dev/null || true
-
-  # Give the child a moment to write the pidfile and for CHV to survive early.
-  local i=0; while [ ! -s "$PIDFILE" ] && [ "$i" -lt 20 ]; do sleep 0.2; i=$((i+1)); done
-  is_running || { log "vm failed to start; see $CONSOLE"; \
-    tail -8 "$CONSOLE" 2>/dev/null >&2; return 1; }
-  log "vm started (pid $(vm_pid)); console: $CONSOLE"
+  # Direct kernel boot: root is the whole of vda (no partition table) and the
+  # seed rides on vdb. Everything below this line -- which VMM, how the console
+  # is wired, how the vsock plane is built -- is cave-vm's, because that is
+  # where it differs between a Linux host and an Apple silicon one.
+  cave-vm start \
+    --state "$STATE_DIR" \
+    --kernel "$kernel" --initrd "$initrd" --init "$toplevel/init" \
+    --disk "$DISK" --seed "$SEEDIMG" \
+    --cid "$GUEST_CID" \
+    --crinj "$CRINJ_ADDR" --git "127.0.0.1:$GIT_PORT" \
+    || { log "vm failed to start; see $CONSOLE"; \
+         tail -8 "$CONSOLE" 2>/dev/null >&2; stop_gpg_broker; return 1; }
   wait_for_guest || return 1
   log "attach with: vmcav agent"
 }
 
 do_stop() {
-  if ! is_running; then
-    log "not running"; stop_git_daemon; stop_bridges
-    rm -f "$PIDFILE" "$API" "$VSOCK"; return 0
-  fi
-  local p; p=$(vm_pid)
-  log "stopping vm (pid $p) via ACPI power-down"
-  if [ -S "$API" ] && command -v ch-remote >/dev/null 2>&1; then
-    timeout 5 ch-remote --api-socket "$API" power-button >/dev/null 2>&1 || true
-  fi
-  # Wait for a clean shutdown, signalled by EITHER the VMM exiting OR the guest
-  # reaching power-off in the console. The pid check is normally what returns:
-  # CHV exits within seconds of the guest halting. The console marker is the
-  # fallback for a VMM that lingers after its guest is done, and it is the
-  # stronger signal of the thing actually worth knowing, that the disk is
-  # unmounted, so killing at that point is safe.
-  local i=0 clean=0
-  while [ "$i" -lt 240 ]; do
-    kill -0 "$p" 2>/dev/null || { clean=1; break; }
-    if sed 's/\x1b\[[0-9;?]*[a-zA-Z]//g' "$CONSOLE" 2>/dev/null \
-         | grep -qE "reboot: Power down|Reached target System Power Off"; then clean=1; break; fi
-    sleep 1; i=$((i + 1))
-  done
-  if [ "$clean" = 1 ]; then
-    log "guest powered down cleanly in ${i}s"
-    kill -0 "$p" 2>/dev/null && { kill "$p" 2>/dev/null || true; sleep 2; kill -9 "$p" 2>/dev/null || true; }
-  else
-    log "power-down did not complete in ${i}s; forcing SIGTERM/SIGKILL"
-    kill "$p" 2>/dev/null || true; sleep 3; kill -9 "$p" 2>/dev/null || true
-  fi
-  rm -f "$PIDFILE" "$API" "$VSOCK"
-  stop_git_daemon; stop_bridges
-  log "vm stopped"
+  # The guest's login is deliberately not taken here: reformat is the only
+  # thing about to destroy the disk it lives on, so it is the only thing that
+  # reaches in for it.
+  cave-vm stop --state "$STATE_DIR" || true
+  stop_git_daemon; stop_gpg_broker
 }
 
 case "${1:-help}" in

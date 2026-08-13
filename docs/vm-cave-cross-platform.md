@@ -64,12 +64,14 @@ Windows, if it ever matters, is a third backend and unaffected by any of this.
 
 **Guest-initiated ports are identical on both VMMs**, which is worth stating
 because it is easy to assume otherwise. The *host* creates and listens on a
-unix socket per port, and the VMM dials it when the guest connects. `vmcav`'s
-`start_bridges` does exactly this under CHV (`socat
-UNIX-LISTEN:${VSOCK}_7300,fork ...`), and vfkit's `listen` mode is the same.
-No porting work in this direction. Note the consequence: something host-side
-must create these sockets on *both* platforms. On Linux that is socat; macOS
-has no socat, so `cave-vm` has to do it in-process.
+unix socket per port, and the VMM dials it when the guest connects. This was
+a socat process per port under CHV (`socat UNIX-LISTEN:${VSOCK}_7300,fork
+...`), and vfkit's `listen` mode is the same shape. No porting work in this
+direction. Note the consequence: something host-side must create these sockets
+on *both* platforms, and macOS has no socat, so `cave-vm` does it in-process
+on both. Half-close has to be propagated: git's client stops sending and keeps
+reading, and a relay that tears down both directions at once truncates the
+fetch.
 
 **The entire delta is host-initiated.** CHV multiplexes every inbound port
 over one socket, selected at connect time by a `CONNECT <port>` text handshake
@@ -77,13 +79,19 @@ answered `OK <n>`, so ports are dynamic. vfkit takes one `--device
 virtio-vsock,port=N,...,connect` per port at VM launch, one unix socket each,
 no handshake, so **the inbound port table is fixed when the VM boots**.
 
-Normalize at `internal/plane`, which the design already scopes for this ("vsock
-port map, host unix-socket dialer/listener, guest forwarder"). Two methods
-cover it:
+Normalized at `internal/vmm`, which is one package with the VMM rather than
+the separate `internal/plane` the design first scoped: the port number, socket
+path and direction are all vfkit launch arguments, so neither half can be
+built without the other. Two methods cover the delta:
 
 - `Listen(port)`, identical on both platforms
 - `Dial(port)`: CHV writes the `CONNECT` handshake; vfkit connects to the
   per-port socket
+
+The direction flag is the one place this fails silently. vfkit's `connect`
+names the *host's* role, so a host-initiated port is the one that carries it
+and a guest-initiated port is the bare default. Reversed, the socket still
+appears and nothing ever connects to it.
 
 **The constraint to honour on Linux too, even though CHV permits more: no
 feature may allocate an inbound vsock port after boot.** The design's table is
@@ -155,26 +163,30 @@ configured. This is the highest-value unfixed item in this document.
 
 ## Host-side portability
 
-`vmcav` is a Linux shell script and breaks in seven concrete places:
+`vmcav` was a Linux shell script that broke in seven concrete places. Moving
+the VM lifecycle into `cave-vm` closed five of them:
 
-| Break | macOS |
-| --- | --- |
-| `grep /proc/$p/cmdline` for `is_running` | no `/proc` at all |
-| `setsid` to detach the VM | absent |
-| `readlink -f` | BSD readlink has no `-f` |
-| `cp --sparse=always` | `cp -c` clones on APFS, and is better |
-| `truncate -s` | absent |
-| `socat`, `mke2fs`, `gpg` in `require_tools` | none present |
-| `$BOOT/kernel/bzImage`, `packages.x86_64-linux.$a` | aarch64 |
+| Break | macOS | Now |
+| --- | --- | --- |
+| `grep /proc/$p/cmdline` for `is_running` | no `/proc` at all | `ps -o state=,comm=` in Go |
+| `setsid` to detach the VM | absent | `syscall.Setsid` |
+| `socat` in `require_tools` | absent | in-process relay |
+| `python3` for the vsock handshake | present but needless | `cave-vm vsock-connect` |
+| hardcoded `--memory size=4096M --cpus boot=4` | half of an 8 GB machine | `--memory/--cpus` flags |
+| `readlink -f`, `cp --sparse=always`, `truncate -s` | BSD variants differ | still in the script |
+| `mke2fs`, `gpg` in `require_tools` | neither present | still in the script |
+| `$BOOT/kernel/bzImage`, `packages.x86_64-linux.$a` | aarch64 | still in the script |
 
-plus hardcoded `--memory size=4096M --cpus boot=4`, which is half of an 8 GB
-machine.
+What remains in the script is image creation and seed building, which is also
+where the guest-architecture problem lives, so the two should be solved
+together rather than ported twice.
 
-**Nearly all of this disappears when the VM lifecycle moves out of the script
-into `cave-vm`.** Go's `os/exec` and `syscall.Setsid` are portable, liveness
-is a pidfile plus a signal, and the unix sockets the plane needs are
-`net.Listen`. The script is where the portability debt lives, which argues for
-pulling that move forward rather than porting the script.
+One host assumption is worth naming because it is invisible on Linux: a guest
+store path is not a host path. `init=/nix/store/...` names a path inside the
+guest's filesystem, and on a Linux host the same path usually exists on the
+host as well, so checking for it appears to work. On macOS the guest artifacts
+are built in a Lima VM and that path exists nowhere on the host, so any check
+against it rejects a VM that boots perfectly.
 
 ## Bootstrapping the guest image
 
@@ -230,6 +242,34 @@ The full egress path, guest to internet, with crinj logging the CONNECT:
     guest curl -> 127.0.0.1:10255 -> socat -> vsock 7200 -> vfkit
       -> host unix socket -> relay -> crinj -> example.com   (status=200)
 
+### Under `cave-vm` rather than by hand
+
+Re-run once the lifecycle moved into Go, with `cave-vm start|stop` driving
+vfkit and no shell script involved:
+
+| Property | Result |
+| --- | --- |
+| `cave-vm start` boots the guest to a login prompt | yes |
+| direction mapping (22 `connect`, 7200/7300/7400 `listening`) | yes |
+| in-process relay carries the same git wire protocol | yes |
+| host-initiated `Dial` reaches vfkit | yes, then `vsock:22` reset |
+| REST power-down, filesystems unmounted, "System Power Off" | yes |
+| teardown leaves no process, socket or pidfile | yes |
+
+The `vsock:22` reset is guest-side and expected: this disk image predates the
+explicit socat unit, so nothing in the guest is listening on vsock 22, which
+is the same generator gap recorded above.
+
+Two host bugs surfaced only against the real binary, neither reachable by
+reading documentation:
+
+- vfkit answers `POST /vm/state` with **202**, not the 200 its own docs
+  promise. Treating anything but 200 as failure reports every clean shutdown
+  as an error.
+- `os.Process.Release()` sets `Pid` to -1. A pid read after it and written to
+  a pidfile turns the later shutdown into `kill(-1)`, which signals every
+  process the user owns.
+
 ### The macOS recipe, and what each step needs
 
 1. **VMM.** `vfkit` from its GitHub release, pre-signed. No Homebrew, no nix.
@@ -241,7 +281,8 @@ The full egress path, guest to internet, with crinj logging the CONNECT:
    `CGO_ENABLED=0`, because the sqlite driver is pure-Go
    `modernc.org/sqlite`.
 5. **A unix-to-TCP relay** for each guest-initiated port, since macOS has no
-   socat. Around twenty lines of Go, and exactly what `internal/plane` owns.
+   socat. Around twenty lines of Go, and what `internal/vmm` now owns on both
+   platforms.
 
 What remains is above this line rather than below it: `vm-root-agent` has
 `requires = [ seed-claude-config.service clone-repo.service ]`, so a running
