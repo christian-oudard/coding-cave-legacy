@@ -856,13 +856,19 @@ fn crinj_pid_file() -> PathBuf {
     crinj_dir().join("pid")
 }
 
+/// Signal the recorded crinj, if that pid is still crinj. The pid file
+/// outlives an instance that died without cav's help (SIGKILL, a crash, a
+/// stray `pkill`), and the kernel recycles pids, so an unchecked signal here
+/// can land on an unrelated host process.
 fn crinj_signal(sig: Signal) {
-    if let Ok(text) = std::fs::read_to_string(crinj_pid_file()) {
-        if let Ok(raw) = text.trim().parse::<i32>() {
-            if let Some(pid) = rustix::process::Pid::from_raw(raw) {
-                let _ = rustix::process::kill_process(pid, sig);
-            }
-        }
+    let Ok(text) = std::fs::read_to_string(crinj_pid_file()) else { return };
+    let Ok(raw) = text.trim().parse::<i32>() else { return };
+    let comm = std::fs::read_to_string(format!("/proc/{raw}/comm")).unwrap_or_default();
+    if !comm.contains("crinj") {
+        return;
+    }
+    if let Some(pid) = rustix::process::Pid::from_raw(raw) {
+        let _ = rustix::process::kill_process(pid, sig);
     }
 }
 
@@ -1227,11 +1233,18 @@ fn start_crinj() -> Result<(Option<std::process::Child>, Option<CrinjState>)> {
     let start = Instant::now();
     let deadline = start + Duration::from_secs(5);
     loop {
-        if crinj_listening() {
-            crate::log_debug!("crinj ready after {:.1}s", start.elapsed().as_secs_f64());
-            break;
-        }
+        // Our own child is checked before the port: when two caves launch at
+        // once neither sees a listener, both spawn, and the loser exits on the
+        // bind failure. Reading the port first would take the winner's
+        // listener as proof our instance came up -- recording the loser's pid
+        // as crinj's (so the winner never gets the SIGHUP reload or the
+        // last-session SIGTERM) and leaving it unreaped as a zombie for this
+        // cav's whole lifetime.
         if let Some(status) = proc.try_wait()? {
+            if crinj_listening() {
+                crate::log_debug!("another cave won the crinj startup race, using its instance");
+                return Ok((None, None));
+            }
             let events = read_crinj_events(&state);
             let dump = if events.is_empty() {
                 "(no log output)".to_string()
@@ -1243,6 +1256,10 @@ fn start_crinj() -> Result<(Option<std::process::Child>, Option<CrinjState>)> {
                     .join("\n")
             };
             bail!("crinj exited with {status} before becoming ready:\n{dump}");
+        }
+        if crinj_listening() {
+            crate::log_debug!("crinj ready after {:.1}s", start.elapsed().as_secs_f64());
+            break;
         }
         if Instant::now() > deadline {
             bail!("crinj failed to start within 5s");
