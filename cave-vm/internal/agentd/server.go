@@ -102,11 +102,14 @@ func doAttach(conn net.Conn, br *bufio.Reader, reg *Registry, args []string) err
 		return err
 	}
 
-	// The read side ends the attach by closing the connection under the
-	// writer, which is what turns a client hanging up into an unblocked
-	// write error rather than a goroutine parked on a channel forever.
+	// The read side closes gone when the client is finished with us. Closing
+	// the connection is not enough on its own: an agent that is quiet at that
+	// moment gives the write loop below nothing to fail on, so it would sit
+	// on the output channel and stay registered as a client until the agent
+	// happened to print something.
+	gone := make(chan struct{})
 	go func() {
-		defer conn.Close()
+		defer func() { close(gone); conn.Close() }()
 		for {
 			t, payload, err := ReadFrame(br)
 			if err != nil {
@@ -129,10 +132,17 @@ func doAttach(conn net.Conn, br *bufio.Reader, reg *Registry, args []string) err
 		}
 	}()
 
-	for chunk := range out {
-		if _, err := conn.Write(chunk); err != nil {
-			return nil
+	for {
+		select {
+		case chunk, ok := <-out:
+			if !ok {
+				return nil // the agent exited
+			}
+			if _, err := conn.Write(chunk); err != nil {
+				return nil
+			}
+		case <-gone:
+			return nil // the client hung up
 		}
 	}
-	return nil
 }
