@@ -27,7 +27,7 @@ restart it, the VM and every agent session survive"), recorded because
 containerd's shim exists for exactly that. libkrun's `krun_start_enter()`
 makes the calling thread become the VM, so linking it puts the guest inside
 the supervisor, which cannot then be restarted. The VMM must therefore be a
-separate process on both platforms — and once it is, libkrun's single-API
+separate process on both platforms, and once it is libkrun's single-API
 advantage evaporates, because we talk to it over a socket rather than through
 its C API. The cgo tension with the `CGO_ENABLED=0` ground rule is moot rather
 than traded away.
@@ -52,7 +52,7 @@ and which is otherwise a codesigning problem.
 
 Rejected, with reasons that may expire: **krunkit** is EFI-only, so it would
 force the guest flake to emit an EFI disk instead of the kernel, initrd and
-squashfs it already builds — it stays a later option, being deliberately
+squashfs it already builds. It stays a later option, being deliberately
 CLI-compatible with vfkit. **apple/containerization** is Swift, the wrong side
 of a language boundary. **Tart** targets whole-VM workflows, not a service
 plane. **Lima** carries its own guest agent and mount opinions, and wants a
@@ -75,14 +75,14 @@ has no socat, so `cave-vm` has to do it in-process.
 over one socket, selected at connect time by a `CONNECT <port>` text handshake
 answered `OK <n>`, so ports are dynamic. vfkit takes one `--device
 virtio-vsock,port=N,...,connect` per port at VM launch, one unix socket each,
-no handshake — so **the inbound port table is fixed when the VM boots**.
+no handshake, so **the inbound port table is fixed when the VM boots**.
 
-Normalise at `internal/plane`, which the design already scopes for this ("vsock
+Normalize at `internal/plane`, which the design already scopes for this ("vsock
 port map, host unix-socket dialer/listener, guest forwarder"). Two methods
 cover it:
 
-- `Listen(port)` — identical on both platforms
-- `Dial(port)` — CHV writes the `CONNECT` handshake; vfkit connects to the
+- `Listen(port)`, identical on both platforms
+- `Dial(port)`: CHV writes the `CONNECT` handshake; vfkit connects to the
   per-port socket
 
 **The constraint to honour on Linux too, even though CHV permits more: no
@@ -95,7 +95,7 @@ unportable, and that would be discovered late.
 
 `systemd-ssh-generator` creates an `AF_VSOCK` listener by itself under Cloud
 Hypervisor, and does not under vfkit, where it binds "AF_UNIX Local" only.
-Terminal attach then has nothing to reach, with no error anywhere — it simply
+Terminal attach then has nothing to reach, with no error anywhere. It simply
 does not connect.
 
 vfkit is not at fault. Running a listener by hand in the guest returned the
@@ -140,8 +140,8 @@ nixpkgs emits `Image`, not `Image.gz`, for `aarch64-linux`, so
 
 ## Guest time: unhandled on both, worse on macOS
 
-The guest has no time synchronisation of any kind — no timesyncd, no NTP, no
-`qemu-guest-agent` — and no NIC to reach a time server with anyway.
+The guest has no time synchronization of any kind, no timesyncd, no NTP and
+no `qemu-guest-agent`, and no NIC to reach a time server with anyway.
 
 x86 KVM guests get `kvm-clock`, which tracks host adjustments across suspend.
 Under HVF on aarch64 the guest uses `arch_sys_counter`, which does not. That
@@ -186,7 +186,7 @@ cannot produce them either.
 Resolved in practice: **a Lima NixOS VM is the aarch64 Linux builder.**
 Everything substitutes from cache.nixos.org rather than compiling, and the
 disk image builds through nested QEMU under TCG without trouble even on an M1
-with no nested virtualisation. The alternatives are shipping prebuilt
+with no nested virtualization. The alternatives are shipping prebuilt
 artifacts (what nixos-lima does), `nix-darwin`'s `linux-builder` or
 `nix-rosetta-builder`, or building on a Linux machine and copying.
 

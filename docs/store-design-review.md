@@ -1,7 +1,14 @@
 # Nix store sharing: commit review and root-cause analysis
 
-Status: review. No decision is taken here; options and trade-offs are at the
-end.
+Status: resolved, for the VM world. This reviews the container-cave store
+history on `main`: what was tried, why each attempt failed, and the option
+analysis that followed. `vm-cave-design.md` answers it by removing the
+problem rather than solving it: one guest, one store, one stock multi-user
+nix-daemon, so per-cave chroot stores, seeding, the converge daemon and the
+promotion gate have no counterpart and are not ported.
+
+Retained because the failure modes recorded here are the reason that answer
+is the right one, and because `main` still runs the design being reviewed.
 
 ## Requirements
 
@@ -28,7 +35,7 @@ private upper. Zero-copy reads, no duplication, normal nix. It met
 requirements 1 to 3 natively and failed on coherence and identity:
 
 - 48a1e62 introduced the idmapped mount. It relabeled root-owned paths to the
-  cave user so nix's canonicalisation and GC chmods would not EPERM.
+  cave user so nix's canonicalization and GC chmods would not EPERM.
 - dd5abb9: the idmap option fields were applied inverted (the kernel's syntax
   is documented backwards), producing overflow uids and EOVERFLOW failures
   mid-substitute. The mount looked healthy in findmnt either way.
@@ -71,7 +78,7 @@ also writes) is fragile in proportion to the machinery propping it up.
 The dedup daemon matured through incident response:
 
 - f594889 / d50e9db: nix opening a writable local store as root
-  canonicalises its ownership to root:nixbld, seizing the cave store from
+  canonicalizes its ownership to root:nixbld, seizing the cave store from
   its owner; later launches died with EACCES. The read-only-store flag does
   not prevent this as real root; only dropping privileges does.
 - 8307709: a host disk filled to 100%. The shared GC, reading a cave DB with
@@ -99,11 +106,11 @@ form: hardlinks cannot cross a VM boundary at all.
    front (daemon: sandbox hole; overlay store: experimental) and then spent
    six weeks hand-building a third mechanism out of idmaps, DB seeds, live
    syncs, substituters, hardlink converge passes, and privilege drops. Each
-   piece collided with a nix invariant we did not control: canonicalisation
+   piece collided with a nix invariant we did not control: canonicalization
    on open, substituter locking, GC locking, DB coherence, reference
    scanning.
 
-2. **Each era optimised away the previous failure, not toward the
+2. **Each era optimized away the previous failure, not toward the
    requirements.** Era 1 failed on coherence, so era 2 bought coherence by
    giving up zero-copy. The substituter failed on locking, so we bought
    isolation by giving up sharing-on-fetch. Disk filled, so converge bought
@@ -121,7 +128,7 @@ form: hardlinks cannot cross a VM boundary at all.
    reconciliation is what makes launches copy).
 
 4. **Nix's trust model was learned by incident, not read up front.** The
-   inverted idmap syntax, canonicalisation-on-open seizing stores, the
+   inverted idmap syntax, canonicalization-on-open seizing stores, the
    substituter lock, EXDEV through the read-only bind, and reference-scanned
    flake URLs in build.json (which drag a 467MB nixpkgs checkout with 52k
    files into every launch copy) were each discovered in production. All are
@@ -243,7 +250,7 @@ before. The distinction that matters is that era 1's lower was the *live
 mutable host store*, and the incidents came from it drifting under
 running caves (host builds, GC, sibling promotions). An immutable
 content-addressed lower deletes that entire class. The residual risk is
-the other era 1 failure, canonicalisation-on-open provoking copy-ups,
+the other era 1 failure, canonicalization-on-open provoking copy-ups,
 which needs content that is already canonical (store paths are 0555
 root:root, so this is close to free) and a DB pre-seeded to match the
 lower. The real unknown is FUSE latency in the store read path, which is

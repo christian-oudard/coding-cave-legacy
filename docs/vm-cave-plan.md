@@ -1,14 +1,17 @@
 # cave-vm: Go bring-up plan
 
-Forward-looking notes for the cleanroom Go rewrite of VM-per-cave on
-branch `vm_cave`. The prior Nix/bash exploration is preserved on the
-branch as the run of commits below `Remove Nix VM exploration`; the
-tree at HEAD matches `host-cave/main` plus that delete. The
-exploration's findings are summarised below as input to the rewrite.
+Historical. Superseded by `vm-cave-design.md`, which restates the decisions
+worth keeping; this is retained for the rationale behind them and for the
+findings of the Nix/bash exploration that preceded the rewrite. Work happens
+on `vm-cave`; the exploration is preserved on `vm_cave` as the run of commits
+below `Remove Nix VM exploration`.
+
+Read the phase list here as history. The current one is at the end of
+`vm-cave-design.md`.
 
 ## Why Go
 
-Personal preference of the project author — using this work as a
+Personal preference of the project author, using this work as a
 vehicle for learning the Go ecosystem and comparing it against Rust
 (`cav-rs`'s existing language) and Python. Not a tradeoff-driven
 choice; future readers shouldn't expect a hidden technical reason.
@@ -25,7 +28,7 @@ These are inputs to the Go rewrite, not things to redo:
   writable upper-layer overlay backed by a per-VM volume. Avoids
   the nix-daemon database race that RW shared-store would create.
 - **Env mirroring: virtio-fs of host home, RW.** The user's home
-  on the host already has the home-manager-materialised view of
+  on the host already has the home-manager-materialized view of
   their `cave.nix` (`.gitconfig`, `.zshrc`, `.vimrc`,
   `.nix-profile` → store path); sharing the dir 1:1 gets git/vim/
   zsh/python/etc. inside the VM with no separate build step.
@@ -68,7 +71,7 @@ no shares).
 
 ## Settled scope decisions
 
-- **VM runtime state lives under cav's existing data dir** —
+- **VM runtime state lives under cav's existing data dir**:
   `$CODING_CAVE_DATA_DIR` if set, else
   `~/.local/share/coding-cave/`. The exact layout below that is up
   to the implementation; the user's only requirement is that nothing
@@ -97,7 +100,7 @@ no shares).
   (the existing HTTP proxy that does TLS interception + credential
   injection) stays. It was recently rewritten in Go, so the language
   matches cave-vm. Every byte of network traffic out of the cave VM
-  must go through crinj — no direct routes, no DNS bypass, no
+  must go through crinj: no direct routes, no DNS bypass, no
   separate outbound path. The guest's `http_proxy` / `HTTPS_PROXY` /
   resolver / firewall posture must reflect this; specifics TBD when
   the networking phase lands (likely some combination of vsock or a
@@ -111,7 +114,7 @@ no shares).
 Each phase is one commit (or a small handful) with something that
 runs end-to-end. No "wire it all up later" deferrals.
 
-### Phase 0 — Project skeleton
+### Phase 0: Project skeleton
 
 - `cave-vm/go.mod` declaring the module.
 - `cave-vm/main.go` with cobra-style or stdlib `flag` argv parsing
@@ -124,7 +127,7 @@ runs end-to-end. No "wire it all up later" deferrals.
 
 Acceptance: `nix run .#cave-vm -- --help` prints usage.
 
-### Phase 1 — Boot any kernel under CHV from Go
+### Phase 1: Boot any kernel under CHV from Go
 
 - `cave-vm start` exec's cloud-hypervisor with an off-the-shelf
   nixpkgs kernel (the linux package's `bzImage`, or a vmlinux if
@@ -137,7 +140,7 @@ Acceptance: `nix run .#cave-vm -- --help` prints usage.
 Acceptance: `nix run .#cave-vm -- start` boots, prints something,
 exits cleanly.
 
-### Phase 2 — Slim cave kernel
+### Phase 2: Slim cave kernel
 
 - Re-introduce a slim Linux kernel derivation (we know the working
   CONFIG_* set from the prior exploration). System.map symbol
@@ -147,7 +150,7 @@ exits cleanly.
 Acceptance: boot time on cave-kernel matches the ~130 ms we
 measured before.
 
-### Phase 3 — virtio-fs share for /nix/store
+### Phase 3: virtio-fs share for /nix/store
 
 - Go spawns virtiofsd as a child process, waits for the socket,
   exec's CHV with `--fs tag=ro-store,socket=...`.
@@ -156,7 +159,7 @@ measured before.
 
 Acceptance: a host-built derivation visible from inside the guest.
 
-### Phase 4 — Real guest distro
+### Phase 4: Real guest distro
 
 - Either a hand-rolled NixOS config (no microvm.nix dependency) or
   reuse microvm.nix's NixOS module while replacing its bash runner
@@ -166,7 +169,7 @@ Acceptance: a host-built derivation visible from inside the guest.
 Acceptance: `cave-vm start` lands on a `[cave-coder@cave-vm ~]$`
 prompt with all the system services up.
 
-### Phase 5 — virtio-fs share for user home
+### Phase 5: virtio-fs share for user home
 
 - Second virtiofsd, host `$HOME` → guest `/home/cave-coder`.
 - Read `$HOME` at run time (the prior bash launcher hardcoded
@@ -176,7 +179,7 @@ prompt with all the system services up.
 Acceptance: user's git config / vim config / zsh prompt all show
 up inside the guest.
 
-### Phase 6 — Long-running lifecycle
+### Phase 6: Long-running lifecycle
 
 - `cave-vm start` daemonises the VM (or registers it with
   systemd-user, depending on the surrounding env).
@@ -189,7 +192,7 @@ up inside the guest.
 Acceptance: start a VM, open three shells into it, exit one, the
 VM and the other two shells survive.
 
-### Phase 7 — Subcave + nested
+### Phase 7: Subcave + nested
 
 - Re-introduce the CHV-in-CHV subcave path now that the basics
   work. Kernel needs `CONFIG_KVM_INTEL`+`CONFIG_VIRTUALIZATION`;
@@ -199,7 +202,7 @@ VM and the other two shells survive.
 Acceptance: `cav agent` (or a stand-in) running inside a cave-vm
 can spawn another cave-vm.
 
-### Phase 8 — cav integration
+### Phase 8: cav integration
 
 - `cav agent --vm` spawns a cave-vm instead of bwrap.
 - `cav shell` attaches via the same mechanism Phase 6 added.

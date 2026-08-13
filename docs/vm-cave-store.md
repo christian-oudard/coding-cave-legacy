@@ -6,11 +6,18 @@ that landed on `main` after the plan was written. See `docs/nix-store.md`
 and `docs/nix-store-redesign.md` on `main` for the current design this
 review takes as given.
 
-Status: review only. Options are laid out with trade-offs; the
-recommendation at the end is a recommendation, not a decision.
+Status: resolved. `vm-cave-design.md` took the decision, adopting option B in
+on-demand form: the host projection became a binary cache served over vsock
+(`internal/narcache`) rather than a mounted tree, so the manifests, want-lists
+and sqlite crossing the boundary that this review worries about are all
+avoided. Options A and C were rejected or deferred as written, and option D's
+shared-store projection is unnecessary because point queries already prevent
+enumeration.
 
-Partly superseded. This review takes the three-level hardlink dedup tree
-and its `cav-store` daemon as the current design, but that whole
+Retained for the trade-off analysis that produced that answer.
+
+Its premises have also moved on. This review takes the three-level hardlink
+dedup tree and its `cav-store` daemon as the current design, but that whole
 subsystem was removed in 5ef19eb; each cave now has a private chroot
 store and nothing is shared. Read `store-design-review.md` first for why
 it was removed and for the current option set. What survives here and is
@@ -167,7 +174,7 @@ both halves.
   with a kernel boundary added. Of the original objections: the
   idmap/uid coupling is moot inside a VM where we are privileged; the
   live-lower-mutation class is fully alive, since host GC and
-  `nix-store --optimise` move inodes under the share, and virtio-fs
+  `nix-store --optimize` move inodes under the share, and virtio-fs
   cache coherence over a mutating lower is an additional risk on top.
   Requires cross-boundary gcroot publication (fail-closed) plus
   re-fetch self-heal. The `local-overlay` variant additionally breaks

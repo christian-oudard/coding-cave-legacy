@@ -64,8 +64,8 @@ hook that exists in one repository out of sixteen.
 
 Recorded so it is not re-raised. crinj forwards to arbitrary hosts, not only
 to the Anthropic API; outbound TLS to unrelated public hosts succeeds from
-inside the guest. This is the intended design — caves are built around an open
-internet — and the boundary's purpose is credential injection, not
+inside the guest. This is the intended design, since caves are built around an
+open internet, and the boundary's purpose is credential injection, not
 destination control. It does mean every other finding here is also an
 exfiltration finding, which is why the ones below are rated as they are.
 
@@ -91,7 +91,7 @@ of the Anthropic credential and false in general, because of this file.
 
 `main` has the same defect, in `seed_claude_config`: it copies the host's
 `~/.claude.json` when the cave home lacks one. `main` also already contains
-the right answer and does not use it — `lib/sandbox.nix` builds a minimal
+the right answer and does not use it. `lib/sandbox.nix` builds a minimal
 synthesized default (onboarding and callout flags only), but the host copy
 runs first, so the synthesized file is only a fallback for hosts that have no
 `.claude.json` at all.
@@ -139,7 +139,7 @@ Severity: medium-high. Partly inherent.
 allowlist, rebuilds the invocation host-side, and pins the key, so the guest
 cannot export key material or sign as someone else. But the payload is
 guest-controlled and never examined. The guest can obtain a valid detached
-signature from the user's key over any content at all — a signed tag, a
+signature from the user's key over any content at all: a signed tag, a
 release artifact, a mail message, a commit object attributing arbitrary
 content to the user.
 
@@ -149,7 +149,7 @@ not commits. The broker could parse the payload as a git commit object and
 require that its tree and parents exist in the served repository.
 
 `main` is in the same position and slightly worse: it forwards the gpg-agent
-extra socket into the sandbox, which is restricted mode — key export blocked —
+extra socket into the sandbox, which is restricted mode (key export blocked),
 but is still the general agent protocol rather than one operation. vm-cave's
 broker is an improvement on it; neither constrains what gets signed.
 
@@ -164,7 +164,7 @@ Severity: low on a single-user machine.
 name. The gpg broker chmods its own socket to 0600; the socat bridges and
 Cloud Hypervisor's API socket take default permissions. Another local user
 could reach crinj egress, push through the git daemon with the agent's
-injected identity, or — via the API socket — control the VM. A 0700 parent
+injected identity, or, via the API socket, control the VM. A 0700 parent
 directory closes it.
 
 `main` has the same shape for a different reason: its per-agent git daemon

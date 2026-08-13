@@ -1,15 +1,20 @@
 # vm-root-agent: the in-VM bootstrap agent
 
-Status: design. Companion to `vm-cave-design.md`; nothing here is built.
+Status: built and running. Companion to `vm-cave-design.md`. Two of the three
+bootstrap-era divergences below have since graduated; the section says which.
 
 ## Purpose
 
-Most of cave-vm exists only as specs. The vm-root-agent inverts the build
-order: a Claude agent session runs *inside* the cave VM with full root over
-the guest, and builds the in-guest half of the system (cave-guestd, the
-nix-daemon deployment, pkgdd wiring, cave sandboxing) from within, testing
-against the real environment on every step. It can redeploy the guest,
-including its own runtime, autonomously.
+The vm-root-agent inverts the build order: a Claude agent session runs
+*inside* the cave VM with full root over the guest, and builds the in-guest
+half of the system (cave-guestd, the nix-daemon deployment, pkgdd wiring,
+cave sandboxing) from within, testing against the real environment on every
+step. It can redeploy the guest, including its own runtime, autonomously.
+
+This worked. The guest supervisor, the vsock service plane, the git approval
+round trip and the gpg signing broker were all built from inside the VM, and
+`vm-cave-red-team.md` is an adversarial review the agent ran against the
+running boundary from that position.
 
 The agent is "cave 0": the first inhabitant of the VM, privileged inside
 it, and subject to exactly the same host boundary as every future cave.
@@ -42,24 +47,27 @@ with a defined graduation step:
    The agent redeploys with `nixos-rebuild switch --flake`. NixOS
    generations are the rollback mechanism. Graduates to: the sealed image
    built by cave-vm, once cave-guestd and the image build exist.
-2. **Bootloader boot (EDK2/cloud-hypervisor firmware + systemd-boot), not
-   direct kernel boot.** Direct kernel boot puts kernel choice on the host,
-   outside the agent's reach; a bootloader keeps kernel upgrades and
-   generation rollback fully in-guest, including boot-counting automatic
-   rollback. Graduates to: direct kernel boot by cave-vm, which by then
-   owns image lifecycle from the host side.
-3. **A NIC behind passt, not vsock-only.** None of the vsock plane exists
-   yet. The bootstrap VM gets user-mode networking (passt) with a guest
-   firewall pinning all egress to the crinj listener on the host side, plus
-   host port-forwards for ssh and git. This is weaker than no-NIC (a rule,
-   not an impossibility) and is acceptable only because the guest holds no
-   secrets. Graduates to: the vsock plane, which the agent itself builds
-   (phase 3 of vm-cave-design.md) and then migrates onto, removing its own
-   NIC as the acceptance test.
+2. ~~**Bootloader boot (EDK2 firmware + systemd-boot), not direct kernel
+   boot.**~~ **Graduated.** The reasoning was that a bootloader keeps kernel
+   upgrades and generation rollback fully in-guest, where direct kernel boot
+   puts kernel choice on the host and outside the agent's reach. The guest
+   now boots directly: `boot.loader.grub.enable = false`, and the host passes
+   `--kernel/--initramfs/--cmdline`. The cost predicted here is real and
+   still paid. A generation that changes the kernel needs the host to boot
+   the new one, which `guest/configuration.nix` records at the point where it
+   bites.
+3. ~~**A NIC behind passt, not vsock-only.**~~ **Graduated, and it was the
+   acceptance test.** The bootstrap VM originally had user-mode networking
+   with a guest firewall pinning egress to crinj, which is a rule rather than
+   an impossibility. The agent built the vsock plane and removed its own NIC.
+   The guest now has no network interface at all: crinj on 7200, git on 7300,
+   the gpg broker on 7400, sshd inbound on 22, and `vm-cave-red-team.md`
+   confirms no NIC against the running system.
 
 Host-side, until cave-vm exists, a checked-in bootstrap script
 (`scripts/vmcav`) does what `cave-vm start` will eventually do: build the
-initial image from the flake, start the VMM (rootless, /dev/kvm), serve the
+initial image from the flake, start the VMM (rootless, /dev/kvm on Linux),
+serve the
 repo over a git daemon, stage the host seed (crinj CA, claude login state,
 ssh key), and manage the VM's lifecycle (start/stop/status/shell). The
 script is throwaway by design; retiring it piece by piece into `cave-vm` is
@@ -82,7 +90,7 @@ prerequisite.
 - The host git daemon serves the repo; the agent pushes its spec ref
   (pre-receive permits fast-forwards under refs/heads/agent-*/** and
   nothing else). vmcav builds the guest from that ref, so a push is a
-  deploy on next boot -- no host approval in the loop. Merging into the
+  deploy on next boot, with no host approval in the loop. Merging into the
   human's branches remains a host-side decision.
 
 Acceptance: attach over ssh, find claude running, ask it to make a trivial
@@ -130,7 +138,7 @@ on, safely, without a human in the loop.
 5. **Commit and push** once a step lands: the agent fast-forwards its spec
    ref (agent-1/vm-cave; root is a per-VM flag, not a reserved id, so the
    root agent still gets a normal id), which is what vmcav builds from, so
-   pushing is deploying -- no host permission required. The VM is cattle:
+   pushing is deploying, with no host permission required. The VM is cattle:
    deleting the disk and running `vmcav start` must always produce a
    working agent from the last pushed spec commit. Merging the spec into
    vm-cave/main is still a host decision, but the VM never waits on it.

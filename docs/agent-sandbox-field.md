@@ -152,8 +152,8 @@ disk contract is block-based over "one writable rootfs device", so there is no
 natural shared `/nix/store` across siblings either. Separate VMs per agent also
 put inter-agent comms back behind a host broker.
 
-What fork optimises, VM cold start and base image duplication, this design
-already amortises to zero by running one VM per host boot. It is therefore fast
+What fork optimizes, VM cold start and base image duplication, this design
+already amortizes to zero by running one VM per host boot. It is therefore fast
 at something we do not pay for, and silent on what we do.
 
 **Cleanroom is worth mining rather than adopting.** It owns three things this

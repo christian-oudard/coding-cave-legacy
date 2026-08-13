@@ -1,9 +1,13 @@
 # cave-vm: full design and implementation plan (Go, single VM, rootless)
 
-Status: plan. No code exists yet. This document supersedes the phase list in
-`vm-cave-plan.md` (its settled decisions carry forward and are restated here)
-and resolves the recommendation in `vm-cave-store.md` (option B reshaped: the
-host projection becomes an on-demand binary cache instead of a mounted tree).
+Status: the target design. Parts of it are built; see "Where the
+implementation actually is" below, which is the one section to read before
+trusting any other against the tree.
+
+This document supersedes the phase list in `vm-cave-plan.md` (its settled
+decisions carry forward and are restated here) and resolves the
+recommendation in `vm-cave-store.md` (option B reshaped: the host projection
+becomes an on-demand binary cache instead of a mounted tree).
 
 ## Scope
 
@@ -35,15 +39,47 @@ container caves while this is built).
 
 ## Carried-over decisions (from vm-cave-plan.md)
 
-- VMM: Cloud Hypervisor. Nested KVM keeps the subcave workflow; ~130 ms
-  plain boot measured. Kernel config invariants and the symbol-assertion
-  build check carry over verbatim.
+- VMM: Cloud Hypervisor on Linux; ~130 ms plain boot measured. Kernel config
+  invariants and the symbol-assertion build check carry over verbatim. The
+  original reason to prefer it, that nested KVM keeps the subcave workflow,
+  has since narrowed: Apple gates nested virtualization to M3 and later, so
+  on earlier hardware there is no subcave workflow for any VMM to keep.
+  macOS uses vfkit, as a second process backend behind one interface;
+  `vm-cave-cross-platform.md` has the argument and the measurements.
 - Language: Go, module at `cave-vm/` at the repo root.
 - One VM for everyone, lifecycle implicit (first agent brings it up), state
   under `$CODING_CAVE_DATA_DIR`, default `~/.local/share/coding-cave/`.
 - crinj is the sole network authority. Every byte of guest egress goes
   through it; API keys exist only on the host.
 - VM lifecycle is decoupled from any shell session.
+
+## Where the implementation actually is
+
+The bootstrap took a different route to the same place, so the tree does not
+match the Go module layout below and will not for a while. What exists:
+
+- **`scripts/vmcav`**, a shell script, owns the whole VM lifecycle:
+  `start`, `stop`, `status`, `agent`, `shell`, `image create|reformat`, and
+  it delegates `review|diff|approve` to the Go binary. Everything the layout
+  below assigns to `internal/chv`, `internal/plane` and `internal/state`
+  lives here for now. It is also the single largest piece of portability
+  debt, being Linux-only in several places.
+- **`cave-vm/internal/`** is `agentd`, `approve` and `registry`, not the
+  six packages listed below. `cmd/cave-guestd` runs in the guest and owns
+  each agent's pty so a session survives a lost terminal; `cmd/cave-vm` is
+  host-side git and nothing else, which is the part worth real tests.
+- **`guest/`** is a mutable NixOS flake on a disk image, not the sealed
+  squashfs the image section describes. That is deliberate and temporary;
+  `vm-root-agent.md` records each bootstrap-era divergence with its
+  graduation step.
+- **The service plane works** end to end on both host platforms: crinj on
+  7200, the git daemon on 7300, the gpg signing broker on 7400, and sshd
+  inbound on 22.
+- **`internal/narcache` does not exist.** Phase 4 is the largest unbuilt
+  piece and, per `vm-cave-todo.md`, the most differentiated.
+
+Read the phases at the end as the remaining order of work, not as a record
+of what has happened.
 
 ## System overview
 
@@ -101,7 +137,7 @@ image:
     trusted-users = root
     allowed-users = @caves
     sandbox = true
-    auto-optimise-store = true
+    auto-optimize-store = true
     require-sigs = true
     substituters = http://127.0.0.1:7100 https://cache.nixos.org
     trusted-public-keys = cave-host-1:<generated> cache.nixos.org-1:<stock>
@@ -114,7 +150,7 @@ per-cave chroot stores, the converge daemon, the promotion gate, and the
 shared store have no counterpart here; in the VM world they are deleted,
 not ported (vm-cave-store fact 5 is overridden by this plan).
 
-`auto-optimise-store` gives intra-guest file-level dedup between similar
+`auto-optimize-store` gives intra-guest file-level dedup between similar
 store paths as a bonus.
 
 ### Host binary cache server (`internal/narcache`)

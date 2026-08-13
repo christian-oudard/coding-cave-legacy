@@ -212,7 +212,7 @@ achievable on their budget.
 
 So: keep the VMM layer boring and small (two process-backends, skip Windows),
 stop treating cold boot as a headline metric since one VM per host boot means
-never competing on it, and prioritise phase 4 (narcache) and phase 8 (pkgdd)
+never competing on it, and prioritize phase 4 (narcache) and phase 8 (pkgdd)
 over 1-3. Phase 4's acceptance check, building a host-present package in the
 guest with zero internet bytes, is the demo no competitor can reproduce. Land
 the git bridge (phase 7) early, since the approval gate is the thesis.
