@@ -149,10 +149,12 @@ Settled, so that it is not re-derived:
   live config. Editing it changes what the next built package installs and
   nothing that is running.
 - Outside updates go over ssh into a running VM, the way NixOS already does
-  this: build on the host, `nix copy` the closure in, activate there
-  (`nixos-rebuild --target-host`, transport being the vsock ProxyCommand).
-  The host keeps the kernel and initrd it built as GC roots, so it can boot
-  what it deployed.
+  this: build on the host, `nix copy` the closure in, activate there,
+  transport being the vsock ProxyCommand. The host keeps the kernel and
+  initrd it built as GC roots, so it can boot what it deployed. Built:
+  `vmcav deploy`. The closure goes in before the host's out-links move, so a
+  failed activation still leaves a VM that boots what was deployed. A kernel
+  change needs a restart and says so.
 - A stopped VM cannot be updated. Accepted restriction: start it and deploy,
   or `reformat` to the shipped default.
 - Inside updates are just the agent running `nixos-rebuild switch` as root.

@@ -65,12 +65,31 @@ SOCKBASE="/tmp/vmcav-$(id -u)-$(printf '%s' "$STATE_DIR" | cksum | cut -d' ' -f1
 API="$SOCKBASE.api"
 VSOCK="$SOCKBASE.vsock"
 GUEST_CID="${GUEST_CID:-3}"
+# One definition of how to reach the guest, in a file rather than an argument
+# list, because ssh is not the only thing that has to use it: `nix copy` takes
+# extra ssh arguments through NIX_SSHOPTS, which it splits on whitespace, and
+# the ProxyCommand has spaces in it. A config file is the only form all of
+# them can share.
+#
 # Host-key checks are off and known_hosts is /dev/null: this is our own VM
 # over a socket only we can open, and the guest's key changes every time the
 # disk is recreated, so verification is friction with nothing behind it.
-GUEST_SSH_OPTS=(-i "$SSHKEY"
-  -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR
-  -o "ProxyCommand=$SELF vsock-connect 22")
+SSHCONF="$STATE_DIR/ssh_config"
+write_ssh_config() {
+  mkdir -p "$STATE_DIR"
+  cat > "$SSHCONF" <<EOF
+Host cave-guest
+  User root
+  IdentityFile $SSHKEY
+  IdentitiesOnly yes
+  StrictHostKeyChecking no
+  UserKnownHostsFile /dev/null
+  LogLevel ERROR
+  ProxyCommand $SELF vsock-connect 22
+EOF
+}
+write_ssh_config
+GUEST_SSH_OPTS=(-F "$SSHCONF")
 
 log() { printf '[vmcav] %s\n' "$*" >&2; }
 
@@ -463,10 +482,7 @@ restore_local_tty() {
   tput cnorm 2>/dev/null || printf '\033[?25h'
 }
 
-# ssh into the guest as root over the forwarded port. Host-key checks are off
-# and known_hosts is /dev/null: it's a localhost port-forward to our own VM,
-# and the guest host key changes whenever the disk is recreated, so
-# verification is just friction.
+# ssh into the guest as root, over the vsock ProxyCommand in the config above.
 guest_ssh() {
   is_running || { log "vm is not running (vmcav start)"; exit 1; }
   command -v ssh >/dev/null 2>&1 || { log "ssh not found; enter the dev shell (use flake / nix develop)"; exit 1; }
@@ -539,6 +555,7 @@ usage: vmcav <command>
   status          whether it is up, which generation, where the console is
   agent           attach to the agent's claude session (detach: ctrl-\)
   shell [cmd...]  a root shell in the guest, or run cmd there
+  deploy          build the guest config and activate it in the running VM
   review [agent]  what the agent has pushed and not had landed
   diff [agent]    the same range, in full
   approve [agent] fast-forward the base branch onto the agent's work
@@ -560,9 +577,11 @@ EOF
 # here, so `start` is only ever a boot: the three artifacts the cmdline names
 # are kept as out-links, which are gc roots, so the store cannot collect the
 # system the disk is running out from under it.
-do_image_create() {
-  require_tools
-  [ -f "$DISK" ] && { log "image exists at $DISK (vmcav image reformat to replace it)"; return 1; }
+# Build guest artifacts into out-links under $dir. Out-links are gc roots, so
+# whatever the host is prepared to boot cannot be collected out from under it.
+# $1 is where they go, the rest are the flake outputs to build.
+build_guest() {
+  local dir="$1"; shift
   mkdir -p "$SEED"
   stage_seed
   # The guest bakes crinj's CA into its system trust store at build time, so
@@ -571,10 +590,16 @@ do_image_create() {
   export CAVE_VM_SRC
   log "building guest from $GUEST_FLAKE"
   local a
-  for a in kernel initrd disk toplevel; do
+  for a in "$@"; do
     nix build --impure --extra-experimental-features 'nix-command flakes' \
-      --out-link "$BOOT/$a" "$GUEST_FLAKE#packages.x86_64-linux.$a" || return 1
+      --out-link "$dir/$a" "$GUEST_FLAKE#packages.x86_64-linux.$a" || return 1
   done
+}
+
+do_image_create() {
+  require_tools
+  [ -f "$DISK" ] && { log "image exists at $DISK (vmcav image reformat to replace it)"; return 1; }
+  build_guest "$BOOT" kernel initrd disk toplevel || return 1
   local disk_mb; disk_mb=$(config_disk_mb)
   log "creating guest disk (cap $((disk_mb / 1024)) GB, sparse)"
   cp --sparse=always "$BOOT/disk/nixos.img" "$DISK"; chmod u+w "$DISK"
@@ -612,6 +637,66 @@ do_image_reformat() {
   fi
   rm -f "$DISK"
   do_image_create
+}
+
+# Change what a running VM runs, without destroying it. The inside half of
+# this is the agent's own `nixos-rebuild switch`; this is the outside half,
+# for when the change is yours rather than the agent's, or when the agent is
+# not in a state to make it.
+#
+# Ordering is the whole design. The closure goes into the guest first, so that
+# by the time the host's out-links name the new system the guest already has
+# it: a deploy that dies during activation still leaves a VM that boots, on
+# the system that was deployed. The other order points the host's cmdline at a
+# toplevel the guest's store has never seen, which fails at boot with nothing
+# to fall back to.
+do_deploy() {
+  require_tools
+  is_running || { log "the vm is not running; deploy needs a live guest (vmcav start)"; return 1; }
+  guest_ready || { log "the vm is running but the guest is not answering ssh"; return 1; }
+
+  # Built beside the live out-links, not over them: until the guest has the
+  # closure, the host must keep pointing at the system the guest still has.
+  local staging="$STATE_DIR/boot.next"
+  build_guest "$staging" kernel initrd toplevel || return 1
+  local toplevel; toplevel=$(readlink -f "$staging/toplevel")
+  local current
+  current=$( (GUEST_SSH_TTY=-T guest_ssh readlink -f /run/current-system) 2>/dev/null \
+    | tr -d '\r' || true)
+  if [ "$toplevel" = "$current" ]; then
+    log "the guest is already running this system"
+    rm -rf "$staging"
+    return 0
+  fi
+
+  # --no-check-sigs because the host built these paths itself and the guest has
+  # no reason to trust this host's signature over the channel that delivered
+  # it: the transport is a socket only we can open, into a VM we own.
+  log "copying the closure into the guest"
+  NIX_SSHOPTS="-F $SSHCONF" nix copy --to ssh://cave-guest --no-check-sigs \
+    --extra-experimental-features 'nix-command flakes' "$toplevel" || return 1
+
+  # Only now is it safe to say this is what the host boots.
+  local old_kernel; old_kernel=$(readlink -f "$BOOT/kernel" 2>/dev/null || true)
+  build_guest "$BOOT" kernel initrd toplevel || return 1
+  rm -rf "$staging"
+
+  log "activating"
+  # The profile first, so the generation exists whether or not activation
+  # succeeds and `nixos-rebuild switch --rollback` in the guest has something
+  # to go back to.
+  GUEST_SSH_TTY=-T guest_ssh \
+    "nix-env -p /nix/var/nix/profiles/system --set $toplevel \
+     && $toplevel/bin/switch-to-configuration switch" || {
+    log "activation failed; the guest still has the closure and boots it on restart"
+    return 1
+  }
+
+  if [ "$old_kernel" != "$(readlink -f "$BOOT/kernel")" ]; then
+    log "the kernel changed; the guest is running the old one until a restart"
+    log "  (vmcav stop && vmcav start)"
+  fi
+  log "deployed"
 }
 
 do_start() {
@@ -717,6 +802,7 @@ case "${1:-help}" in
   stop) do_stop ;;
   status) do_status ;;
   agent) do_agent ;;
+  deploy) do_deploy ;;
   review|diff|approve) cave_vm "$@" ;;
   shell) shift; do_shell "$@" ;;
   vsock-connect) shift; do_vsock_connect "$@" ;;
