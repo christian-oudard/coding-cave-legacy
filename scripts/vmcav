@@ -39,6 +39,9 @@ DISK="$STATE_DIR/cave-guest.raw"
 # Out-links for the boot artifacts, which makes them gc roots: the store must
 # not collect the kernel, initrd or system the disk is running.
 BOOT="$STATE_DIR/boot"
+# Where a kernel or initrd extracted back out of the guest disk lands, for the
+# case where the host store no longer has the one the guest is running.
+BOOTCACHE="$STATE_DIR/boot-disk"
 SEEDIMG="$STATE_DIR/cave-seed.raw"
 CONSOLE="$STATE_DIR/console.log"
 PIDFILE="$STATE_DIR/vm.pid"
@@ -120,7 +123,8 @@ is_running() {
 # so do_start also checks /dev/kvm before launching.
 require_tools() {
   local missing="" t
-  for t in setsid ssh-keygen socat git python3 cloud-hypervisor ch-remote mke2fs gpg; do
+  for t in setsid ssh-keygen socat git python3 cloud-hypervisor ch-remote mke2fs \
+           debugfs gpg; do
     command -v "$t" >/dev/null 2>&1 || missing="$missing $t"
   done
   [ -z "$missing" ] && return
@@ -699,20 +703,67 @@ do_deploy() {
   log "deployed"
 }
 
+# What a guest boots is recorded on its own disk, in the system profile it
+# activated: the host wrote generation 1 at `image create`, and every
+# `nixos-rebuild switch` inside the guest and every `deploy` from outside moves
+# it. Read it from there rather than from the host's out-links, so a guest that
+# rebuilt itself comes back as itself, and a disk survives a host store that no
+# longer has the closure (a gc, a fresh machine, another host entirely).
+#
+# debugfs reads the filesystem unprivileged and read-only, which is the whole
+# reason this is affordable; it is only ever called with the VM stopped, so
+# nothing is writing underneath it.
+disk_readlink() {
+  local out
+  out=$(debugfs -R "stat $1" "$DISK" 2>/dev/null \
+    | sed -n 's/.*Fast link dest: "\(.*\)"$/\1/p')
+  # Past 60 bytes ext4 spills the target into a data block, where stat stops
+  # printing it and cat starts.
+  [ -n "$out" ] || out=$(debugfs -R "cat $1" "$DISK" 2>/dev/null | tr -d '\n')
+  [ -n "$out" ] || return 1
+  printf '%s' "$out"
+}
+
+# Cloud Hypervisor loads the kernel and initrd from the host filesystem, so
+# whichever ones the guest's system names have to exist here as files. The host
+# store is the fast path, since that is where `image create` and `deploy` left
+# them; failing that, copy the guest's own out of the disk.
+guest_boot_file() {
+  local path="$1" dest
+  [ -e "$path" ] && { printf '%s' "$path"; return; }
+  dest="$BOOTCACHE/$(basename "$(dirname "$path")")-$(basename "$path")"
+  if [ ! -s "$dest" ]; then
+    mkdir -p "$BOOTCACHE"
+    log "taking $(basename "$path") from the guest disk (the host store lost it)"
+    debugfs -R "dump $path $dest" "$DISK" 2>/dev/null || return 1
+  fi
+  printf '%s' "$dest"
+}
+
 do_start() {
   if is_running; then log "already running (pid $(vm_pid))"; do_status; return 0; fi
   mkdir -p "$STATE_DIR"
   require_tools
 
-  # Boot only. Building is `vmcav image create`, and the artifacts it left as
-  # out-links are what the cmdline names: the toplevel has to be one the
-  # guest's own store already holds, and only image creation put it there.
+  # Boot only. Building is `vmcav image create`; what to boot is the disk's
+  # business, and it says so in its system profile.
   [ -f "$DISK" ] || { log "no guest image; create one:  vmcav image create"; return 1; }
-  local kernel="$BOOT/kernel/bzImage" initrd="$BOOT/initrd/initrd" toplevel
-  toplevel=$(readlink -f "$BOOT/toplevel" 2>/dev/null || true)
-  for f in "$kernel" "$initrd" "$toplevel/init"; do
-    [ -e "$f" ] || { log "missing boot artifact $f; rebuild:  vmcav image create"; return 1; }
-  done
+  local sys toplevel kpath ipath kernel initrd
+  sys=$(disk_readlink /nix/var/nix/profiles/system) || sys=""
+  case "$sys" in
+    /*) toplevel="$sys" ;;
+    # The profile is a symlink to system-N-link beside it, which is the
+    # symlink to the store.
+    ?*) toplevel=$(disk_readlink "/nix/var/nix/profiles/$sys") || toplevel="" ;;
+    *)  toplevel="" ;;
+  esac
+  kpath=$(disk_readlink "$toplevel/kernel") || kpath=""
+  ipath=$(disk_readlink "$toplevel/initrd") || ipath=""
+  [ -n "$toplevel" ] && [ -n "$kpath" ] && [ -n "$ipath" ] || {
+    log "cannot read a system profile from $DISK; rebuild:  vmcav image reformat"
+    return 1; }
+  kernel=$(guest_boot_file "$kpath") || return 1
+  initrd=$(guest_boot_file "$ipath") || return 1
 
   [ -w /dev/kvm ] || { log "/dev/kvm not available; Cloud Hypervisor is"; \
     log "  KVM-only with no software fallback. Relaunch the cave with"; \

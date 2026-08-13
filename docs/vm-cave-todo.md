@@ -150,11 +150,16 @@ Settled, so that it is not re-derived:
   nothing that is running.
 - Outside updates go over ssh into a running VM, the way NixOS already does
   this: build on the host, `nix copy` the closure in, activate there,
-  transport being the vsock ProxyCommand. The host keeps the kernel and
-  initrd it built as GC roots, so it can boot what it deployed. Built:
-  `vmcav deploy`. The closure goes in before the host's out-links move, so a
-  failed activation still leaves a VM that boots what was deployed. A kernel
-  change needs a restart and says so.
+  transport being the vsock ProxyCommand. Built: `vmcav deploy`. The closure
+  goes in before the host's out-links move, so a failed activation still
+  leaves a VM that boots what was deployed. A kernel change needs a restart
+  and says so.
+- What a VM boots is read off its own disk at `start`: the system profile the
+  guest activated names the toplevel, and that names the kernel and initrd.
+  So an in-guest `nixos-rebuild switch` survives a restart with no host-side
+  sync, and a disk boots on a host whose store never had the closure (a gc, a
+  fresh machine), because the kernel and initrd can be pulled back out of the
+  disk. The host's out-links stay as gc roots, not as the source of truth.
 - A stopped VM cannot be updated. Accepted restriction: start it and deploy,
   or `reformat` to the shipped default.
 - Inside updates are just the agent running `nixos-rebuild switch` as root.
