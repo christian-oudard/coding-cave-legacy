@@ -385,17 +385,19 @@ The design's port table is already fixed (22, 7001, 7100, 7200, 7300), so
 nothing gives today; the rule to keep is that no feature may require
 allocating an inbound vsock port after boot, or it will not port.
 
-**Did not hold: host-initiated vsock.** With `--device
-virtio-vsock,port=22,...,connect`, nothing answered. The guest console shows
-`systemd-ssh-generator` bound only "AF_UNIX Local" and no AF_VSOCK listener,
-where under CHV the same generator is what `vmcav agent` reaches through
-`vsock-connect.py`. So terminal attach does not work on macOS yet, and the
-cause is guest-side detection rather than vfkit refusing the connection.
-Diagnosing it needs the guest CID as vfkit presents it.
+**Host-initiated vsock works, but the guest was not listening.** With
+`--device virtio-vsock,port=22,...,connect` nothing answered at first. The
+cause was guest-side, not vfkit: `systemd-ssh-generator` bound only "AF_UNIX
+Local" and no AF_VSOCK listener, where under CHV the same generator is what
+`vmcav agent` reaches through `vsock-connect.py`. Starting a listener by hand
+in the guest (`socat VSOCK-LISTEN:22,fork,reuseaddr TCP:127.0.0.1:22`)
+produced the sshd banner on the host immediately:
 
-The seed disk was not attached, so `/etc/cave-host` failed to mount. Building
-it needs `mke2fs`, which macOS does not have; on this host it would come from
-nix, or the image gets built in the guest.
+    SSH-2.0-OpenSSH_10.3
+
+So vfkit's `connect` mode is fine and the fix belongs in the guest. Binding it
+explicitly with a socat unit, alongside the outbound bridges, removes the
+dependency on a generator heuristic that differs per VMM.
 
 ### What a darwin `vmcav` still needs
 
