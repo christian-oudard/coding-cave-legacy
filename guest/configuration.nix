@@ -183,6 +183,24 @@ in
   };
   services.getty.autologinUser = "root";
 
+  # The inbound leg: terminal attach is the host connecting in, so something
+  # must accept AF_VSOCK on 22 and hand it to sshd. systemd-ssh-generator does
+  # this by itself under Cloud Hypervisor, but not under vfkit, where it binds
+  # AF_UNIX only and leaves nothing answering, so attach silently has no
+  # listener. Doing it explicitly costs one socat and removes the dependency on
+  # a generator heuristic that differs per VMM.
+  systemd.services.vsock-ssh = {
+    description = "Accept host ssh on vsock 22 and hand it to sshd";
+    wantedBy = [ "multi-user.target" ];
+    after = [ "sshd.service" ];
+    serviceConfig = {
+      ExecStart = "${pkgs.socat}/bin/socat "
+        + "VSOCK-LISTEN:22,fork,reuseaddr TCP:127.0.0.1:22";
+      Restart = "always";
+      RestartSec = 1;
+    };
+  };
+
   # logrotate's config check rejects the store-owned config (through the
   # 9p-mounted /nix/store the file's owner isn't uid 0), which fails on boot
   # and, worse, makes switch-to-configuration return non-zero. The agent's
