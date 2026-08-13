@@ -367,11 +367,23 @@ protocol:
 
     003fgit-upload-pack /cave-shared.git\0host=127.0.0.1\0\0version=2\0
 
-Note the ownership difference from Cloud Hypervisor. CHV creates
-`vsock.sock_N` itself for guest-initiated ports. vfkit's `listen` mode is the
-other way round: the **host** creates and listens on the unix socket, and
-vfkit dials it when the guest connects. `internal/plane` has to own socket
-creation on macOS and not on Linux.
+Guest-initiated ports work the same way under both VMMs, which is worth
+stating because it is easy to assume otherwise: the **host** creates and
+listens on a unix socket per port, and the VMM dials it when the guest
+connects. `vmcav`'s `start_bridges` does exactly this under Cloud Hypervisor
+(`socat UNIX-LISTEN:${VSOCK}_7300,fork ...`), and vfkit's `listen` mode is
+identical. No porting work in this direction.
+
+The whole delta is host-initiated. CHV multiplexes every inbound port over a
+single socket, selected at connect time by a `CONNECT <port>` text handshake
+answered `OK <n>`, so ports are dynamic. vfkit instead takes one `--device
+virtio-vsock,port=N,...,connect` per port at VM launch, one unix socket each,
+no handshake, so **the inbound port table is fixed when the VM boots**.
+
+That constraint should be honoured on Linux too, even though CHV permits more.
+The design's port table is already fixed (22, 7001, 7100, 7200, 7300), so
+nothing gives today; the rule to keep is that no feature may require
+allocating an inbound vsock port after boot, or it will not port.
 
 **Did not hold: host-initiated vsock.** With `--device
 virtio-vsock,port=22,...,connect`, nothing answered. The guest console shows
