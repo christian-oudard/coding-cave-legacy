@@ -43,26 +43,47 @@ const (
 	FromHost
 )
 
-// Port is one entry in the service plane. Relay is the host TCP address to
-// forward to, and is only meaningful FromGuest. An empty Relay means something
-// outside this process binds the socket itself, which is how the gpg signing
-// broker works: it is a unix-socket server rather than a TCP service, so there
-// is nothing to relay to.
+// Port is one entry in the service plane. A FromGuest port needs someone to
+// answer on its unix socket, and there are three ways that happens:
+//
+//   - Relay set: forwarded to a host TCP service (crinj, the git daemon).
+//   - Serve set: answered inside this process (the nix binary cache), which is
+//     what keeps the host's store off any TCP port the rest of the host could
+//     reach.
+//   - neither: something outside this process binds the socket itself, which
+//     is how the gpg signing broker works, being a unix-socket server with no
+//     TCP address to forward to.
 type Port struct {
 	Num   uint32
 	Dir   Dir
 	Name  string
 	Relay string
+	Serve func(net.Listener)
 }
 
-// Ports is the whole service plane, fixed at boot. 7100 (nix binary cache) and
-// 7001 (control RPC) are in the design and absent here because neither exists
-// yet; adding one is a new entry plus a reboot, not a runtime allocation.
-func Ports(crinj, git string) []Port {
+// Services is what the host offers the guest. A struct rather than a widening
+// list of positional strings, because the entries are no longer all the same
+// kind of thing.
+type Services struct {
+	Crinj string             // host address of the crinj proxy
+	Git   string             // host address of the per-project git daemon
+	Nix   func(net.Listener) // the nix binary cache, served in this process
+}
+
+// Ports is the whole service plane, fixed at boot. Every port is listed
+// unconditionally even when nothing is wired to it: under vfkit the table is
+// the launch argv, so a port that appeared only when its service was
+// configured would change the VM's device set, and the plane process and the
+// launcher would disagree about what the guest can dial.
+//
+// 7001 (control RPC) is in the design and absent here because it does not
+// exist yet; adding it is a new entry plus a reboot, not a runtime allocation.
+func Ports(svc Services) []Port {
 	return []Port{
 		{Num: 22, Dir: FromHost, Name: "ssh"},
-		{Num: 7200, Dir: FromGuest, Name: "crinj", Relay: crinj},
-		{Num: 7300, Dir: FromGuest, Name: "git", Relay: git},
+		{Num: 7100, Dir: FromGuest, Name: "nix", Serve: svc.Nix},
+		{Num: 7200, Dir: FromGuest, Name: "crinj", Relay: svc.Crinj},
+		{Num: 7300, Dir: FromGuest, Name: "git", Relay: svc.Git},
 		{Num: 7400, Dir: FromGuest, Name: "gpg"},
 	}
 }
@@ -512,7 +533,7 @@ func cleanup(b Backend, s Spec, p Paths) {
 func Listen(b Backend, s Spec, p Paths) ([]net.Listener, error) {
 	var lns []net.Listener
 	for _, port := range s.Ports {
-		if port.Dir != FromGuest || port.Relay == "" {
+		if port.Dir != FromGuest || (port.Relay == "" && port.Serve == nil) {
 			continue
 		}
 		path := b.Socket(p, port)
@@ -525,7 +546,11 @@ func Listen(b Backend, s Spec, p Paths) ([]net.Listener, error) {
 			return nil, fmt.Errorf("listening for %s on %s: %w", port.Name, path, err)
 		}
 		lns = append(lns, ln)
-		go relay(ln, port.Relay)
+		if port.Serve != nil {
+			go port.Serve(ln)
+		} else {
+			go relay(ln, port.Relay)
+		}
 	}
 	return lns, nil
 }

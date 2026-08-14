@@ -273,6 +273,22 @@ in
     };
   };
 
+  # The host's /nix/store, served as an ordinary binary cache. This is the one
+  # thing no container sandbox can offer: packages the host already has are
+  # copied in over vsock instead of being fetched again, and the guest verifies
+  # signatures, so a trusted transport is not what is being relied on.
+  systemd.services.vsock-nix = {
+    description = "Bridge 127.0.0.1:7100 to the host nix binary cache over vsock 7100";
+    wantedBy = [ "multi-user.target" ];
+    before = [ "vm-root-agent.service" ];
+    serviceConfig = {
+      ExecStart = "${pkgs.socat}/bin/socat "
+        + "TCP-LISTEN:7100,bind=127.0.0.1,fork,reuseaddr VSOCK-CONNECT:2:7100";
+      Restart = "always";
+      RestartSec = 1;
+    };
+  };
+
   systemd.services.vsock-git = {
     description = "Bridge 127.0.0.1:9418 to the host git daemon over vsock 7300";
     wantedBy = [ "multi-user.target" ];
@@ -364,6 +380,21 @@ in
   nix.settings.experimental-features = [ "nix-command" "flakes" ];
   nix.settings.trusted-users = [ "root" ];
   nixpkgs.config.allowUnfree = true;
+
+  # The host cache's address and signing key arrive on the seed disk, because
+  # the key is generated on whichever machine this VM is running on and so
+  # cannot be committed here or baked into the image. `!include` rather than
+  # `include`: a boot with no seed attached must still have a working nix, and
+  # the leading bang is what makes a missing file not an error.
+  #
+  # require-sigs stays at its default of true. That is what the fragment's
+  # trusted-public-keys line is for, and it is why the host signs at all: the
+  # vsock link cannot be reached from outside this machine, but "unreachable"
+  # is not the same claim as "verified", and only the second one survives
+  # someone later deciding to reach the cache another way.
+  nix.extraOptions = ''
+    !include /etc/cave-host/nix.conf
+  '';
 
   # --- Guest toolchain: the minimal floor, nothing more ---
   # This list is also the agent's PATH: its unit resolves tools through

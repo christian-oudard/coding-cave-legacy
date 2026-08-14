@@ -34,6 +34,9 @@ CONFIG="${CODING_CAVE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/coding-cave/conf
 STATE_DIR="${STATE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/coding-cave/vm}"
 CRINJ_PORT="${CRINJ_PORT:-10255}"
 GIT_PORT="${GIT_PORT:-9418}"
+# Where the guest reaches the host's nix store. Same number on both sides: the
+# guest's socat bridge listens on this port and dials vsock 7100.
+NIX_CACHE_PORT="${NIX_CACHE_PORT:-7100}"
 
 DISK="$STATE_DIR/cave-guest.raw"
 # Out-links for the boot artifacts, which makes them gc roots: the store must
@@ -156,6 +159,23 @@ stage_seed() {
   cp -f "$SSHKEY.pub" "$SEED/authorized_keys"
   stage_pubring
   stage_gitconfig
+  stage_nix_conf
+}
+
+# The guest substitutes from the host's store over vsock 7100, which needs two
+# things it cannot know at build time: that the substituter exists, and which
+# key signs it. Both go in a nix.conf fragment the guest !includes from the
+# seed, so the key is generated on this machine and never committed.
+#
+# extra- forms, not the plain ones: the plain settings would replace what the
+# guest's own configuration set, and the point is to add a substituter ahead of
+# cache.nixos.org, not to take it away. Ahead of it by priority, which the
+# cache serves as 10 against cache.nixos.org's 40, rather than by list order.
+stage_nix_conf() {
+  cat > "$SEED/nix.conf" <<EOF
+extra-substituters = http://127.0.0.1:$NIX_CACHE_PORT
+extra-trusted-public-keys = $(cave-vm cache-key --state "$STATE_DIR")
+EOF
 }
 
 # The agent has to commit before it can push, and git refuses to commit

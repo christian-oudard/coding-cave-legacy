@@ -108,8 +108,13 @@ match the Go module layout below and will not for a while. What exists:
   through crinj on 7200, and has no NIC (`ip -br link` shows only `lo`); on
   an M1 the same relays carry the same traffic under vfkit. The host-side
   relays are Go, so `socat` is no longer a host dependency on either.
-- **`internal/nixcache` does not exist.** Phase 4 is the largest unbuilt
-  piece and, per `vm-cave-todo.md`, the most differentiated.
+- **The nix package cache is built and accepted.** `cave-vm serve` answers
+  vsock 7100 with a signed binary cache over the host's store; the guest
+  substitutes from it ahead of cache.nixos.org and verifies the signature.
+  Checked on a Linux host with crinj absent: every `cache.nixos.org` request
+  failed at the proxy, a closure the guest did not have was copied in from
+  `http://127.0.0.1:7100`, `nix store verify` in the guest called it trusted,
+  and a host-absent path failed rather than reaching anything.
 
 Read the phases at the end as the remaining order of work, not as a record
 of what has happened.
@@ -176,7 +181,8 @@ socket. Fixed port map, one Go constant table (`internal/vmm`):
 
 - 22   guest sshd (host-initiated; terminal attach)
 - 7001 control RPC: cave-guestd gRPC-free JSON over HTTP (host-initiated)
-- 7100 nix binary cache (guest-initiated, served by cave-vm on the host)
+- 7100 nix binary cache (guest-initiated, answered inside `cave-vm serve`
+  rather than relayed, so the host's store is on no TCP port at all)
 - 7200 crinj HTTP(S) proxy (guest-initiated, bridged to crinj's listener)
 - 7300 git (guest-initiated, bridged to the existing per-project git daemon)
 
@@ -200,8 +206,13 @@ image:
     sandbox = true
     auto-optimize-store = true
     require-sigs = true
-    substituters = http://127.0.0.1:7100 https://cache.nixos.org
-    trusted-public-keys = cave-host-1:<generated> cache.nixos.org-1:<stock>
+    !include /etc/cave-host/nix.conf
+
+The included fragment is the seed's, and it adds the host cache and the key
+that signs it. Which substituter is tried first is decided by the `Priority`
+each one serves in its `nix-cache-info`, not by list order: the host cache
+answers 10 against cache.nixos.org's 40, so nothing depends on where the
+seeded line lands in the list.
 
 Properties that fall out with zero code: caves cannot inject unsigned
 paths (daemon trust model), identical installs by N caves are one valid
@@ -225,21 +236,50 @@ Endpoints:
 
 - `GET /nix-cache-info` returns `StoreDir: /nix/store`, `WantMassQuery: 1`,
   `Priority: 10`.
-- `GET /<hash>.narinfo`: resolve via `nix path-info --json
-  /nix/store/<hash>-*` (exec, same kernel, nix handles DB locking). Respond
-  with StorePath, References, NarHash, NarSize, `Compression: none`,
-  `URL: nar/<hash>.nar`, and a fleet signature. 404 on unknown hash.
-- `GET /nar/<hash>.nar`: stream `nix nar dump-path` (or `nix-store --dump`)
-  of the path. No compression: this is a local link, CPU is the scarce
-  resource, and NarSize is known up front for Content-Length.
+- `GET /<hash>.narinfo`: respond with StorePath, References, NarHash,
+  NarSize, `Compression: none`, `URL: nar/<hash>.nar`, and a signature. 404
+  on unknown hash.
+- `GET /nar/<hash>.nar`: stream `nix-store --dump` of the path. No
+  compression: this is a local link, CPU is the scarce resource, and NarSize
+  is known up front for Content-Length.
 
-Signing: an ed25519 keypair generated once at state-dir init
-(`<state>/cache-key`, `cave-host-1:...`). Sign the standard fingerprint
-`1;<path>;<narhash>;<narsize>;<refs>`. Implementation via
-`github.com/nix-community/go-nix` (nixbase32, narinfo, signature); the nar
-bytes themselves come from exec'ing nix, which is already a runtime
-dependency. If go-nix proves awkward, narinfo is a 10-line text format and
-the signature is one ed25519 call; hand-rolling is acceptable.
+The hash is the only thing the guest controls and it selects host files whose
+bytes are served back, so it is validated as exactly 32 nixbase32 characters
+before it reaches anything, and a rejection is a 404 like any other miss.
+Read-only does not cover this: an escaped hash would be a disclosure bug
+rather than a write bug.
+
+Hash to path is answered from an index of the store directory rather than by
+composing a path from the request, so what reaches the filesystem and nix's
+argv is always a name this process read from a directory entry. The index is
+rebuilt when the store directory's mtime moves, which is exactly when a path
+is added or removed; `WantMassQuery` means most lookups are misses, and
+re-scanning per miss would turn one `nix build` into thousands of readdirs.
+
+Metadata comes from `nix-store --query --hash/--size/--references` rather
+than `nix path-info --json`: it is the stable interface, and `--hash` already
+returns narinfo's encoding, so nothing here implements nixbase32. References
+are sorted, because nix's fingerprint joins a set and `--query` prints
+database order. That difference is invisible on any path with fewer than two
+references and produces signatures nix calls untrusted with no hint why, so a
+test asserts the format against a real cache.nixos.org signature over a
+multi-reference path.
+
+Signing: an ed25519 keypair generated on first use at `<state>/cache-key`,
+named `cave-host-1`, in nix's own `<name>:<base64>` file format. Sign the
+standard fingerprint `1;<path>;<narhash>;<narsize>;<refs>`. Hand-rolled:
+narinfo is a 10-line text format and the signature is one stdlib ed25519
+call, so `github.com/nix-community/go-nix` was not needed and the module
+stays dependency-free.
+
+The link is unreachable from outside the machine, which is not the same claim
+as verified, so the guest keeps `require-sigs` at its default. The public
+half reaches the guest through the seed disk, the same way the crinj CA does,
+because the key is generated per machine and cannot be committed or baked
+into the image: `<seed>/nix.conf` carries `extra-substituters` and
+`extra-trusted-public-keys`, which the guest picks up with a `!include`. The
+`extra-` forms add rather than replace, and the leading `!` keeps a boot with
+no seed attached from having a broken nix.
 
 Concurrency and GC: no coordination with host GC at all. If the host GCs a
 path between narinfo and nar fetch, the nar request fails and the guest
@@ -539,8 +579,8 @@ firewall-pinning arrangement Kata or firecracker-containerd ship.
                           clean shutdown (ACPI), crash detection, port map,
                           host unix-socket dialer/listener. One Backend per
                           platform (Cloud Hypervisor, vfkit).
-      internal/nixcache/   binary cache HTTP server, narinfo signing,
-                          nix CLI exec wrappers
+      internal/nixcache/  binary cache HTTP server, narinfo signing, the
+                          store-directory index, nix CLI exec wrappers
       internal/guest/     guestd internals: cave lifecycle, uid allocation,
                           bwrap invocation, home materialization, CacheSpec
                           table, pty session management
@@ -578,10 +618,14 @@ wiring. Phases 0 and 1 restate the old plan's floor.
   under 10 s; state survives stop/start.
 - **3. Attach plane.** sshd on vsock, `cave-vm shell` lands in a guest
   session held by the daemon. Accept: detach, reattach, session intact.
-- **4. Nix supply.** the nix package cache server, fleet key, guest daemon
-  substituter order. Accept: with crinj absent and no network, `nix build nixpkgs#hello`
-  (host-present) succeeds in the guest and transfers zero internet bytes;
-  a host-absent package fails (proving no hidden egress).
+- **4. Nix supply.** Done. The nix package cache server, its signing key, and
+  the guest's substituter order. Accept: with crinj absent and no network, a
+  host-present closure the guest does not have is realised in the guest and
+  transfers zero internet bytes; a host-absent path fails, proving no hidden
+  egress. Stated as `nix build nixpkgs#hello` in an earlier draft, which
+  cannot be run with no network at all: evaluating a flakeref is itself a
+  fetch. Realising a store path by name tests the substituter and nothing
+  else, which is the claim being made.
 - **5. Egress.** crinj bridged on 7200, guest proxy env global. Accept: the
   host-absent package now substitutes from cache.nixos.org through crinj;
   guest has no NIC (`ip link` shows only lo).

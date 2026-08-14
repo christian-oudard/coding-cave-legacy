@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -12,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"codingcave.dev/cave-vm/internal/nixcache"
 	"codingcave.dev/cave-vm/internal/vmm"
 )
 
@@ -25,7 +27,13 @@ type vmFlags struct {
 	kernel, initrd, init_ string
 	disk, seed            string
 	memory, cpus, cid     int
-	crinj, git            string
+	crinj, git, store     string
+
+	// nix is the binary cache's handler, and only `serve` sets it: the other
+	// commands need the port to exist in the table, not to answer on it.
+	// Whether it is set does not change the table, which is what keeps the
+	// launcher's argv and the plane's listeners in agreement.
+	nix func(net.Listener)
 }
 
 func vmFlagSet(name string) *vmFlags {
@@ -41,6 +49,7 @@ func vmFlagSet(name string) *vmFlags {
 	v.fs.IntVar(&v.cid, "cid", 3, "guest vsock CID")
 	v.fs.StringVar(&v.crinj, "crinj", "", "host address to relay vsock 7200 to")
 	v.fs.StringVar(&v.git, "git", "", "host address to relay vsock 7300 to")
+	v.fs.StringVar(&v.store, "store", "/nix/store", "host nix store to serve on vsock 7100")
 	return v
 }
 
@@ -54,6 +63,11 @@ func (v *vmFlags) parse(args []string) {
 
 func (v *vmFlags) paths() vmm.Paths { return vmm.NewPaths(v.state) }
 
+// cacheKey is the nix binary cache's signing key, one per state dir. It is
+// generated on first use by whichever command needs it first, which is either
+// `serve` (to sign) or `cache-key` (to tell the guest what to trust).
+func (v *vmFlags) cacheKey() string { return filepath.Join(v.state, "cache-key") }
+
 func (v *vmFlags) spec(p vmm.Paths) vmm.Spec {
 	return vmm.Spec{
 		Kernel:   v.kernel,
@@ -64,7 +78,7 @@ func (v *vmFlags) spec(p vmm.Paths) vmm.Spec {
 		CPUs:     v.cpus,
 		CID:      uint32(v.cid),
 		Console:  filepath.Join(p.State, "console.log"),
-		Ports:    vmm.Ports(v.crinj, v.git),
+		Ports:    vmm.Ports(vmm.Services{Crinj: v.crinj, Git: v.git, Nix: v.nix}),
 	}
 }
 
@@ -144,7 +158,8 @@ func servePlane(v *vmFlags, p vmm.Paths) error {
 		return err
 	}
 	defer log.Close()
-	cmd := exec.Command(self, "serve", "--state", v.state, "--crinj", v.crinj, "--git", v.git)
+	cmd := exec.Command(self, "serve", "--state", v.state,
+		"--crinj", v.crinj, "--git", v.git, "--store", v.store)
 	cmd.Stdout, cmd.Stderr = log, log
 	pid, err := vmm.StartDetached(cmd)
 	if err != nil {
@@ -170,11 +185,18 @@ func stopPlane(p vmm.Paths) {
 }
 
 // vmServe is the host end of every guest-initiated port: one unix socket each,
-// relayed to the host service. This is what socat did per port on Linux, and
-// what macOS needs done in-process because it has no socat.
+// relayed to the host service, except the nix binary cache which is answered
+// here. This is what socat did per port on Linux, and what macOS needs done
+// in-process because it has no socat.
 func vmServe(args []string) {
 	v := vmFlagSet("serve")
 	v.parse(args)
+	cache, err := nixcache.New(v.store, v.cacheKey())
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "cave-vm:", err)
+		os.Exit(1)
+	}
+	v.nix = cache.Serve
 	b, p := backend(), v.paths()
 	lns, err := vmm.Listen(b, v.spec(p), p)
 	if err != nil {
@@ -221,6 +243,22 @@ func vmRunning(args []string) {
 	}
 }
 
+// vmCacheKey prints the binary cache's public key in nix's own format, so the
+// caller can drop it straight into the guest's trusted-public-keys. The key is
+// generated here if it does not exist yet, which is what makes staging the
+// seed and serving the cache agree about which key signs: there is one file,
+// and both of them read it.
+func vmCacheKey(args []string) {
+	v := vmFlagSet("cache-key")
+	v.parse(args)
+	key, err := nixcache.LoadKey(v.cacheKey(), nixcache.KeyName)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "cave-vm:", err)
+		os.Exit(1)
+	}
+	fmt.Println(key.Public())
+}
+
 // vmSocket prints where a port's unix socket lives, for the services that bind
 // their own rather than being relayed to: the gpg signing broker is a
 // unix-socket server, so there is no TCP address to forward to.
@@ -233,7 +271,7 @@ func vmSocket(args []string) {
 	}
 	num := mustPort(v.fs.Arg(0))
 	b, p := backend(), v.paths()
-	for _, port := range vmm.Ports("", "") {
+	for _, port := range vmm.Ports(vmm.Services{}) {
 		if port.Num == num {
 			fmt.Println(b.Socket(p, port))
 			return

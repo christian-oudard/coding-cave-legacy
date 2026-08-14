@@ -34,15 +34,17 @@ func spec(p Paths) Spec {
 		CPUs:     4,
 		CID:      3,
 		Console:  filepath.Join(p.State, "console.log"),
-		Ports:    Ports("127.0.0.1:10255", "127.0.0.1:9418"),
+		Ports:    Ports(Services{Crinj: "127.0.0.1:10255", Git: "127.0.0.1:9418"}),
 	}
 }
 
 // The port table is fixed at boot because vfkit needs one device per port at
 // launch. If a port is ever added, it is added here, not allocated at runtime.
 func TestPortsAreFixedAndDirected(t *testing.T) {
-	ports := Ports("crinj:1", "git:2")
-	want := map[uint32]Dir{22: FromHost, 7200: FromGuest, 7300: FromGuest, 7400: FromGuest}
+	ports := Ports(Services{Crinj: "crinj:1", Git: "git:2"})
+	want := map[uint32]Dir{
+		22: FromHost, 7100: FromGuest, 7200: FromGuest, 7300: FromGuest, 7400: FromGuest,
+	}
 	if len(ports) != len(want) {
 		t.Fatalf("port count = %d, want %d", len(ports), len(want))
 	}
@@ -62,6 +64,50 @@ func TestPortsAreFixedAndDirected(t *testing.T) {
 		if p.Num == 7400 && p.Relay != "" {
 			t.Errorf("port 7400 should have no relay, got %q", p.Relay)
 		}
+	}
+}
+
+// Under vfkit the port table is the launch argv, so which ports exist must not
+// depend on which services happen to be configured. The launcher builds the
+// table with nothing wired up and the plane process builds it with everything;
+// if those disagreed, the guest would dial a device that was never created.
+func TestThePortTableDoesNotDependOnWhatIsWired(t *testing.T) {
+	bare := Ports(Services{})
+	wired := Ports(Services{Crinj: "c:1", Git: "g:2", Nix: func(net.Listener) {}})
+	if len(bare) != len(wired) {
+		t.Fatalf("port count %d unwired vs %d wired", len(bare), len(wired))
+	}
+	for i := range bare {
+		if bare[i].Num != wired[i].Num || bare[i].Dir != wired[i].Dir {
+			t.Errorf("port %d differs: %v vs %v", i, bare[i], wired[i])
+		}
+	}
+}
+
+// The nix binary cache is answered in this process rather than forwarded to a
+// TCP listener, which is what keeps the host's store reachable from the guest
+// and from nothing else on the host.
+func TestListenServesAPortInProcess(t *testing.T) {
+	p := testPaths(t)
+	s := spec(p)
+	served := make(chan net.Listener, 1)
+	s.Ports = []Port{{Num: 7100, Dir: FromGuest, Name: "nix",
+		Serve: func(ln net.Listener) { served <- ln }}}
+	lns, err := Listen(&chv{}, s, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lns[0].Close()
+	if len(lns) != 1 {
+		t.Fatalf("listened on %d sockets, want 1", len(lns))
+	}
+	select {
+	case ln := <-served:
+		if ln.Addr().String() != p.Vsock()+"_7100" {
+			t.Errorf("served %s, want %s", ln.Addr(), p.Vsock()+"_7100")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the in-process server was never handed its listener")
 	}
 }
 

@@ -277,10 +277,14 @@ and the host.
 So: keep the VMM layer boring and small (two process-backends, skip Windows),
 stop treating cold boot as a headline metric since one VM per host boot means
 never competing on it, and prioritize phase 4 (the nix package cache) and
-phase 8 (pkgdd)
-over 1-3. Phase 4's acceptance check, building a host-present package in the
-guest with zero internet bytes, is the demo no competitor can reproduce. Land
-the git bridge (phase 7) early, since the approval gate is the thesis.
+phase 8 (pkgdd) over 1-3. Land the git bridge (phase 7) early, since the
+approval gate is the thesis.
+
+Phase 4 is done: with crinj absent, a closure the guest did not have arrives
+from the host's store over vsock and verifies, and a host-absent path fails
+rather than reaching anything. That leaves phase 8 as the remaining half of
+the argument, since language package caches are where an agent's bytes
+actually go.
 
 Closed: the argument for staying sandbox-agnostic, keeping bwrap on Linux and
 using `sbx` or Apple's `container` on macOS. It was far less code and it
