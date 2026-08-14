@@ -7,9 +7,11 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 )
 
 // DetachKey is ^\, the same key dtach used before the daemon existed, so the
@@ -35,12 +37,54 @@ const DetachKey = 0x1c
 const restoreTerminal = "\x1b[0m\x1b[?25h\x1b[?2004l" +
 	"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[r"
 
+// SocketPath is where the session called id listens. The name is the whole
+// of the addressing: no daemon keeps a table, so a session exists exactly
+// when something answers here.
+func SocketPath(dir, id string) string { return filepath.Join(dir, id+".sock") }
+
 func dialAgentd(sock string) (net.Conn, error) {
 	conn, err := net.Dial("unix", sock)
 	if err != nil {
-		return nil, fmt.Errorf("agentd: %w (is cave-guestd running?)", err)
+		return nil, fmt.Errorf("agentd: no session at %s: %w", sock, err)
 	}
 	return conn, nil
+}
+
+// EnsureSocket returns the path to a listening session, calling start (which
+// is systemd, in the guest) if nothing answers yet and waiting for it to bind.
+//
+// Starting through systemd rather than forking here is the point of the whole
+// arrangement: the session must not be a child of whoever attached, or hanging
+// up an ssh connection would take the agent with it. A socket file left behind
+// by a killed session is not a session; dialing is what decides, and the new
+// one unlinks the corpse before it binds.
+func EnsureSocket(dir, id string, start func() error, timeout time.Duration) (string, error) {
+	sock := SocketPath(dir, id)
+	if listening(sock) {
+		return sock, nil
+	}
+	if err := start(); err != nil {
+		return "", fmt.Errorf("agentd: starting session %q: %w", id, err)
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		if listening(sock) {
+			return sock, nil
+		}
+		if time.Now().After(deadline) {
+			return "", fmt.Errorf("agentd: session %q never listened at %s", id, sock)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func listening(sock string) bool {
+	conn, err := net.Dial("unix", sock)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
 }
 
 // frameWriter serialises the two things that send frames, keystrokes and
@@ -61,27 +105,41 @@ func (fw *frameWriter) resize(rows, cols uint16) error {
 	return fw.write(FrameResize, EncodeResize(rows, cols))
 }
 
-// List returns one line per agent: "id state rows cols".
-func List(sock string) ([]string, error) {
+// Info asks one session to describe itself: "id state rows cols".
+func Info(sock string) (string, error) {
 	conn, err := dialAgentd(sock)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	defer conn.Close()
-	if _, err := io.WriteString(conn, "LIST\n"); err != nil {
-		return nil, err
+	if _, err := io.WriteString(conn, "INFO\n"); err != nil {
+		return "", err
 	}
 	body, err := io.ReadAll(conn)
+	if err != nil {
+		return "", err
+	}
+	line := strings.TrimSpace(string(body))
+	if rest, ok := strings.CutPrefix(line, "error "); ok {
+		return "", fmt.Errorf("agentd: %s", rest)
+	}
+	return line, nil
+}
+
+// List returns one line per session, by asking each socket in dir. Sockets
+// nobody is listening on are skipped rather than reported: they are what a
+// killed session leaves behind, and the next start of that session unlinks
+// one. Glob sorts, so the order does not reshuffle between runs.
+func List(dir string) ([]string, error) {
+	socks, err := filepath.Glob(filepath.Join(dir, "*.sock"))
 	if err != nil {
 		return nil, err
 	}
 	var out []string
-	for _, line := range strings.Split(string(body), "\n") {
-		if line = strings.TrimSpace(line); line == "" {
+	for _, sock := range socks {
+		line, err := Info(sock)
+		if err != nil {
 			continue
-		}
-		if rest, ok := strings.CutPrefix(line, "error "); ok {
-			return nil, fmt.Errorf("agentd: %s", rest)
 		}
 		out = append(out, line)
 	}
@@ -92,7 +150,7 @@ func List(sock string) ([]string, error) {
 // detaches or the agent exits. The terminal goes into raw mode for the
 // duration: the agent is a full-screen program and needs the keystrokes and
 // escape sequences that a cooked terminal would otherwise eat.
-func AttachTo(sock, id string, in, out *os.File) error {
+func AttachTo(sock string, in, out *os.File) error {
 	conn, err := dialAgentd(sock)
 	if err != nil {
 		return err
@@ -103,7 +161,7 @@ func AttachTo(sock, id string, in, out *os.File) error {
 	if ws, err := GetSize(out); err == nil {
 		rows, cols = ws.Rows, ws.Cols
 	}
-	if _, err := fmt.Fprintf(conn, "ATTACH %s %d %d\n", id, rows, cols); err != nil {
+	if _, err := fmt.Fprintf(conn, "ATTACH %d %d\n", rows, cols); err != nil {
 		return err
 	}
 

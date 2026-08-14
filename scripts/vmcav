@@ -227,7 +227,7 @@ wait_for_guest() {
   # Which of the two never arrived is the whole diagnosis, so say it.
   if [ -n "$ssh_ok" ]; then
     log "the guest is up but no agent session appeared in ${max}s"
-    log "  see: vmcav shell journalctl -u vm-root-agent"
+    log "  see: vmcav shell journalctl -u cave-session@1"
   else
     log "the guest did not answer ssh in ${max}s; it is still running."
     log "  see $CONSOLE, or raise CAVE_BOOT_TIMEOUT"
@@ -497,13 +497,14 @@ guest_ssh() {
   return "$rc"
 }
 
-# Drive the agent: attach to the pty cave-guestd holds for the vm-root-agent
-# unit. Detach with ctrl-\ , which leaves the agent running.
+# Drive the agent: attach to the pty its cave-session@ instance holds.
+# Detach with ctrl-\ , which leaves the agent running.
 do_agent() {
   # The client sends its own size on attach and on every SIGWINCH, and the
-  # daemon replays what the agent printed while nobody was watching, so this
+  # session replays what the agent printed while nobody was watching, so this
   # is a plain attach with nothing to set up first. An agent that has exited
-  # is restarted by the daemon, so this always lands on a live session.
+  # has its unit started again by the attach, so this always lands on a live
+  # session.
   # Printed before the attach, not by the client, which says nothing ever. The
   # agent paints over the screen immediately, so this is only readable in
   # scrollback afterwards -- which is exactly when you go looking for it.
@@ -512,7 +513,7 @@ do_agent() {
 }
 
 # A plain root shell in the guest. No args -> interactive shell; extra args run
-# as a command (e.g. `vmcav shell journalctl -u vm-root-agent`).
+# as a command (e.g. `vmcav shell journalctl -u cave-session@1`).
 do_shell() { guest_ssh "$@"; }
 
 # The commit this vmcav was built from. The nix wrapper bakes it in, because

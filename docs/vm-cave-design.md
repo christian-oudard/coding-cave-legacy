@@ -345,12 +345,28 @@ user unit is optional convenience.
 
 ## Sessions and attach
 
-cave-guestd owns each agent's pty directly, so a session survives host-side
-detach and terminal loss (and, with the VM being long-lived, laptop client
-disconnects in the eventual remote-host setup). It keeps a bounded buffer of
-each agent's recent output and replays it on attach, which is what makes a
-reattach come back to the screen the agent is on rather than a blank one;
-more than one client can watch the same agent at once.
+One cave-guestd process owns one agent's pty directly, so a session survives
+host-side detach and terminal loss (and, with the VM being long-lived, laptop
+client disconnects in the eventual remote-host setup). It keeps a bounded
+buffer of the agent's recent output and replays it on attach, which is what
+makes a reattach come back to the screen the agent is on rather than a blank
+one; more than one client can watch the same agent at once.
+
+Process per session, not a daemon holding all of them, because a daemon's
+crash, OOM kill or own upgrade would end every session at once. systemd owns
+each one as `cave-session@<id>.service`, the socket is
+`/run/cave/sessions/<id>.sock`, and nothing keeps a table: a session exists
+exactly when something answers there. `list` reads the directory and asks each
+socket, and `attach` starts the unit for a session it cannot find, which is
+also how an agent that exited comes back under the same name. Starting it
+through systemd rather than forking is the point: a session parented by
+whoever attached would die with their ssh connection.
+
+`restartIfChanged = false` stays on the template, for the one case the split
+does not cover, the unit's own definition changing. A new binary reaches
+sessions started after a deploy; live ones keep what they have. Verified on a
+live VM: a deploy that rewrote the unit left the running session on the same
+pid.
 
 No multiplexer. tmux and dtach were both tried and dropped: tmux brings
 windows, panes, a prefix key and a scrollback worse than the terminal's own,
@@ -360,9 +376,8 @@ client, so every reattach came back blank and at the wrong width.
 `cave-vm agent [n]` attaches: ssh over vsock (ProxyCommand `cave-vm
 vsock-connect 22`) into `cave-guestd attach`, which relays the terminal raw
 and forwards its size on attach and on every resize. Detach is ctrl-\ and
-leaves the agent running; attaching to an agent that has exited starts a
-fresh one under the same name. Host ssh keypair generated at state-dir init
-and baked into the guest's authorized_keys at image build.
+leaves the agent running. Host ssh keypair generated at state-dir init and
+baked into the guest's authorized_keys at image build.
 
 Control RPC (port 7001, JSON over HTTP, no framework): `POST /agents`
 (create cave: project slug, base branch, prompt), `GET /agents`,

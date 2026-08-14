@@ -9,10 +9,14 @@ import (
 	"strings"
 )
 
-// Serve answers connections until ln is closed. The daemon holds the agents;
-// a connection is only ever a window onto one, so nothing here owns state and
-// a client crashing is not an event the agent notices.
-func Serve(ln net.Listener, reg *Registry) error {
+// Serve answers connections for one session until ln is closed. A connection
+// is only ever a window onto the agent, so nothing here owns state and a
+// client crashing is not an event the agent notices.
+//
+// One session per server, and per process: the pty must not share a lifetime
+// with anything that gets restarted for its own reasons, which a daemon
+// holding every session does by definition.
+func Serve(ln net.Listener, s *Session) error {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -20,14 +24,14 @@ func Serve(ln net.Listener, reg *Registry) error {
 		}
 		go func() {
 			defer conn.Close()
-			if err := handle(conn, reg); err != nil && err != io.EOF {
+			if err := handle(conn, s); err != nil && err != io.EOF {
 				fmt.Fprintf(conn, "error %v\n", err)
 			}
 		}()
 	}
 }
 
-func handle(conn net.Conn, reg *Registry) error {
+func handle(conn net.Conn, s *Session) error {
 	br := bufio.NewReader(conn)
 	line, err := br.ReadString('\n')
 	if err != nil {
@@ -38,57 +42,45 @@ func handle(conn net.Conn, reg *Registry) error {
 		return fmt.Errorf("empty request")
 	}
 	switch fields[0] {
-	case "LIST":
-		return doList(conn, reg)
+	case "INFO":
+		return doInfo(conn, s)
 	case "ATTACH":
-		return doAttach(conn, br, reg, fields[1:])
+		return doAttach(conn, br, s, fields[1:])
 	default:
 		return fmt.Errorf("unknown request %q", fields[0])
 	}
 }
 
-// LIST reports one agent per line. The connection closing is the end of the
-// list; there is nothing to say afterwards.
-func doList(w io.Writer, reg *Registry) error {
-	for _, s := range reg.List() {
-		state := "exited"
-		if s.Running() {
-			state = "running"
-		}
-		ws, err := s.Size()
-		if err != nil {
-			ws = WinSize{}
-		}
-		if _, err := fmt.Fprintf(w, "%s %s %d %d\n", s.ID, state, ws.Rows, ws.Cols); err != nil {
-			return err
-		}
+// INFO is one line, and the connection closing is the end of it. Listing
+// every session is the client's job: it reads the socket directory and asks
+// each one, because there is no longer anywhere else that knows them all.
+func doInfo(w io.Writer, s *Session) error {
+	state := "exited"
+	if s.Running() {
+		state = "running"
 	}
-	return nil
+	ws, err := s.Size()
+	if err != nil {
+		ws = WinSize{}
+	}
+	_, err = fmt.Fprintf(w, "%s %s %d %d\n", s.ID, state, ws.Rows, ws.Cols)
+	return err
 }
 
 // doAttach relays in both directions until the client goes away or the agent
 // exits. The client's size wins on attach: a terminal that reconnects at a
 // different size expects the agent to repaint at the size it can actually see.
-func doAttach(conn net.Conn, br *bufio.Reader, reg *Registry, args []string) error {
-	if len(args) != 3 {
-		return fmt.Errorf("usage: ATTACH <id> <rows> <cols>")
+func doAttach(conn net.Conn, br *bufio.Reader, s *Session, args []string) error {
+	if len(args) != 2 {
+		return fmt.Errorf("usage: ATTACH <rows> <cols>")
 	}
-	rows, err := strconv.ParseUint(args[1], 10, 16)
+	rows, err := strconv.ParseUint(args[0], 10, 16)
 	if err != nil {
-		return fmt.Errorf("bad rows %q", args[1])
+		return fmt.Errorf("bad rows %q", args[0])
 	}
-	cols, err := strconv.ParseUint(args[2], 10, 16)
+	cols, err := strconv.ParseUint(args[1], 10, 16)
 	if err != nil {
-		return fmt.Errorf("bad cols %q", args[2])
-	}
-	s, ok := reg.Get(args[0])
-	if !ok {
-		return fmt.Errorf("no agent %q", args[0])
-	}
-	if !s.Running() {
-		if s, err = reg.Restart(args[0]); err != nil {
-			return err
-		}
+		return fmt.Errorf("bad cols %q", args[1])
 	}
 
 	replay, out, detach := s.Attach()

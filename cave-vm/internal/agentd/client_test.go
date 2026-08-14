@@ -3,9 +3,11 @@ package agentd
 import (
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // collector drains a pipe into a buffer the test can poll, so the client is
@@ -34,14 +36,14 @@ func (c *collector) String() string {
 	return c.buf.String()
 }
 
-func TestListReturnsOneLinePerAgent(t *testing.T) {
-	reg, sock := serveTest(t)
+// Listing is a directory read plus one question each, so two sessions that
+// know nothing about each other still list together.
+func TestListReturnsOneLinePerSession(t *testing.T) {
+	dir := sessionDir(t)
 	for _, id := range []string{"2", "1"} {
-		if _, err := reg.Start(id, []string{"/bin/sh", "-c", "sleep 30"}, nil, "/", 24, 80); err != nil {
-			t.Fatal(err)
-		}
+		serveIn(t, dir, id, "/bin/sh", "-c", "sleep 30")
 	}
-	got, err := List(sock)
+	got, err := List(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,9 +52,67 @@ func TestListReturnsOneLinePerAgent(t *testing.T) {
 	}
 }
 
-func TestListWithoutADaemonSaysSo(t *testing.T) {
-	_, err := List("/nonexistent/agentd.sock")
-	if err == nil || !strings.Contains(err.Error(), "cave-guestd") {
+// What a killed session leaves behind is a file, not a session.
+func TestListSkipsASocketNobodyIsListeningOn(t *testing.T) {
+	dir := sessionDir(t)
+	if err := os.WriteFile(filepath.Join(dir, "9.sock"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	serveIn(t, dir, "1", "/bin/sh", "-c", "sleep 30")
+	got, err := List(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != "1 running 24 80" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestListOfNothingIsEmpty(t *testing.T) {
+	got, err := List(sessionDir(t))
+	if err != nil || len(got) != 0 {
+		t.Fatalf("got %q, %v", got, err)
+	}
+}
+
+// A session that is already listening is never started twice: attaching to a
+// live agent must not restart the work it is doing.
+func TestEnsureSocketLeavesALiveSessionAlone(t *testing.T) {
+	dir := sessionDir(t)
+	serveIn(t, dir, "1", "/bin/sh", "-c", "sleep 30")
+	started := false
+	sock, err := EnsureSocket(dir, "1", func() error { started = true; return nil }, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if started {
+		t.Fatal("started a session that was already running")
+	}
+	if sock != SocketPath(dir, "1") {
+		t.Fatalf("got %q", sock)
+	}
+}
+
+// Asking for an agent that is not there is what starts it, which is how an
+// agent that exited comes back under the same name.
+func TestEnsureSocketStartsAMissingSession(t *testing.T) {
+	dir := sessionDir(t)
+	sock, err := EnsureSocket(dir, "1", func() error {
+		serveIn(t, dir, "1", "/bin/sh", "-c", "sleep 30")
+		return nil
+	}, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Info(sock); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEnsureSocketGivesUpWhenNothingComesUp(t *testing.T) {
+	dir := sessionDir(t)
+	_, err := EnsureSocket(dir, "1", func() error { return nil }, 100*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "never listened") {
 		t.Fatalf("got %v", err)
 	}
 }
@@ -60,12 +120,7 @@ func TestListWithoutADaemonSaysSo(t *testing.T) {
 // The round trip the user actually performs: type at the agent, see the
 // answer, then detach and leave it running.
 func TestAttachRelaysTypingAndDetachesOnTheDetachKey(t *testing.T) {
-	reg, sock := serveTest(t)
-	s, err := reg.Start("1", []string{"/bin/sh", "-c",
-		"while read l; do echo \"got $l\"; done"}, nil, "/", 24, 80)
-	if err != nil {
-		t.Fatal(err)
-	}
+	s, sock := serveTest(t, "/bin/sh", "-c", "while read l; do echo \"got $l\"; done")
 
 	inR, inW, _ := os.Pipe()
 	outR, outW, _ := os.Pipe()
@@ -74,7 +129,7 @@ func TestAttachRelaysTypingAndDetachesOnTheDetachKey(t *testing.T) {
 	go seen.drain(outR)
 
 	done := make(chan error, 1)
-	go func() { done <- AttachTo(sock, "1", inR, outW) }()
+	go func() { done <- AttachTo(sock, inR, outW) }()
 
 	waitFor(t, "the client to attach", func() bool {
 		s.mu.Lock()
@@ -106,10 +161,7 @@ func TestAttachRelaysTypingAndDetachesOnTheDetachKey(t *testing.T) {
 // When the agent exits the client comes back on its own, without waiting for
 // the user to press anything.
 func TestAttachReturnsWhenTheAgentExits(t *testing.T) {
-	reg, sock := serveTest(t)
-	if _, err := reg.Start("1", []string{"/bin/sh", "-c", "echo bye; sleep 0.2"}, nil, "/", 24, 80); err != nil {
-		t.Fatal(err)
-	}
+	_, sock := serveTest(t, "/bin/sh", "-c", "echo bye; sleep 0.2")
 	inR, inW, _ := os.Pipe()
 	outR, outW, _ := os.Pipe()
 	defer inW.Close()
@@ -117,7 +169,7 @@ func TestAttachReturnsWhenTheAgentExits(t *testing.T) {
 	go seen.drain(outR)
 
 	done := make(chan error, 1)
-	go func() { done <- AttachTo(sock, "1", inR, outW) }()
+	go func() { done <- AttachTo(sock, inR, outW) }()
 	if err := <-done; err != nil {
 		t.Fatalf("got %v", err)
 	}

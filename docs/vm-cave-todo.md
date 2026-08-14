@@ -58,40 +58,17 @@ them in the registry: session id per agent, `cav status`, resume by id), and
 whether more than one agent per VM is a thing, which decides whether "the
 agent" stays the single session the daemon names `1`.
 
-## cave-guestd must not parent the ptys
-
-Every pty lives in cave-guestd's own process, so anything that ends that
-process ends every session: a crash, an OOM kill, a bug, and any restart of
-its unit. `restartIfChanged = false` keeps a deploy from doing it and buys
-nothing else; it also means the daemon can never take its own upgrade, since
-the only way to run a new one is to stop the one holding the ptys.
-
-The rule is already in `vm-cave-design.md`, one level up: lifetime decoupling
-is the shim's whole reason to exist, containerd never parents its workloads,
-and killing the supervisor here leaves the VM and every session running.
-Inside the guest it says the same thing about the daemon and the ptys.
-
-So: a process per session holding the pty master and the ring, in its own
-unit rather than in the daemon's cgroup, which systemd kills wholesale on
-restart. A `cave-session@<name>.service` template, a socket per session under
-`/run`, and cave-guestd as a router that reconnects to what it finds and
-holds no long-lived state. Restart, upgrade and crash become the same
-non-event.
-
-This replaces the SCM_RIGHTS handoff to a successor that was planned for the
-same problem. Handoff only ever covered the planned upgrade, and the sessions
-still die on everything else.
-
 ## Agent hibernation
 
 A VM holds many agents, and it restarts: a host-side deploy that changes the
 kernel, a stop at the end of a day, a crash. Every agent dies with it. There
 is no way to quiesce them first, and no way to bring them back doing what
-they were doing. The entry above covers only the daemon restarting, not the
-machine.
+they were doing.
 
-The present code assumes the opposite of all of this. One session named `1`,
-one systemd unit, and `vmcav agent` attaches to "the" agent.
+The present code assumes the opposite of all of this: `vmcav agent` attaches
+to "the" agent, and nothing quiesces anything. Sessions surviving their own
+restarts is now handled, one process and one unit each, but that is a
+different problem from the machine going down under all of them.
 
 What hibernation has to cover is at least: quiescing an agent at a point
 where its work is recoverable (which overlaps the uncommitted-work entry
@@ -130,10 +107,9 @@ the same split, so it is no longer the precedent to copy.
 A VM is meant to hold many agents. Everything built so far assumes exactly
 one, in ways that are cheap to list and not cheap to change:
 
-- one `vm-root-agent.service`, starting one session the daemon names `1`.
-  cave-guestd already addresses agents by name and can hold several, so this
-  is the unit and its launcher, not the daemon
-- `vmcav agent` attaches to "the" agent, with no way to name one
+- `vmcav agent` attaches to "the" agent, with no way to name one, though
+  `cave-guestd attach <id>` underneath it takes one and starts the session if
+  it is not there, so this is the host CLI rather than the guest
 - the git daemon injects `CODING_CAVE_AGENT_ID=1` for the whole guest, so
   the pre-receive guard cannot tell co-resident agents apart (the hook says
   as much: it gates by namespace, not by agent)

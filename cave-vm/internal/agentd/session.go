@@ -152,6 +152,13 @@ func (s *Session) Resize(rows, cols uint16) error { return SetSize(s.pty, rows, 
 
 func (s *Session) Size() (WinSize, error) { return GetSize(s.pty) }
 
+// Wait blocks until the agent exits and reports how it went, so the process
+// holding this session can exit with it and leave systemd an honest status.
+func (s *Session) Wait() error {
+	<-s.done
+	return s.exitErr
+}
+
 func (s *Session) Running() bool {
 	select {
 	case <-s.done:

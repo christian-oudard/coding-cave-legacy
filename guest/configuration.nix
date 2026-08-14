@@ -1,11 +1,11 @@
 { config, pkgs, lib, modulesPath, claudeCode, ... }:
 
 let
-  # The socket cave-guestd serves on. /run, so a reboot cannot leave a stale
-  # one behind.
-  agentSocket = "/run/cave-agentd.sock";
+  # Where session sockets live, one per agent, named after it. /run, so a
+  # reboot cannot leave a stale one behind.
+  sessionDir = "/run/cave/sessions";
 
-  # cave-guestd: the daemon that owns each agent's pty, and the client that
+  # cave-guestd: the process that owns one agent's pty, and the client that
   # attaches to one. It replaced dtach, which held a pty but buffered nothing
   # and never resized a session to its attaching client, so every reattach
   # came back to a blank screen at the wrong width.
@@ -479,18 +479,27 @@ in
   };
 
   # --- The agent runtime ---
-  # claude as root with bypass permissions, its pty held by cave-guestd so it
-  # survives the ssh connection going away. Deliberately not a multiplexer:
-  # nothing here wants windows, panes, a status bar or a prefix key, and a
-  # multiplexer's scrollback is worse than the terminal's own. Defined here so
-  # the agent redeploys its own unit via nixos-rebuild.
-  # RestartIfChanged=false so a switch doesn't kill a live session.
-  systemd.services.vm-root-agent = {
-    description = "Bootstrap vm-root-agent (claude as root, under cave-guestd)";
+  # claude as root with bypass permissions, its pty held by a cave-guestd of
+  # its own so it survives the ssh connection going away. Deliberately not a
+  # multiplexer: nothing here wants windows, panes, a status bar or a prefix
+  # key, and a multiplexer's scrollback is worse than the terminal's own.
+  # Defined here so the agent redeploys its own unit via nixos-rebuild.
+  #
+  # A template, one instance per agent, because the alternative is one daemon
+  # holding every pty, and then its crashes, its OOM kills and its own upgrade
+  # all end every session at once. systemd is the only thing parenting an
+  # agent: `cave-guestd attach` starts an instance it cannot find rather than
+  # forking one, so nothing an agent is doing belongs to the ssh connection
+  # that went looking for it.
+  systemd.services."cave-session@" = {
+    description = "Agent session %i (claude as root, its pty held by cave-guestd)";
     after = [ "vsock-crinj.service" "seed-claude-config.service" "clone-repo.service" ];
     wants = [ "vsock-crinj.service" ];
     requires = [ "seed-claude-config.service" "clone-repo.service" ];
-    wantedBy = [ "multi-user.target" ];
+    # Still false, for the one case the split does not cover: this unit's own
+    # definition changing. A session is exactly what may not be restarted
+    # under a working agent, so a new binary reaches sessions started after
+    # the deploy, and the live ones keep the one they have.
     restartIfChanged = false;
     # Deliberately not a list of store paths. This unit is not restarted by a
     # switch, by design, so anything resolved when it started is frozen for as
@@ -535,20 +544,30 @@ in
       TERM = "xterm-256color";
     };
     serviceConfig = {
-      # The daemon stays in the foreground, so systemd tracks the real process
-      # rather than guessing a pid after a double fork. It starts the agent
-      # immediately, which is what makes the agent's own work independent of
-      # anyone being attached.
+      # The session process stays in the foreground and exits with its agent,
+      # so systemd tracks the real process and the unit's state is the
+      # session's state rather than a guess about a pid after a double fork.
       Type = "simple";
-      # The daemon's own path is pinned, because nothing can swap a process
-      # that is holding ptys. The agent's is not: the daemon execs it afresh
-      # for every session, so naming it through the current system means a new
-      # session picks up whatever the last deploy installed. Baking the store
-      # path here was a self-update bug -- the agent could rebuild its own
-      # system, activate it, and still launch the previous claude forever.
-      ExecStart = "${caveGuestd}/bin/cave-guestd serve -socket ${agentSocket} "
+      # The session process's own path is pinned, because nothing can swap a
+      # process that is holding a pty. The agent's is not: naming it through
+      # the current system means a session started after a deploy picks up
+      # whatever that deploy installed. Baking the store path here was a
+      # self-update bug -- the agent could rebuild its own system, activate
+      # it, and still launch the previous claude forever.
+      ExecStart = "${caveGuestd}/bin/cave-guestd session -id %i -dir ${sessionDir} "
         + "-- /run/current-system/sw/bin/cave-agent";
+      # An agent that exits stays exited. Coming back is someone asking for it
+      # again, which starts this unit afresh.
       Restart = "no";
     };
+  };
+
+  # The root agent is session 1, and is the one instance that starts by itself:
+  # it is doing work whether or not anyone attaches. Every other instance is
+  # created by an attach. A drop-in rather than a unit, so the template above
+  # stays the single definition of what a session is.
+  systemd.units."cave-session@1.service" = {
+    overrideStrategy = "asDropin";
+    wantedBy = [ "multi-user.target" ];
   };
 }
