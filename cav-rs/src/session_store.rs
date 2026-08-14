@@ -13,6 +13,7 @@
 //! the hardlink stays attached to the data being written.
 
 use anyhow::{Context, Result};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::config;
@@ -194,36 +195,74 @@ pub fn current_session(agent_id: &str, slug: &str, requested: Option<&str>) -> O
     }
 }
 
-/// Register every unregistered transcript belonging to an agent. Safe to call
-/// repeatedly: already-registered sessions are skipped, so a running session
-/// is not disturbed.
-pub fn register_agent_sessions(
-    agent_id: &str,
-    project: &str,
-    extra_projects: &[String],
-    branch: Option<&str>,
-) -> Result<usize> {
-    let claude_dir = workspace::agent_claude_dir(agent_id);
-    let mut n = 0;
-    for live in transcripts(&claude_dir) {
-        let Some(sid) = session_id_of(&live) else {
-            continue;
-        };
-        link_transcript(&live, &sid)?;
-        let rec = SessionRecord {
-            session_id: sid,
+/// Registers an agent's transcripts for the life of one launch.
+///
+/// The cave is polled every couple of seconds, so everything that does not
+/// change across a launch is resolved once, here: the agent's uuid (a
+/// registry read in itself), the project, the branch, and which sessions are
+/// already recorded. A steady-state pass is then a readdir and nothing else.
+/// Before, each pass opened a connection and took a write transaction per
+/// transcript to insert rows that were already there, against the same file
+/// `continue_agent_id` locks with BEGIN IMMEDIATE.
+pub struct Registrar {
+    claude_dir: PathBuf,
+    agent_id: String,
+    project: String,
+    extra_projects: Vec<String>,
+    branch: Option<String>,
+    seen: HashSet<String>,
+}
+
+impl Registrar {
+    pub fn new(
+        agent_id: &str,
+        project: &str,
+        extra_projects: &[String],
+        branch: Option<&str>,
+    ) -> Self {
+        Self {
+            claude_dir: workspace::agent_claude_dir(agent_id),
+            agent_id: agent_id.to_string(),
             project: project.to_string(),
             extra_projects: extra_projects.to_vec(),
-            agent_id: Some(agent_id.to_string()),
             branch: branch.map(str::to_string),
-            started_at: None,
-            ended_at: None,
-        };
-        if registry::register_session(&rec)? {
-            n += 1;
+            seen: HashSet::new(),
         }
     }
-    Ok(n)
+
+    /// Register every transcript this launch has not recorded yet, returning
+    /// how many were new. Safe to call repeatedly: a running session whose
+    /// record already exists is never touched.
+    ///
+    /// `seen` starts empty at each launch rather than persisting, so a crash
+    /// between the hardlink and the insert is repaired by the next launch's
+    /// first pass. A session joins it only once both halves have succeeded.
+    pub fn run(&mut self) -> Result<usize> {
+        let mut n = 0;
+        for live in transcripts(&self.claude_dir) {
+            let Some(sid) = session_id_of(&live) else {
+                continue;
+            };
+            if self.seen.contains(&sid) {
+                continue;
+            }
+            link_transcript(&live, &sid)?;
+            let rec = SessionRecord {
+                session_id: sid.clone(),
+                project: self.project.clone(),
+                extra_projects: self.extra_projects.clone(),
+                agent_id: Some(self.agent_id.clone()),
+                branch: self.branch.clone(),
+                started_at: None,
+                ended_at: None,
+            };
+            if registry::register_session(&rec)? {
+                n += 1;
+            }
+            self.seen.insert(sid);
+        }
+        Ok(n)
+    }
 }
 
 #[cfg(test)]
@@ -435,6 +474,34 @@ mod tests {
     fn purge_on_a_fresh_dir_is_not_an_error() {
         let c = tmp("purge-fresh");
         purge_launch_state(&c).unwrap();
+    }
+
+    /// The poll runs every two seconds for the life of the cave, so a session
+    /// it has already registered must cost no database work at all.
+    #[test]
+    fn a_registered_session_is_not_re_registered_by_the_next_pass() {
+        let g = crate::test_util::DataDirGuard::new("register-seen");
+        let aid = registry::acquire_agent_id(&g.path.join("proj")).unwrap();
+        transcript(&workspace::agent_claude_dir(&aid), "proj", "sess-poll", "line\n");
+        let mut registrar = Registrar::new(&aid, "proj", &[], None);
+        // Built while the registry is intact, since resolving the agent's
+        // uuid reads it. Stands in for the next launch's first pass.
+        let mut next_launch = Registrar::new(&aid, "proj", &[], None);
+
+        assert_eq!(registrar.run().unwrap(), 1);
+
+        // Deleting the registry is how a test observes "never opened it":
+        // any pass that reaches sqlite recreates the file on the way in.
+        let db = g.path.join("coding-cave.db");
+        assert!(db.is_file());
+        std::fs::remove_file(&db).unwrap();
+
+        assert_eq!(registrar.run().unwrap(), 0);
+        assert!(!db.exists(), "a known session still opened the registry");
+
+        // A launch that has not seen the session still records it, which is
+        // what repairs a crash between the hardlink and the insert.
+        assert_eq!(next_launch.run().unwrap(), 1);
     }
 
     #[test]

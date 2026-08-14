@@ -78,10 +78,21 @@ picker stays scoped to the agent's own sessions.
 
 ## Session registration
 
-A host-side watcher on `claude/agents/<agent_id>/projects/` registers each new
-`*.jsonl` as it appears: it writes the `sessions` row and hardlinks
-`sessions/<session_id>.jsonl` to the live inode. Both paths are under the data
-dir, so the link is always possible.
+A host-side poll of `claude/agents/<agent_id>/projects/`, every two seconds
+for the life of the cave, registers each new `*.jsonl` as it appears: it
+writes the `sessions` row and hardlinks `sessions/<session_id>.jsonl` to the
+live inode. Both paths are under the data dir, so the link is always possible.
+
+It polls rather than using inotify because transcripts land in per-project
+subdirectories that appear as the agent touches new projects, so inotify would
+need a watch on the parent plus one per subdirectory as they are created. The
+poll is cheap instead: everything fixed for a launch, the agent's uuid above
+all, is resolved once when the poll starts, and each pass skips the sessions
+this launch already recorded. A steady-state pass is a readdir and no database
+work at all, which matters because it shares the registry with the
+`BEGIN IMMEDIATE` in `continue_agent_id`. What a launch has recorded is not
+persisted, so a crash between the hardlink and the insert is repaired by the
+next launch's first pass.
 
 Consequences:
 

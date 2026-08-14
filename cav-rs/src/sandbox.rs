@@ -2933,10 +2933,10 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
         let extras = extra_slugs.clone();
         let branch = git::current_branch(Some(&workspaces[0].0)).ok();
         std::thread::spawn(move || {
-            let register = || {
-                if let Err(e) =
-                    session_store::register_agent_sessions(&aid, &primary, &extras, branch.as_deref())
-                {
+            let mut registrar =
+                session_store::Registrar::new(&aid, &primary, &extras, branch.as_deref());
+            let mut register = move || {
+                if let Err(e) = registrar.run() {
                     eprintln!(
                         "{} session registration failed: {e}",
                         style::bold_yellow("Warning:")
