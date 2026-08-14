@@ -99,7 +99,10 @@ enum Cmd {
         #[arg(long)]
         prompt: Option<String>,
     },
-    /// Approve agent work into base branch
+    /// Approve agent work into base branch.
+    ///
+    /// AGENT-ID may name a branch as `<agent-id>/<base>` when the agent has
+    /// pending work on more than one base.
     Approve {
         #[arg(value_name = "AGENT-ID")]
         args: Vec<String>,
@@ -383,12 +386,18 @@ fn run() -> Result<()> {
             })
         }
         Cmd::Approve { args, yes, commit } => {
-            let agent_id = parse_single_agent_arg(&args, "approve")?;
+            let (agent_id, agent_base) = parse_agent_arg(&args, "approve", true)?;
             // Actions stay in the current repo (redirect: false) so they never
             // touch a project the user didn't name.
             let base = resolve_base(agent_id.as_deref(), None, false)?;
             require_init(&base)?;
-            approve::approve(&base, agent_id.as_deref(), yes, commit.as_deref())
+            approve::approve(
+                &base,
+                agent_id.as_deref(),
+                agent_base.as_deref(),
+                yes,
+                commit.as_deref(),
+            )
         }
         Cmd::Reject { args, yes, commit } => {
             let agent_id = parse_single_agent_arg(&args, "reject")?;
@@ -761,9 +770,26 @@ fn parse_agent_id(s: &str) -> String {
 }
 
 fn parse_single_agent_arg(args: &[String], cmd: &str) -> Result<Option<String>> {
+    Ok(parse_agent_arg(args, cmd, false)?.0)
+}
+
+/// Parses the positional argument shared by approve and reject. With
+/// `allow_base`, an agent with pending work on several bases can be narrowed
+/// as `<agent-id>/<base>` (e.g. `18/develop`); the base may itself contain
+/// slashes, so only the first one separates.
+fn parse_agent_arg(
+    args: &[String],
+    cmd: &str,
+    allow_base: bool,
+) -> Result<(Option<String>, Option<String>)> {
     let mut agent_id: Option<String> = None;
+    let mut agent_base: Option<String> = None;
     for arg in args {
-        let candidate = parse_agent_id(arg);
+        let (head, base) = match arg.split_once('/') {
+            Some((head, base)) if allow_base && !base.is_empty() => (head, Some(base)),
+            _ => (arg.as_str(), None),
+        };
+        let candidate = parse_agent_id(head);
         if config::is_agent_id(&candidate) {
             if let Some(prev) = &agent_id {
                 bail!(
@@ -773,6 +799,7 @@ fn parse_single_agent_arg(args: &[String], cmd: &str) -> Result<Option<String>> 
                 );
             }
             agent_id = Some(candidate);
+            agent_base = base.map(str::to_string);
         } else if looks_like_hash(arg) {
             bail!(
                 "'{}' looks like a commit prefix. Did you mean: {}",
@@ -786,7 +813,7 @@ fn parse_single_agent_arg(args: &[String], cmd: &str) -> Result<Option<String>> 
             );
         }
     }
-    Ok(agent_id)
+    Ok((agent_id, agent_base))
 }
 
 fn looks_like_hash(s: &str) -> bool {
@@ -1060,6 +1087,37 @@ fn unix_to_ymdhm(secs: u64) -> (u64, u64, u64, u64, u64) {
         mo += 1;
     }
     (y, mo, days + 1, h, min)
+}
+
+#[cfg(test)]
+mod agent_arg_tests {
+    use super::*;
+
+    fn parse(arg: &str) -> (Option<String>, Option<String>) {
+        parse_agent_arg(&[arg.to_string()], "approve", true).unwrap()
+    }
+
+    #[test]
+    fn a_bare_id_names_no_branch() {
+        assert_eq!(parse("18"), (Some("18".into()), None));
+        assert_eq!(parse("coding-cave@18"), (Some("18".into()), None));
+    }
+
+    #[test]
+    fn a_slash_narrows_to_one_of_the_agents_branches() {
+        assert_eq!(parse("18/develop"), (Some("18".into()), Some("develop".into())));
+        // Base branches may contain slashes of their own.
+        assert_eq!(
+            parse("18/feature/wip"),
+            (Some("18".into()), Some("feature/wip".into()))
+        );
+    }
+
+    #[test]
+    fn reject_takes_the_id_alone() {
+        let args = ["18/develop".to_string()];
+        assert!(parse_agent_arg(&args, "reject", false).is_err());
+    }
 }
 
 #[cfg(test)]

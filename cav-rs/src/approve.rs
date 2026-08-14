@@ -17,6 +17,7 @@ type Candidate = (String, String, String);
 pub fn approve(
     base: &Path,
     agent_id: Option<&str>,
+    agent_base: Option<&str>,
     yes: bool,
     commit: Option<&str>,
 ) -> Result<()> {
@@ -47,6 +48,9 @@ pub fn approve(
             }
             has_any_agent_branches = true;
             let base_name = resolve_base(rb.clone());
+            if agent_base.is_some_and(|b| b != base_name) {
+                continue;
+            }
             let remote_dev = format!("{CAVE_SHARED_REMOTE}/{rb}");
             let remote_base = format!("{CAVE_SHARED_REMOTE}/{base_name}");
             let has_base = git::git(
@@ -71,6 +75,14 @@ pub fn approve(
     sort_candidates(&mut candidates);
 
     if candidates.is_empty() {
+        if let (Some(aid), Some(agent_base)) = (agent_id, agent_base) {
+            bail!(
+                "No commits to approve for agent {} on {} in {}.",
+                style::bold(aid),
+                style::yellow(agent_base),
+                style::blue(&slug),
+            );
+        }
         if let Some(aid) = agent_id {
             let hint = registry::other_project_hint(base, aid)
                 .map(|h| format!("\n{h}"))
@@ -356,13 +368,15 @@ fn pick_candidate(
     if yes {
         let ids: Vec<&str> = groups.iter().map(|(aid, _)| aid.as_str()).collect();
         if let [aid] = ids.as_slice() {
+            let bases: Vec<&str> =
+                groups[0].1.iter().map(|(_, b, _)| b.as_str()).collect();
             bail!(
-                "Agent {} has {} branches with pending work in {}.\n\
-                 Approve interactively (without {}) to pick one.",
+                "Agent {} has pending work on {} in {}: {}\nSpecify which: {}",
                 style::bold(aid),
-                style::bold(&groups[0].1.len().to_string()),
+                count(bases.len(), "branch", "branches"),
                 style::blue(slug),
-                style::bold_cyan("-y"),
+                style::yellow(&bases.join(", ")),
+                style::bold_cyan(&format!("cav approve {aid}/<base>")),
             );
         }
         bail!(

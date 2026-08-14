@@ -374,6 +374,50 @@ fn approve_menu_lists_each_agent_once_then_asks_which_branch() {
 }
 
 #[test]
+fn approve_takes_agent_id_slash_base_without_a_prompt() {
+    let p = Project::new("approve-id-slash-base");
+    p.register_agent("1");
+    git(&["checkout", "-b", "develop"], &p.dir);
+    git(&["push", "cave", "develop"], &p.dir);
+    git(&["checkout", "main"], &p.dir);
+    git(&["fetch", "cave"], &p.dir);
+    p.push_agent_commits("1", "main", &[("a.txt", "A\n")]);
+    p.push_agent_commits("1", "develop", &[("b.txt", "B\n")]);
+    git(&["checkout", "-b", "side"], &p.dir);
+
+    // Without a base, -y can't choose, and says how to.
+    let out = p.cav(&["approve", "-y", "1"]);
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_ne!(out.status.code(), Some(0), "should refuse to guess: {err}");
+    assert!(
+        err.contains("cav approve 1/<base>"),
+        "should point at the branch syntax: {err}"
+    );
+
+    let out = p.cav(&["approve", "-y", "1/develop"]);
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(out.status.code(), Some(0), "approve failed: {combined}");
+    assert!(
+        !p.shared_has_ref("refs/heads/agent-1/develop"),
+        "agent-1/develop should be approved and deleted: {combined}"
+    );
+    assert!(
+        p.shared_has_ref("refs/heads/agent-1/main"),
+        "agent-1/main should be untouched: {combined}"
+    );
+
+    // A base the agent has no pending work on is an error, not a fallback.
+    let out = p.cav(&["approve", "-y", "1/nope"]);
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_ne!(out.status.code(), Some(0), "should not fall back: {err}");
+    assert!(err.contains("nope"), "error should name the branch: {err}");
+}
+
+#[test]
 fn full_approve_removes_agent_branch_everywhere() {
     let p = Project::new("full-approve");
     p.push_agent_commits("1", "main", &[("a.txt", "A\n")]);

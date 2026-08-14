@@ -103,9 +103,9 @@ With `--comms`, enable inter-agent communication: the agent gets a `send_message
 
 All caves are recursive. Agents can launch sub-caves for testing coding-cave features.
 
-### `cav approve [agent-id] [--commit <SHA>]`
+### `cav approve [agent-id[/base]] [--commit <SHA>]`
 
-Approves an agent's work and fast-forwards the canonical base branch to the tip of the agent's branch. Specify which agent ID number to approve, or the agent ID is inferred from the currently checked-out agent branch. Approval errors out if the merge is not a fast-forward (the agent must rebase first). To process an approval, the command advances the base branch on both the cave remote and the host repo.
+Approves an agent's work and fast-forwards the canonical base branch to the tip of the agent's branch. Specify which agent ID number to approve, or the agent ID is inferred from the currently checked-out agent branch. An agent with pending work on more than one base branch is asked which branch after the agent is chosen, or is given the branch up front as `<agent-id>/<base>`. Approval errors out if the merge is not a fast-forward (the agent must rebase first). To process an approval, the command advances the base branch on both the cave remote and the host repo.
 
 With `--commit SHA`, approve only up to that commit (partial approval). The dev branch is preserved with remaining commits for a future approval.
 
