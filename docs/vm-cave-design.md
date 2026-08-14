@@ -530,7 +530,7 @@ the archive permanent by hardlinking the live inode. There is no mount here,
 so the bytes have to cross, and a second inode on the host cannot be the same
 inode.
 
-### The mirror is append-only, and the host does the naming
+### Copying records out, with the host doing the naming
 
 Who does what, since it is spread over four pieces and only one of them is
 new:
@@ -538,38 +538,33 @@ new:
 - **claude**, in the guest, writes its transcript where it always does.
   Nothing intercepts it.
 - **`cave-guestd`**, in the guest, as one-shot commands rather than a
-  service: list `(uuid, length)`, write one record from a given offset to
+  service: list the agent's `(uuid, length)` pairs, write one record to
   stdout, and read one on stdin into the path claude expects for this cwd.
   Stateless and dumb, so there is no lifetime to manage and it answers
   whether or not a session is live.
-- **The host supervisor** drives it, at the checkpoints below: validates,
-  appends, never replaces. Every naming and every write is here.
+- **The host supervisor** drives it, at the checkpoints below. Every naming
+  and every write is here.
 - **The registry** holds the row, in `main`'s existing `sessions` table.
 
 The per-session process has no part in this. It owns a pty and nothing else,
-which is also what keeps the mirror working after an agent has exited.
+which is also what keeps checkpoints working after an agent has exited.
 
-The obvious mechanism, rsync over the ssh path `deploy` already uses, is
-wrong, and the reason generalizes. In a pull it is the *sender* that supplies
-the file list, so a compromised guest chooses the names and the bytes that
-land under the destination; rsync has a history of exactly that, malicious
-senders escaping the destination directory. Even a flawless rsync leaves a
-guest able to overwrite records already in the archive, which defeats the
-only reason the archive exists. A push is the same thing with the direction
-reversed, and needs a writable path into the host besides. This is a
-read-write mount wearing a different hat.
+**The tool is ssh, the same path `deploy` uses, one file at a time.** Not
+rsync and not tar, and the reason generalizes to any batch copier: they work
+by letting the *sender* describe the filesystem, so a compromised guest would
+choose the names and the bytes that land under the destination. rsync has a
+history of exactly that, malicious senders escaping the destination
+directory, and a pushing guest additionally needs a writable path into the
+host. Either way it is a read-write mount wearing a different hat.
 
-So the guest names nothing:
-
-- The host asks for a list of `(session id, length)` and discards any id that
-  is not a UUID, so there are no paths in the protocol at all.
-- For each, if the host holds fewer bytes, it asks for that record from its
-  own offset and appends what it gets.
-- It never truncates and never replaces. If the prefix it holds stops
-  matching, it keeps what it has and files the divergent copy away from the
-  records, under `sessions/diverged/`, so a guest that rewrites or lies costs
-  disk rather than history. Deletion is a host-side human act, never
-  something the guest can cause.
+So the guest names nothing. The host asks for a list, discards any id that is
+not a UUID, and then constructs both the source path and the destination
+itself, which leaves no paths in the protocol at all. It fetches into a temp
+file, and moves it into place only if it is at least as long as the record
+already held; a shorter or divergent copy is kept aside instead, so the one
+realistic corruption path, copying a truncated guest file over a good record,
+cannot destroy anything. Deletion is a host-side human act, never something
+the guest can cause.
 
 The stem of a record file is the session id, and stays the session id
 everywhere: `sessions/<uuid>.jsonl` on the host, and the same name when it is
@@ -578,36 +573,31 @@ restored into a guest. claude finds resumable sessions by scanning
 both `--resume <uuid>` and the picker inside the cave depend on that name
 surviving the round trip. Only the directory is derived, from the cwd the
 session will run in, which is why the guest computes it and the host never
-needs to know guest paths. This is also why a divergent copy cannot live
-beside the records: `<uuid>.1.jsonl` is not a session id, and restoring one
-would produce a transcript nothing can resume.
+needs to know guest paths. It is also why a copy kept aside cannot sit beside
+the records: `<uuid>.1.jsonl` is not a session id, and restoring one would
+produce a transcript nothing can resume.
 
-It must not rest on our own code being right either, which is the same
-requirement pointed the other way, and it costs four rules:
+Two properties to keep, both about not depending on things being right:
 
 - **The archive is claude's own file, unwrapped.** No container format, no
-  compression, no chunking, no index file that can go stale. The worst a bug
-  can do is fail to add bytes, never transform them, and a record stays
-  readable with `cat` and resumable by copying it into a guest by hand.
+  compression, no chunking, no index file that can go stale, and no backup
+  tool wrapping it. `~/.local/share/coding-cave` is already covered by
+  whatever backs up a home directory, which is the reason it lives there, so
+  versioning and retention are solved outside this code; git, restic and borg
+  were all considered and all lose more than they add (git cannot prune from
+  the middle without rewriting history, restic and borg make every read a
+  restore, and restic's mandatory encryption adds a key that can be lost).
+  The worst a bug here can do is fail to copy bytes, never transform them.
 - **The filesystem is the index.** Flat directory, filename is the uuid, so a
   record is findable with `ls` with no database at all. The registry rows
   carry project, agent and branch; losing them costs metadata, not
   findability.
-- **Whole lines only.** The host commits up to the last newline it received
-  and re-requests from there, so a short read, a dropped connection or a
-  crash mid-transfer still leaves a file that is a sequence of complete
-  lines. Trimming our own partial tail back to a newline is the one
-  truncation allowed, and is a different act from replacing a record.
-- **Failures lag, they do not lose.** The guest keeps its copy until a
-  reformat, so a mirror that is broken or wrong is repaired by fixing the
-  code and syncing again. Staleness therefore has to be visible rather than
-  silent.
 
-The result is append-only in the real sense, and it does not rest on the guest
-behaving: an agent that rewrites another agent's transcript inside the VM
-cannot touch a byte the host already holds. Keeping agents out of each other's
-transcripts *inside* the guest is worth having to limit the damage there, and
-is uid separation or per-agent binds, which is the multi-agent item.
+Neither rests on the guest behaving: an agent that trashes another agent's
+transcript inside the VM cannot shorten or replace what the host already
+holds. Keeping agents out of each other's transcripts *inside* the guest is
+worth having to limit the damage there, and is uid separation or per-agent
+binds, which is the multi-agent item.
 
 `main` is weaker here and says so: a cave can truncate its own live transcript
 in place, mutating the shared inode, which its doc lists under "not covered".
@@ -630,8 +620,8 @@ have anyway. A slow safety net, a quarter hour rather than five seconds,
 covers the agent that runs for a week without exiting, whose history is worth
 the most and would otherwise have no checkpoint in it.
 
-None of the protocol above changes with the schedule: the same two verbs, the
-same host-side naming, the same append-only rule.
+Nothing above changes with the schedule: the same verbs, the same host-side
+naming, the same refusal to replace a record with a shorter one.
 
 ### Restoring into a guest
 
@@ -650,17 +640,18 @@ guest.
 able to append to any transcript is exactly the interleaving it exists to
 prevent, and ownership comes from the sessions table.
 
-Memory is not per-session and cannot ride this. It is per-project, shared, has
-to exist before the agent starts, and its files are rewritten rather than
-appended. `main`'s answer stands (slug-named files that union, `MEMORY.md`
-regenerated from frontmatter so a lost concurrent write self-heals); what the
-VM adds is that it is the one surface where guest-chosen bytes overwrite a
-host file, so it is the one that needs a rule of its own.
+Memory is not per-session and needs its own rule. It is per-project, shared
+between agents, has to exist before an agent starts, and its files are
+rewritten rather than grown, so the length check that protects a transcript
+says nothing useful about it. `main`'s answer stands (slug-named files that
+union, `MEMORY.md` regenerated from frontmatter so a lost concurrent write
+self-heals); what the VM adds is that memory is the one surface where
+guest-chosen bytes legitimately overwrite a host file.
 
 The store stays on the guest disk, so redownload-and-rebuild remains the cost
 of a reformat. Uncommitted work in a worktree is the one thing that cannot
-ride this, being a whole mutable checkout rather than an append-only file; it
-stays open, as the first entry in the todo doc.
+ride any of this, being a whole mutable checkout rather than a file that only
+grows; it stays open, as the first entry in the todo doc.
 
 ## Prior art: containerd and Kata Containers
 

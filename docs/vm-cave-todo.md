@@ -45,7 +45,7 @@ broken bootstrap forces you to run.
 
 Still open, and now the only thing in this file that is. Session state moved
 to the host (`vm-cave-design.md`), but a worktree cannot follow it: it is a
-whole mutable checkout, not an append-only file that streams over the plane.
+whole mutable checkout, not a file that only grows and copies out cleanly.
 So a dirty worktree is still the one thing a reformat destroys.
 
 Open: what to preserve and where. A pre-reformat WIP commit on the agent's
@@ -63,9 +63,10 @@ reboot-to-test-a-generation loop, which is the same problem seen from a
 different side.
 
 Settled in `vm-cave-design.md`, and no longer open: sessions are host state,
-in `main`'s existing layout and `sessions` table, mirrored out of the guest
-append-only with the host doing all the naming. What is left is building it,
-which is a list verb, a read-from-offset verb, and a host-side loop.
+in `main`'s existing layout and `sessions` table, copied out of the guest at
+checkpoints with the host doing all the naming. What is left is building it,
+which is a list verb, a read verb, a write verb for restore, and the
+checkpoint triggers.
 
 ## Agent hibernation
 
