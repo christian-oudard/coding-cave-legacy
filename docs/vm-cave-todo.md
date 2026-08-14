@@ -35,19 +35,23 @@ The agent is told to commit early, but "the tool eats your work if you
 forget" is not a workable contract, and reformat is the one command a
 broken bootstrap forces you to run.
 
-Open: what to preserve and where. A pre-reformat WIP commit on the agent's
-own branch is the cheapest, and pollutes the branch. A bundle or patch
-series parked in the host state dir keeps the branch clean, and invents a
-second place work can live. Also unresolved whether this belongs to
-reformat at all, or is a guest-side habit (autocommit unit, periodic push).
+Answered by the state-disk split in `vm-cave-design.md`: worktrees live on
+the disk reformat keeps, so uncommitted work survives without a WIP commit,
+a bundle, or a host-side copy. What remains is the case the split does not
+cover, the louder command that destroys both disks, where the same work is
+back on the table.
 
 ## Session management
 
-The agent's claude session lives in the pty cave-guestd holds and in
-`/root/.claude` on the guest disk, so it dies with a reformat and cannot be
-resumed from the host. `vm-root-agent.md` already needs a resume marker for
-the reboot-to-test-a-generation loop, which is the same problem seen from a
+The agent's claude session lives in the pty cave-guestd holds and in the
+home directory on the guest disk, so it cannot be resumed from the host.
+`vm-root-agent.md` already needs a resume marker for the
+reboot-to-test-a-generation loop, which is the same problem seen from a
 different side.
+
+The state-disk split settles the durability half: the logs and memory are on
+the disk reformat keeps, so what is missing is only the id and the resume,
+not the history.
 
 Open: whether sessions are host-visible at all (the container cave tracks
 them in the registry: session id per agent, `cav status`, resume by id), and
@@ -82,19 +86,19 @@ Open, and genuinely undecided:
 - What a redeploy does to hibernated agents. An in-guest `nixos-rebuild
   switch` restarts units under a live agent, and a kernel change means a
   reboot; whether hibernation is what makes those safe, or is orthogonal.
-- What survives a reformat. Today, nothing: the sessions live on the disk
-  that reformat destroys.
+- What survives a reformat. Answered: the sessions live on the state disk,
+  which reformat keeps.
 
 ## Memory management
 
 Nothing carries `~/.claude/` memory into or out of the guest. The host seeds
-`claude.json` only, so an agent starts with no memory of previous sessions
-and loses whatever it accumulates at the next reformat.
+`claude.json` only, so an agent starts with no memory of previous sessions.
 
-Open: whether guest memory is seeded from the host's, kept separate per VM,
-or committed to the repo like a project's `CLAUDE.md`. The login has the same
-shape of problem and is already solved the crude way: reformat copies it out
-of the guest first and seeds it back, which memory could do too.
+Losing it at reformat is answered by the state disk. What is still open is
+whether guest memory has anything to do with the host's at all: seeded from
+it, kept separate per VM, or committed to the repo like a project's
+`CLAUDE.md`. The crude login copy that reformat does today goes away with
+the same split, so it is no longer the precedent to copy.
 
 ## Multiple agents per VM
 

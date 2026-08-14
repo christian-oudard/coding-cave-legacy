@@ -418,11 +418,49 @@ none. Setting `system.configurationRevision` gives each generation the cav
 commit it was built from, which the host can read straight off the disk, since
 that is where `start` already reads the system profile.
 
-Open: whether `cave.nix` applies as a home-manager profile linked into cave
-homes, which cannot break the machine, or as part of the system generation,
-which is one config and one activation; and what triggers an upgrade of cav's
-own guest system, the cav package changing under it, the next `start`, or a
-command of its own.
+### Two owners, one activation
+
+home-manager comes in as a NixOS module for the `coder` user, so there is one
+`nixos-rebuild` with two inputs that are owned differently:
+
+- The **system** config is cav's, and lives only in the coding-cave repo.
+  There is no end-user customization of it, which is what keeps cav's default
+  and a user's preferences from ever needing a merge. An agent changes it the
+  way `vm-root-agent.md` already describes, from a checkout of that repo,
+  deploying itself, and the push out of the guest goes through the same
+  approval gate as any other work.
+- The **home** config is `cave.nix`, arriving by the sync above. Packages can
+  come from either side; nothing forces a user into the home-manager API,
+  and nothing takes it away from a `cave.nix` already written against it.
+
+home-manager was never a preference on `main`, it was the only mechanism
+available: cav there runs on whatever distro the host is and cannot configure
+a system it does not own. In the guest that constraint is gone, so
+`environment.systemPackages` is the simpler default for anything that is not
+per-user dotfiles.
+
+Open: what triggers an upgrade of cav's own guest system, the cav package
+changing under it, the next `start`, or a command of its own.
+
+### What a reformat may not destroy
+
+`reformat` must cost packages and build time and nothing else. Memories,
+session logs, the guest's login and any uncommitted work have to survive it.
+
+That is a disk boundary, not a list of files to copy at the last moment: a
+second virtio-blk device holds `/home` and the guest's state dir, and
+`reformat` recreates only the system disk. The store stays with the system,
+which is what makes redownload-and-rebuild the actual and only cost. The
+agent registry is host-side already, and anything pushed to `cave-shared` is
+on the host already, so neither needs a mechanism.
+
+This deletes the host-side capture of the guest's login and claude config
+entirely, and with it the channel red team finding 4 describes: the login
+stops crossing the boundary because it never leaves the disk it lives on.
+
+The cost is that reformat stops being the cure for a broken guest when what
+is broken is on the disk it now keeps. That wants a second, louder command
+that takes both disks, not a flag on the everyday one.
 
 ## Prior art: containerd and Kata Containers
 
