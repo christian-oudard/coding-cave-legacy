@@ -245,11 +245,21 @@ and which no competitor's product can be configured into:
   only.
 - **Inter-agent comms.** Docker forbids it outright between sandboxes.
 
-The reframe worth holding onto: the VM has been treated as an isolation
-upgrade, but on Linux bwrap already gives caves. What the VM actually buys is
-**macOS support and the one-store model**, neither of which any product on
-the market can supply. Out-hardening Docker is not the point and not
-achievable on their budget.
+The reframe this section was written around, that on Linux bwrap already gives
+caves so the VM buys only macOS support and the one-store model, no longer
+holds. copy.fail and dirty-frag settled it: bwrap is not the host boundary
+any more, because the host boundary may not be a kernel one. The VM is the
+boundary on every platform, and there is no second backend to keep
+sandbox-agnostic.
+
+What survives is that out-hardening Docker is not the point and not
+achievable on their budget. The store and the coordination gate are still the
+things nobody else has.
+
+bwrap does not disappear: inside the guest it is still what separates caves
+from each other. That is now a blast-radius choice, where an escape reaches
+the other agents in one VM, and no longer the thing standing between an agent
+and the host.
 
 So: keep the VMM layer boring and small (two process-backends, skip Windows),
 stop treating cold boot as a headline metric since one VM per host boot means
@@ -259,9 +269,7 @@ over 1-3. Phase 4's acceptance check, building a host-present package in the
 guest with zero internet bytes, is the demo no competitor can reproduce. Land
 the git bridge (phase 7) early, since the approval gate is the thesis.
 
-The strongest argument against all of this, worth answering rather than
-ignoring: make cave sandbox-agnostic instead, keep bwrap on Linux, use `sbx`
-or Apple's `container` on macOS, and spend everything on coordination, comms
-and nix. Far less code. It fails on exactly one point, that the shared store
-needs one VM, so it would mean accepting per-agent stores on macOS and shared
-on Linux.
+Closed: the argument for staying sandbox-agnostic, keeping bwrap on Linux and
+using `sbx` or Apple's `container` on macOS. It was far less code and it
+always failed on the shared store needing one VM; it now also fails on the
+boundary itself, which is the point above.
