@@ -549,13 +549,20 @@ new:
 The per-session process has no part in this. It owns a pty and nothing else,
 which is also what keeps checkpoints working after an agent has exited.
 
-**The tool is ssh, the same path `deploy` uses, one file at a time.** Not
-rsync and not tar, and the reason generalizes to any batch copier: they work
-by letting the *sender* describe the filesystem, so a compromised guest would
-choose the names and the bytes that land under the destination. rsync has a
-history of exactly that, malicious senders escaping the destination
-directory, and a pushing guest additionally needs a writable path into the
-host. Either way it is a read-write mount wearing a different hat.
+**The tool is ssh, the same path `deploy` uses, one file at a time.** What is
+disqualified is any batch copier over a *directory*, rsync and tar alike: they
+work by letting the sender describe the filesystem, so a compromised guest
+would choose the names that land under the destination, which rsync has a
+history of being escaped through, and a pushing guest additionally needs a
+writable path into the host. Either way that is a read-write mount wearing a
+different hat.
+
+Per-file rsync with an explicit destination path is not disqualified, since
+then the host names both ends; it is merely pointless. Its delta is the only
+thing it adds, and over vsock to a VM on this machine, copying a single-digit
+megabyte transcript whole takes milliseconds. If transcripts grow an order of
+magnitude or a guest ever sits across a real network, it becomes the right
+call, and the host already constructs both paths, so it is a one-line change.
 
 So the guest names nothing. The host asks for a list, discards any id that is
 not a UUID, and then constructs both the source path and the destination
