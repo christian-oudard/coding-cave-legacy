@@ -112,6 +112,7 @@ func NewPaths(state string) Paths {
 }
 
 func (p Paths) PidFile() string   { return filepath.Join(p.State, "vm.pid") }
+func (p Paths) LockFile() string  { return filepath.Join(p.State, "vm.lock") }
 func (p Paths) RunScript() string { return filepath.Join(p.State, "run-vm.sh") }
 func (p Paths) API() string       { return p.Sock + ".api" }
 func (p Paths) Vsock() string     { return p.Sock + ".vsock" }
@@ -149,6 +150,80 @@ func Pick() (Backend, error) {
 	return nil, fmt.Errorf("no VMM backend for %s", runtime.GOOS)
 }
 
+// One cave VM per machine. The state dir is the VM's identity, and it is
+// reachable from more than one place: caves share a home, so the same
+// directory is visible to the host and to every cave on it.
+//
+// A pidfile cannot enforce this. Pids are per namespace, so a supervisor in a
+// cave asks kill(pid, 0) about a host pid, is told nothing is there, and
+// starts a second VMM on a disk that is already open. The first symptom is the
+// VMM's own disk lock, by which point the pidfile has already been overwritten
+// and the running VM can no longer be stopped by the supervisor that owns it.
+//
+// flock lives in the filesystem rather than in a process table, so it answers
+// the question that is actually being asked: is this state dir in use, by
+// anyone, anywhere on this machine.
+func Lock(p Paths) (*os.File, error) {
+	if err := os.MkdirAll(p.State, 0o755); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(p.LockFile(), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("another supervisor is already running this VM (%s).\n"+
+			"  One cave VM per machine: the state dir is shared, so this may be a\n"+
+			"  cave other than the one you are in, or the host itself", p.State)
+	}
+	return f, nil
+}
+
+// diskInUse reports whether some process already has the guest disk open for
+// writing. This is a second, independent check, and it is not redundant: the
+// lock above is only seen by supervisors that take it, so it cannot see a VM
+// started by an older vmcav, or by anything that is not this binary.
+//
+// It has to be a POSIX record lock rather than flock. Cloud Hypervisor takes
+// its disk lock with fcntl(F_SETLK), and on Linux the two kinds do not see
+// each other at all: an flock probe of a disk CHV is holding succeeds, which
+// would make this check quietly useless. Verified by probing a live VM's disk
+// both ways.
+//
+// The probe takes the lock and drops it immediately, so it never contends with
+// the VMM that is about to start.
+func diskInUse(path string) bool {
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	lk := syscall.Flock_t{Type: syscall.F_WRLCK, Whence: io.SeekStart}
+	if syscall.FcntlFlock(f.Fd(), syscall.F_SETLK, &lk) != nil {
+		return true
+	}
+	lk.Type = syscall.F_UNLCK
+	syscall.FcntlFlock(f.Fd(), syscall.F_SETLK, &lk)
+	return false
+}
+
+// Locked reports whether anyone holds the VM, without taking it. Probing costs
+// a lock and an unlock, which is racy by nature; it is for reporting, and Lock
+// is what start relies on.
+func Locked(p Paths) bool {
+	f, err := os.OpenFile(p.LockFile(), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	if syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
+		return true
+	}
+	syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	return false
+}
+
 // Start launches the VM detached and returns once the VMM is up. It does not
 // wait for the guest to boot: that is the caller's business, and the caller has
 // better ways to ask (ssh, a health endpoint) than this package does.
@@ -158,14 +233,34 @@ func Pick() (Backend, error) {
 // the VMM gets its own session and the only thing tying the two together is the
 // pidfile plus the control socket.
 func Start(b Backend, s Spec, p Paths) (int, error) {
-	if pid, ok := Running(b, p); ok {
+	if pid, ok := Running(b, s, p); ok {
+		// Ours, already up: nothing to do. Someone else's is not a success,
+		// and saying so with a pid of 0 would hand the caller a number that
+		// every kill reads as its own process group.
+		if pid == 0 {
+			return 0, fmt.Errorf("this VM is already running under another supervisor")
+		}
 		return pid, nil
 	}
 	if err := b.Check(); err != nil {
 		return 0, err
 	}
-	if err := os.MkdirAll(p.State, 0o755); err != nil {
+	// Taken before anything is written, so a refused start changes nothing.
+	lock, err := Lock(p)
+	if err != nil {
 		return 0, err
+	}
+	// The VMM inherits the lock and holds it for exactly as long as it runs.
+	// flock belongs to the open file description, not to a process, so this
+	// copy can close while the VMM's keeps the lock held, and the lock is
+	// released by the kernel when the VMM exits however it exits.
+	defer lock.Close()
+	// Still before any side effect: the VMM would discover this itself and
+	// die, but only after the pidfile had been overwritten, which is what
+	// makes the VM that is actually running unstoppable by its own supervisor.
+	if len(s.Disks) > 0 && diskInUse(s.Disks[0].Path) {
+		return 0, fmt.Errorf("the guest disk is already open by a running VM (%s).\n"+
+			"  One cave VM per machine, and this one was not started from here", s.Disks[0].Path)
 	}
 	clearOwnedSockets(b, s, p)
 
@@ -186,6 +281,7 @@ func Start(b Backend, s Spec, p Paths) (int, error) {
 
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Stdout, cmd.Stderr = log, log
+	cmd.ExtraFiles = []*os.File{lock}
 	pid, err := StartDetached(cmd)
 	if err != nil {
 		return 0, fmt.Errorf("starting %s: %w", b.Name(), err)
@@ -195,8 +291,12 @@ func Start(b Backend, s Spec, p Paths) (int, error) {
 	}
 	// A VMM that fails on its argv dies in well under a second, and reporting
 	// success for it would push the failure into whatever ran next.
+	//
+	// ourVMM, not Running: we are holding the lock, so Running would see it,
+	// call that a live VM, and report a launch that already failed as a
+	// success.
 	time.Sleep(300 * time.Millisecond)
-	if _, ok := Running(b, p); !ok {
+	if _, ok := ourVMM(b, p); !ok {
 		return 0, fmt.Errorf("%s exited immediately; see %s and %s",
 			b.Name(), filepath.Join(p.State, b.Name()+".log"), s.Console)
 	}
@@ -262,11 +362,37 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// Running reports the VMM's pid. A live pid is not enough on its own: once the
-// VMM exits the pidfile outlives it and the kernel eventually hands that number
-// to something else, which then reads as a running VM until the first vsock
-// connection fails in a confusing way. So confirm the process is still ours.
-func Running(b Backend, p Paths) (int, bool) {
+// Running reports whether a VM is up and, when it is ours to act on, its pid.
+// A pid of 0 with true means a VM is running under a supervisor this process
+// cannot see: the lock is held, but the pidfile names a process in another
+// namespace. Callers must not signal a pid of 0, which the kernel reads as the
+// whole process group.
+// Callers that already hold the lock must not use this: flock conflicts
+// between open file descriptions rather than processes, so a second probe from
+// inside Start sees Start's own lock and reports a VM that may have died.
+func Running(b Backend, s Spec, p Paths) (int, bool) {
+	if pid, ours := ourVMM(b, p); ours {
+		return pid, true
+	}
+	// No process of ours, but either of these settles it. The lock catches
+	// another cave-vm; the disk catches a VM this binary did not start, which
+	// is what a status that only knew about the lock would call "stopped"
+	// while a VM was plainly running.
+	if Locked(p) {
+		return 0, true
+	}
+	if len(s.Disks) > 0 && diskInUse(s.Disks[0].Path) {
+		return 0, true
+	}
+	return 0, false
+}
+
+// ourVMM reports the pid only when this process could actually signal it. A
+// live pid is not enough on its own: once the VMM exits the pidfile outlives it
+// and the kernel eventually hands that number to something else, which then
+// reads as a running VM until the first vsock connection fails in a confusing
+// way. So confirm the process is still ours.
+func ourVMM(b Backend, p Paths) (int, bool) {
 	raw, err := os.ReadFile(p.PidFile())
 	if err != nil {
 		return 0, false
@@ -330,10 +456,18 @@ func consoleHalted(path string) bool {
 // timeout is generous because the guest is unmounting a real filesystem, and
 // the failure mode of being impatient here is a disk that needs fsck.
 func Stop(b Backend, s Spec, p Paths, timeout time.Duration) error {
-	pid, ok := Running(b, p)
+	pid, ok := Running(b, s, p)
 	if !ok {
 		cleanup(b, s, p)
 		return nil
+	}
+	// Someone else's VM. Refusing is not caution, it is correctness twice
+	// over: every kill below would be kill(0), which signals our own process
+	// group rather than the VM, and cleanup would delete the sockets the live
+	// VM is still serving.
+	if pid == 0 {
+		return fmt.Errorf("this VM is running under another supervisor and cannot be\n" +
+			"  stopped from here; stop it where it was started")
 	}
 	if err := b.Shutdown(p); err != nil {
 		fmt.Fprintf(os.Stderr, "cave-vm: power-down request failed: %v\n", err)

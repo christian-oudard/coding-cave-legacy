@@ -104,8 +104,8 @@ print(int(cfg.get("vm", {}).get("disk_size_gb", 100)) * 1024)
 PY
 }
 
-vm_pid() { cave-vm running --state "$STATE_DIR" 2>/dev/null || true; }
-is_running() { cave-vm running --state "$STATE_DIR" >/dev/null 2>&1; }
+vm_pid() { cave-vm running --state "$STATE_DIR" --disk "$DISK" 2>/dev/null || true; }
+is_running() { cave-vm running --state "$STATE_DIR" --disk "$DISK" >/dev/null 2>&1; }
 
 # vmcav's tools come from the dev shell (flake.nix devShell). Fail early with
 # guidance rather than silently running degraded. The VMM itself is not in this
@@ -392,8 +392,18 @@ do_status() {
   # the ref moves in silence. Status is where you find out one arrived, and it
   # says so with the VM stopped too, because the work arrived either way.
   if ! is_running; then echo "vm: stopped"; cave_vm pending || true; return 0; fi
+  # An empty pid means the VM is running under a supervisor this side cannot
+  # see: another cave, or the host. Say so rather than printing a pid nobody
+  # can use, and do not go on to ask the guest questions -- the ssh path here
+  # belongs to whoever started it.
   local p; p=$(vm_pid)
-  local since; since=$(ps -o lstart= -p "$p" 2>/dev/null | sed 's/^ *//')
+  if [ -z "$p" ]; then
+    echo "vm: running, started elsewhere on this machine (one cave VM per machine)"
+    echo "  stop it where it was started; this side cannot reach its sockets"
+    cave_vm pending || true
+    return 0
+  fi
+  local since; since=$(ps -o lstart= -p "$p" 2>/dev/null | sed 's/^ *//' || true)
   echo "vm: running (pid $p, since ${since:-?})"
   # Which generation it is on is status, not version: the host boots one
   # toplevel and the agent's nixos-rebuild moves the guest off it in place.
@@ -768,7 +778,7 @@ do_stop() {
   # The guest's login is deliberately not taken here: reformat is the only
   # thing about to destroy the disk it lives on, so it is the only thing that
   # reaches in for it.
-  cave-vm stop --state "$STATE_DIR" || true
+  cave-vm stop --state "$STATE_DIR" --disk "$DISK" || true
   stop_git_daemon; stop_gpg_broker
 }
 

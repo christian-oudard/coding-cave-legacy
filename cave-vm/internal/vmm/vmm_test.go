@@ -303,6 +303,196 @@ func TestStartClearsOnlyItsOwnSockets(t *testing.T) {
 	}
 }
 
+// One cave VM per machine, enforced with a filesystem lock rather than a
+// pidfile, because caves share a home and pids do not cross namespaces.
+func TestLockRefusesASecondSupervisor(t *testing.T) {
+	p := testPaths(t)
+	first, err := Lock(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !Locked(p) {
+		t.Error("a held VM does not report as locked")
+	}
+	if _, err := Lock(p); err == nil {
+		t.Fatal("a second supervisor was allowed to take the same VM")
+	}
+	// Releasing has to actually release, or a crashed supervisor would wedge
+	// the VM until someone deleted a file by hand.
+	first.Close()
+	if Locked(p) {
+		t.Error("the lock outlived the process holding it")
+	}
+	second, err := Lock(p)
+	if err != nil {
+		t.Fatalf("could not retake a released VM: %v", err)
+	}
+	second.Close()
+}
+
+// The lock has to survive the process that took it, or it would be released
+// the moment `start` returns and the next start would sail past it. flock
+// belongs to the open file description, so a child inherits the same lock.
+func TestLockIsHeldByTheChildNotTheStarter(t *testing.T) {
+	p := testPaths(t)
+	lock, err := Lock(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("sleep", "30")
+	cmd.ExtraFiles = []*os.File{lock}
+	pid, err := StartDetached(cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer syscall.Kill(pid, syscall.SIGKILL)
+
+	// The starter drops its copy, exactly as Start does when it returns.
+	lock.Close()
+	if !Locked(p) {
+		t.Fatal("the lock was released when the starter closed its copy")
+	}
+	syscall.Kill(pid, syscall.SIGKILL)
+	deadline := time.Now().Add(5 * time.Second)
+	for Locked(p) && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if Locked(p) {
+		t.Error("the lock was not released when the child died")
+	}
+}
+
+// A VM held by a supervisor in another namespace reads as running with no pid.
+// Stop must refuse it: every kill would be kill(0), which signals the caller's
+// own process group, and the cleanup would delete the live VM's sockets.
+func TestStopRefusesAVMItDoesNotOwn(t *testing.T) {
+	p := testPaths(t)
+	s := spec(p)
+	lock, err := Lock(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	// A pidfile naming something unsignallable, as a foreign namespace's
+	// would be.
+	if err := os.WriteFile(p.PidFile(), []byte("999999999"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sock := (&chv{}).Socket(p, Port{Num: 7300, Dir: FromGuest})
+	if err := os.WriteFile(sock, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	pid, ok := Running(&chv{}, s, p)
+	if !ok || pid != 0 {
+		t.Fatalf("Running = (%d, %v), want (0, true) for a foreign VM", pid, ok)
+	}
+	if err := Stop(&chv{}, s, p, time.Second); err == nil {
+		t.Error("Stop acted on a VM belonging to another supervisor")
+	}
+	if _, err := os.Stat(sock); err != nil {
+		t.Error("Stop deleted a live VM's socket")
+	}
+}
+
+// deadBackend is a VMM that exits the moment it is launched, which is what a
+// bad argv or an unavailable device produces in practice.
+type deadBackend struct{ chv }
+
+func (*deadBackend) Binary() string            { return "false" }
+func (*deadBackend) Check() error              { return nil }
+func (*deadBackend) Args(Spec, Paths) []string { return nil }
+
+// Start holds the lock while it runs, and flock conflicts between open file
+// descriptions rather than processes, so a liveness check that probes the lock
+// sees Start's own and calls a launch that already failed a success. The
+// failure then surfaces much later, as a guest that never finishes booting.
+func TestStartReportsAVMMThatDiesImmediately(t *testing.T) {
+	p := testPaths(t)
+	s := spec(p)
+	disk := filepath.Join(p.State, "guest.raw")
+	if err := os.WriteFile(disk, make([]byte, 4096), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s.Disks = []Disk{{Path: disk}}
+	s.Console = filepath.Join(p.State, "console.log")
+
+	_, err := Start(&deadBackend{}, s, p)
+	if err == nil {
+		t.Fatal("Start reported success for a VMM that exited immediately")
+	}
+	if !strings.Contains(err.Error(), "exited immediately") {
+		t.Errorf("unhelpful error for a dead VMM: %v", err)
+	}
+	// And it must not leave the VM looking alive to the next caller.
+	if _, ok := Running(&deadBackend{}, s, p); ok {
+		t.Error("a VM that never started reports as running")
+	}
+}
+
+// Cloud Hypervisor locks the guest disk with fcntl(F_SETLK), and on Linux
+// flock and POSIX record locks are invisible to each other. A probe using the
+// wrong one succeeds against a disk a live VM is holding, so this check would
+// pass while doing nothing. The lock has to be taken by another process:
+// POSIX record locks are per-process, so a lock taken here would not conflict
+// with itself.
+func TestDiskInUseSeesAPosixRecordLock(t *testing.T) {
+	disk := filepath.Join(t.TempDir(), "guest.raw")
+	if err := os.WriteFile(disk, make([]byte, 4096), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if diskInUse(disk) {
+		t.Fatal("an unused disk reported as in use")
+	}
+
+	if os.Getenv("VMM_TEST_HOLD_DISK") != "" {
+		holdDiskForever(os.Getenv("VMM_TEST_HOLD_DISK"))
+		return
+	}
+	helper := exec.Command(os.Args[0], "-test.run=TestDiskInUseSeesAPosixRecordLock")
+	helper.Env = append(os.Environ(), "VMM_TEST_HOLD_DISK="+disk)
+	out, err := helper.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := helper.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { helper.Process.Kill(); helper.Wait() }()
+
+	// The helper says "held" once the lock is actually taken.
+	buf := make([]byte, 5)
+	if _, err := io.ReadFull(out, buf); err != nil {
+		t.Fatalf("helper never reported holding the lock: %v", err)
+	}
+	if !diskInUse(disk) {
+		t.Error("a disk locked by another process reported as free")
+	}
+
+	helper.Process.Kill()
+	helper.Wait()
+	deadline := time.Now().Add(5 * time.Second)
+	for diskInUse(disk) && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if diskInUse(disk) {
+		t.Error("the disk stayed locked after the holder died")
+	}
+}
+
+func holdDiskForever(path string) {
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		return
+	}
+	lk := syscall.Flock_t{Type: syscall.F_WRLCK, Whence: io.SeekStart}
+	if syscall.FcntlFlock(f.Fd(), syscall.F_SETLK, &lk) != nil {
+		return
+	}
+	os.Stdout.WriteString("held\n")
+	select {}
+}
+
 // os.Process.Release sets Pid to -1, so a pid read after it is not just wrong
 // but actively dangerous: -1 is kill(2)'s "every process you can signal". A
 // pidfile holding it turns an ordinary shutdown into a self-inflicted logout.
@@ -357,7 +547,9 @@ func TestRunningIgnoresZombies(t *testing.T) {
 	if syscall.Kill(pid, 0) != nil {
 		t.Fatal("precondition: a zombie should still answer kill(0)")
 	}
-	if _, ok := Running(&zombieBackend{}, p); ok {
+	// An empty Spec, so nothing but the pid check can answer: this is about
+	// the zombie, not about the lock or the disk.
+	if _, ok := Running(&zombieBackend{}, Spec{}, p); ok {
 		t.Error("a defunct process was reported as a running VM")
 	}
 }

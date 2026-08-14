@@ -114,6 +114,34 @@ match the Go module layout below and will not for a while. What exists:
 Read the phases at the end as the remaining order of work, not as a record
 of what has happened.
 
+## One cave VM per machine
+
+Not one per project, and not one per agent. Agent-agent isolation is one VM
+with per-uid caves (see the accepted costs below), and the reason the count
+stops at one machine-wide is the nix store: `vm-cave-store.md` establishes that
+a store cannot be shared across a VM boundary, so a second VM is a second copy
+of everything, not a cheap addition.
+
+This has to be enforced rather than assumed, because the state dir is more
+reachable than it looks. Caves share a home, so one state dir is visible to the
+host and to every cave on it, and a pidfile cannot arbitrate between them: pids
+are per namespace, so a supervisor in a cave asks about a host pid, is told
+nothing is there, and starts a second VMM on a disk that is already open. It
+then overwrites the pidfile, which leaves the VM that really is running with no
+supervisor that can stop it.
+
+Two locks, because neither covers the other's case:
+
+- `<state>/vm.lock`, an `flock` taken before any side effect and inherited by
+  the VMM, so it is held for exactly the VM's lifetime and released by the
+  kernel however the VMM exits. This is what makes two `cave-vm` supervisors
+  see each other.
+- a POSIX record lock probe of the guest disk, which sees a VM this binary did
+  not start, including one from an older `vmcav`. It must be `fcntl(F_SETLK)`
+  and not `flock`: Cloud Hypervisor locks its disks the first way, and on Linux
+  the two kinds are invisible to each other, so an `flock` probe of a disk a
+  live VM is holding succeeds and the check silently does nothing.
+
 ## System overview
 
 Host processes (all unprivileged, run as the launching user):

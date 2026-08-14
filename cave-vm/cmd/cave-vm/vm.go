@@ -88,7 +88,11 @@ func vmStart(args []string) {
 	b, p := backend(), v.paths()
 	spec := v.spec(p)
 
-	if pid, ok := vmm.Running(b, p); ok {
+	if pid, ok := vmm.Running(b, spec, p); ok {
+		if pid == 0 {
+			fmt.Fprintln(os.Stderr, "cave-vm: this VM is already running under another supervisor")
+			os.Exit(1)
+		}
 		fmt.Fprintf(os.Stderr, "cave-vm: already running (pid %d)\n", pid)
 		return
 	}
@@ -204,11 +208,17 @@ func vmStop(args []string) {
 func vmRunning(args []string) {
 	v := vmFlagSet("running")
 	v.parse(args)
-	pid, ok := vmm.Running(backend(), v.paths())
+	p := v.paths()
+	pid, ok := vmm.Running(backend(), v.spec(p), p)
 	if !ok {
 		os.Exit(1)
 	}
-	fmt.Println(pid)
+	// A VM held by a supervisor in another namespace is running, and its pid
+	// means nothing here. Print nothing rather than 0, which a shell caller
+	// would go on to use as a pid.
+	if pid > 0 {
+		fmt.Println(pid)
+	}
 }
 
 // vmSocket prints where a port's unix socket lives, for the services that bind
