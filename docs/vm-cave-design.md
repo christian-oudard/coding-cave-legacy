@@ -566,11 +566,15 @@ call, and the host already constructs both paths, so it is a one-line change.
 
 So the guest names nothing. The host asks for a list, discards any id that is
 not a UUID, and then constructs both the source path and the destination
-itself, which leaves no paths in the protocol at all. It fetches into a temp
-file, and moves it into place only if it is at least as long as the record
-already held; a shorter or divergent copy is kept aside instead, so the one
-realistic corruption path, copying a truncated guest file over a good record,
-cannot destroy anything. Deletion is a host-side human act, never something
+itself, which leaves no paths in the protocol at all. It fetches the records whose names it
+does not have or whose length has grown, into a temp file, and moves one into
+place only if it is at least as long as the record already held *and* begins
+with the bytes already held. Both checks are local, since the whole file is in
+hand, so the prefix check costs no extra verb and no extra round trip, and it
+catches what a length test alone misses: a record truncated and then grown
+past its old size. A copy that fails either check is kept aside rather than
+applied, so the one realistic corruption path, a truncated guest file landing
+on a good record, cannot destroy anything. Deletion is a host-side human act, never something
 the guest can cause.
 
 The stem of a record file is the session id, and stays the session id
