@@ -502,20 +502,31 @@ changing under it, the next `start`, or a command of its own.
 `reformat` must cost packages and build time and nothing else. Memories,
 session logs, the guest's login and any uncommitted work have to survive it.
 
-That is a disk boundary, not a list of files to copy at the last moment: a
-second virtio-blk device holds `/home` and the guest's state dir, and
-`reformat` recreates only the system disk. The store stays with the system,
-which is what makes redownload-and-rebuild the actual and only cost. The
-agent registry is host-side already, and anything pushed to `cave-shared` is
-on the host already, so neither needs a mechanism.
+Session state does not live in the VM at all. Logs, memory and the login are
+host files under `~/.local/share/coding-cave`, which is a stronger property
+than surviving a reformat: they survive losing the machine, they sit in the
+directory a backup already covers, and the host can list a session and resume
+it without booting anything, which is what the session-management entry in
+`vm-cave-todo.md` was asking for. The registry, host-side already, records the
+id that makes resume a host-side command. Anything pushed to `cave-shared` is
+on the host already.
 
-This deletes the host-side capture of the guest's login and claude config
-entirely, and with it the channel red team finding 4 describes: the login
-stops crossing the boundary because it never leaves the disk it lives on.
+Considered and rejected, so it is not re-derived: a second virtio-blk device
+holding `/home`, with `reformat` recreating only the system disk. It survives
+a reformat and nothing else, it is opaque from the host without `debugfs`, and
+it buries the one thing worth backing up inside a 100 GB sparse image.
 
-The cost is that reformat stops being the cure for a broken guest when what
-is broken is on the disk it now keeps. That wants a second, louder command
-that takes both disks, not a flag on the everyday one.
+The bytes cross on the service plane, not on a mount: the guest has no host
+filesystem, by construction. claude's session logs are append-only JSONL,
+which decides the shape: materialize the log at session start so `--resume`
+has something to read, stream appends out while it runs. The per-session
+process is the natural owner, since it already exists per session and dies
+with it.
+
+The store stays on the guest disk, so redownload-and-rebuild remains the cost
+of a reformat. Uncommitted work in a worktree is the one thing that cannot
+ride this, being a whole mutable checkout rather than an append-only file; it
+stays open, as the first entry in the todo doc.
 
 ## Prior art: containerd and Kata Containers
 
