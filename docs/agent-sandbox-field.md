@@ -17,7 +17,8 @@ Not a substrate for this design, for reasons that are structural rather than
 matters of taste. N agents means N kernels and N filesystems, therefore N nix
 stores, and "multiple sandboxes don't share images or layers" is stated
 outright. That is the inverse of requirements 2 and 3, and it reintroduces
-precisely the problem narcache and pkgdd exist to solve. The per-sandbox
+precisely the problem the nix package cache and pkgdd exist to solve. The
+per-sandbox
 Docker daemon is dead weight for a nix-only guest: idle RSS plus a second
 image-distribution and GC system duplicating the store. The VMM is closed and
 `sbx login` binds it to a Docker account. And it has no opinion at all about
@@ -123,7 +124,8 @@ Northflank. Locally the field is thin.
 
 Two observations from the survey. None of them uses nix; every one is OCI
 images or a stock distro, which is why nothing off the shelf substitutes for
-narcache and pkgdd. And none combines multi-agent git coordination with a
+the nix package cache and pkgdd. And none combines multi-agent git
+coordination with a
 hardware boundary. The worktree projects are all containers and the microVM
 projects have no multi-agent story, so Cleanroom and container-use are each
 half of this design and neither is the whole.
@@ -165,7 +167,8 @@ Go:
   has no analogue here (crinj has no snapshots to leak into), but the gateway
   design is directly comparable to crinj and the code is liftable.
 - A host-side **content cache** served to the guest through that gateway, for
-  Git and Go. This is narcache's pattern in another ecosystem, and is useful
+  Git and Go. This is the nix package cache's pattern in another ecosystem,
+  and is useful
   independent validation of phase 4 before building it.
 - A **policy compiler that fails closed**, turning `cleanroom.yaml` into
   enforceable runtime configuration and refusing anything the runtime cannot

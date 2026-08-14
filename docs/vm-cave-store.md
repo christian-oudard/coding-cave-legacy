@@ -8,7 +8,7 @@ current design this review takes as given.
 
 Status: resolved. `vm-cave-design.md` took the decision, adopting option B in
 on-demand form: the host projection became a binary cache served over vsock
-(`internal/narcache`) rather than a mounted tree, so the manifests, want-lists
+(`internal/nixcache`) rather than a mounted tree, so the manifests, want-lists
 and sqlite crossing the boundary that this review worries about are all
 avoided. Options A and C were rejected or deferred as written, and option D's
 shared-store projection is unnecessary because point queries already prevent

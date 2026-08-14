@@ -238,7 +238,7 @@ and which no competitor's product can be configured into:
   every one is OCI images or a stock distro. Note this is also unsolved on
   `main` today, where store dedup was removed and each cave has a private
   store. One guest with a stock multi-user daemon is the answer `main` gave
-  up on, and `narcache` plus `pkgdd` have no equivalent anywhere.
+  up on, and the nix package cache and `pkgdd` have no equivalent anywhere.
 - **Git as the coordination mechanism with a host-side gate.** Agent
   branches, `pre-receive`, `cav approve`. Docker's `--clone` is fetch-based
   with no gate; Dagger's `container-use` is the nearest and is containers
@@ -253,7 +253,8 @@ achievable on their budget.
 
 So: keep the VMM layer boring and small (two process-backends, skip Windows),
 stop treating cold boot as a headline metric since one VM per host boot means
-never competing on it, and prioritize phase 4 (narcache) and phase 8 (pkgdd)
+never competing on it, and prioritize phase 4 (the nix package cache) and
+phase 8 (pkgdd)
 over 1-3. Phase 4's acceptance check, building a host-present package in the
 guest with zero internet bytes, is the demo no competitor can reproduce. Land
 the git bridge (phase 7) early, since the approval gate is the thesis.

@@ -108,7 +108,7 @@ match the Go module layout below and will not for a while. What exists:
   through crinj on 7200, and has no NIC (`ip -br link` shows only `lo`); on
   an M1 the same relays carry the same traffic under vfkit. The host-side
   relays are Go, so `socat` is no longer a host dependency on either.
-- **`internal/narcache` does not exist.** Phase 4 is the largest unbuilt
+- **`internal/nixcache` does not exist.** Phase 4 is the largest unbuilt
   piece and, per `vm-cave-todo.md`, the most differentiated.
 
 Read the phases at the end as the remaining order of work, not as a record
@@ -214,7 +214,7 @@ not ported (vm-cave-store fact 5 is overridden by this plan).
 `auto-optimize-store` gives intra-guest file-level dedup between similar
 store paths as a bonus.
 
-### Host binary cache server (`internal/narcache`)
+### Host binary cache server (`internal/nixcache`)
 
 cave-vm serves the host's /nix/store over the standard binary-cache HTTP
 protocol on vsock port 7100. This replaces vm-cave-store's projected tree,
@@ -381,7 +381,7 @@ re-deriving:
 
 - `cave-guestd` is `kata-agent`: a guest supervisor reached by a small RPC
   over vsock (port 7001 here, ttrpc there).
-- narcache is containerd's content store plus registry pull: blobs
+- the nix package cache is containerd's content store plus registry pull: blobs
   addressed by digest, fetched on demand, dedup falling out of the
   addressing rather than out of a sync protocol. A narinfo is a manifest
   fetch, a nar is a layer.
@@ -431,7 +431,7 @@ firewall-pinning arrangement Kata or firecracker-containerd ship.
                           clean shutdown (ACPI), crash detection, port map,
                           host unix-socket dialer/listener. One Backend per
                           platform (Cloud Hypervisor, vfkit).
-      internal/narcache/  binary cache HTTP server, narinfo signing,
+      internal/nixcache/   binary cache HTTP server, narinfo signing,
                           nix CLI exec wrappers
       internal/guest/     guestd internals: cave lifecycle, uid allocation,
                           bwrap invocation, home materialization, CacheSpec
@@ -470,8 +470,8 @@ wiring. Phases 0 and 1 restate the old plan's floor.
   under 10 s; state survives stop/start.
 - **3. Attach plane.** sshd on vsock, `cave-vm shell` lands in a guest
   session held by the daemon. Accept: detach, reattach, session intact.
-- **4. Nix supply.** narcache server, fleet key, guest daemon substituter
-  order. Accept: with crinj absent and no network, `nix build nixpkgs#hello`
+- **4. Nix supply.** the nix package cache server, fleet key, guest daemon
+  substituter order. Accept: with crinj absent and no network, `nix build nixpkgs#hello`
   (host-present) succeeds in the guest and transfers zero internet bytes;
   a host-absent package fails (proving no hidden egress).
 - **5. Egress.** crinj bridged on 7200, guest proxy env global. Accept: the
