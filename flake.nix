@@ -74,8 +74,8 @@
       });
 
       # `nix flake check`. Offline by construction: no network in the sandbox,
-      # and neither suite makes calls. The VM smoke test is not here, it needs
-      # a build and minutes of boot.
+      # and neither suite makes calls. Nothing here boots a VM: that costs a
+      # guest build and minutes of boot, so it stays a manual `vmcav start`.
       checks = forAll (pkgs: {
         # git is here because internal/approve drives real repos: the thing
         # worth testing is what the ref actually does, not a mock of it.

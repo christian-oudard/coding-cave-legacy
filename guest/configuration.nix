@@ -160,8 +160,8 @@ in
   # read at eval time by in-guest redeploys, see security.pki above), the
   # host's claude login state (claude.json), this VM's own captured login
   # placeholder (credentials.json), its git identity, and its ssh public key.
-  # `nofail` plus a short timeout keep a seedless boot (the smoke test) from
-  # hanging.
+  # `nofail` plus a short timeout keep a boot with no seed disk attached from
+  # hanging on a device that is never going to appear.
   #
   # Delivered as a small read-only ext4 disk rather than a filesystem share:
   # CHV has no 9p, and its virtio-fs would drag in a virtiofsd the launcher
@@ -335,8 +335,8 @@ in
   # The agent's core loop ends in "commit and push", and git refuses to commit
   # without an identity. vmcav stages the host's user.name/user.email into the
   # seed share (host-specific, so it cannot be committed here). The fallback
-  # keeps a seedless boot (the smoke test) able to commit rather than failing
-  # at the last step of the loop; it is deliberately obviously-not-a-person.
+  # keeps a boot with no seed able to commit rather than failing at the last
+  # step of the loop; it is deliberately obviously-not-a-person.
   systemd.services.install-gitconfig = {
     description = "Install git identity for root";
     wantedBy = [ "multi-user.target" ];
