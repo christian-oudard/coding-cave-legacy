@@ -13,18 +13,35 @@ import (
 // session uuid and is also the file's stem, everywhere: claude finds resumable
 // sessions by scanning a directory and reading stems, so that name has to
 // survive the round trip or `--resume` and the picker stop working.
+//
+// Project is the encoded working directory the transcript was found under. It
+// is metadata, never a path the host builds from: a restore is placed by the
+// guest, from the cwd the session will resume in.
 type Record struct {
-	ID   string
-	Size int64
+	ID      string
+	Size    int64
+	Project string
 }
 
-// Guest is the side of the boundary holding live transcripts. Local
-// implements it against a filesystem, SSH against a running VM, which is what
-// lets the copying logic be tested without one.
+// Dest is which of the guest's two session directories a record goes into.
+type Dest int
+
+const (
+	// Resumable is claude's own projects/<encoded-cwd>/, where a record is
+	// offered by `--resume` and the picker.
+	Resumable Dest = iota
+	// Shared is a directory claude does not scan, holding every agent's
+	// records so an agent can read the others without being offered them.
+	Shared
+)
+
+// Guest is the side of the boundary holding live transcripts. Local implements
+// it against a filesystem, SSH against a running VM and Disk against a stopped
+// image, which is what lets the copying logic be tested without a VM at all.
 type Guest interface {
 	List() ([]Record, error)
 	Read(id string) (io.ReadCloser, error)
-	Write(id string, r io.Reader) error
+	Write(id string, r io.Reader, dest Dest) error
 }
 
 // ValidID is the whole of the host's trust in what the guest says. Ids become

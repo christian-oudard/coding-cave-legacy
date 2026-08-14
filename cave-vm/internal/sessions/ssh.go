@@ -52,21 +52,27 @@ func (s SSH) List() ([]Record, error) {
 	return parseList(bytes.NewReader(out))
 }
 
-// parseList reads "<id> <size>" lines. Anything malformed is dropped rather
-// than failing the checkpoint: the guest's output is input, not instruction.
+// parseList reads "<id> <size> [project]" lines. Anything malformed is dropped
+// rather than failing the sync: the guest's output is input, not instruction.
+// The project is metadata and optional, so a guest that predates it still
+// syncs.
 func parseList(r io.Reader) ([]Record, error) {
 	var out []Record
 	sc := bufio.NewScanner(r)
 	for sc.Scan() {
 		fields := strings.Fields(sc.Text())
-		if len(fields) != 2 || !ValidID(fields[0]) {
+		if len(fields) < 2 || len(fields) > 3 || !ValidID(fields[0]) {
 			continue
 		}
 		size, err := strconv.ParseInt(fields[1], 10, 64)
 		if err != nil {
 			continue
 		}
-		out = append(out, Record{ID: fields[0], Size: size})
+		rec := Record{ID: fields[0], Size: size}
+		if len(fields) == 3 {
+			rec.Project = fields[2]
+		}
+		out = append(out, rec)
 	}
 	return out, sc.Err()
 }
@@ -90,11 +96,17 @@ func (s SSH) Read(id string) (io.ReadCloser, error) {
 	return &cmdReader{cmd: cmd, out: stdout, errb: &errb}, nil
 }
 
-func (s SSH) Write(id string, r io.Reader) error {
+func (s SSH) Write(id string, r io.Reader, dest Dest) error {
 	if !ValidID(id) {
 		return fmt.Errorf("sessions: %q is not a session id", id)
 	}
-	cmd := s.command("write", id)
+	// Flags before the verb, which is where the guest-side parser expects
+	// them.
+	args := []string{"write", id}
+	if dest == Shared {
+		args = []string{"-shared", "write", id}
+	}
+	cmd := s.command(args...)
 	cmd.Stdin = r
 	var errb bytes.Buffer
 	cmd.Stderr = &errb

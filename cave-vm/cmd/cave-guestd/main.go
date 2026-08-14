@@ -164,9 +164,14 @@ func transcripts(args []string) {
 	// worktree, matching what cave-agent cds to; when caves become per-agent
 	// this comes from the cave's own record instead of a default.
 	cwd := fs.String("cwd", "/root/coding-cave", "the cwd a restored session resumes in")
+	// Every agent's records, for reading rather than resuming. Outside
+	// ~/.claude so claude never scans it, which is what keeps another agent's
+	// session out of this agent's picker while still being readable.
+	shareDir := fs.String("shared-dir", "/cave/sessions", "where every agent's records are readable")
+	shared := fs.Bool("shared", false, "write into the shared directory rather than the picker")
 	fs.Parse(args)
 
-	local := sessions.Local{ClaudeDir: *claude, Cwd: *cwd}
+	local := sessions.Local{ClaudeDir: *claude, Cwd: *cwd, SharedDir: *shareDir}
 	switch fs.Arg(0) {
 	case "list":
 		records, err := local.List()
@@ -174,7 +179,7 @@ func transcripts(args []string) {
 			die(err)
 		}
 		for _, r := range records {
-			fmt.Printf("%s %d\n", r.ID, r.Size)
+			fmt.Printf("%s %d %s\n", r.ID, r.Size, r.Project)
 		}
 	case "read":
 		rc, err := local.Read(fs.Arg(1))
@@ -186,7 +191,11 @@ func transcripts(args []string) {
 			die(err)
 		}
 	case "write":
-		if err := local.Write(fs.Arg(1), os.Stdin); err != nil {
+		dest := sessions.Resumable
+		if *shared {
+			dest = sessions.Shared
+		}
+		if err := local.Write(fs.Arg(1), os.Stdin, dest); err != nil {
 			die(err)
 		}
 	default:

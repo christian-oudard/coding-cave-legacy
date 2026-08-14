@@ -122,11 +122,11 @@ func TestListOfAGuestWithNoSessionsIsEmpty(t *testing.T) {
 	}
 }
 
-func TestCheckpointCopiesOutWhatTheHostLacks(t *testing.T) {
+func TestSyncCopiesOutWhatTheHostLacks(t *testing.T) {
 	l := guest(t, "/root/coding-cave", map[string]string{sidA + ".jsonl": "hello\n"})
 	a := archive(t, nil)
 
-	changes, err := Checkpoint(l, a)
+	changes, err := Sync(l, a, "1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,11 +138,11 @@ func TestCheckpointCopiesOutWhatTheHostLacks(t *testing.T) {
 	}
 }
 
-func TestCheckpointCopiesARecordThatGrew(t *testing.T) {
+func TestSyncCopiesARecordThatGrew(t *testing.T) {
 	l := guest(t, "/root/coding-cave", map[string]string{sidA + ".jsonl": "one\ntwo\n"})
 	a := archive(t, map[string]string{sidA: "one\n"})
 
-	changes, err := Checkpoint(l, a)
+	changes, err := Sync(l, a, "1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,11 +154,11 @@ func TestCheckpointCopiesARecordThatGrew(t *testing.T) {
 	}
 }
 
-func TestCheckpointSkipsARecordOfTheSameLength(t *testing.T) {
+func TestSyncSkipsARecordOfTheSameLength(t *testing.T) {
 	l := guest(t, "/root/coding-cave", map[string]string{sidA + ".jsonl": "one\n"})
 	a := archive(t, map[string]string{sidA: "one\n"})
 
-	changes, err := Checkpoint(l, a)
+	changes, err := Sync(l, a, "1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +172,7 @@ func TestAShorterRecordIsKeptAsideNotApplied(t *testing.T) {
 	l := guest(t, "/root/coding-cave", map[string]string{sidA + ".jsonl": "one\n"})
 	a := archive(t, map[string]string{sidA: "one\ntwo\nthree\n"})
 
-	changes, err := Checkpoint(l, a)
+	changes, err := Sync(l, a, "1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +193,7 @@ func TestARewrittenRecordIsKeptAsideNotApplied(t *testing.T) {
 	l := guest(t, "/root/coding-cave", map[string]string{sidA + ".jsonl": "different!\n"})
 	a := archive(t, map[string]string{sidA: "one\ntwo\n"})
 
-	changes, err := Checkpoint(l, a)
+	changes, err := Sync(l, a, "1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +210,7 @@ func TestARewrittenRecordIsKeptAsideNotApplied(t *testing.T) {
 func TestDivergedCopiesAreNotRecords(t *testing.T) {
 	l := guest(t, "/root/coding-cave", map[string]string{sidA + ".jsonl": "x\n"})
 	a := archive(t, map[string]string{sidA: "one\ntwo\n"})
-	if _, err := Checkpoint(l, a); err != nil {
+	if _, err := Sync(l, a, "1"); err != nil {
 		t.Fatal(err)
 	}
 	got, err := a.List()
@@ -222,27 +222,34 @@ func TestDivergedCopiesAreNotRecords(t *testing.T) {
 	}
 }
 
-func TestCheckpointIgnoresIdsThatAreNotSessionIds(t *testing.T) {
+func TestSyncIgnoresIdsThatAreNotSessionIds(t *testing.T) {
 	l := guest(t, "/root/coding-cave", map[string]string{
 		"..-..-etc-passwd.jsonl": "no",
 		sidA + ".jsonl":          "yes\n",
 	})
 	a := archive(t, nil)
-	if _, err := Checkpoint(l, a); err != nil {
+	if _, err := Sync(l, a, "1"); err != nil {
 		t.Fatal(err)
 	}
 	entries, err := os.ReadDir(a.Dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 || entries[0].Name() != sidA+".jsonl" {
+	// The record and its sidecar, and nothing carrying the name the guest
+	// tried to use.
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), sidA) {
+			t.Fatalf("a name from the guest reached the archive: %q", e.Name())
+		}
+	}
+	if len(entries) != 2 {
 		t.Fatalf("got %v", entries)
 	}
 }
 
 // One bad record does not cost the others, because a checkpoint runs when
 // something is about to be destroyed.
-func TestCheckpointContinuesPastAFailure(t *testing.T) {
+func TestSyncContinuesPastAFailure(t *testing.T) {
 	l := guest(t, "/root/coding-cave", map[string]string{
 		sidA + ".jsonl": "a\n",
 		sidB + ".jsonl": "b\n",
@@ -254,7 +261,7 @@ func TestCheckpointContinuesPastAFailure(t *testing.T) {
 	}
 	a := archive(t, nil)
 
-	changes, err := Checkpoint(l, a)
+	changes, err := Sync(l, a, "1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -333,7 +340,132 @@ func TestParseListDropsMalformedLines(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 2 || got[0] != (Record{sidA, 42}) || got[1] != (Record{sidB, 7}) {
+	if len(got) != 2 || got[0] != (Record{ID: sidA, Size: 42}) || got[1] != (Record{ID: sidB, Size: 7}) {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestSyncRecordsWhoOwnsARecord(t *testing.T) {
+	l := guest(t, "/root/coding-cave", map[string]string{sidA + ".jsonl": "hi\n"})
+	a := archive(t, nil)
+	if _, err := Sync(l, a, "7"); err != nil {
+		t.Fatal(err)
+	}
+	m := a.ReadMeta(sidA)
+	if m.Agent != "7" || m.Project != "-root-coding-cave" || m.First.IsZero() {
+		t.Fatalf("got %+v", m)
+	}
+	owned, err := a.Owned("7")
+	if err != nil || len(owned) != 1 || owned[0] != sidA {
+		t.Fatalf("got %v, %v", owned, err)
+	}
+	if other, _ := a.Owned("8"); len(other) != 0 {
+		t.Fatalf("another agent claimed it: %v", other)
+	}
+}
+
+// The archive remembers when a session appeared, not just when it was last
+// touched, so a later sync does not rewrite its history.
+func TestSyncKeepsTheFirstSighting(t *testing.T) {
+	l := guest(t, "/root/coding-cave", map[string]string{sidA + ".jsonl": "one\n"})
+	a := archive(t, nil)
+	if _, err := Sync(l, a, "1"); err != nil {
+		t.Fatal(err)
+	}
+	first := a.ReadMeta(sidA).First
+
+	path := filepath.Join(l.projects(), EncodeProject("/root/coding-cave"), sidA+".jsonl")
+	if err := os.WriteFile(path, []byte("one\ntwo\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Sync(l, a, "1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.ReadMeta(sidA).First; !got.Equal(first) {
+		t.Fatalf("first moved from %v to %v", first, got)
+	}
+}
+
+// A record whose bytes did not land must not get metadata claiming it did.
+func TestADivergedRecordDoesNotGetMetadata(t *testing.T) {
+	l := guest(t, "/root/coding-cave", map[string]string{sidA + ".jsonl": "x\n"})
+	a := archive(t, map[string]string{sidA: "one\ntwo\n"})
+	if _, err := Sync(l, a, "1"); err != nil {
+		t.Fatal(err)
+	}
+	if m := a.ReadMeta(sidA); m.Agent != "" {
+		t.Fatalf("got %+v", m)
+	}
+}
+
+// Sidecars are not records: a stray .meta must never look like a session.
+func TestMetadataFilesAreNotListedAsRecords(t *testing.T) {
+	l := guest(t, "/root/coding-cave", map[string]string{sidA + ".jsonl": "hi\n"})
+	a := archive(t, nil)
+	if _, err := Sync(l, a, "1"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := a.List()
+	if err != nil || len(got) != 1 || got[0].ID != sidA {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+}
+
+// Every agent's records are readable, without appearing in anyone's picker.
+func TestShareCopiesEveryRecordOutsideThePicker(t *testing.T) {
+	l := guest(t, "/root/coding-cave", nil)
+	l.SharedDir = filepath.Join(tempDir(t), "cave-sessions")
+	a := archive(t, map[string]string{sidA: "mine\n", sidB: "theirs\n"})
+
+	changes, err := Share(l, a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(changes) != 2 {
+		t.Fatalf("got %+v", changes)
+	}
+	if read(t, filepath.Join(l.SharedDir, sidB+".jsonl")) != "theirs\n" {
+		t.Fatal("another agent's record is not readable")
+	}
+	// Not in the picker: List only reports what claude would offer.
+	got, err := l.List()
+	if err != nil || len(got) != 0 {
+		t.Fatalf("shared records leaked into the picker: %+v", got)
+	}
+}
+
+// The shared copy is disposable, so a second share overwrites rather than
+// failing the way a restore into the picker does.
+func TestShareReplacesAnOlderSharedCopy(t *testing.T) {
+	l := guest(t, "/root/coding-cave", nil)
+	l.SharedDir = filepath.Join(tempDir(t), "cave-sessions")
+	a := archive(t, map[string]string{sidA: "one\n"})
+	if _, err := Share(l, a); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(a.Path(sidA), []byte("one\ntwo\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	changes, err := Share(l, a)
+	if err != nil || changes[0].Err != nil {
+		t.Fatalf("got %+v, %v", changes, err)
+	}
+	if read(t, filepath.Join(l.SharedDir, sidA+".jsonl")) != "one\ntwo\n" {
+		t.Fatal("the shared copy was not refreshed")
+	}
+}
+
+// The project is metadata, and optional: a guest that does not report it still
+// syncs rather than being dropped as malformed.
+func TestParseListTakesTheProjectWhenGiven(t *testing.T) {
+	got, err := parseList(strings.NewReader(
+		sidA + " 42 -root-coding-cave\n" +
+			sidB + " 7\n" +
+			sidA + " 1 a b c\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Project != "-root-coding-cave" || got[1].Project != "" {
 		t.Fatalf("got %+v", got)
 	}
 }

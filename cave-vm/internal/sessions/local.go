@@ -20,6 +20,11 @@ type Local struct {
 	// Cwd is where a restored session will be resumed, and decides the
 	// project directory a written record lands in. Only the guest knows it.
 	Cwd string
+	// SharedDir holds every agent's records, for reading rather than
+	// resuming. Deliberately outside ClaudeDir so claude never scans it: an
+	// agent should be able to read another's session without being offered it
+	// in its own picker.
+	SharedDir string
 }
 
 func (l Local) projects() string { return filepath.Join(l.ClaudeDir, "projects") }
@@ -53,7 +58,7 @@ func (l Local) List() ([]Record, error) {
 			if err != nil {
 				continue
 			}
-			out = append(out, Record{ID: id, Size: info.Size()})
+			out = append(out, Record{ID: id, Size: info.Size(), Project: d.Name()})
 		}
 	}
 	return out, nil
@@ -87,13 +92,25 @@ func (l Local) Read(id string) (io.ReadCloser, error) {
 	return os.Open(p)
 }
 
-// Write puts a record where claude will look for it when resuming in Cwd. It
-// refuses to overwrite: a restore is for a session the guest does not have, and
-// clobbering a live transcript with an older copy of itself would lose whatever
-// the agent has done since.
-func (l Local) Write(id string, r io.Reader) error {
+// Write puts a record into the guest: where claude will look for it when
+// resuming in Cwd, or into the shared directory, which is for reading only.
+//
+// Resumable refuses to overwrite, because a restore is for a session the guest
+// does not have and clobbering a live transcript with an older copy of itself
+// would lose whatever the agent has done since. Shared replaces freely: it is
+// a copy of the host's record and the host's record is the truth.
+func (l Local) Write(id string, r io.Reader, dest Dest) error {
 	if !ValidID(id) {
 		return fmt.Errorf("sessions: %q is not a session id", id)
+	}
+	if dest == Shared {
+		if l.SharedDir == "" {
+			return fmt.Errorf("sessions: no shared directory configured")
+		}
+		if err := os.MkdirAll(l.SharedDir, 0o755); err != nil {
+			return err
+		}
+		return writeFile(filepath.Join(l.SharedDir, id+".jsonl"), r, true)
 	}
 	if l.Cwd == "" {
 		return fmt.Errorf("sessions: no cwd, so there is no project to restore into")
@@ -102,8 +119,15 @@ func (l Local) Write(id string, r io.Reader) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	dest := filepath.Join(dir, id+".jsonl")
-	f, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	return writeFile(filepath.Join(dir, id+".jsonl"), r, false)
+}
+
+func writeFile(dest string, r io.Reader, replace bool) error {
+	flags := os.O_WRONLY | os.O_CREATE | os.O_EXCL
+	if replace {
+		flags = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
+	}
+	f, err := os.OpenFile(dest, flags, 0o600)
 	if err != nil {
 		return err
 	}

@@ -10,45 +10,89 @@ import (
 )
 
 // Session records are host state: they outlive the guest disk, a reformat and
-// the machine, and they are what `--resume` needs. `checkpoint` copies out what
-// has grown, `restore` puts records back into a guest that does not have them.
-// Both are one-shot, so the caller decides when: an agent exiting, a stop, and
+// the machine, and they are what `--resume` needs.
+//
+//	sync      copy out what is new or has grown (ssh, or -disk for a stopped VM)
+//	restore   put an agent's own records back where its picker will find them
+//	share     copy every record into the guest's read-only view
+//	list      what the archive holds
+//
+// All one-shot, so the caller decides when: an agent exiting, a stop, and
 // before a reformat, which is the one that may not be skipped.
 func sessionsCommand(args []string) {
 	fs := flag.NewFlagSet("sessions", flag.ExitOnError)
 	archive := fs.String("archive", defaultArchive(), "the host's record directory")
 	config := fs.String("ssh-config", "", "ssh_config naming the guest")
 	host := fs.String("host", "cave-guest", "the guest's alias in that config")
+	// Reading a stopped image instead of asking a running guest. This is what
+	// makes a reformat safe when the guest is too broken to answer, which is
+	// exactly when a reformat happens.
+	disk := fs.String("disk", "", "read a stopped guest image instead of using ssh")
+	agent := fs.String("agent", "1", "which agent these records belong to")
 	fs.Parse(args)
 
-	if *config == "" {
-		fatal(fmt.Errorf("sessions: -ssh-config is required"))
-	}
-	guest := sessions.SSH{Config: *config, Host: *host}
 	a := sessions.Archive{Dir: *archive}
+	// Only the verbs that cross the boundary need a guest; listing what the
+	// host holds is a host question and must answer with the VM stopped, gone,
+	// or never created.
+	guest := func() sessions.Guest {
+		g, err := pickGuest(*disk, *config, *host)
+		if err != nil {
+			fatal(err)
+		}
+		return g
+	}
 
 	switch fs.Arg(0) {
-	case "checkpoint":
-		report(sessions.Checkpoint(guest, a))
+	case "sync":
+		report(sessions.Sync(guest(), a, *agent))
 	case "restore":
 		ids := fs.Args()[1:]
 		if len(ids) == 0 {
-			fatal(fmt.Errorf("sessions restore: which session?"))
+			// No ids means the agent's own, which is what a cave start does:
+			// its picker should hold its history and nobody else's.
+			var err error
+			ids, err = a.Owned(*agent)
+			if err != nil {
+				fatal(err)
+			}
 		}
-		report(sessions.Restore(guest, a, ids))
+		report(sessions.Restore(guest(), a, ids))
+	case "share":
+		report(sessions.Share(guest(), a))
 	case "list":
 		records, err := a.List()
 		if err != nil {
 			fatal(err)
 		}
 		for _, r := range records {
-			fmt.Printf("%s %d\n", r.ID, r.Size)
+			m := a.ReadMeta(r.ID)
+			fmt.Printf("%s %d %s %s\n", r.ID, r.Size, orDash(m.Agent), orDash(m.Project))
 		}
 	default:
 		fmt.Fprintln(os.Stderr,
-			"usage: cave-vm sessions -ssh-config F [checkpoint|restore <id>...|list]")
+			"usage: cave-vm sessions [-ssh-config F | -disk IMG] [sync|restore [id...]|share|list]")
 		os.Exit(2)
 	}
+}
+
+// pickGuest is the one place that decides which side of the boundary answers:
+// a running guest over ssh, or a stopped image read directly.
+func pickGuest(disk, config, host string) (sessions.Guest, error) {
+	if disk != "" {
+		return sessions.Disk{Image: disk}, nil
+	}
+	if config == "" {
+		return nil, fmt.Errorf("sessions: give -ssh-config for a running guest, or -disk for a stopped one")
+	}
+	return sessions.SSH{Config: config, Host: host}, nil
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
 }
 
 // report says what moved and fails loudly on anything that did not, without

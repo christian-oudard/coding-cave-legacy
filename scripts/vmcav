@@ -533,7 +533,7 @@ do_agent() {
   # Returning here means the agent exited or you detached, and both are a
   # natural place to bank what it has written. It does not cover an agent that
   # exits with nobody attached, which is what the unit-level trigger is for.
-  checkpoint_sessions
+  sync_sessions
 }
 
 # A plain root shell in the guest. No args -> interactive shell; extra args run
@@ -648,9 +648,14 @@ do_image_reformat() {
   # is up would mean stopping it first, which is exactly when the login
   # becomes unreadable.
   if is_running; then
-    capture_guest_credentials; capture_guest_config; checkpoint_sessions
+    capture_guest_credentials; capture_guest_config
     do_stop
   fi
+  # After the stop, not before: with the VM down this reads the transcripts
+  # straight off the image, which needs nothing of the guest and so also works
+  # for the guest you are most likely to be reformatting, the one that stopped
+  # answering. Last thing before the disk goes.
+  sync_sessions
   rm -f "$DISK"
   do_image_create
 }
@@ -664,16 +669,44 @@ do_image_reformat() {
 # Never fatal. It runs immediately before something the user asked for, and
 # refusing to stop or reformat because a transcript would not copy would be
 # the tool holding its own bookkeeping over the user's instruction.
-checkpoint_sessions() {
-  is_running || return 0
+sync_sessions() {
   command -v cave-vm >/dev/null 2>&1 || return 0
-  local out
-  if ! out=$(cave-vm sessions -ssh-config "$SSHCONF" checkpoint 2>&1); then
+  # `|| rc=$?` rather than a bare assignment: under set -e a failing command
+  # substitution takes the whole script with it, and this must never be the
+  # reason a stop or a reformat does not happen.
+  local out rc=0
+  # A running guest answers over ssh; a stopped one is read straight off its
+  # disk image. The second is what makes `reformat` safe: the guest you are
+  # most likely to reformat is one too broken to answer, and it is about to be
+  # deleted. Never both, because reading a live filesystem gives torn data.
+  if is_running; then
+    out=$(cave-vm sessions -ssh-config "$SSHCONF" sync 2>&1) || rc=$?
+  elif [ -f "$DISK" ]; then
+    out=$(cave-vm sessions -disk "$DISK" sync 2>&1) || rc=$?
+  else
+    return 0
+  fi
+  if [ "$rc" -ne 0 ]; then
     log "warning: some session records did not copy out:"
     printf '%s\n' "$out" >&2
     return 0
   fi
-  [ -n "$out" ] && log "session records: $(printf '%s' "$out" | wc -l) updated"
+  [ -n "$out" ] && log "session records: $(printf '%s\n' "$out" | grep -c .) updated"
+  return 0
+}
+
+# Put an agent's own records back where its picker will find them, and every
+# record where any agent can read it. At start, because `/resume` happens
+# inside the cave with the host not consulted, so what is not on disk when
+# claude launches does not exist as far as the agent is concerned.
+restore_sessions() {
+  command -v cave-vm >/dev/null 2>&1 || return 0
+  is_running || return 0
+  local out
+  out=$(cave-vm sessions -ssh-config "$SSHCONF" restore 2>&1) \
+    || log "warning: some session records did not restore: $out"
+  out=$(cave-vm sessions -ssh-config "$SSHCONF" share 2>&1) \
+    || log "warning: the shared session view is incomplete: $out"
   return 0
 }
 
@@ -818,6 +851,10 @@ do_start() {
     || { log "vm failed to start; see $CONSOLE"; \
          tail -8 "$CONSOLE" 2>/dev/null >&2; stop_gpg_broker; return 1; }
   wait_for_guest || return 1
+  # Before anyone attaches, because `/resume` is chosen inside the cave with
+  # the host not consulted: a record that is not on disk when claude starts
+  # does not exist as far as the agent is concerned.
+  restore_sessions
   log "attach with: vmcav agent"
 }
 
@@ -827,7 +864,7 @@ do_stop() {
   # reaches in for it. Session records are different: the guest keeps its copy
   # across a stop, but this is the last moment it can be read, and a VM that
   # does not come back should not take an agent's history with it.
-  checkpoint_sessions
+  sync_sessions
   cave-vm stop --state "$STATE_DIR" --disk "$DISK" || true
   stop_git_daemon; stop_gpg_broker
 }
