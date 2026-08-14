@@ -1,7 +1,8 @@
 /// Integration tests for branch lifecycle across approve/reject.
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::io::Write;
+use std::process::{Command, Output, Stdio};
 
 const CAV: &str = env!("CARGO_BIN_EXE_cav");
 
@@ -97,9 +98,9 @@ impl Project {
         .unwrap();
     }
 
-    fn cav(&self, args: &[&str]) -> Output {
-        Command::new(CAV)
-            .args(args)
+    fn cav_cmd(&self, args: &[&str]) -> Command {
+        let mut cmd = Command::new(CAV);
+        cmd.args(args)
             .current_dir(&self.dir)
             .env("PATH", hook_path())
             .env("CODING_CAVE_DATA_DIR", &self.data_dir)
@@ -108,9 +109,30 @@ impl Project {
             // touches the real system store.
             .env("CODING_CAVE_NIX_STORES_DIR", self.nix_stores())
             .env_remove("CODING_CAVE_VERSION")
-            .env_remove("CODING_CAVE_AGENT_ID")
-            .output()
-            .expect("cav binary not found")
+            .env_remove("CODING_CAVE_AGENT_ID");
+        cmd
+    }
+
+    fn cav(&self, args: &[&str]) -> Output {
+        self.cav_cmd(args).output().expect("cav binary not found")
+    }
+
+    /// Run cav with `input` on stdin, for the interactive prompts.
+    fn cav_answering(&self, args: &[&str], input: &str) -> Output {
+        let mut child = self
+            .cav_cmd(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("cav binary not found");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        child.wait_with_output().unwrap()
     }
 
     /// The per-cave nix-store base the spawned cav uses (redirected for tests).
@@ -305,6 +327,49 @@ fn approve_disambiguates_by_base_branch() {
     assert!(
         p.shared_has_ref("refs/heads/agent-2/develop"),
         "agent-2/develop should be untouched: {combined}"
+    );
+}
+
+#[test]
+fn approve_menu_lists_each_agent_once_then_asks_which_branch() {
+    // An agent with pending work on two bases used to appear twice in the
+    // menu under the same id, making the second entry unselectable.
+    let p = Project::new("approve-two-branches");
+    p.register_agent("1");
+    p.register_agent("2");
+    git(&["checkout", "-b", "develop"], &p.dir);
+    git(&["push", "cave", "develop"], &p.dir);
+    git(&["checkout", "main"], &p.dir);
+    git(&["fetch", "cave"], &p.dir);
+    p.push_agent_commits("1", "main", &[("a.txt", "A\n")]);
+    p.push_agent_commits("1", "develop", &[("b.txt", "B\n")]);
+    p.push_agent_commits("2", "main", &[("c.txt", "C\n")]);
+    // Sit on a branch that matches no candidate, so the menu appears.
+    git(&["checkout", "-b", "side"], &p.dir);
+
+    // Agent 1, its second branch (bases sort alphabetically: develop, main).
+    let out = p.cav_answering(&["approve"], "1\n2\ny\n");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(out.status.code(), Some(0), "approve failed: {combined}");
+    assert!(
+        combined.contains("[1/2]") && !combined.contains("[1/1/2]"),
+        "agent 1 should appear once in the menu: {combined}"
+    );
+    assert!(
+        !p.shared_has_ref("refs/heads/agent-1/main"),
+        "agent-1/main should be approved and deleted: {combined}"
+    );
+    assert!(
+        p.shared_has_ref("refs/heads/agent-1/develop"),
+        "agent-1/develop should be untouched: {combined}"
+    );
+    assert!(
+        p.shared_has_ref("refs/heads/agent-2/main"),
+        "agent-2/main should be untouched: {combined}"
     );
 }
 

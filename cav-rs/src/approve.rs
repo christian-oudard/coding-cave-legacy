@@ -11,6 +11,9 @@ use crate::registry;
 use crate::sandbox;
 use crate::style;
 
+/// (dev branch, base branch, agent id)
+type Candidate = (String, String, String);
+
 pub fn approve(
     base: &Path,
     agent_id: Option<&str>,
@@ -35,7 +38,7 @@ pub fn approve(
     // Build flat list of (branch, base_name, agent_id) candidates,
     // filtering out branches with no commits ahead of base. Covers branches
     // already merged into base and branches that lag behind base.
-    let mut candidates: Vec<(String, String, String)> = vec![];
+    let mut candidates: Vec<Candidate> = vec![];
     let mut has_any_agent_branches = false;
     for rb in git::remote_branches(CAVE_SHARED_REMOTE, Some(base))? {
         if let Some((_, aid)) = parse_dev_branch(&rb) {
@@ -65,6 +68,8 @@ pub fn approve(
         }
     }
 
+    sort_candidates(&mut candidates);
+
     if candidates.is_empty() {
         if let Some(aid) = agent_id {
             let hint = registry::other_project_hint(base, aid)
@@ -89,7 +94,7 @@ pub fn approve(
     let mut commit_sha: Option<String> = None;
     if let Some(prefix) = commit {
         let lower = prefix.to_ascii_lowercase();
-        let mut matches: Vec<((String, String, String), String)> = vec![];
+        let mut matches: Vec<(Candidate, String)> = vec![];
         for cand in &candidates {
             if let Some(sha) = candidate_match_commit(&cand.0, &cand.1, &lower, base) {
                 matches.push((cand.clone(), sha));
@@ -274,68 +279,169 @@ pub fn approve(
     Ok(())
 }
 
-fn pick_candidate(
-    candidates: Vec<(String, String, String)>,
+/// Numeric agent order, then base branch: remote branches sort as text,
+/// which puts agent 19 ahead of agent 2.
+fn sort_candidates(candidates: &mut [Candidate]) {
+    candidates.sort_by(|a, b| {
+        let key = |c: &Candidate| {
+            (c.2.parse::<u64>().unwrap_or(u64::MAX), c.1.clone(), c.0.clone())
+        };
+        key(a).cmp(&key(b))
+    });
+}
+
+/// One entry per agent, in candidate order. An agent with several dev
+/// branches gets a single menu entry; the branch is a second question.
+fn group_by_agent(
+    candidates: Vec<Candidate>,
+) -> Vec<(String, Vec<Candidate>)> {
+    let mut groups: Vec<(String, Vec<Candidate>)> = vec![];
+    for cand in candidates {
+        match groups.last_mut() {
+            Some((aid, group)) if *aid == cand.2 => group.push(cand),
+            _ => groups.push((cand.2.clone(), vec![cand])),
+        }
+    }
+    groups
+}
+
+/// Pending commit subjects on a candidate's dev branch, newest first.
+fn candidate_commits(
+    (branch, base_name, _): &Candidate,
     base: &Path,
-    slug: &str,
-    yes: bool,
-) -> Result<(String, String, String)> {
-    if yes {
-        let ids: std::collections::BTreeSet<String> =
-            candidates.iter().map(|(_, _, aid)| aid.clone()).collect();
-        bail!(
-            "Multiple choices in {}: agents {}\nSpecify which: {}",
-            style::blue(slug),
-            style::bold(&ids.into_iter().collect::<Vec<_>>().join(", ")),
-            style::bold_cyan("cav approve <agent-id>"),
-        );
-    }
+) -> Vec<String> {
+    let remote_dev = format!("{CAVE_SHARED_REMOTE}/{branch}");
+    let remote_base = format!("{CAVE_SHARED_REMOTE}/{base_name}");
+    let has_base = git::git(
+        &["rev-parse", "--verify", &remote_base],
+        Some(base),
+        false,
+        true,
+        false,
+    )
+    .is_ok();
+    let base_ref = has_base.then_some(remote_base.as_str());
+    git::pending_excludes(base_ref, &remote_dev, Some(base))
+        .and_then(|ex| {
+            let ex: Vec<&str> = ex.iter().map(String::as_str).collect();
+            git::commit_oneline(&remote_dev, Some(&ex), Some(base))
+        })
+        .unwrap_or_default()
+}
 
-    println!("\nPending work in {}:\n", style::blue(slug));
-    for (branch, base_name, aid) in candidates.iter() {
-        let name = registry::display_name(base, aid);
-        let remote_dev = format!("{CAVE_SHARED_REMOTE}/{branch}");
-        let remote_base = format!("{CAVE_SHARED_REMOTE}/{base_name}");
-        let has_base = git::git(
-            &["rev-parse", "--verify", &remote_base],
-            Some(base),
-            false,
-            true,
-            false,
-        )
-        .is_ok();
-        let base_ref = has_base.then_some(remote_base.as_str());
-        let commits = git::pending_excludes(base_ref, &remote_dev, Some(base))
-            .and_then(|ex| {
-                let ex: Vec<&str> = ex.iter().map(String::as_str).collect();
-                git::commit_oneline(&remote_dev, Some(&ex), Some(base))
-            })
-            .unwrap_or_default();
-        let n = commits.len();
-        let word = if n == 1 { "commit" } else { "commits" };
-        println!(
-            "  {}) {} → {}    {} {word}",
-            style::bold(aid),
-            style::agent_name(&name),
-            style::yellow(base_name),
-            style::bold(&n.to_string()),
-        );
-        print!("{}", git::format_commit_list(&commits, "     ", Some(3)));
-    }
-
-    let ids: Vec<&str> = candidates.iter().map(|(_, _, aid)| aid.as_str()).collect();
-    print!("\nApprove which agent? [{}] ", ids.join("/"));
+fn ask(question: &str, options: &[String]) -> Result<String> {
+    print!("\n{question} [{}] ", options.join("/"));
     io::stdout().flush()?;
     let mut answer = String::new();
     match io::stdin().read_line(&mut answer) {
         Ok(0) | Err(_) => bail!("\nAborted."),
         Ok(_) => {}
     }
-    let answer = answer.trim();
-    candidates
+    Ok(answer.trim().to_string())
+}
+
+fn count(n: usize, singular: &str, plural: &str) -> String {
+    let noun = if n == 1 { singular } else { plural };
+    format!("{} {noun}", style::bold(&n.to_string()))
+}
+
+fn pick_candidate(
+    candidates: Vec<Candidate>,
+    base: &Path,
+    slug: &str,
+    yes: bool,
+) -> Result<Candidate> {
+    let groups = group_by_agent(candidates);
+
+    if yes {
+        let ids: Vec<&str> = groups.iter().map(|(aid, _)| aid.as_str()).collect();
+        if let [aid] = ids.as_slice() {
+            bail!(
+                "Agent {} has {} branches with pending work in {}.\n\
+                 Approve interactively (without {}) to pick one.",
+                style::bold(aid),
+                style::bold(&groups[0].1.len().to_string()),
+                style::blue(slug),
+                style::bold_cyan("-y"),
+            );
+        }
+        bail!(
+            "Multiple choices in {}: agents {}\nSpecify which: {}",
+            style::blue(slug),
+            style::bold(&ids.join(", ")),
+            style::bold_cyan("cav approve <agent-id>"),
+        );
+    }
+
+    println!("\nPending work in {}:\n", style::blue(slug));
+    for (aid, group) in &groups {
+        let name = registry::display_name(base, aid);
+        if let [cand] = group.as_slice() {
+            let commits = candidate_commits(cand, base);
+            println!(
+                "  {}) {} → {}    {}",
+                style::bold(aid),
+                style::agent_name(&name),
+                style::yellow(&cand.1),
+                count(commits.len(), "commit", "commits"),
+            );
+            print!("{}", git::format_commit_list(&commits, "     ", Some(3)));
+        } else {
+            println!(
+                "  {}) {}    {}",
+                style::bold(aid),
+                style::agent_name(&name),
+                count(group.len(), "branch", "branches"),
+            );
+            for cand in group {
+                println!(
+                    "     {}    {}",
+                    style::yellow(&cand.1),
+                    count(candidate_commits(cand, base).len(), "commit", "commits"),
+                );
+            }
+        }
+    }
+
+    let ids: Vec<String> = groups.iter().map(|(aid, _)| aid.clone()).collect();
+    let answer = ask("Approve which agent?", &ids)?;
+    let group = groups
         .into_iter()
-        .find(|(_, _, aid)| aid == answer)
-        .ok_or_else(|| anyhow::anyhow!("Invalid selection."))
+        .find(|(aid, _)| *aid == answer)
+        .map(|(_, group)| group)
+        .ok_or_else(|| anyhow::anyhow!("Invalid selection."))?;
+
+    if group.len() == 1 {
+        return Ok(group.into_iter().next().unwrap());
+    }
+    pick_branch(group, base, &registry::display_name(base, &answer))
+}
+
+fn pick_branch(
+    group: Vec<Candidate>,
+    base: &Path,
+    name: &str,
+) -> Result<Candidate> {
+    println!("\n{} has pending work on:\n", style::agent_name(name));
+    for (i, cand) in group.iter().enumerate() {
+        let commits = candidate_commits(cand, base);
+        println!(
+            "  {}) {}    {}",
+            style::bold(&(i + 1).to_string()),
+            style::yellow(&cand.1),
+            count(commits.len(), "commit", "commits"),
+        );
+        print!("{}", git::format_commit_list(&commits, "     ", Some(3)));
+    }
+
+    let numbers: Vec<String> = (1..=group.len()).map(|i| i.to_string()).collect();
+    let answer = ask("Approve which branch?", &numbers)?;
+    let index: usize = answer
+        .parse()
+        .ok()
+        .filter(|i| (1..=group.len()).contains(i))
+        .ok_or_else(|| anyhow::anyhow!("Invalid selection."))?;
+    Ok(group.into_iter().nth(index - 1).unwrap())
 }
 
 /// Returns the full SHA of the unique commit in the candidate's pending
@@ -467,3 +573,38 @@ fn do_approve(
     Ok(notes)
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cand(aid: &str, base_name: &str) -> Candidate {
+        (
+            format!("agent-{aid}/{base_name}"),
+            base_name.to_string(),
+            aid.to_string(),
+        )
+    }
+
+    #[test]
+    fn sorts_agents_numerically() {
+        let mut c = vec![cand("18", "develop"), cand("19", "main"), cand("2", "main")];
+        sort_candidates(&mut c);
+        let ids: Vec<&str> = c.iter().map(|(_, _, aid)| aid.as_str()).collect();
+        assert_eq!(ids, ["2", "18", "19"]);
+    }
+
+    #[test]
+    fn an_agent_gets_one_menu_entry_however_many_branches_it_has() {
+        let c = vec![
+            cand("18", "develop"),
+            cand("18", "worktree-div"),
+            cand("19", "main"),
+        ];
+        let groups = group_by_agent(c);
+        let ids: Vec<&str> = groups.iter().map(|(aid, _)| aid.as_str()).collect();
+        assert_eq!(ids, ["18", "19"]);
+        assert_eq!(groups[0].1.len(), 2);
+        assert_eq!(groups[1].1.len(), 1);
+    }
+}
