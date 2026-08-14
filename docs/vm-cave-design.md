@@ -369,6 +369,61 @@ Control RPC (port 7001, JSON over HTTP, no framework): `POST /agents`
 `POST /agents/<n>/stop`, `GET /health`. cave-vm is the only client; the
 protocol is internal and versioned by the image/binary shipping together.
 
+## The cave environment, and the command surface
+
+One environment, specified by one file: `~/.config/coding-cave/cave.nix` on
+the host, plus its siblings, exactly as on `main`. It is what agents get and
+what `cav shell` gets, because those are the same environment. Per-project
+tooling is the project's own `flake.nix` and is not cav's business, which is
+most of what would otherwise have been a second layer.
+
+**The build happens in the guest.** An `aarch64-darwin` host cannot build an
+`aarch64-linux` system at all, so a host-side build is not portable, and once
+the guest builds on macOS there is no reason for Linux to differ: narcache
+already exists to let the guest substitute out of the host's store. What
+crosses the boundary is therefore a handful of small text files, not a
+closure. `vmcav deploy`, which builds on the host and `nix copy`s the closure
+in, is a Linux-only bootstrap shortcut and does not survive contact with
+macOS.
+
+`cav env build` and `cav env pull` are the same mechanism in opposite
+directions. `build` pushes the spec in and rebuilds; `pull` brings an agent's
+changes back out and writes them to `cave.nix`. Push is not a command anyone
+should have to remember: hash the sources, and anything that needs the
+environment (starting an agent, `cav shell`) pushes and rebuilds when the hash
+differs, which is `main`'s existing skip logic moved to the guest boundary.
+`cav env build` stays for iterating without starting anything.
+
+The guest keeps its copy in a git repository of its own, so an agent editing
+the environment gets history, a diff and a revert, and so "has the guest
+changed" is a question git answers: the working tree against the commit
+recorded when the host last pushed. Whether the *host's* file changed is a
+stored hash, the same one the skip logic already needs. Both changed means a
+prompt to clobber, defaulting to no, and nothing merges. That repository is
+the guest's own and never leaks outward: the host user is not required to
+version anything, and `pull` writes the file directly. It writes through to
+the path the symlink resolves to, so a chezmoi-managed link stays a link and
+shows up as an ordinary local modification in whatever the user already uses.
+
+`cav env update [input]` keeps its meaning from `main`: bump the lock, do not
+build. It stays a pure host operation, needs no VM, and works on macOS because
+fetching flake inputs is arch-independent. The lock is state rather than spec,
+lives beside `cave.nix` on the host so it survives a `reformat`, and rides in
+the synced set in both directions, so an agent that runs `nix flake update` in
+the guest can bring the result back through `pull`.
+
+`cav vm start|stop|status|reformat` is the machine, and holds no configuration
+verbs. `create` disappears into `start`, which builds a disk when there is
+none. Setting `system.configurationRevision` gives each generation the cav
+commit it was built from, which the host can read straight off the disk, since
+that is where `start` already reads the system profile.
+
+Open: whether `cave.nix` applies as a home-manager profile linked into cave
+homes, which cannot break the machine, or as part of the system generation,
+which is one config and one activation; and what triggers an upgrade of cav's
+own guest system, the cav package changing under it, the next `start`, or a
+command of its own.
+
 ## Prior art: containerd and Kata Containers
 
 Checked against the closest established systems. containerd is the
@@ -534,7 +589,8 @@ wiring. Phases 0 and 1 restate the old plan's floor.
   implementation's sandbox config rather than re-derived. Mechanism TBD
   (share the JSON sandbox config the nix build already emits).
 - CLI unification: when does `cav agent` learn to delegate to cave-vm, and
-  which of status/approve/cp grow VM awareness first.
+  which of status/approve/cp grow VM awareness first. The environment and
+  machine verbs are settled above.
 - crinj read-through content cache scope and eviction policy (separate
   crinj plan; the vsock bridge here does not depend on it).
 - Where package-dedupe lives: its own repo (its layer 1 is deliberately
