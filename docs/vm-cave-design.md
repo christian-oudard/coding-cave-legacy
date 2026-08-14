@@ -532,6 +532,23 @@ inode.
 
 ### The mirror is append-only, and the host does the naming
 
+Who does what, since it is spread over four pieces and only one of them is
+new:
+
+- **claude**, in the guest, writes its transcript where it always does.
+  Nothing intercepts it.
+- **`cave-guestd`**, in the guest, as one-shot commands rather than a
+  service: list `(uuid, length)`, write one record from a given offset to
+  stdout, and read one on stdin into the path claude expects for this cwd.
+  Stateless and dumb, so there is no lifetime to manage and it answers
+  whether or not a session is live.
+- **The host supervisor** drives it: polls, validates, appends, never
+  replaces. Every naming and every write is here.
+- **The registry** holds the row, in `main`'s existing `sessions` table.
+
+The per-session process has no part in this. It owns a pty and nothing else,
+which is also what keeps the mirror working after an agent has exited.
+
 The obvious mechanism, rsync over the ssh path `deploy` already uses, is
 wrong, and the reason generalizes. In a pull it is the *sender* that supplies
 the file list, so a compromised guest chooses the names and the bytes that
