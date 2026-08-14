@@ -417,7 +417,12 @@ pub fn resolve_continue(
     }
 
     let aid = agent_id.unwrap();
-    let session_id = read_session_id(&aid)?;
+    let slug = config::project_slug(base);
+    // Not the row alone: `/clear` mints a session id inside the cave that the
+    // row never learns, so resuming from it would reattach to the
+    // conversation the user cleared away.
+    let session_id =
+        crate::session_store::current_session(&aid, &slug, read_session_id(&aid)?.as_deref());
 
     if let Some(ref sid) = session_id {
         // Whether claude will actually find a transcript to resume, not
@@ -426,8 +431,8 @@ pub fn resolve_continue(
         // dir, and a pre-upgrade agent's transcript can still be sitting
         // under the old shared home. session_store restores either into the
         // live path before we commit to --resume.
-        let slug = config::project_slug(base);
         if crate::session_store::ensure_live_transcript(&aid, &slug, sid) {
+            write_session_id(&aid, sid)?;
             return Ok(ResolvedContinue {
                 agent_id: aid,
                 session_id: sid.clone(),

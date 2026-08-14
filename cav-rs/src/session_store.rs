@@ -137,6 +137,63 @@ pub fn ensure_live_transcript(agent_id: &str, slug: &str, session_id: &str) -> b
     legacy.is_file() && std::fs::rename(&legacy, &live).is_ok()
 }
 
+/// The session Claude last had open for the cave's cwd, from the agent's own
+/// `.claude.json`. This is the value `claude -c` follows.
+fn last_session_id(agent_id: &str, slug: &str) -> Option<String> {
+    let text = std::fs::read_to_string(workspace::agent_claude_json(agent_id)).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    // Claude keys its per-project state by the cwd it was launched in, which
+    // inside the cave is always /projects/<slug>.
+    v.get("projects")?
+        .get(format!("/projects/{slug}"))?
+        .get("lastSessionId")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// When a transcript was last written, live copy or permanent record. The
+/// archive entry is the live inode, so either answers for a registered
+/// session and the fallback only covers the seconds before the watcher runs.
+fn transcript_written_at(agent_id: &str, slug: &str, sid: &str) -> Option<std::time::SystemTime> {
+    let live = workspace::agent_project_dir(agent_id, slug).join(format!("{sid}.jsonl"));
+    let path = if live.is_file() { live } else { config::session_transcript(sid) };
+    std::fs::metadata(path).ok()?.modified().ok()
+}
+
+/// The session the agent is actually on, given the id cav asked claude for.
+///
+/// `--session-id` is binding only until the user types `/clear`, which mints
+/// a fresh session id inside the cave. cav never sees that happen, so the id
+/// it recorded at launch stays pinned to the pre-clear conversation and every
+/// later `cav -c`/`cav -r <n>` reattaches to it. Claude does follow the
+/// change, in `.claude.json`, so prefer that id when its transcript is the
+/// one written last.
+///
+/// Only the two named ids are considered. Scanning for "the newest transcript
+/// in the dir" would sweep up background-job sessions, which are written to
+/// the same place and are not the agent's conversation.
+pub fn current_session(agent_id: &str, slug: &str, requested: Option<&str>) -> Option<String> {
+    let Some(moved) = last_session_id(agent_id, slug) else {
+        return requested.map(str::to_string);
+    };
+    let Some(req) = requested else {
+        return Some(moved);
+    };
+    if moved == req {
+        return Some(moved);
+    }
+    // A requested id with no transcript at all is left alone: it may still be
+    // restorable from the legacy shared home, which ensure_live_transcript
+    // handles and this cannot see.
+    match (
+        transcript_written_at(agent_id, slug, &moved),
+        transcript_written_at(agent_id, slug, req),
+    ) {
+        (Some(m), Some(r)) if m > r => Some(moved),
+        _ => Some(req.to_string()),
+    }
+}
+
 /// Register every unregistered transcript belonging to an agent. Safe to call
 /// repeatedly: already-registered sessions are skipped, so a running session
 /// is not disturbed.
@@ -187,6 +244,120 @@ mod tests {
         let p = dir.join(format!("{sid}.jsonl"));
         std::fs::write(&p, body).unwrap();
         p
+    }
+
+    /// Write a transcript and stamp its mtime, so ordering in these tests
+    /// does not depend on the filesystem's timestamp resolution.
+    fn transcript_at(claude: &Path, slug: &str, sid: &str, secs_ago: u64) -> PathBuf {
+        let p = transcript(claude, slug, sid, "line\n");
+        let t = std::time::SystemTime::now() - std::time::Duration::from_secs(secs_ago);
+        std::fs::File::options()
+            .write(true)
+            .open(&p)
+            .unwrap()
+            .set_modified(t)
+            .unwrap();
+        p
+    }
+
+    fn claude_json(agent_id: &str, slug: &str, last: &str) {
+        let p = workspace::agent_claude_json(agent_id);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        let body = serde_json::json!({
+            "projects": { format!("/projects/{slug}"): { "lastSessionId": last } }
+        });
+        std::fs::write(&p, body.to_string()).unwrap();
+    }
+
+    #[test]
+    fn current_session_follows_a_clear() {
+        let g = crate::test_util::DataDirGuard::new("current-clear");
+        let aid = registry::acquire_agent_id(&g.path.join("proj")).unwrap();
+        let claude = workspace::agent_claude_dir(&aid);
+        transcript_at(&claude, "proj", "before-clear", 60);
+        transcript_at(&claude, "proj", "after-clear", 0);
+        claude_json(&aid, "proj", "after-clear");
+
+        assert_eq!(
+            current_session(&aid, "proj", Some("before-clear")).as_deref(),
+            Some("after-clear"),
+        );
+    }
+
+    /// Clearing repeatedly leaves a chain of transcripts in one launch. Only
+    /// the last one is the agent's conversation; the intermediates stay in
+    /// the archive, resumable by uuid, but must not win the row.
+    #[test]
+    fn current_session_follows_the_last_of_several_clears() {
+        let g = crate::test_util::DataDirGuard::new("current-chain");
+        let aid = registry::acquire_agent_id(&g.path.join("proj")).unwrap();
+        let claude = workspace::agent_claude_dir(&aid);
+        for (sid, age) in [("launched", 40), ("clear-1", 30), ("clear-2", 20), ("clear-3", 10)] {
+            transcript_at(&claude, "proj", sid, age);
+        }
+        claude_json(&aid, "proj", "clear-3");
+
+        assert_eq!(
+            current_session(&aid, "proj", Some("launched")).as_deref(),
+            Some("clear-3"),
+        );
+    }
+
+    #[test]
+    fn current_session_keeps_the_requested_id_when_claude_did_not_move() {
+        let g = crate::test_util::DataDirGuard::new("current-same");
+        let aid = registry::acquire_agent_id(&g.path.join("proj")).unwrap();
+        transcript_at(&workspace::agent_claude_dir(&aid), "proj", "sess", 0);
+        claude_json(&aid, "proj", "sess");
+
+        assert_eq!(
+            current_session(&aid, "proj", Some("sess")).as_deref(),
+            Some("sess"),
+        );
+    }
+
+    /// claude records lastSessionId per cwd, so a stale entry from an earlier
+    /// launch of the same agent must not outrank the session cav just ran.
+    #[test]
+    fn current_session_ignores_a_stale_last_session_id() {
+        let g = crate::test_util::DataDirGuard::new("current-stale");
+        let aid = registry::acquire_agent_id(&g.path.join("proj")).unwrap();
+        let claude = workspace::agent_claude_dir(&aid);
+        transcript_at(&claude, "proj", "older", 60);
+        transcript_at(&claude, "proj", "requested", 0);
+        claude_json(&aid, "proj", "older");
+
+        assert_eq!(
+            current_session(&aid, "proj", Some("requested")).as_deref(),
+            Some("requested"),
+        );
+    }
+
+    /// A requested id with no transcript anywhere may still be restorable
+    /// from the legacy shared home, which only ensure_live_transcript sees.
+    #[test]
+    fn current_session_leaves_an_unwritten_requested_id_alone() {
+        let g = crate::test_util::DataDirGuard::new("current-unwritten");
+        let aid = registry::acquire_agent_id(&g.path.join("proj")).unwrap();
+        transcript_at(&workspace::agent_claude_dir(&aid), "proj", "other", 0);
+        claude_json(&aid, "proj", "other");
+
+        assert_eq!(
+            current_session(&aid, "proj", Some("never-written")).as_deref(),
+            Some("never-written"),
+        );
+    }
+
+    #[test]
+    fn current_session_is_the_recorded_one_when_nothing_was_requested() {
+        let g = crate::test_util::DataDirGuard::new("current-none");
+        let aid = registry::acquire_agent_id(&g.path.join("proj")).unwrap();
+        claude_json(&aid, "proj", "recorded");
+
+        assert_eq!(
+            current_session(&aid, "proj", None).as_deref(),
+            Some("recorded"),
+        );
     }
 
     #[test]

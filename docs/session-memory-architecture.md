@@ -104,6 +104,24 @@ Every agent can read every session at `/cave/sessions`, across all projects.
 The mount is read-only, so an agent cannot write or delete another's record;
 the only writable path to any transcript is the agent's own `~/.claude`.
 
+## Which session an agent is on
+
+The agent row holds one session id, minted by cav and passed as
+`--session-id`. That id is binding only until the user types `/clear`, which
+mints a new one inside the cave. cav never sees it happen, so the row stays
+pinned to the pre-clear conversation and every later `cav -c` / `cav -r <n>`
+reattaches to it.
+
+Claude does follow the change: it records `lastSessionId` per launch cwd in
+`.claude.json`, which is per agent and so already on cav's side of the
+boundary. Both at launch and at teardown, cav takes whichever of the two ids
+-- the one it asked for and the one Claude moved to -- has the more recently
+written transcript, and writes that back to the row.
+
+Only those two ids are ever considered. Picking "the newest transcript in the
+agent's directory" would sweep up background-job sessions, which land in the
+same place and are not the agent's conversation.
+
 `cav agent --resume <session-id>` resolves the id through the `sessions`
 table, restoring the transcript into the resuming agent's own directory first
 if it isn't already there (from the permanent archive, or, for a session that

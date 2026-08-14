@@ -2961,27 +2961,24 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
     let _ = stop_tx.send(());
     let _ = watcher.join();
 
-    // claude --session-id is binding: the .jsonl lands at the uuid we asked
-    // for, or claude wrote nothing (early exit, no messages sent). No
-    // post-hoc inference needed -- check the path we requested and that's
-    // it. The previous "fall back to latest .jsonl" path silently stole
-    // sessions from other agents in the shared archive; scanning is safe
-    // here only because a fork's new id has no requested path to check and
-    // claude_dir is this agent's own, never shared.
+    // claude --session-id is binding only until the user types /clear, which
+    // mints a new id in the cave. Claude records it, so current_session picks
+    // between the id we asked for and the one it moved to -- never by
+    // scanning, which would sweep up background-job sessions. The old "fall
+    // back to latest .jsonl" path silently stole sessions from other agents
+    // in the shared archive; scanning is safe for a fork only because its new
+    // id has no requested path to check and claude_dir is this agent's own.
     let actual_sid = if borrowed {
         session_store::transcripts(&claude_dir)
             .into_iter()
             .filter_map(|p| p.file_stem().and_then(|s| s.to_str()).map(str::to_string))
             .find(|sid| !pre_fork_sids.contains(sid))
     } else {
-        session_id
-            .as_deref()
-            .filter(|sid| {
-                workspace::agent_project_dir(&agent_id, &slug)
-                    .join(format!("{sid}.jsonl"))
-                    .is_file()
-            })
-            .map(str::to_string)
+        session_store::current_session(&agent_id, &slug, session_id.as_deref()).filter(|sid| {
+            workspace::agent_project_dir(&agent_id, &slug)
+                .join(format!("{sid}.jsonl"))
+                .is_file()
+        })
     };
 
     // Exit always transitions to Paused. The session log, worktree, and

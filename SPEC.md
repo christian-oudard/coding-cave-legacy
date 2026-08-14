@@ -91,7 +91,7 @@ Adds a project to the coding-cave registry. Sets up the shared bare repo, and br
 
 Launches a Claude Code CLI agent in a coding-cave session. Auto-assigns a numeric ID. There are no agent ID duplicates among running agents or stopped agents with unmerged work.
 
-Continue the most recently exited session with `--continue`. Continue arbitrary sessions, by session-id or agent-id, with `--resume`. Per-launch flags (`--project`, `--port`, `--dev`, `--comms`) apply only to the current launch and do not carry over from the original session; the agent's system prompt is rebuilt each launch to reflect the flags actually in effect.
+Continue the most recently exited session with `--continue`. Continue arbitrary sessions, by session-id or agent-id, with `--resume`. Continuing by agent id lands in the conversation that agent was last in, including when `/clear` inside the cave started a new one. Per-launch flags (`--project`, `--port`, `--dev`, `--comms`) apply only to the current launch and do not carry over from the original session; the agent's system prompt is rebuilt each launch to reflect the flags actually in effect.
 
 Allow access to multiple projects with the `--project` flag (repeatable).
 
