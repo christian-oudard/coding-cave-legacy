@@ -542,8 +542,8 @@ new:
   stdout, and read one on stdin into the path claude expects for this cwd.
   Stateless and dumb, so there is no lifetime to manage and it answers
   whether or not a session is live.
-- **The host supervisor** drives it: polls, validates, appends, never
-  replaces. Every naming and every write is here.
+- **The host supervisor** drives it, at the checkpoints below: validates,
+  appends, never replaces. Every naming and every write is here.
 - **The registry** holds the row, in `main`'s existing `sessions` table.
 
 The per-session process has no part in this. It owns a pty and nothing else,
@@ -566,9 +566,42 @@ So the guest names nothing:
 - For each, if the host holds fewer bytes, it asks for that record from its
   own offset and appends what it gets.
 - It never truncates and never replaces. If the prefix it holds stops
-  matching, it keeps what it has and starts a new record beside it, so a
-  guest that rewrites or lies costs disk rather than history. Deletion is a
-  host-side human act, never something the guest can cause.
+  matching, it keeps what it has and files the divergent copy away from the
+  records, under `sessions/diverged/`, so a guest that rewrites or lies costs
+  disk rather than history. Deletion is a host-side human act, never
+  something the guest can cause.
+
+The stem of a record file is the session id, and stays the session id
+everywhere: `sessions/<uuid>.jsonl` on the host, and the same name when it is
+restored into a guest. claude finds resumable sessions by scanning
+`~/.claude/projects/<encoded-cwd>/*.jsonl` and reading the stem as the id, so
+both `--resume <uuid>` and the picker inside the cave depend on that name
+surviving the round trip. Only the directory is derived, from the cwd the
+session will run in, which is why the guest computes it and the host never
+needs to know guest paths. This is also why a divergent copy cannot live
+beside the records: `<uuid>.1.jsonl` is not a session id, and restoring one
+would produce a transcript nothing can resume.
+
+It must not rest on our own code being right either, which is the same
+requirement pointed the other way, and it costs four rules:
+
+- **The archive is claude's own file, unwrapped.** No container format, no
+  compression, no chunking, no index file that can go stale. The worst a bug
+  can do is fail to add bytes, never transform them, and a record stays
+  readable with `cat` and resumable by copying it into a guest by hand.
+- **The filesystem is the index.** Flat directory, filename is the uuid, so a
+  record is findable with `ls` with no database at all. The registry rows
+  carry project, agent and branch; losing them costs metadata, not
+  findability.
+- **Whole lines only.** The host commits up to the last newline it received
+  and re-requests from there, so a short read, a dropped connection or a
+  crash mid-transfer still leaves a file that is a sequence of complete
+  lines. Trimming our own partial tail back to a newline is the one
+  truncation allowed, and is a different act from replacing a record.
+- **Failures lag, they do not lose.** The guest keeps its copy until a
+  reformat, so a mirror that is broken or wrong is repaired by fixing the
+  code and syncing again. Staleness therefore has to be visible rather than
+  silent.
 
 The result is append-only in the real sense, and it does not rest on the guest
 behaving: an agent that rewrites another agent's transcript inside the VM
@@ -581,13 +614,41 @@ in place, mutating the shared inode, which its doc lists under "not covered".
 Having no shared inode is what lets the VM be strictly better rather than
 merely different.
 
-Inbound is the same channel and the same rule as `main`'s
-`ensure_live_transcript`: lazily, at session start, fetch the one record being
-resumed and write it where claude expects it for the guest's own cwd, and if
-the host has nothing, start a fresh session and say so rather than letting
-`--resume` fail inside the guest. Never at boot: after a reformat the guest is
-empty, and pushing every recorded transcript into it would be slow and would
-break the scoping of the resume picker to an agent's own sessions.
+### Checkpoints, not a live mirror
+
+The archive is synced at events, not on a fast timer. The guest disk and the
+archive live on the same host filesystem, so continuous mirroring protects
+against almost nothing that an exit-time checkpoint misses; what it would
+protect against is `reformat`, which is deliberate and can sync first, exactly
+as it already does for the login.
+
+Triggers: an agent exiting, `stop`, and before `reformat`, which is the one
+that may never be skipped. The host learns about an exit from an
+`ExecStopPost` on the session unit that nudges it over the plane, one byte
+that names nothing and writes nothing, after which the host pulls as it would
+have anyway. A slow safety net, a quarter hour rather than five seconds,
+covers the agent that runs for a week without exiting, whose history is worth
+the most and would otherwise have no checkpoint in it.
+
+None of the protocol above changes with the schedule: the same two verbs, the
+same host-side naming, the same append-only rule.
+
+### Restoring into a guest
+
+One claude can `/resume` many sessions and append to any of them, and that
+happens inside the cave where the host is not consulted. So the picker can
+only offer what is already on disk, and restore has to be bulk and up front
+rather than one record at a time: at cave start, the agent's own sessions,
+which is the scoping `main` applies to the picker anyway and what bounds the
+cost. Anything outside that set, an older session or another agent's, goes
+through the host (`cav agent --resume <id>`), which puts the one record in
+place before launching, and starts a fresh session with a clear message if the
+archive does not have it, rather than letting `--resume` fail inside the
+guest.
+
+`main`'s `--fork-session` rule matters more here than there: any claude being
+able to append to any transcript is exactly the interleaving it exists to
+prevent, and ownership comes from the sessions table.
 
 Memory is not per-session and cannot ride this. It is per-project, shared, has
 to exist before the agent starts, and its files are rewritten rather than
