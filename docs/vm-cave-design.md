@@ -516,12 +516,68 @@ holding `/home`, with `reformat` recreating only the system disk. It survives
 a reformat and nothing else, it is opaque from the host without `debugfs`, and
 it buries the one thing worth backing up inside a 100 GB sparse image.
 
-The bytes cross on the service plane, not on a mount: the guest has no host
-filesystem, by construction. claude's session logs are append-only JSONL,
-which decides the shape: materialize the log at session start so `--resume`
-has something to read, stream appends out while it runs. The per-session
-process is the natural owner, since it already exists per session and dies
-with it.
+Everything above this line is `main`'s arrangement, and it is reused as is:
+the same layout, the same permanent `sessions` table, registration of a
+transcript when it appears rather than when it was predicted (background jobs
+have ids cav never sees in advance), and the same `--fork-session` rule when
+the resumer is not the session's owner. Two facts `main` verified are carried
+rather than re-derived: claude appends to a transcript rather than renaming
+over it, and plain `--resume` appends in place.
+
+What the VM changes is one thing. `main` gets the file onto the host for free,
+because the cave writes through a bind mount into a host directory, and makes
+the archive permanent by hardlinking the live inode. There is no mount here,
+so the bytes have to cross, and a second inode on the host cannot be the same
+inode.
+
+### The mirror is append-only, and the host does the naming
+
+The obvious mechanism, rsync over the ssh path `deploy` already uses, is
+wrong, and the reason generalizes. In a pull it is the *sender* that supplies
+the file list, so a compromised guest chooses the names and the bytes that
+land under the destination; rsync has a history of exactly that, malicious
+senders escaping the destination directory. Even a flawless rsync leaves a
+guest able to overwrite records already in the archive, which defeats the
+only reason the archive exists. A push is the same thing with the direction
+reversed, and needs a writable path into the host besides. This is a
+read-write mount wearing a different hat.
+
+So the guest names nothing:
+
+- The host asks for a list of `(session id, length)` and discards any id that
+  is not a UUID, so there are no paths in the protocol at all.
+- For each, if the host holds fewer bytes, it asks for that record from its
+  own offset and appends what it gets.
+- It never truncates and never replaces. If the prefix it holds stops
+  matching, it keeps what it has and starts a new record beside it, so a
+  guest that rewrites or lies costs disk rather than history. Deletion is a
+  host-side human act, never something the guest can cause.
+
+The result is append-only in the real sense, and it does not rest on the guest
+behaving: an agent that rewrites another agent's transcript inside the VM
+cannot touch a byte the host already holds. Keeping agents out of each other's
+transcripts *inside* the guest is worth having to limit the damage there, and
+is uid separation or per-agent binds, which is the multi-agent item.
+
+`main` is weaker here and says so: a cave can truncate its own live transcript
+in place, mutating the shared inode, which its doc lists under "not covered".
+Having no shared inode is what lets the VM be strictly better rather than
+merely different.
+
+Inbound is the same channel and the same rule as `main`'s
+`ensure_live_transcript`: lazily, at session start, fetch the one record being
+resumed and write it where claude expects it for the guest's own cwd, and if
+the host has nothing, start a fresh session and say so rather than letting
+`--resume` fail inside the guest. Never at boot: after a reformat the guest is
+empty, and pushing every recorded transcript into it would be slow and would
+break the scoping of the resume picker to an agent's own sessions.
+
+Memory is not per-session and cannot ride this. It is per-project, shared, has
+to exist before the agent starts, and its files are rewritten rather than
+appended. `main`'s answer stands (slug-named files that union, `MEMORY.md`
+regenerated from frontmatter so a lost concurrent write self-heals); what the
+VM adds is that it is the one surface where guest-chosen bytes overwrite a
+host file, so it is the one that needs a rule of its own.
 
 The store stays on the guest disk, so redownload-and-rebuild remains the cost
 of a reformat. Uncommitted work in a worktree is the one thing that cannot

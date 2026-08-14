@@ -62,15 +62,10 @@ home directory on the guest disk, so it cannot be resumed from the host.
 reboot-to-test-a-generation loop, which is the same problem seen from a
 different side.
 
-Moving session state to the host settles the durability half and the
-visibility half at once: the logs live under `~/.local/share/coding-cave` and
-the registry holds the id, so what is missing is the resume itself, not the
-history and not a way for the host to know what to resume.
-
-Open: whether sessions are host-visible at all (the container cave tracks
-them in the registry: session id per agent, `cav status`, resume by id), and
-whether more than one agent per VM is a thing, which decides whether "the
-agent" stays the single session the daemon names `1`.
+Settled in `vm-cave-design.md`, and no longer open: sessions are host state,
+in `main`'s existing layout and `sessions` table, mirrored out of the guest
+append-only with the host doing all the naming. What is left is building it,
+which is a list verb, a read-from-offset verb, and a host-side loop.
 
 ## Agent hibernation
 
