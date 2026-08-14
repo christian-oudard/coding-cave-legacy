@@ -4,5 +4,5 @@
 [vm]
 # Maximum guest disk size, in GB. The image is sparse ("elastic"): it only
 # consumes what the guest actually writes, up to this cap. Applies when the
-# disk is first created; `vmcav reformat` recreates it at the new size.
+# disk is first created; `vmcav image reformat` recreates it at the new size.
 disk_size_gb = 100

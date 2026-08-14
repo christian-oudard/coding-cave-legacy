@@ -403,7 +403,7 @@ firewall-pinning arrangement Kata or firecracker-containerd ship.
                           nix CLI exec wrappers
       internal/guest/     guestd internals: cave lifecycle, uid allocation,
                           bwrap invocation, home materialization, CacheSpec
-                          table, tmux session management
+                          table, pty session management
       internal/state/     state dir layout, key generation, guest.img
                           creation, image artifact resolution
       internal/rpc/       control protocol types shared by CLI and guestd
@@ -428,7 +428,7 @@ wiring. Phases 0 and 1 restate the old plan's floor.
   over vsock. `cave-vm status` reports it. Accept: cold boot to healthy
   under 10 s; state survives stop/start.
 - **3. Attach plane.** sshd on vsock, `cave-vm shell` lands in a guest
-  tmux. Accept: detach, reattach, session intact.
+  session held by the daemon. Accept: detach, reattach, session intact.
 - **4. Nix supply.** narcache server, fleet key, guest daemon substituter
   order. Accept: with crinj absent and no network, `nix build nixpkgs#hello`
   (host-present) succeeds in the guest and transfers zero internet bytes;

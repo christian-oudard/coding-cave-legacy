@@ -208,11 +208,14 @@ in
     };
   };
 
-  # logrotate's config check rejects the store-owned config (through the
-  # 9p-mounted /nix/store the file's owner isn't uid 0), which fails on boot
-  # and, worse, makes switch-to-configuration return non-zero. The agent's
-  # redeploy loop reads that as a failed deploy and would roll back a good
-  # one. logrotate isn't needed here (journald self-rotates), so disable it.
+  # logrotate's config check rejected the store-owned config, which fails on
+  # boot and, worse, makes switch-to-configuration return non-zero. The
+  # agent's redeploy loop reads that as a failed deploy and would roll back a
+  # good one. logrotate isn't needed here (journald self-rotates), so disable
+  # it. The original diagnosis was ownership seen through a 9p-mounted
+  # /nix/store, which cannot be it any more: the store is on the ext4 root
+  # now. Left disabled because nothing here wants logrotate either way, so
+  # whether the check would still fail is untested.
   services.logrotate.enable = false;
 
   # Guest-side leg of the service plane. CHV's vsock is the unix-socket
@@ -430,7 +433,8 @@ in
   # Clone the coding-cave repo the agent works in. Its own oneshot (not
   # buried in the agent launcher) so success/failure is visible in the
   # journal and the agent hard-depends on it: no repo, no agent (fail
-  # loudly). CAVE_REPO_URL defaults to the host git daemon over user-net.
+  # loudly). CAVE_REPO_URL defaults to the host git daemon, reached on
+  # localhost where the vsock-git bridge re-exposes it.
   systemd.services.clone-repo = {
     description = "Clone the coding-cave repo for the agent";
     # The git bridge, not network-online.target: there is no NIC, so
@@ -511,8 +515,9 @@ in
       # claude refuses --dangerously-skip-permissions as root ("cannot be
       # used with root/sudo privileges") unless it sees an already-sandboxed
       # environment. The VM is that sandbox, so declare it; without this the
-      # agent starts and immediately exits. `vmcav agent` sets the same when
-      # it launches claude interactively; a plain `vmcav shell` does not.
+      # agent starts and immediately exits. It is set here rather than by
+      # `vmcav agent`, which only attaches to the session this unit already
+      # started; a claude launched by hand from `vmcav shell` needs its own.
       IS_SANDBOX = "1";
       # systemd sets HOME only for units with User=, so a root unit gets none
       # and every tool that resolves config through $HOME misbehaves under the

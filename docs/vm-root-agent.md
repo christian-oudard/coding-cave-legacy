@@ -80,8 +80,8 @@ hand. Everything in "The redeploy loop" below (health checks, boot
 counting, resume markers) is built *by the agent* afterward, not a
 prerequisite.
 
-- A minimal NixOS guest: sshd, git, nix (daemon mode), tmux, claude-code,
-  a repo clone, and the agent unit. Nothing else.
+- A minimal NixOS guest: sshd, git, nix (daemon mode), cave-guestd,
+  claude-code, a repo clone, and the agent unit. Nothing else.
 - claude runs as root with bypass permissions
   (`--dangerously-skip-permissions`); inside the VM there is nothing to
   protect from it.
@@ -99,15 +99,15 @@ approval, all without any credential existing inside the VM.
 
 ## The agent runtime
 
-- `vm-root-agent.service`, a systemd unit in the guest config: a tmux
-  session running claude-code as root in `/root/coding-cave` (a clone of
+- `vm-root-agent.service`, a systemd unit in the guest config: a
+  cave-guestd session running claude-code as root in `/root/coding-cave` (a clone of
   the vm-cave branch, remote pointing at the host git daemon). The unit is
   part of the NixOS configuration, so the agent redeploys its own runtime
   like everything else, with generations as the undo.
 - Auth via the crinj OAuth passthrough; config seeding (trust dialog,
   onboarding) as the Rust implementation does today, translated into the
   guest config's activation.
-- The user attaches from the host (`ssh -> tmux attach`) to steer, and
+- The user attaches from the host (`ssh -> cave-guestd attach`) to steer, and
   approves commits from the host. The agent otherwise works unattended.
 
 ## The redeploy loop
@@ -118,9 +118,10 @@ on, safely, without a human in the loop.
 1. **Edit** guest config and Go code in `/root/coding-cave`.
 2. **Switch**: `nixos-rebuild switch --flake .#cave-guest-dev`. Userspace
    changes (guestd, pkgdd config, units, the agent's own service) activate
-   in place; the tmux session and the claude process survive because tmux
-   is not restarted by the switch (`X-RestartIfChanged=false` on the agent
-   unit; redeploying the agent binary itself takes effect on next session).
+   in place; the session and the claude process survive because the daemon
+   holding the pty is not restarted by the switch
+   (`X-RestartIfChanged=false` on the agent unit; redeploying the agent
+   binary itself takes effect on next session).
 3. **Health check**: a `guest-health` script (also in the config) verifies
    the invariants that make the agent reachable and recoverable: sshd up,
    git remote reachable, crinj egress works, disk not full, agent unit
@@ -190,8 +191,6 @@ one bootstrap-era liberty:
 - Whether the bootstrap flake lives in `guest/` of this repo (assumed
   above) or a separate repo; in-repo keeps the approval gate covering the
   guest config, which argues strongly for in-repo.
-- passt vs slirp4netns for the bootstrap NIC (whichever attaches to CHV
-  with less friction; both are rootless).
 - How much of the Rust implementation's config seeding and sandbox profile
   the agent may read for reference: per the branch rules, semantics only,
   via branch switching on the host and pasted excerpts, since the guest

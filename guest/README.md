@@ -35,11 +35,16 @@ seed instead, so the env var is not needed there.
 
 The guest has no network device, so unproxied egress is impossible by
 construction rather than by firewall rule. Host services arrive over
-virtio-vsock and are re-exposed on localhost by two socat units, so the proxy
-env, the agent's git remotes, and everything else stay ignorant of vsock:
+virtio-vsock and are re-exposed on localhost by a socat unit each, so the
+proxy env, the agent's git remotes, and everything else stay ignorant of
+vsock:
 
     127.0.0.1:10255  ->  vsock 7200  ->  crinj on the host
     127.0.0.1:9418   ->  vsock 7300  ->  the host git daemon
+    127.0.0.1:7400   ->  vsock 7400  ->  the host gpg signing broker
+
+Inbound is the mirror image: a socat unit accepts host ssh on vsock 22 and
+hands it to sshd, which is how `vmcav shell` and `vmcav agent` get in.
 
 CHV's vsock is the unix-socket hybrid, so no `/dev/vhost-vsock` and no kernel
 module are involved. A guest connection to port N surfaces on the host as the
@@ -64,10 +69,11 @@ Cloud Hypervisor is KVM-only with no software-emulation fallback, so
 `vmcav` keeps the guest's root disk at `$STATE_DIR/cave-guest.raw` (default
 `~/.local/share/coding-cave/vm/`), in your home rather than a temp dir, so
 guest state (the cloned repo, agent session, nix store writes) survives
-reboots. It is created sparse from the built image on first start and grown to
-the cap in `~/.config/coding-cave/config.toml` (default 100 GB), so it
-consumes only what the guest writes. To start clean, stop the VM and delete
-it; the next `vmcav start` recreates it. The seed disk is rebuilt every start.
+reboots. `vmcav image create` creates it sparse from the built image and grows
+it to the cap in `~/.config/coding-cave/config.toml` (default 100 GB), so it
+consumes only what the guest writes. `vmcav start` only boots: with no disk
+it tells you to create one. To start clean, `vmcav image reformat`. The seed
+disk is rebuilt every start.
 
 ## Redeploy loop (agent's core capability)
 

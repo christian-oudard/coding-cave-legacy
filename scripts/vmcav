@@ -569,14 +569,6 @@ usage: vmcav <command>
 EOF
 }
 
-# Re-bootstrap. Updating a guest is an in-guest nixos-rebuild, which needs a
-# working agent in a working VM; when that is what is broken, the way out is
-# the cattle property (docs/vm-root-agent.md): destroy the disk and let the
-# host build the whole system from the spec ref, needing nothing inside.
-#
-# Its own command rather than a flag on start: it destroys the guest's
-# filesystem, and nothing that does that should be reachable by adding a word
-# to the command you run every day.
 # Build the guest and materialize its disk. Everything that needs nix lives
 # here, so `start` is only ever a boot: the three artifacts the cmdline names
 # are kept as out-links, which are gc roots, so the store cannot collect the
@@ -611,8 +603,16 @@ do_image_create() {
   log "image ready; vmcav start"
 }
 
-# Destroy and recreate: the disk is the only copy of everything the guest has
-# done, so this is the one command that throws work away.
+# Re-bootstrap. Updating a guest is an in-guest nixos-rebuild, which needs a
+# working agent in a working VM; when that is what is broken, the way out is
+# the cattle property (docs/vm-root-agent.md): destroy the disk and let the
+# host build the whole system from the spec ref, needing nothing inside.
+#
+# Destroy and recreate, so the disk being the only copy of everything the
+# guest has done makes this the one command that throws work away. Its own
+# command rather than a flag on start for that reason: nothing that destroys
+# a filesystem should be reachable by adding a word to the command you run
+# every day.
 do_image_reformat() {
   if [ -f "$DISK" ]; then
     echo "This destroys the guest's entire filesystem:" >&2
@@ -823,12 +823,12 @@ do_stop() {
   if [ -S "$API" ] && command -v ch-remote >/dev/null 2>&1; then
     timeout 5 ch-remote --api-socket "$API" power-button >/dev/null 2>&1 || true
   fi
-  # Wait for a clean shutdown, signalled by EITHER qemu exiting OR the guest
-  # reaching power-off in the console. Watching the console matters under TCG:
-  # the guest can finish unmounting and halt ("reboot: Power down") while the
-  # emulated qemu process lingers for a while; once that marker appears the
-  # disk is safely unmounted, so killing the halted qemu is safe. On KVM qemu
-  # just exits in seconds and the PID check returns first.
+  # Wait for a clean shutdown, signalled by EITHER the VMM exiting OR the guest
+  # reaching power-off in the console. The pid check is normally what returns:
+  # CHV exits within seconds of the guest halting. The console marker is the
+  # fallback for a VMM that lingers after its guest is done, and it is the
+  # stronger signal of the thing actually worth knowing, that the disk is
+  # unmounted, so killing at that point is safe.
   local i=0 clean=0
   while [ "$i" -lt 240 ]; do
     kill -0 "$p" 2>/dev/null || { clean=1; break; }

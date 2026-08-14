@@ -27,7 +27,7 @@ it outright. That is the next step and it has not been taken.
 
 ## Preserve uncommitted work across `reformat`
 
-`vmcav reformat` destroys the guest disk, which is the only copy of anything
+`vmcav image reformat` destroys the guest disk, which is the only copy of anything
 the agent has not pushed. Committed work survives because pushing to
 `agent-<id>/<base>` puts it in the host repo; a dirty worktree does not.
 
@@ -127,8 +127,9 @@ Everything is claude-specific, in more places than the name suggests: the
 unit runs `claude --dangerously-skip-permissions`, `IS_SANDBOX=1` exists
 only to satisfy claude's root guard, the seed carries `claude.json`,
 `seed-claude-config` forces claude's trust and onboarding keys, the guest's
-managed settings pre-accept claude's bypass-permissions dialog, and crinj's
-OAuth chain is configured for Anthropic's token endpoint.
+managed settings pre-accept claude's bypass-permissions dialog, `vmcav
+agent` attaches to a daemon session that is assumed to be running claude,
+and crinj's OAuth chain is configured for Anthropic's token endpoint.
 
 Codex, antigravity and whatever follows each arrive with their own version
 of all of it: an auth story (a different OAuth provider, or a plain API key,
