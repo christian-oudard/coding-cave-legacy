@@ -4,26 +4,34 @@ Things known to be missing or wrong, kept out of `vm-cave-design.md` because
 they are not phases of the build-out: they are gaps the bootstrap has
 surfaced. Each says what is broken and what is undecided, not what to do.
 
-## `clone-repo` fails on a freshly created image
+## `clone-repo` failed once and has not reproduced
 
-Seen on a from-scratch `image create` into a never-booted disk, and
-unexplained. The guest boots, reaches multi-user and answers ssh,
-`seed-claude-config` finishes, and then `clone-repo` fails. `vm-root-agent`
-requires it, so the agent never starts and the VM comes up with nothing
-running in it.
+Seen once, on a from-scratch `image create` into a never-booted disk: the
+guest reached multi-user and answered ssh, `seed-claude-config` finished, and
+then `clone-repo` failed, taking `vm-root-agent` with it, since it requires
+it. The VM came up with nothing running in it.
 
     Starting Clone the coding-cave repo for the agent...
     [FAILED] Failed to start Clone the coding-cave repo for the agent.
     [DEPEND] Dependency failed for Bootstrap vm-root-agent
 
-The host side looks right at the point of failure: `vmcav` created the shared
-repo, started the git daemon on 9418, and brought up the 7300 bridge. crinj
-was unreachable in that run, which `clone-repo` does not need.
+A later `image create` plus `start`, on the same host and the same code path,
+succeeded: `clone-repo` exited 0 and the agent's checkout landed on
+`agent-1/vm-cave`. So this is intermittent, not a plain break, and the run
+that failed took its journal with it.
 
-The cause is still unread, not unreachable: the console only carries the
-`[FAILED]` line, because the unit's own output goes to the journal. A `vmcav
-start` leaves the VM up, so `vmcav shell journalctl -u clone-repo` should say
-it outright. That is the next step and it has not been taken.
+What makes it worth keeping rather than forgetting: `clone-repo` is a
+`oneshot` with no retry, and what it depends on is not in the guest. It
+clones through the vsock bridge to a git daemon on the host, so anything
+transient on the far side of that boundary at the wrong moment is
+unrecoverable and stops the agent from existing at all. Whether that is what
+happened is unestablished; the ordering (`after`/`wants` on
+`vsock-git.service`) only waits for the guest's own socat, which is up long
+before the host is necessarily answering.
+
+Open: whether to make the unit survive a transient failure (a retry, or a
+`Restart` with a bounded limit) or to leave it failing loudly on the argument
+that a guest which cannot reach the host has nothing useful to do anyway.
 
 ## Preserve uncommitted work across `reformat`
 
