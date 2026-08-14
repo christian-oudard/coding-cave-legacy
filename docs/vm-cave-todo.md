@@ -58,12 +58,37 @@ them in the registry: session id per agent, `cav status`, resume by id), and
 whether more than one agent per VM is a thing, which decides whether "the
 agent" stays the single session the daemon names `1`.
 
+## cave-guestd must not parent the ptys
+
+Every pty lives in cave-guestd's own process, so anything that ends that
+process ends every session: a crash, an OOM kill, a bug, and any restart of
+its unit. `restartIfChanged = false` keeps a deploy from doing it and buys
+nothing else; it also means the daemon can never take its own upgrade, since
+the only way to run a new one is to stop the one holding the ptys.
+
+The rule is already in `vm-cave-design.md`, one level up: lifetime decoupling
+is the shim's whole reason to exist, containerd never parents its workloads,
+and killing the supervisor here leaves the VM and every session running.
+Inside the guest it says the same thing about the daemon and the ptys.
+
+So: a process per session holding the pty master and the ring, in its own
+unit rather than in the daemon's cgroup, which systemd kills wholesale on
+restart. A `cave-session@<name>.service` template, a socket per session under
+`/run`, and cave-guestd as a router that reconnects to what it finds and
+holds no long-lived state. Restart, upgrade and crash become the same
+non-event.
+
+This replaces the SCM_RIGHTS handoff to a successor that was planned for the
+same problem. Handoff only ever covered the planned upgrade, and the sessions
+still die on everything else.
+
 ## Agent hibernation
 
 A VM holds many agents, and it restarts: a host-side deploy that changes the
 kernel, a stop at the end of a day, a crash. Every agent dies with it. There
 is no way to quiesce them first, and no way to bring them back doing what
-they were doing.
+they were doing. The entry above covers only the daemon restarting, not the
+machine.
 
 The present code assumes the opposite of all of this. One session named `1`,
 one systemd unit, and `vmcav agent` attaches to "the" agent.
