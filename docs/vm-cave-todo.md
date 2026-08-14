@@ -4,6 +4,27 @@ Things known to be missing or wrong, kept out of `vm-cave-design.md` because
 they are not phases of the build-out: they are gaps the bootstrap has
 surfaced. Each says what is broken and what is undecided, not what to do.
 
+## `clone-repo` fails on a freshly created image
+
+Seen on a from-scratch `image create` into a never-booted disk, and
+unexplained. The guest boots, reaches multi-user and answers ssh,
+`seed-claude-config` finishes, and then `clone-repo` fails. `vm-root-agent`
+requires it, so the agent never starts and the VM comes up with nothing
+running in it.
+
+    Starting Clone the coding-cave repo for the agent...
+    [FAILED] Failed to start Clone the coding-cave repo for the agent.
+    [DEPEND] Dependency failed for Bootstrap vm-root-agent
+
+The host side looks right at the point of failure: `vmcav` created the shared
+repo, started the git daemon on 9418, and brought up the 7300 bridge. crinj
+was unreachable in that run, which `clone-repo` does not need.
+
+The cause is still unread, not unreachable: the console only carries the
+`[FAILED]` line, because the unit's own output goes to the journal. A `vmcav
+start` leaves the VM up, so `vmcav shell journalctl -u clone-repo` should say
+it outright. That is the next step and it has not been taken.
+
 ## Preserve uncommitted work across `reformat`
 
 `vmcav reformat` destroys the guest disk, which is the only copy of anything
@@ -175,6 +196,33 @@ to rebase rather than growing a merge nobody tested.
 Open: whether the spec ref means "the agent's branch" (agent deploys without
 approval, human is the outsider) or "what the VM runs" (both move it, the
 human's deploy is a first-class command). That choice decides the other two.
+
+## Nothing runs the Mac host end to end
+
+The hardware is no longer the blocker. The Apple silicon host that
+`vm-cave-cross-platform.md` took its evidence from is provisioned and
+reachable over ssh, with vfkit v0.6.4 installed and working and 170 GB free.
+What is on it is the residue of that validation run: the guest artifacts it
+booted (`Image`, `initrd`, `nixos.img`, `seed.img`), a hand-written
+`boot.sh`, and a `cave-vm` binary. The Lima VM's disk is still there but
+`limactl` is not, and the coding-cave checkout and crinj were deleted once
+the findings were written up.
+
+So every macOS result on record was produced by hand, and nothing on that
+machine can be re-run from this repo. `vmcav` is the reason: it is a Linux
+shell script that breaks in the seven places
+`vm-cave-cross-platform.md` enumerates (no `/proc`, no `setsid`, BSD
+`readlink`, no `socat`/`mke2fs`/`gpg`, `x86_64-linux` hardcoded), so "run the
+tool on the Mac" is not a thing that can be attempted today, only
+approximated by driving vfkit directly again.
+
+Open: whether to keep re-validating by hand against the current guest, which
+is cheap and proves only what is already documented, or to pull the VM
+lifecycle into `cave-vm` now, which is what the cross-platform doc concludes
+and what would make the Mac a first-class host rather than a demo. The second
+is real scope and lands ahead of where `vm-cave-design.md` currently puts it.
+Also unresolved: the aarch64 guest needs a Linux builder, so re-provisioning
+Lima is a prerequisite either way.
 
 ## Where the effort should go, given the field
 
