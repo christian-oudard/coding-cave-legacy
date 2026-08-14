@@ -314,11 +314,6 @@ func (r *Registry) IsRunning(id string) (bool, error) {
 	return running, err
 }
 
-// DisplayName is the "slug@id" label. project is already a slug.
-func DisplayName(project, id string) string {
-	return project + "@" + id
-}
-
 // --- Sessions ---
 
 // SetSession records the claude session id for an agent, clearing it from any

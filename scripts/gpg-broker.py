@@ -103,7 +103,7 @@ def respond(conn, code, out, err):
 
 def main():
     path = sys.argv[1]
-    gpg = os.environ.get("GPG_BIN", "gpg")
+    gpg = "gpg"
     keyid = os.environ.get("CAVE_SIGNING_KEY", "")
     if os.path.exists(path):
         os.unlink(path)
