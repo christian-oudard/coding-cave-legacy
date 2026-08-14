@@ -530,6 +530,10 @@ do_agent() {
   # scrollback afterwards -- which is exactly when you go looking for it.
   log "attaching; detach with ctrl-\\"
   guest_ssh "cave-guestd attach" || true
+  # Returning here means the agent exited or you detached, and both are a
+  # natural place to bank what it has written. It does not cover an agent that
+  # exits with nobody attached, which is what the unit-level trigger is for.
+  checkpoint_sessions
 }
 
 # A plain root shell in the guest. No args -> interactive shell; extra args run
@@ -644,11 +648,33 @@ do_image_reformat() {
   # is up would mean stopping it first, which is exactly when the login
   # becomes unreadable.
   if is_running; then
-    capture_guest_credentials; capture_guest_config
+    capture_guest_credentials; capture_guest_config; checkpoint_sessions
     do_stop
   fi
   rm -f "$DISK"
   do_image_create
+}
+
+# Copy the guest's session transcripts into the host's record. Cheap when
+# nothing has grown, since only records the host lacks or that got longer are
+# fetched at all, so this can be called at every moment that might be the last
+# one: a stop, a detach, and above all a reformat, which is the only command
+# that destroys the guest's copy.
+#
+# Never fatal. It runs immediately before something the user asked for, and
+# refusing to stop or reformat because a transcript would not copy would be
+# the tool holding its own bookkeeping over the user's instruction.
+checkpoint_sessions() {
+  is_running || return 0
+  command -v cave-vm >/dev/null 2>&1 || return 0
+  local out
+  if ! out=$(cave-vm sessions -ssh-config "$SSHCONF" checkpoint 2>&1); then
+    log "warning: some session records did not copy out:"
+    printf '%s\n' "$out" >&2
+    return 0
+  fi
+  [ -n "$out" ] && log "session records: $(printf '%s' "$out" | wc -l) updated"
+  return 0
 }
 
 # Change what a running VM runs, without destroying it. The inside half of
@@ -798,7 +824,10 @@ do_start() {
 do_stop() {
   # The guest's login is deliberately not taken here: reformat is the only
   # thing about to destroy the disk it lives on, so it is the only thing that
-  # reaches in for it.
+  # reaches in for it. Session records are different: the guest keeps its copy
+  # across a stop, but this is the last moment it can be read, and a VM that
+  # does not come back should not take an agent's history with it.
+  checkpoint_sessions
   cave-vm stop --state "$STATE_DIR" --disk "$DISK" || true
   stop_git_daemon; stop_gpg_broker
 }

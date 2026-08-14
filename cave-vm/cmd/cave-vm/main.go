@@ -41,6 +41,8 @@ func main() {
 		vmCacheKey(os.Args[2:])
 	case "vsock-connect":
 		vmVsockConnect(os.Args[2:])
+	case "sessions":
+		sessionsCommand(os.Args[2:])
 	default:
 		usage()
 	}
@@ -77,6 +79,7 @@ func plural(n int) string {
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage: cave-vm [pending|review|diff|approve|version]")
 	fmt.Fprintln(os.Stderr, "       cave-vm [start|stop|serve|running|socket|cache-key|vsock-connect] --state DIR ...")
+	fmt.Fprintln(os.Stderr, "       cave-vm sessions -ssh-config F [checkpoint|restore <id>...|list]")
 	os.Exit(2)
 }
 

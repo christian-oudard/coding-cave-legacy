@@ -15,14 +15,17 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"codingcave.dev/cave-vm/internal/agentd"
+	"codingcave.dev/cave-vm/internal/sessions"
 )
 
 const (
@@ -43,6 +46,8 @@ func main() {
 		list(args)
 	case "attach":
 		attach(args)
+	case "sessions":
+		transcripts(args)
 	default:
 		usage()
 	}
@@ -50,6 +55,7 @@ func main() {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage: cave-guestd session|list|attach")
+	fmt.Fprintln(os.Stderr, "       cave-guestd sessions list|read <id>|write <id>")
 	os.Exit(2)
 }
 
@@ -142,6 +148,57 @@ func attach(args []string) {
 	if err := agentd.AttachTo(sock, os.Stdin, os.Stdout); err != nil {
 		die(err)
 	}
+}
+
+// transcripts serves the host's checkpoints: list what claude has written,
+// hand over one record, or put one back. Read-only but for `write`, and it
+// names nothing the host asked it to name, which is the point of the split:
+// the host validates every id and constructs every path, so nothing here can
+// be talked into touching a file outside claude's own project directories.
+func transcripts(args []string) {
+	fs := flag.NewFlagSet("sessions", flag.ExitOnError)
+	claude := fs.String("claude", filepath.Join(homeDir(), ".claude"),
+		"the agent's ~/.claude")
+	// Where a restored record has to land, because claude looks for a session
+	// under the directory encoding the cwd it is resumed in. The agent's
+	// worktree, matching what cave-agent cds to; when caves become per-agent
+	// this comes from the cave's own record instead of a default.
+	cwd := fs.String("cwd", "/root/coding-cave", "the cwd a restored session resumes in")
+	fs.Parse(args)
+
+	local := sessions.Local{ClaudeDir: *claude, Cwd: *cwd}
+	switch fs.Arg(0) {
+	case "list":
+		records, err := local.List()
+		if err != nil {
+			die(err)
+		}
+		for _, r := range records {
+			fmt.Printf("%s %d\n", r.ID, r.Size)
+		}
+	case "read":
+		rc, err := local.Read(fs.Arg(1))
+		if err != nil {
+			die(err)
+		}
+		defer rc.Close()
+		if _, err := io.Copy(os.Stdout, rc); err != nil {
+			die(err)
+		}
+	case "write":
+		if err := local.Write(fs.Arg(1), os.Stdin); err != nil {
+			die(err)
+		}
+	default:
+		usage()
+	}
+}
+
+func homeDir() string {
+	if h := os.Getenv("HOME"); h != "" {
+		return h
+	}
+	return "/root"
 }
 
 // startUnit asks systemd for a session that is not running, which is also how
