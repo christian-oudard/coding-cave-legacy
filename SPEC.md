@@ -99,6 +99,8 @@ With `--port`, expose a host TCP port inside the cave (repeatable). The agent ca
 
 With `--dev`, bind-mount a host device node (e.g. `/dev/nvidia0`) into the cave (repeatable). The path must be under `/dev/` and refer to a char or block device. All paths must share an owning group, and the host user must be a member of that group.
 
+With `--gpu`, give the cave every discrete GPU on the host: the device nodes plus the host's graphics driver userspace, so CUDA, Vulkan and OpenGL work inside the cave. The driver comes from the host because a vendor's userspace libraries only work with the kernel module they shipped with, and a cave building its own copy would get a different release. Errors when the host has no discrete GPU, or has no driver userspace installed; `--dev` remains available for binding an integrated GPU's render node. In a cave, `--gpu` hands every GPU the cave was given down to the subcave.
+
 With `--comms`, enable inter-agent communication: the agent gets a `send_message` tool for messaging other agents and receives their messages as channel events. Off by default.
 
 All caves are recursive. Agents can launch sub-caves for testing coding-cave features.

@@ -140,6 +140,22 @@ fn validate_host_devices(paths: Vec<String>) -> Result<Vec<String>> {
     Ok(out)
 }
 
+/// Encode GPU driver bind pairs for `CODING_CAVE_GPU_BINDS`: a bare path
+/// when source and mount point are the same, `src>dst` when they differ.
+fn encode_gpu_binds(binds: &[(PathBuf, PathBuf)]) -> String {
+    binds
+        .iter()
+        .map(|(src, dst)| {
+            if src == dst {
+                src.display().to_string()
+            } else {
+                format!("{}>{}", src.display(), dst.display())
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
 /// Resolve the GID we should adopt as primary so the cave's user-namespace
 /// mapping passes through device group ownership.
 ///
@@ -366,6 +382,102 @@ mod validate_host_devices_tests {
 }
 
 #[cfg(test)]
+mod encode_gpu_binds_tests {
+    use super::encode_gpu_binds;
+    use std::path::PathBuf;
+
+    #[test]
+    fn self_binds_stay_bare() {
+        let s = encode_gpu_binds(&[
+            (PathBuf::from("/nix/store/aaa-glibc"), PathBuf::from("/nix/store/aaa-glibc")),
+            (PathBuf::from("/nix/store/bbb-nvidia"), PathBuf::from("/nix/store/bbb-nvidia")),
+        ]);
+        assert_eq!(s, "/nix/store/aaa-glibc:/nix/store/bbb-nvidia");
+    }
+
+    #[test]
+    fn alias_carries_both_paths() {
+        // The driver tree mounts at the path the Vulkan loader searches,
+        // which is never where it lives in the store.
+        let s = encode_gpu_binds(&[(
+            PathBuf::from("/nix/store/ccc-graphics-drivers"),
+            PathBuf::from("/run/opengl-driver"),
+        )]);
+        assert_eq!(s, "/nix/store/ccc-graphics-drivers>/run/opengl-driver");
+    }
+
+    #[test]
+    fn empty_binds_encode_empty() {
+        assert_eq!(encode_gpu_binds(&[]), "");
+    }
+}
+
+#[cfg(test)]
+mod gpu_bwrap_args_tests {
+    use super::{build_bwrap_argv, SandboxConfig};
+    use std::collections::HashMap;
+    use std::path::Path;
+
+    fn argv(env: &[(&str, &str)]) -> Vec<String> {
+        let cfg = SandboxConfig::default();
+        let env: HashMap<String, String> = env
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        build_bwrap_argv(&cfg, &env, &[], 3, Path::new("/nonexistent"))
+    }
+
+    fn position(args: &[String], window: &[&str]) -> Option<usize> {
+        args.windows(window.len())
+            .position(|w| w.iter().zip(window).all(|(a, b)| a == b))
+    }
+
+    #[test]
+    fn driver_tree_mounts_where_the_loader_looks() {
+        let args = argv(&[(
+            "CODING_CAVE_GPU_BINDS",
+            "/nix/store/aaa-glibc:/nix/store/bbb-drivers>/run/opengl-driver",
+        )]);
+        assert!(position(
+            &args,
+            &["--ro-bind", "/nix/store/aaa-glibc", "/nix/store/aaa-glibc"]
+        )
+        .is_some());
+        assert!(position(
+            &args,
+            &["--ro-bind", "/nix/store/bbb-drivers", "/run/opengl-driver"]
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn closure_mounts_after_the_cave_store() {
+        // The closure paths mount inside /nix/store. Binding them before the
+        // cave's own store would put them under a mount that then replaces
+        // them, leaving the cave with a driver tree of dangling symlinks.
+        let args = argv(&[
+            ("CODING_CAVE_STORE_ROOT", "/data/cave-1"),
+            ("CODING_CAVE_GPU_BINDS", "/nix/store/aaa-glibc"),
+        ]);
+        let store = position(&args, &["--bind", "/data/cave-1/nix/store", "/nix/store"])
+            .expect("cave store bind");
+        let closure = position(
+            &args,
+            &["--ro-bind", "/nix/store/aaa-glibc", "/nix/store/aaa-glibc"],
+        )
+        .expect("closure bind");
+        assert!(closure > store);
+    }
+
+    #[test]
+    fn no_gpu_binds_without_the_env_var() {
+        let args = argv(&[]);
+        assert!(position(&args, &["--ro-bind", "/run/opengl-driver"]).is_none());
+        assert!(!args.iter().any(|a| a.contains("opengl-driver")));
+    }
+}
+
+#[cfg(test)]
 mod device_passthrough_gid_tests {
     use super::device_passthrough_gid;
     use std::os::unix::fs::MetadataExt;
@@ -480,6 +592,22 @@ fn build_bwrap_argv(
                 "--dev-bind".to_string(),
                 dev.to_string(),
                 dev.to_string(),
+            ]);
+        }
+    }
+
+    // The GPU driver userspace. Must come after the cave's own store bind:
+    // the closure paths mount inside /nix/store, and the mount points are
+    // created in the store bound just above.
+    if let Some(list) = env.get("CODING_CAVE_GPU_BINDS") {
+        for pair in list.split(':').filter(|s| !s.is_empty()) {
+            // `src>dst` where the two differ. `>` cannot occur in a store
+            // path name, so it never collides with a bound path.
+            let (src, dst) = pair.split_once('>').unwrap_or((pair, pair));
+            args.extend([
+                "--ro-bind".to_string(),
+                src.to_string(),
+                dst.to_string(),
             ]);
         }
     }
@@ -2303,6 +2431,13 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
 
     let host_devices = validate_host_devices(host_devices)?;
     let device_gid = device_passthrough_gid(&host_devices)?;
+    // Resolve the driver userspace before any state is created, so a GPU
+    // request the host cannot satisfy fails without leaving an agent behind.
+    let gpu_binds = if gpu {
+        crate::gpu::driver_binds()?
+    } else {
+        Vec::new()
+    };
 
     let extra_slugs: Vec<String> = extra_projects
         .iter()
@@ -2544,6 +2679,12 @@ pub fn run_agent(opts: RunAgentOpts) -> Result<()> {
         env.insert(
             "CODING_CAVE_HOST_DEVICES".to_string(),
             host_devices.join(":"),
+        );
+    }
+    if gpu {
+        env.insert(
+            "CODING_CAVE_GPU_BINDS".to_string(),
+            encode_gpu_binds(&gpu_binds),
         );
     }
 

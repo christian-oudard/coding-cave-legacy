@@ -2,10 +2,14 @@
 //! each via `/sys/bus/pci/devices/<addr>/{vendor,class}`, and return the
 //! render nodes of every discrete GPU. iGPU-only hosts get an error;
 //! `-d` is still available for iGPU passthrough.
+//!
+//! Device nodes alone leave a cave with a GPU it cannot talk to, so this
+//! module also resolves the host's driver userspace to bind alongside them.
 
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{anyhow, bail, Result};
 
@@ -140,6 +144,10 @@ fn nvidia_extras_in(dev: &Path, gpus: &[Gpu]) -> Vec<PathBuf> {
     if !gpus.iter().any(|g| g.vendor == Vendor::Nvidia) {
         return Vec::new();
     }
+    nvidia_nodes_in(dev)
+}
+
+fn nvidia_nodes_in(dev: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Ok(entries) = fs::read_dir(dev) {
         for entry in entries.flatten() {
@@ -176,12 +184,94 @@ fn discrete_gpu_paths(gpus: Vec<Gpu>, dev: &Path) -> Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
+/// Inside a cave there is no `/dev/dri/by-path` and no `/sys`, so a GPU
+/// cannot be classified here. It doesn't need to be: the host cave bound
+/// bare nodes for GPUs it had already vetted, so `--gpu` in a subcave
+/// means "hand down every GPU node I was given".
+fn cave_gpu_paths(dev: &Path) -> Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    if let Ok(entries) = fs::read_dir(dev.join("dri")) {
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy().starts_with("renderD") {
+                paths.push(entry.path());
+            }
+        }
+    }
+    paths.sort();
+    paths.extend(nvidia_nodes_in(dev));
+    if paths.is_empty() {
+        bail!("--gpu: no GPU device nodes in this cave. Relaunch the host cave with --gpu.");
+    }
+    Ok(paths)
+}
+
+fn in_cave() -> bool {
+    std::env::var_os("CODING_CAVE_VERSION").is_some()
+}
+
 /// Resolve `--gpu` to the device-node paths needed for every discrete
 /// GPU on the host: DRM render nodes plus vendor-specific control nodes
 /// (NVIDIA's `/dev/nvidia*`). Deterministic; same behavior interactive
 /// and non-interactive.
 pub fn resolve() -> Result<Vec<PathBuf>> {
+    if in_cave() {
+        return cave_gpu_paths(Path::new("/dev"));
+    }
     discrete_gpu_paths(detect()?, Path::new("/dev"))
+}
+
+/// The host's graphics driver userspace. NixOS merges the vendor libraries,
+/// the Vulkan ICD manifest and the GLVND EGL vendor manifest here, and both
+/// the Vulkan loader and libglvnd search this path by default, so binding
+/// the tree is all a cave needs -- no env wiring.
+const DRIVER_TREE: &str = "/run/opengl-driver";
+
+/// Bind sources for the driver userspace, each paired with its mount point.
+///
+/// A cave cannot build its own copy: NVIDIA's userspace libraries must match
+/// the running kernel module exactly, and the cave's nixpkgs pin is a
+/// different driver release. Without this the loader finds no ICD and
+/// reports no Vulkan devices, and CUDA finds no libcuda.
+///
+/// The tree is a symlink farm into the host store while a cave's
+/// `/nix/store` is its own private store, so the closure has to come along
+/// for the symlinks and every RUNPATH inside it to resolve. In a cave the
+/// closure is already there: the inherited `/nix/store` bind is recursive,
+/// so the host cave's driver mounts come with it.
+pub fn driver_binds() -> Result<Vec<(PathBuf, PathBuf)>> {
+    let tree = Path::new(DRIVER_TREE);
+    if !tree.exists() {
+        bail!(
+            "--gpu: {DRIVER_TREE} is missing, so the cave would get GPU device \
+             nodes with no driver to drive them. Enable hardware.graphics on the host."
+        );
+    }
+    let real = fs::canonicalize(tree)?;
+    let mut binds: Vec<(PathBuf, PathBuf)> = if in_cave() {
+        Vec::new()
+    } else {
+        closure(&real)?.into_iter().map(|p| (p.clone(), p)).collect()
+    };
+    binds.push((real, PathBuf::from(DRIVER_TREE)));
+    Ok(binds)
+}
+
+fn closure(path: &Path) -> Result<Vec<PathBuf>> {
+    let out = Command::new("nix-store")
+        .args(["--query", "--requisites"])
+        .arg(path)
+        .output()?;
+    if !out.status.success() {
+        bail!(
+            "--gpu: nix-store --query --requisites {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8(out.stdout)?
+        .lines()
+        .map(PathBuf::from)
+        .collect())
 }
 
 #[cfg(test)]
@@ -353,6 +443,36 @@ mod tests {
         assert!(names.contains(&"nvidiactl".to_string()));
         assert!(names.contains(&"nvidia-uvm".to_string()));
         assert!(names.contains(&"nvidia-uvm-tools".to_string()));
+    }
+
+    #[test]
+    fn cave_passes_every_gpu_node_down() {
+        // No /dev/dri/by-path and no /sys in a cave: classification is the
+        // host cave's job and already happened.
+        let dev = empty_dev("cave-nodes");
+        fs::create_dir(dev.path().join("dri")).unwrap();
+        for f in &["renderD128", "card0"] {
+            fs::write(dev.path().join("dri").join(f), b"").unwrap();
+        }
+        for f in &["nvidia0", "nvidiactl", "nvidia-uvm"] {
+            fs::write(dev.path().join(f), b"").unwrap();
+        }
+        let paths = cave_gpu_paths(dev.path()).unwrap();
+        let names: Vec<String> = paths
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["renderD128", "nvidia-uvm", "nvidia0", "nvidiactl"]
+        );
+    }
+
+    #[test]
+    fn cave_without_gpu_nodes_errors() {
+        let dev = empty_dev("cave-empty");
+        let e = cave_gpu_paths(dev.path()).unwrap_err();
+        assert!(e.to_string().contains("no GPU device nodes"));
     }
 
     #[test]

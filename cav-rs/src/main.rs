@@ -88,7 +88,7 @@ enum Cmd {
         /// Bind a host device into the cave (repeatable, must be under /dev)
         #[arg(short = 'd', long = "dev", value_name = "PATH", action = clap::ArgAction::Append)]
         host_devices: Vec<String>,
-        /// Bind every discrete GPU's render node into the cave.
+        /// Bind every discrete GPU (device nodes and driver userspace) into the cave.
         /// Errors when the host has no discrete GPU; use -d for iGPU passthrough.
         #[arg(long = "gpu")]
         gpu: bool,
