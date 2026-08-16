@@ -1,0 +1,5 @@
+{
+  "name": "sample-plugin",
+  "description": "Fixture plugin for the cave env eval check",
+  "version": "0.1.0"
+}

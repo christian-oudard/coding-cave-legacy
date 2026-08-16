@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Evaluate the host NixOS module the way nixos-rebuild does, but build-free,
-# to catch argument / option / type regressions in modules/host.nix or its
-# wiring in flake.nix before they reach a real rebuild.
+# Evaluate the nix modules the way their consumers do -- the host NixOS module
+# as nixos-rebuild applies it, the cave user env as an agent launch builds it --
+# but build-free, to catch argument / option / type regressions in
+# modules/host.nix, modules/claude-code.nix, or their wiring in flake.nix
+# before they reach a real rebuild or a failed cave launch.
 #
 # Why this shape:
 #   - `nix flake check` only shape-checks the `nixosModules` output; it never
@@ -12,17 +14,20 @@
 #     does NOT reliably reflect the current tree, so a script built around it
 #     false-passes.
 #
-# So we lean on a real flake output, checks.<sys>.hostModuleEval, which
-# instantiates the module in a nixosSystem. Evaluating its `.drvPath` via the
-# flake CLI reflects the working tree correctly and forces the whole module
-# fixpoint (options, config, the rendered config file) -- but realises
-# nothing, so there are no downloads and the system/cav are never built.
+# So we lean on real flake outputs, checks.<sys>.hostModuleEval (instantiates
+# the module in a nixosSystem) and checks.<sys>.caveEnvEval (instantiates a
+# representative cave env through lib.mkCaveEnv). Evaluating their `.drvPath`
+# via the flake CLI reflects the working tree correctly and forces the whole
+# module fixpoint (options, config, the rendered files) -- but realises
+# nothing, so there are no downloads and neither the system nor cav is built.
 set -euo pipefail
 root="$(cd "$(dirname "$0")" && pwd)"
 system="$(nix eval --impure --raw --expr 'builtins.currentSystem')"
 
 cd "$root"
-nix eval --no-eval-cache --extra-experimental-features 'nix-command flakes' \
-  ".#checks.${system}.hostModuleEval.drvPath" >/dev/null
+for check in hostModuleEval caveEnvEval; do
+  nix eval --no-eval-cache --extra-experimental-features 'nix-command flakes' \
+    ".#checks.${system}.${check}.drvPath" >/dev/null
+done
 
-echo "host NixOS module evaluates"
+echo "host NixOS module and cave env evaluate"

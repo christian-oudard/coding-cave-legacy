@@ -31,7 +31,8 @@ let
        else [ ];
   autoEnabledPlugins = lib.listToAttrs
     (map (n: lib.nameValuePair n true)
-      (lib.concatMap readPluginName config.programs.claude-code.plugins));
+      (lib.concatMap readPluginName
+        (lib.attrValues config.programs.claude-code.plugins)));
 
   # Bundle settings merge in declaration order; user extraSettings on top.
   # Strip permissions.allow/deny: caves run --dangerously-skip-permissions,
@@ -82,14 +83,15 @@ in {
     };
 
     plugins = lib.mkOption {
-      type = with lib.types; listOf (either package path);
-      default = [ ];
+      type = with lib.types; attrsOf (either package path);
+      default = { };
       description = ''
         Canonical Claude Code plugin directories, passed through to
-        programs.claude-code.plugins. Each entry is either a path to a
-        plugin directory or a derivation producing one. The plugin's
-        skills, hooks, bin/, and settings are discovered by Claude Code
-        itself from the plugin directory layout.
+        programs.claude-code.plugins. The attribute name becomes the
+        plugin's directory name; the value is either a path to a plugin
+        directory or a derivation producing one. The plugin's skills,
+        hooks, bin/, and settings are discovered by Claude Code itself
+        from the plugin directory layout.
       '';
     };
 
@@ -135,6 +137,6 @@ in {
     # PATH, so a plugin that ships a CLI (e.g. persist) is callable by name from
     # a terminal or a custom hook without a separate home.packages entry.
     home.packages = bundlePackages
-      ++ builtins.filter lib.isDerivation cfg.plugins;
+      ++ builtins.filter lib.isDerivation (lib.attrValues cfg.plugins);
   };
 }

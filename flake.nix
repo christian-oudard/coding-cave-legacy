@@ -178,13 +178,35 @@
                 }).config.environment.systemPackages);
             in pkgs.runCommand "host-module-eval" { inherit probe; } "printf '%s' \"$probe\" > $out";
 
+          # Same idea for the cave user env: it is only built when an agent
+          # starts, so a type or wiring regression in modules/claude-code.nix
+          # (or an option type drifting from home-manager's) first shows up as
+          # a failed cave launch. Instantiate a representative env -- plugins
+          # keyed by name, a hook, a bundle -- and force its drvPath, which
+          # runs the whole home-manager fixpoint without realising anything.
+          caveEnvEval =
+            let env = (self.lib.mkCaveEnv {
+                  inherit claude-code;
+                  userModule = {
+                    coding-cave.claude-code = {
+                      plugins.sample-plugin = ./tests/fixtures/sample-plugin;
+                      bundles = [{ src = ./tests/fixtures/sample-plugin; }];
+                      hooks.Stop = [{
+                        hooks = [{ type = "command"; command = "true"; }];
+                      }];
+                    };
+                  };
+                }).packages.${pkgs.stdenv.hostPlatform.system}.default;
+            in pkgs.runCommand "cave-env-eval" { inherit (env) drvPath; }
+              "printf '%s' \"$drvPath\" > $out";
+
         in {
           packages = {
             default = cav;
             cav-debug = cavDebug;
             inherit sandbox;
           };
-          checks = { build = cav; inherit tests hostModuleEval; };
+          checks = { build = cav; inherit tests hostModuleEval caveEnvEval; };
         }
       );
 
