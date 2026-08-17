@@ -387,6 +387,14 @@ fn pick_candidate(
         );
     }
 
+    // Only one agent in play, on several branches: the agent question has
+    // a single answer, so the branch is the only real choice.
+    if groups.len() == 1 {
+        let (aid, group) = groups.into_iter().next().unwrap();
+        let name = registry::display_name(base, &aid);
+        return pick_branch(group, base, &name);
+    }
+
     println!("\nPending work in {}:\n", style::blue(slug));
     for (aid, group) in &groups {
         let name = registry::display_name(base, aid);

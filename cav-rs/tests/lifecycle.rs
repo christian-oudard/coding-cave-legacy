@@ -374,6 +374,49 @@ fn approve_menu_lists_each_agent_once_then_asks_which_branch() {
 }
 
 #[test]
+fn approve_with_an_agent_id_asks_only_which_branch() {
+    // Naming the agent answers the agent question; approve used to ask it
+    // again with a single option instead of listing that agent's branches.
+    let p = Project::new("approve-agent-id-branch-menu");
+    p.register_agent("1");
+    p.register_agent("2");
+    git(&["checkout", "-b", "develop"], &p.dir);
+    git(&["push", "cave", "develop"], &p.dir);
+    git(&["checkout", "main"], &p.dir);
+    git(&["fetch", "cave"], &p.dir);
+    p.push_agent_commits("1", "main", &[("a.txt", "A\n")]);
+    p.push_agent_commits("1", "develop", &[("b.txt", "B\n")]);
+    p.push_agent_commits("2", "main", &[("c.txt", "C\n")]);
+    // Sit on a branch that matches no candidate, so a menu appears.
+    git(&["checkout", "-b", "side"], &p.dir);
+
+    // Second branch (bases sort alphabetically: develop, main), then confirm.
+    let out = p.cav_answering(&["approve", "1"], "2\ny\n");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(out.status.code(), Some(0), "approve failed: {combined}");
+    assert!(
+        !combined.contains("Approve which agent?"),
+        "the agent is already named: {combined}"
+    );
+    assert!(
+        combined.contains("Approve which branch?"),
+        "should ask which branch: {combined}"
+    );
+    assert!(
+        !p.shared_has_ref("refs/heads/agent-1/main"),
+        "agent-1/main should be approved and deleted: {combined}"
+    );
+    assert!(
+        p.shared_has_ref("refs/heads/agent-1/develop"),
+        "agent-1/develop should be untouched: {combined}"
+    );
+}
+
+#[test]
 fn review_takes_agent_id_slash_base_without_a_prompt() {
     let p = Project::new("review-id-slash-base");
     p.register_agent("1");
