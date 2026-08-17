@@ -62,6 +62,7 @@ Each agent runs in bubblewrap sandbox.
 - Agents sign commits with host GPG keys, through a forwarded GPG agent extra socket. The extra socket runs in restricted mode, allowing signing but blocking secret key export and other dangerous operations.
 - Git commits are signed with the user's Git identity, stored in environment variables.
 - The Standard POSIX environment (SHELL, TERM, locale).
+- The cave clock reads UTC, so the host's geographic region stays outside the sandbox. Setting `coding-cave.timeZone` in `cave.nix` puts the cave on that zone instead; a `$TZ` exported on the host is honored the same way.
 
 ## Credential Isolation
 Caves do not have access to any of your SSH keys or API tokens. Instead, all web traffic is routed through a credential injection man-in-the-middle proxy, which wraps network traffic and injects credentials.

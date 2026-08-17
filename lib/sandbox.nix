@@ -65,6 +65,13 @@ let
   # on the host; it's forwarded into the cave.
   caveLocaltime = "${pkgs.tzdata}/share/zoneinfo/UTC";
 
+  # The zone database, bound at /etc/zoneinfo with TZDIR pointed at it, as
+  # NixOS does. Nix's glibc has its compiled-in TZDIR inside its own store
+  # path, so without this a forwarded $TZ names a zone nothing can look up:
+  # glibc falls back to UTC and prints the first path segment as the zone
+  # abbreviation ("America"). A static table; it leaks nothing.
+  caveZoneinfo = "${pkgs.tzdata}/share/zoneinfo";
+
   # /etc/hostname so tools that read it (vs uname) see the cave name.
   caveHostnameFile = pkgs.writeText "cave-hostname" "${caveHostname}\n";
 
@@ -134,6 +141,7 @@ let
     "--setenv" "LOGNAME" caveUser
     "--setenv" "SHELL" "${pkgs.bashInteractive}/bin/bash"
     "--setenv" "LANG" "en_US.UTF-8"
+    "--setenv" "TZDIR" "/etc/zoneinfo"
     "--setenv" "LOCALE_ARCHIVE" "${locales}/lib/locale/locale-archive"
     "--setenv" "TERMINFO_DIRS" "${pkgs.ncurses}/share/terminfo"
     # FHS library path for pre-built native extensions (libstdc++ etc.)
@@ -177,6 +185,7 @@ let
     "--ro-bind" "${caveGroup}" "/etc/group"
     "--ro-bind" "${caveHosts}" "/etc/hosts"
     "--ro-bind" "${caveLocaltime}" "/etc/localtime"
+    "--ro-bind" "${caveZoneinfo}" "/etc/zoneinfo"
     "--ro-bind" "${caveHostnameFile}" "/etc/hostname"
 
     # Shadow procfs for mount_too_revealing(). The kernel blocks a new

@@ -188,6 +188,7 @@
             let env = (self.lib.mkCaveEnv {
                   inherit claude-code;
                   userModule = {
+                    coding-cave.timeZone = "America/New_York";
                     coding-cave.claude-code = {
                       plugins.sample-plugin = ./tests/fixtures/sample-plugin;
                       bundles = [{ src = ./tests/fixtures/sample-plugin; }];
