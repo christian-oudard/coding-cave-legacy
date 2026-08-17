@@ -28,7 +28,7 @@ pub fn pull(base: &Path, force: bool) -> Result<()> {
              cav pull is only valid on agent branches (e.g. agent-1/main).\n\
              To review agent changes, run: {}",
             style::yellow(&local_branch),
-            style::bold_cyan("cav review <agent-id>"),
+            style::bold_cyan("cav review <agent_id>"),
         );
     }
     let (base_name, agent_id) = parsed.unwrap();

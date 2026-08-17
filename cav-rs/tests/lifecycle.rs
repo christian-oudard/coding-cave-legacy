@@ -374,6 +374,38 @@ fn approve_menu_lists_each_agent_once_then_asks_which_branch() {
 }
 
 #[test]
+fn review_takes_agent_id_slash_base_without_a_prompt() {
+    let p = Project::new("review-id-slash-base");
+    p.register_agent("1");
+    git(&["checkout", "-b", "develop"], &p.dir);
+    git(&["push", "cave", "develop"], &p.dir);
+    git(&["checkout", "main"], &p.dir);
+    git(&["fetch", "cave"], &p.dir);
+    p.push_agent_commits("1", "main", &[("a.txt", "A\n")]);
+    p.push_agent_commits("1", "develop", &[("b.txt", "B\n")]);
+    // Off both dev branches, so only the argument can do the choosing.
+    git(&["checkout", "-b", "side"], &p.dir);
+
+    let out = p.cav(&["review", "1/develop"]);
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(out.status.code(), Some(0), "review failed: {combined}");
+    assert!(
+        combined.contains("Checked out agent-1/develop"),
+        "should check out the named branch: {combined}"
+    );
+
+    // A base the agent has no branch on is an error, not a fallback.
+    let out = p.cav(&["review", "1/nope"]);
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_ne!(out.status.code(), Some(0), "should not fall back: {err}");
+    assert!(err.contains("nope"), "error should name the branch: {err}");
+}
+
+#[test]
 fn approve_takes_agent_id_slash_base_without_a_prompt() {
     let p = Project::new("approve-id-slash-base");
     p.register_agent("1");
@@ -390,7 +422,7 @@ fn approve_takes_agent_id_slash_base_without_a_prompt() {
     let err = String::from_utf8_lossy(&out.stderr).to_string();
     assert_ne!(out.status.code(), Some(0), "should refuse to guess: {err}");
     assert!(
-        err.contains("cav approve 1/<base>"),
+        err.contains("cav approve 1/<branch_name>"),
         "should point at the branch syntax: {err}"
     );
 

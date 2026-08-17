@@ -75,7 +75,7 @@ pub fn checkout(base: &Path, name: &str, agent_id: Option<&str>) -> Result<()> {
         } else {
             bail!(
                 "Not on a dev branch, please specify agent id.\nUsage: {}",
-                style::bold_cyan("cav checkout <branch> <agent-id>"),
+                style::bold_cyan("cav checkout <branch> <agent_id>"),
             );
         };
         if old_base == name {

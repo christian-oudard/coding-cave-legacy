@@ -10,7 +10,7 @@ use crate::pull;
 use crate::registry;
 use crate::style;
 
-pub fn review(base: &Path, agent_id: &str) -> Result<()> {
+pub fn review(base: &Path, agent_id: &str, agent_base: Option<&str>) -> Result<()> {
     let verbose = config::verbose() >= 1;
     let slug = config::project_slug(base);
     let shared = config::shared_repo_path(base);
@@ -24,9 +24,18 @@ pub fn review(base: &Path, agent_id: &str) -> Result<()> {
         .lines()
         .filter(|b| parse_dev_branch(b).is_some_and(|(_, aid)| aid == agent_id))
         .map(str::to_string)
+        .filter(|b| agent_base.is_none_or(|t| resolve_base(b.clone()) == t))
         .collect();
 
     if candidates.is_empty() {
+        if let Some(t) = agent_base {
+            bail!(
+                "No {} branch found for agent {} in {}.",
+                style::yellow(t),
+                style::bold(agent_id),
+                style::blue(&slug),
+            );
+        }
         if let Some(hint) = registry::other_project_hint(base, agent_id) {
             bail!(
                 "No dev branch found for agent {} in {}.\n{hint}",

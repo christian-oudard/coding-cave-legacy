@@ -128,7 +128,7 @@ pub fn approve(
                  Specify agent: {} -c {}",
                 style::yellow(prefix),
                 style::blue(&slug),
-                style::bold_cyan("cav approve <agent-id>"),
+                style::bold_cyan("cav approve <agent_id>"),
                 style::yellow(prefix),
             ),
         }
@@ -376,14 +376,14 @@ fn pick_candidate(
                 count(bases.len(), "branch", "branches"),
                 style::blue(slug),
                 style::yellow(&bases.join(", ")),
-                style::bold_cyan(&format!("cav approve {aid}/<base>")),
+                style::bold_cyan(&format!("cav approve {aid}/<branch_name>")),
             );
         }
         bail!(
             "Multiple choices in {}: agents {}\nSpecify which: {}",
             style::blue(slug),
             style::bold(&ids.join(", ")),
-            style::bold_cyan("cav approve <agent-id>"),
+            style::bold_cyan("cav approve <agent_id>"),
         );
     }
 

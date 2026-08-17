@@ -101,10 +101,10 @@ enum Cmd {
     },
     /// Approve agent work into base branch.
     ///
-    /// AGENT-ID may name a branch as `<agent-id>/<base>` when the agent has
+    /// Name a branch as `<agent_id>/<branch_name>` when the agent has
     /// pending work on more than one base.
     Approve {
-        #[arg(value_name = "AGENT-ID")]
+        #[arg(value_name = "<agent_id>[/<branch_name>]")]
         args: Vec<String>,
         /// Skip confirmation
         #[arg(short = 'y', long = "yes")]
@@ -120,10 +120,10 @@ enum Cmd {
     /// rejected commits get those commits dropped via rebase --onto.
     /// If the target agent's dev branch was torn down by approve, it is
     /// recreated at the rejected tip so the agent can continue.
-    /// Pass an explicit AGENT-ID when the original committer has been
+    /// Pass an explicit agent id when the original committer has been
     /// gc'd to route the recreated branch to a different agent.
     Reject {
-        #[arg(value_name = "AGENT-ID")]
+        #[arg(value_name = "<agent_id>")]
         args: Vec<String>,
         /// Skip confirmation
         #[arg(short = 'y', long = "yes")]
@@ -144,7 +144,7 @@ enum Cmd {
     },
     /// Show agent and dev branch status
     Status {
-        #[arg(value_name = "[PROJECT] [AGENT-ID]")]
+        #[arg(value_name = "[<project>] [<agent_id>]")]
         args: Vec<String>,
         /// Show status for all registered projects
         #[arg(short = 'a', long = "all")]
@@ -193,8 +193,12 @@ enum Cmd {
         #[arg(short = 'y', long = "yes")]
         yes: bool,
     },
-    /// Fetch and checkout an agent branch for review
+    /// Fetch and checkout an agent branch for review.
+    ///
+    /// Name a branch as `<agent_id>/<branch_name>` when the agent has
+    /// pending work on more than one base.
     Review {
+        #[arg(value_name = "<agent_id>[/<branch_name>]")]
         agent_id: Option<String>,
     },
     /// Enter a running agent's namespace (interactive or one-shot)
@@ -469,7 +473,7 @@ fn run() -> Result<()> {
                             .map(|a| style::bold(a))
                             .collect::<Vec<_>>()
                             .join(", "),
-                        style::bold_cyan("cav remove-agent <agent-id>"),
+                        style::bold_cyan("cav remove-agent <agent_id>"),
                     ),
                 }
             };
@@ -517,17 +521,11 @@ fn run() -> Result<()> {
         Cmd::Review { agent_id } => {
             let base = find_repo_root()?;
             require_init(&base)?;
-            let aid = match agent_id {
-                Some(s) => {
-                    let a = parse_agent_id(&s);
-                    if !config::is_agent_id(&a) {
-                        bail!("Invalid agent ID '{}'. Use a number (e.g. 3).", style::bold(&s));
-                    }
-                    a
-                }
-                None => auto_pick_agent_id(&base, "review")?,
+            let (aid, agent_base) = match agent_id {
+                Some(s) => split_agent_base(&s)?,
+                None => (auto_pick_agent_id(&base, "review")?, None),
             };
-            review::review(&base, &aid)
+            review::review(&base, &aid, agent_base.as_deref())
         }
         Cmd::Shell { agent_id, cmd } => {
             let base = find_repo_root()?;
@@ -775,8 +773,8 @@ fn parse_single_agent_arg(args: &[String], cmd: &str) -> Result<Option<String>> 
 
 /// Parses the positional argument shared by approve and reject. With
 /// `allow_base`, an agent with pending work on several bases can be narrowed
-/// as `<agent-id>/<base>` (e.g. `18/develop`); the base may itself contain
-/// slashes, so only the first one separates.
+/// as `<agent_id>/<branch_name>` (e.g. `18/develop`); the name may itself
+/// contain slashes, so only the first one separates.
 fn parse_agent_arg(
     args: &[String],
     cmd: &str,
@@ -785,10 +783,7 @@ fn parse_agent_arg(
     let mut agent_id: Option<String> = None;
     let mut agent_base: Option<String> = None;
     for arg in args {
-        let (head, base) = match arg.split_once('/') {
-            Some((head, base)) if allow_base && !base.is_empty() => (head, Some(base)),
-            _ => (arg.as_str(), None),
-        };
+        let (head, base) = if allow_base { split_base(arg) } else { (arg.as_str(), None) };
         let candidate = parse_agent_id(head);
         if config::is_agent_id(&candidate) {
             if let Some(prev) = &agent_id {
@@ -807,13 +802,39 @@ fn parse_agent_arg(
                 style::bold_cyan(&format!("cav {cmd} -c {arg}")),
             );
         } else {
+            let id = if allow_base { "[<agent_id>[/<branch_name>]]" } else { "[<agent_id>]" };
             bail!(
                 "Unknown argument '{arg}'. Usage: {}",
-                style::bold_cyan(&format!("cav {cmd} [agent-id] [-c <commit>]")),
+                style::bold_cyan(&format!("cav {cmd} {id} [-c <commit>]")),
             );
         }
     }
     Ok((agent_id, agent_base))
+}
+
+/// Splits `<agent_id>[/<branch_name>]`. The name may itself contain slashes,
+/// so only the first one separates.
+fn split_base(arg: &str) -> (&str, Option<&str>) {
+    match arg.split_once('/') {
+        Some((head, base)) if !base.is_empty() => (head, Some(base)),
+        _ => (arg, None),
+    }
+}
+
+/// Parses the positional `<agent_id>[/<branch_name>]` argument of a command
+/// that takes exactly one agent.
+fn split_agent_base(arg: &str) -> Result<(String, Option<String>)> {
+    let (head, base) = split_base(arg);
+    let aid = parse_agent_id(head);
+    if !config::is_agent_id(&aid) {
+        bail!(
+            "Invalid agent ID '{}'. Use {} (e.g. {}).",
+            style::bold(arg),
+            style::bold("<agent_id>[/<branch_name>]"),
+            style::bold("3/develop"),
+        );
+    }
+    Ok((aid, base.map(str::to_string)))
 }
 
 fn looks_like_hash(s: &str) -> bool {
@@ -1014,7 +1035,7 @@ fn auto_pick_agent_id(base: &Path, cmd: &str) -> Result<String> {
         1 => Ok(ids.into_iter().next().unwrap()),
         0 => bail!("No agents in {slug}."),
         _ => bail!(
-            "Multiple agents in {slug}: {}\nSpecify which: cav {cmd} <agent-id>",
+            "Multiple agents in {slug}: {}\nSpecify which: cav {cmd} <agent_id>",
             ids.join(", ")
         ),
     }

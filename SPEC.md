@@ -87,7 +87,7 @@ The cave environment is configured by `~/.config/coding-cave/cave.nix`, together
 
 Adds a project to the coding-cave registry. Sets up the shared bare repo, and branch protection hooks. A valid project is a git repository with at least one commit, because only committed work is shared with the agent.
 
-### `cav agent [-c,--continue | -r,--resume <agent_id/session_id>] [-p,--project <project_slug>] [--port <port>] [-d,--dev <path>] [--comms]`
+### `cav agent [-c,--continue | -r,--resume <agent_id> | <session_id>] [-p,--project <project_slug>] [--port <port>] [-d,--dev <path>] [--comms]`
 
 Launches a Claude Code CLI agent in a coding-cave session. Auto-assigns a numeric ID. There are no agent ID duplicates among running agents or stopped agents with unmerged work.
 
@@ -105,13 +105,17 @@ With `--comms`, enable inter-agent communication: the agent gets a `send_message
 
 All caves are recursive. Agents can launch sub-caves for testing coding-cave features.
 
-### `cav approve [agent-id[/base]] [--commit <SHA>]`
+### `cav review [<agent_id>[/<branch_name>]]`
 
-Approves an agent's work and fast-forwards the canonical base branch to the tip of the agent's branch. Specify which agent ID number to approve, or the agent ID is inferred from the currently checked-out agent branch. An agent with pending work on more than one base branch is asked which branch after the agent is chosen, or is given the branch up front as `<agent-id>/<base>`. Approval errors out if the merge is not a fast-forward (the agent must rebase first). To process an approval, the command advances the base branch on both the cave remote and the host repo.
+Fetches an agent's work and checks out its branch in the host repo, then lists the commits that are ahead of the base branch. Specify which agent ID number to review, or the agent ID is inferred from the currently checked-out agent branch. An agent with pending work on more than one base branch is asked which branch after the agent is chosen, or is given the branch up front as `<agent_id>/<branch_name>`. A base the agent has no branch on is an error, not a fallback to its other branches.
+
+### `cav approve [<agent_id>[/<branch_name>]] [--commit <SHA>]`
+
+Approves an agent's work and fast-forwards the canonical base branch to the tip of the agent's branch. Specify which agent ID number to approve, or the agent ID is inferred from the currently checked-out agent branch. An agent with pending work on more than one base branch is asked which branch after the agent is chosen, or is given the branch up front as `<agent_id>/<branch_name>`. Approval errors out if the merge is not a fast-forward (the agent must rebase first). To process an approval, the command advances the base branch on both the cave remote and the host repo.
 
 With `--commit SHA`, approve only up to that commit (partial approval). The dev branch is preserved with remaining commits for a future approval.
 
-### `cav reject [agent-id]`
+### `cav reject [<agent_id>]`
 
 Rejects the tip commit of the current base branch. Must be run from a base branch. This undoes the approval that got the commits into the base branch in the first place: rolling back the base branch on host and shared remote, and deleting the approval record. The agent's dev branch is not touched by reject. Reject is blocked when the target agent's dev branch has diverged from where main will be after the rollback — that is, the dev branch is neither a fast-forward target from the new base nor at-or-behind it. The block directs the operator to have the agent rebase their branch onto the new base (the common case), or run `cav remove-agent` to discard the dev branch entirely. If the original agent has been removed from the registry, a different agent must be specified.
 
@@ -123,11 +127,11 @@ Moves work from the agent's branch to the host's view of it. One push from agent
 
 Pushes the current branch to the shared remote. With `--force`, force-pushes (for rollback or history rewriting). Valid on both base branches and agent branches. If we push to an agent branch, the agent's workspace is automatically updated. The push command is idempotent, multiple calls are the same as one call.
 
-### `cav checkout <branch> [agent-id]`
+### `cav checkout <branch> [<agent_id>]`
 
 Retargets an agent to a different base branch. The agent's workspace is switched to the new base, and its unmerged work is rebased onto it. Agent ID is inferred from the currently checked-out agent branch if present, otherwise it must be specified.
 
-### `cav status [-a,--all] [project] [agent-id]`
+### `cav status [-a,--all] [<project>] [<agent_id>]`
 
 Shows the current list of agents and unmerged commits. Two independent selectors narrow what is shown, and either can be left out:
 
