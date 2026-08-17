@@ -27,6 +27,12 @@ fn get_agent() -> Option<String> {
     std::env::var("CODING_CAVE_AGENT_ID").ok().filter(|s| !s.is_empty())
 }
 
+/// A cave-private scratch branch: the `worktree-<name>` branches Claude Code
+/// creates for its side checkouts, at any depth of the base name.
+pub fn is_scratch_branch(base: &str) -> bool {
+    base.split('/').any(|seg| seg.starts_with("worktree-"))
+}
+
 fn check_ref(old_sha: &str, new_sha: &str, refname: &str, agent: Option<&str>) -> Option<String> {
     if !refname.starts_with("refs/heads/") {
         if let Some(aid) = agent {
@@ -72,6 +78,16 @@ fn check_ref(old_sha: &str, new_sha: &str, refname: &str, agent: Option<&str>) -
                 return Some(format!(
                     "REJECTED: Agent {agent} cannot push to '{branch}'.\n\
                      You may only push to branches matching '*/agent-{agent}'."
+                ));
+            }
+            let base = &rest[slash + 1..];
+            // Claude Code parks side checkouts on `worktree-<name>` branches.
+            // They are cave-private scratch: publishing them clutters status
+            // and approval. Deletes stay open so stragglers can be cleaned up.
+            if new_sha != ZERO_SHA && is_scratch_branch(base) {
+                return Some(format!(
+                    "REJECTED: '{branch}' is a scratch worktree branch.\n\
+                     Rebase the work onto your own branch before publishing it."
                 ));
             }
             // Non-FF push: check agent tip
@@ -259,6 +275,40 @@ mod tests {
     #[test]
     fn user_notes_push_allowed() {
         assert!(check_ref(SHA_A, SHA_B, "refs/notes/commits", None).is_none());
+    }
+
+    // Scratch worktree branches (created by agent tooling, never published)
+    #[test]
+    fn agent_push_worktree_branch_rejected() {
+        let r = check_ref(ZERO, SHA_A, "refs/heads/agent-1/worktree-foo", Some("1")).unwrap();
+        assert!(r.contains("REJECTED"), "got: {r}");
+        assert!(r.contains("worktree-foo"), "got: {r}");
+    }
+
+    #[test]
+    fn agent_delete_worktree_branch_allowed() {
+        assert!(
+            check_ref(SHA_A, ZERO, "refs/heads/agent-1/worktree-foo", Some("1")).is_none()
+        );
+    }
+
+    #[test]
+    fn agent_push_nested_worktree_branch_rejected() {
+        let r = check_ref(ZERO, SHA_A, "refs/heads/agent-1/feat/worktree-foo", Some("1"))
+            .unwrap();
+        assert!(r.contains("REJECTED"), "got: {r}");
+    }
+
+    #[test]
+    fn agent_push_worktree_lookalike_allowed() {
+        assert!(
+            check_ref(SHA_A, SHA_B, "refs/heads/agent-1/worktrees", Some("1")).is_none()
+        );
+    }
+
+    #[test]
+    fn user_push_worktree_branch_allowed() {
+        assert!(check_ref(ZERO, SHA_A, "refs/heads/agent-1/worktree-foo", None).is_none());
     }
 
     // Agent ID edge cases

@@ -77,6 +77,10 @@ fn rebase_in_progress(real_git: &str, cwd: Option<&str>) -> bool {
     false
 }
 
+fn is_scratch_branch(branch: &str) -> bool {
+    branch.split('/').any(|seg| seg.starts_with("worktree-"))
+}
+
 fn sync(real_git: &str, args: Vec<String>) {
     let agent_name = env::var("CODING_CAVE_AGENT_NAME").unwrap_or_default();
     let agent_id: String = agent_name.rsplit('@').next().unwrap_or("").to_string();
@@ -110,6 +114,14 @@ fn sync(real_git: &str, args: Vec<String>) {
 
     // Don't sync if we're on a dev branch
     if branch.starts_with("agent-") {
+        exit(0);
+    }
+
+    // Claude Code parks its side checkouts on `worktree-<name>` branches.
+    // Those are cave-private scratch, so leave them here rather than push a
+    // branch the pre-receive hook would reject anyway. Keep in step with
+    // is_scratch_branch in git_pre_receive.rs.
+    if is_scratch_branch(&branch) {
         exit(0);
     }
 
@@ -212,4 +224,24 @@ fn main() {
 
     let args: Vec<String> = env::args().skip(1).collect();
     sync(&real_git, args);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scratch_branch_matches_claude_worktrees() {
+        assert!(is_scratch_branch("worktree-backtest-speed"));
+        assert!(is_scratch_branch("worktree-agent-19"));
+        assert!(is_scratch_branch("feat/worktree-foo"));
+    }
+
+    #[test]
+    fn scratch_branch_spares_real_branches() {
+        assert!(!is_scratch_branch("main"));
+        assert!(!is_scratch_branch("worktrees"));
+        assert!(!is_scratch_branch("my-worktree-thing"));
+        assert!(!is_scratch_branch("feature/worktree"));
+    }
 }

@@ -33,6 +33,8 @@ When agents amend or squash commits, the user can run `cav pull` to pull history
 **Illegal Actions**
 Git hooks enforce that git commands run by agents are topologically correct. Agents cannot publish to canonical base branches (e.g. `main`), or to another agent's branch.
 
+**Scratch branches** Some agent tooling parks work on throwaway branches named `worktree-<name>`, one per side checkout it opens. These are private to the cave: commits made on them are not published to the shared remote, and the shared remote refuses them, so they never reach the host, `cav status`, or approval. Work worth keeping is brought back onto the agent's own branch first. Deleting such a branch from the shared remote is always allowed, so any that were published before this rule can be cleaned up.
+
 ## Projects
 
 Projects are registered with the coding-cave system with `cav init`. This creates the shared bare repo and adds the project to the project registry database table. Each project is assigned a unique slug based on its folder name. Slugs are lowercase, and commands that take a project name match it case-insensitively, so the folder name can be typed as it reads on disk. A project directory moved on disk keeps working: running any cav command from the new location re-registers the slug there once the old registered path no longer exists.
