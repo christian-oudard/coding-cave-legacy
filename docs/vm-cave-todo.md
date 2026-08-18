@@ -181,10 +181,14 @@ attach.
 
 What is left:
 
-- **Nothing syncs for an agent that exits with nobody attached.** The plan is
-  not a timer: sync whenever the host talks to the guest about agents at all
-  (`status`, an attach, stopping one), which bounds staleness by "when you
-  last asked" and needs no clock. Unbuilt.
+- ~~Nothing syncs for an agent that exits with nobody attached.~~ **Built.**
+  `status` syncs, which with `stop`, a detach and `reformat` covers every
+  moment the host talks to the guest about agents. No timer: staleness is
+  bounded by when you last looked, which needs no clock. What made it
+  affordable was moving transcripts off ssh onto the control plane, where a
+  sync costs 3-4ms against 95ms. Verified end to end: a record written in the
+  guest with nobody attached arrives in the host archive on the next `status`,
+  and an appended one is carried as `grew` rather than replaced.
 - **Ownership is bookkeeping, not enforcement.** `sync -agent N` attributes
   records to whoever the caller names, and `vmcav` always says `1`. Every
   agent is root in one home, so any of them can write any transcript. The

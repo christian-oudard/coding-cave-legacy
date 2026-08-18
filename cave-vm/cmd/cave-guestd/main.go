@@ -76,6 +76,11 @@ func serve(args []string) {
 	dir := fs.String("dir", defaultDir, "directory of session sockets")
 	tokenPath := fs.String("token", "/etc/cave-host/control-token", "shared secret from the seed")
 	addr := fs.String("addr", "", "listen here instead of on the socket systemd passed")
+	// The same three paths the `sessions` subcommand takes, and for the same
+	// reasons; see transcripts below.
+	claude := fs.String("claude", filepath.Join(homeDir(), ".claude"), "the agent's ~/.claude")
+	cwd := fs.String("cwd", "/root/coding-cave", "the cwd a restored session resumes in")
+	shareDir := fs.String("shared-dir", "/cave/sessions", "where every agent's records are readable")
 	fs.Parse(args)
 
 	token, err := control.ReadToken(*tokenPath)
@@ -99,13 +104,45 @@ func serve(args []string) {
 		Unit:     unitPattern,
 		List:     agentd.List,
 	}
+	// The transcript half, wired here rather than inside the control package,
+	// which must not import sessions: the host's implementation of that
+	// package's Guest interface is built on the control client, so the two
+	// would import each other. Same reason agentd.List is injected above.
+	store := transcripts_{sessions.Local{ClaudeDir: *claude, Cwd: *cwd, SharedDir: *shareDir}}
 	srv := &http.Server{
-		Handler: control.Handler(g, token),
+		Handler: control.Handler(g, store, token),
 		// A control call is a question about local state; anything slower than
 		// this is a hung guest, and holding the connection open hides that.
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	die(srv.Serve(ln))
+}
+
+// transcripts_ adapts sessions.Local to the control plane's Sessions, which is
+// two type conversions and no logic: both sides already agree on what a record
+// is, and the duplication buys the two packages not importing each other.
+type transcripts_ struct{ local sessions.Local }
+
+func (t transcripts_) List() ([]control.SessionRecord, error) {
+	recs, err := t.local.List()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]control.SessionRecord, 0, len(recs))
+	for _, r := range recs {
+		out = append(out, control.SessionRecord{ID: r.ID, Size: r.Size, Project: r.Project})
+	}
+	return out, nil
+}
+
+func (t transcripts_) Read(id string) (io.ReadCloser, error) { return t.local.Read(id) }
+
+func (t transcripts_) Write(id string, r io.Reader, shared bool) error {
+	dest := sessions.Resumable
+	if shared {
+		dest = sessions.Shared
+	}
+	return t.local.Write(id, r, dest)
 }
 
 func die(err error) {

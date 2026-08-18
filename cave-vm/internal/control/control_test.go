@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -11,6 +12,8 @@ import (
 	"testing"
 	"time"
 )
+
+const sessionID = "0f9a1c2e-3b4d-4f5a-8b6c-7d8e9f0a1b2c"
 
 // fakeGuest stands in for systemd and the clock.
 type fakeGuest struct {
@@ -33,7 +36,7 @@ func (f *fakeGuest) SetTime(t time.Time) error { f.set = t; return f.fail }
 func serve(t *testing.T, g Guest, serverTok, clientTok string) *Client {
 	t.Helper()
 	ln := newPipeListener()
-	srv := &http.Server{Handler: Handler(g, serverTok)}
+	srv := &http.Server{Handler: Handler(g, nil, serverTok)}
 	go srv.Serve(ln)
 	t.Cleanup(func() { srv.Close(); ln.Close() })
 	return NewClient(func(ctx context.Context) (net.Conn, error) {
@@ -186,6 +189,140 @@ func TestReadTokenRejectsEmpty(t *testing.T) {
 	}
 	if _, err := ReadToken(path); err == nil {
 		t.Fatal("an empty token file must not authenticate anything")
+	}
+}
+
+// fakeSessions stands in for the guest's ~/.claude.
+type fakeSessions struct {
+	records map[string]string
+	wrote   map[string]string
+	shared  map[string]bool
+	fail    error
+}
+
+func (f *fakeSessions) List() ([]SessionRecord, error) {
+	if f.fail != nil {
+		return nil, f.fail
+	}
+	var out []SessionRecord
+	for id, body := range f.records {
+		out = append(out, SessionRecord{ID: id, Size: int64(len(body)), Project: "-root-coding-cave"})
+	}
+	return out, nil
+}
+
+func (f *fakeSessions) Read(id string) (io.ReadCloser, error) {
+	body, ok := f.records[id]
+	if !ok {
+		return nil, errors.New("no such record")
+	}
+	return io.NopCloser(strings.NewReader(body)), nil
+}
+
+func (f *fakeSessions) Write(id string, r io.Reader, shared bool) error {
+	b, err := io.ReadAll(r)
+	if err != nil {
+		return err
+	}
+	if f.wrote == nil {
+		f.wrote, f.shared = map[string]string{}, map[string]bool{}
+	}
+	f.wrote[id], f.shared[id] = string(b), shared
+	return nil
+}
+
+func serveSessions(t *testing.T, s Sessions) *Client {
+	t.Helper()
+	ln := newPipeListener()
+	srv := &http.Server{Handler: Handler(&fakeGuest{}, s, "tok")}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Close(); ln.Close() })
+	return NewClient(func(ctx context.Context) (net.Conn, error) { return ln.dial() }, "tok")
+}
+
+func TestListSessions(t *testing.T) {
+	c := serveSessions(t, &fakeSessions{records: map[string]string{sessionID: "a\nb\n"}})
+	got, err := c.ListSessions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != sessionID || got[0].Size != 4 {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+// A transcript is the one thing here that grows without bound, so it must
+// stream rather than arrive as a decoded field.
+func TestReadSessionStreamsTheRecord(t *testing.T) {
+	body := strings.Repeat("{\"role\":\"user\"}\n", 5000)
+	c := serveSessions(t, &fakeSessions{records: map[string]string{sessionID: body}})
+	rc, err := c.ReadSession(sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != body {
+		t.Fatalf("got %d bytes, want %d", len(got), len(body))
+	}
+}
+
+func TestReadSessionThatIsNotThere(t *testing.T) {
+	c := serveSessions(t, &fakeSessions{})
+	if _, err := c.ReadSession(sessionID); err == nil {
+		t.Fatal("expected an error for a record the guest does not have")
+	}
+}
+
+// Which directory a restored record lands in is the whole difference between
+// a session an agent can resume and one it can only read.
+func TestWriteSessionCarriesTheDestination(t *testing.T) {
+	for _, shared := range []bool{false, true} {
+		f := &fakeSessions{}
+		c := serveSessions(t, f)
+		if err := c.WriteSession(sessionID, strings.NewReader("history\n"), shared); err != nil {
+			t.Fatal(err)
+		}
+		if f.wrote[sessionID] != "history\n" {
+			t.Fatalf("shared=%v: body was %q", shared, f.wrote[sessionID])
+		}
+		if f.shared[sessionID] != shared {
+			t.Fatalf("shared=%v: guest saw %v", shared, f.shared[sessionID])
+		}
+	}
+}
+
+// A guest with no transcript routes wired up must 404 rather than panic on a
+// nil interface, which is what a handler built without them would do.
+func TestSessionRoutesAbsentWhenNotWired(t *testing.T) {
+	ln := newPipeListener()
+	srv := &http.Server{Handler: Handler(&fakeGuest{}, nil, "tok")}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Close(); ln.Close() })
+	c := NewClient(func(ctx context.Context) (net.Conn, error) { return ln.dial() }, "tok")
+	if _, err := c.ListSessions(); err == nil || !contains(err.Error(), "404") {
+		t.Fatalf("want a 404, got %v", err)
+	}
+}
+
+func TestSessionsNeedTheTokenToo(t *testing.T) {
+	ln := newPipeListener()
+	f := &fakeSessions{records: map[string]string{sessionID: "secret\n"}}
+	srv := &http.Server{Handler: Handler(&fakeGuest{}, f, "server-token")}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Close(); ln.Close() })
+	c := NewClient(func(ctx context.Context) (net.Conn, error) { return ln.dial() }, "wrong")
+	if _, err := c.ReadSession(sessionID); err == nil {
+		t.Fatal("a transcript was readable without the token")
+	}
+	if err := c.WriteSession(sessionID, strings.NewReader("x"), false); err == nil {
+		t.Fatal("a transcript was writable without the token")
+	}
+	if len(f.wrote) != 0 {
+		t.Fatalf("an unauthenticated write reached the guest: %v", f.wrote)
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -39,6 +40,17 @@ func NewClient(dial func(context.Context) (net.Conn, error), token string) *Clie
 	return c
 }
 
+// request builds an authenticated request. The host in the URL is ignored; the
+// transport always dials the guest.
+func (c *Client) request(method, path string, body io.Reader) (*http.Request, error) {
+	req, err := http.NewRequest(method, "http://cave-guest"+path, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	return req, nil
+}
+
 func (c *Client) do(method, path string, body, out any) error {
 	var rdr io.Reader
 	if body != nil {
@@ -48,12 +60,10 @@ func (c *Client) do(method, path string, body, out any) error {
 		}
 		rdr = bytes.NewReader(b)
 	}
-	// The host in the URL is ignored; the transport always dials the guest.
-	req, err := http.NewRequest(method, "http://cave-guest"+path, rdr)
+	req, err := c.request(method, path, rdr)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.Token)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -71,6 +81,56 @@ func (c *Client) do(method, path string, body, out any) error {
 		return nil
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+func (c *Client) ListSessions() ([]SessionRecord, error) {
+	var body struct {
+		Sessions []SessionRecord `json:"sessions"`
+	}
+	err := c.do("GET", "/sessions", nil, &body)
+	return body.Sessions, err
+}
+
+// ReadSession streams one transcript. The caller closes it, and closing before
+// the end is allowed: the guest is writing into a socket, not a file, so an
+// abandoned read costs it a broken pipe rather than a stuck process.
+func (c *Client) ReadSession(id string) (io.ReadCloser, error) {
+	req, err := c.request("GET", "/sessions/"+url.PathEscape(id), nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode/100 != 2 {
+		defer resp.Body.Close()
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("GET /sessions/%s: %s: %s", id, resp.Status,
+			bytes.TrimSpace(msg))
+	}
+	return resp.Body, nil
+}
+
+func (c *Client) WriteSession(id string, r io.Reader, shared bool) error {
+	path := "/sessions/" + url.PathEscape(id)
+	if shared {
+		path += "?dest=shared"
+	}
+	req, err := c.request("POST", path, r)
+	if err != nil {
+		return err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("POST %s: %s: %s", path, resp.Status, bytes.TrimSpace(msg))
+	}
+	return nil
 }
 
 func (c *Client) Health() (Health, error) {

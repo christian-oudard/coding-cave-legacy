@@ -6,7 +6,9 @@ import (
 	"os"
 	"path/filepath"
 
+	"codingcave.dev/cave-vm/internal/control"
 	"codingcave.dev/cave-vm/internal/sessions"
+	"codingcave.dev/cave-vm/internal/vmm"
 )
 
 // Session records are host state: they outlive the guest disk, a reformat and
@@ -27,7 +29,8 @@ func sessionsCommand(args []string) {
 	// Reading a stopped image instead of asking a running guest. This is what
 	// makes a reformat safe when the guest is too broken to answer, which is
 	// exactly when a reformat happens.
-	disk := fs.String("disk", "", "read a stopped guest image instead of using ssh")
+	disk := fs.String("disk", "", "read a stopped guest image instead of asking the guest")
+	state := fs.String("state", "", "state directory, to reach the guest over the control plane")
 	agent := fs.String("agent", "1", "which agent these records belong to")
 	fs.Parse(args)
 
@@ -36,7 +39,7 @@ func sessionsCommand(args []string) {
 	// host holds is a host question and must answer with the VM stopped, gone,
 	// or never created.
 	guest := func() sessions.Guest {
-		g, err := pickGuest(*disk, *config, *host)
+		g, err := pickGuest(*disk, *state, *config, *host)
 		if err != nil {
 			fatal(err)
 		}
@@ -76,14 +79,30 @@ func sessionsCommand(args []string) {
 	}
 }
 
-// pickGuest is the one place that decides which side of the boundary answers:
-// a running guest over ssh, or a stopped image read directly.
-func pickGuest(disk, config, host string) (sessions.Guest, error) {
+// pickGuest is the one place that decides which side of the boundary answers.
+// Three ways, and the order is the point:
+//
+//   - a stopped image, read with debugfs. First because it is asked for
+//     explicitly, and because it is the only one that works for the guest most
+//     likely to need reading, the one too broken to boot.
+//   - a running guest over the control plane. The usual path: a call costs
+//     about 2ms, which is what makes syncing on every `status` affordable.
+//   - a running guest over ssh. Kept because it needs nothing in the guest to
+//     be listening but cave-guestd's binary, so it still answers when the
+//     control plane is the thing that is broken.
+func pickGuest(disk, state, config, host string) (sessions.Guest, error) {
 	if disk != "" {
 		return sessions.Disk{Image: disk}, nil
 	}
+	if state != "" {
+		tok, err := control.EnsureToken(controlToken(state))
+		if err != nil {
+			return nil, err
+		}
+		return controlGuest{control.NewClient(guestDialer(vmm.NewPaths(state)), tok)}, nil
+	}
 	if config == "" {
-		return nil, fmt.Errorf("sessions: give -ssh-config for a running guest, or -disk for a stopped one")
+		return nil, fmt.Errorf("sessions: give -state (or -ssh-config) for a running guest, or -disk for a stopped one")
 	}
 	return sessions.SSH{Config: config, Host: host}, nil
 }

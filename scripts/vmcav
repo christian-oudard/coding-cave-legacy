@@ -510,6 +510,13 @@ do_status() {
     echo "booted: $booted"
     echo "current: ${current:-unreachable}"
   fi
+  # The one place an unattended agent's history gets copied out. Nothing else
+  # asks: `stop` and `reformat` do, but an agent that exits with nobody
+  # watching reaches neither, and its transcript is exactly the one worth
+  # resuming. No timer, because "whenever the host asks about agents at all"
+  # bounds staleness by when you last looked and needs no clock. Affordable
+  # only since this moved off ssh: a control-plane call is about 2ms.
+  sync_sessions
   echo "console: $CONSOLE"
   [ "${n:-0}" = 0 ] || echo "attach: vmcav agent   (detach: ctrl-\\)"
   cave_vm pending || true
@@ -738,12 +745,13 @@ sync_sessions() {
   # substitution takes the whole script with it, and this must never be the
   # reason a stop or a reformat does not happen.
   local out rc=0
-  # A running guest answers over ssh; a stopped one is read straight off its
-  # disk image. The second is what makes `reformat` safe: the guest you are
-  # most likely to reformat is one too broken to answer, and it is about to be
-  # deleted. Never both, because reading a live filesystem gives torn data.
+  # A running guest answers over the control plane; a stopped one is read
+  # straight off its disk image. The second is what makes `reformat` safe: the
+  # guest you are most likely to reformat is one too broken to answer, and it
+  # is about to be deleted. Never both, because reading a live filesystem
+  # gives torn data.
   if is_running; then
-    out=$(cave-vm sessions -ssh-config "$SSHCONF" sync 2>&1) || rc=$?
+    out=$(cave-vm sessions -state "$STATE_DIR" sync 2>&1) || rc=$?
   elif [ -f "$DISK" ]; then
     out=$(cave-vm sessions -disk "$DISK" sync 2>&1) || rc=$?
   else
@@ -766,9 +774,9 @@ restore_sessions() {
   command -v cave-vm >/dev/null 2>&1 || return 0
   is_running || return 0
   local out
-  out=$(cave-vm sessions -ssh-config "$SSHCONF" restore 2>&1) \
+  out=$(cave-vm sessions -state "$STATE_DIR" restore 2>&1) \
     || log "warning: some session records did not restore: $out"
-  out=$(cave-vm sessions -ssh-config "$SSHCONF" share 2>&1) \
+  out=$(cave-vm sessions -state "$STATE_DIR" share 2>&1) \
     || log "warning: the shared session view is incomplete: $out"
   return 0
 }

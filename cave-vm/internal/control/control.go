@@ -23,6 +23,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -63,6 +64,31 @@ type Guest interface {
 	SetTime(time.Time) error
 }
 
+// SessionRecord is one transcript as the guest sees it. Deliberately not the
+// sessions package's own type: this package must not import that one, because
+// the host-side implementation of its Guest interface is built on this
+// package's client, and the two would import each other.
+type SessionRecord struct {
+	ID      string `json:"id"`
+	Size    int64  `json:"size"`
+	Project string `json:"project"`
+}
+
+// Sessions is the transcript half of the control plane, and it is the reason
+// an agent that nobody attached to still gets its history copied out: over ssh
+// a sync cost a process and 85ms per record, which is too much to do on every
+// `status`, and here it does not.
+//
+// The host names every id and constructs every path; this only ever hands back
+// what it was asked for. That is the same rule the ssh path follows, and the
+// reason neither is rsync or a tar of a directory: a batch copier lets the
+// sender choose the names that land on the host.
+type Sessions interface {
+	List() ([]SessionRecord, error)
+	Read(id string) (io.ReadCloser, error)
+	Write(id string, r io.Reader, shared bool) error
+}
+
 // Token is the shared secret. It is generated on the host, staged into the
 // guest on the seed disk beside authorized_keys, and read from a file at both
 // ends so it never appears in an argument list.
@@ -100,8 +126,14 @@ func EnsureToken(path string) (string, error) {
 
 // Handler is the guest's side. Routes are matched with the stdlib's method and
 // path patterns, so there is no router and no dependency.
-func Handler(g Guest, token string) http.Handler {
+//
+// s may be nil, in which case the transcript routes do not exist at all rather
+// than existing and failing.
+func Handler(g Guest, s Sessions, token string) http.Handler {
 	mux := http.NewServeMux()
+	if s != nil {
+		registerSessions(mux, s)
+	}
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		h, err := g.Health()
 		reply(w, h, err)
@@ -137,6 +169,36 @@ func Handler(g Guest, token string) http.Handler {
 		reply(w, nil, g.SetTime(time.Unix(0, body.UnixNano)))
 	})
 	return authenticated(mux, token)
+}
+
+func registerSessions(mux *http.ServeMux, s Sessions) {
+	mux.HandleFunc("GET /sessions", func(w http.ResponseWriter, r *http.Request) {
+		recs, err := s.List()
+		if recs == nil {
+			recs = []SessionRecord{}
+		}
+		reply(w, struct {
+			Sessions []SessionRecord `json:"sessions"`
+		}{recs}, err)
+	})
+	mux.HandleFunc("GET /sessions/{id}", func(w http.ResponseWriter, r *http.Request) {
+		rc, err := s.Read(r.PathValue("id"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer rc.Close()
+		// Streamed rather than buffered: a transcript is the one thing here
+		// that grows without bound, and the guest has no reason to hold a
+		// whole one in memory to hand it over.
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		io.Copy(w, rc)
+	})
+	mux.HandleFunc("POST /sessions/{id}", func(w http.ResponseWriter, r *http.Request) {
+		// Which directory a restored record lands in: claude's own, where its
+		// picker will find it, or the read-only view of every agent's records.
+		reply(w, nil, s.Write(r.PathValue("id"), r.Body, r.URL.Query().Get("dest") == "shared"))
+	})
 }
 
 // authenticated rejects anything without the token, before routing, so an

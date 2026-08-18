@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"time"
 
 	"codingcave.dev/cave-vm/internal/control"
+	"codingcave.dev/cave-vm/internal/sessions"
 	"codingcave.dev/cave-vm/internal/vmm"
 )
 
@@ -106,6 +108,31 @@ func guestDialer(p vmm.Paths) func(context.Context) (net.Conn, error) {
 	return func(context.Context) (net.Conn, error) {
 		return backend().Dial(p, control.Port)
 	}
+}
+
+// controlGuest is sessions.Guest over the control plane, which is the third
+// way the host reaches transcripts and now the usual one: ssh answers whether
+// or not a daemon is up but costs a process and ~85ms a call, and debugfs
+// reads a stopped image. The mapping is one-to-one, so this is conversions
+// rather than logic.
+type controlGuest struct{ c *control.Client }
+
+func (g controlGuest) List() ([]sessions.Record, error) {
+	recs, err := g.c.ListSessions()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]sessions.Record, 0, len(recs))
+	for _, r := range recs {
+		out = append(out, sessions.Record{ID: r.ID, Size: r.Size, Project: r.Project})
+	}
+	return out, nil
+}
+
+func (g controlGuest) Read(id string) (io.ReadCloser, error) { return g.c.ReadSession(id) }
+
+func (g controlGuest) Write(id string, r io.Reader, dest sessions.Dest) error {
+	return g.c.WriteSession(id, r, dest == sessions.Shared)
 }
 
 func emit(v any) {
