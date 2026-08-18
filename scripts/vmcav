@@ -543,6 +543,7 @@ do_status() {
   # only since this moved off ssh: a control-plane call is about 2ms.
   sync_sessions
   echo "console: $CONSOLE"
+  warn_if_guest_is_behind
   [ "${n:-0}" = 0 ] || echo "attach: vmcav agent   (detach: ctrl-\\)"
   cave_vm pending || true
 }
@@ -621,6 +622,14 @@ guest_ssh() {
 # mean, and neither is remembered anywhere on the host: the guest holds the
 # agent's own record of what it was created for.
 do_agent() {
+  # `stop` as the first word is the verb, not a project. A project named
+  # "stop" would be pathological, and the alternative is a second top-level
+  # command for something that is plainly part of an agent's lifecycle.
+  if [ "${1:-}" = "stop" ]; then
+    shift
+    do_agent_stop "$@"
+    return
+  fi
   local project="${1:-$SLUG}" base="${2:-}"
   if [ -z "$base" ]; then
     base=$(git -C "$REPO" symbolic-ref --quiet --short HEAD) \
@@ -639,6 +648,18 @@ do_agent() {
   guest_ssh "cave-guestd start -id $id -project $project -base $base" \
     || { log "could not start the agent"; return 1; }
   do_attach
+}
+
+# Stop an agent and keep what it wrote. The sync matters more here than
+# anywhere: an agent stopped on purpose is one whose transcript you are most
+# likely to want to resume from, and stopping it is the last moment the guest
+# still has it.
+do_agent_stop() {
+  local id="${1:-1}"
+  is_running || { log "the vm is not running"; return 1; }
+  guest_rpc stop "$id" || { log "could not stop agent $id"; return 1; }
+  log "agent $id stopped"
+  sync_sessions
 }
 
 do_attach() {
@@ -693,6 +714,7 @@ usage: vmcav <command>
   status          whether it is up, which generation, where the console is
   agent [proj] [branch]
                   create the agent for a project and attach (detach: ctrl-\)
+  agent stop [id] stop an agent and bank its transcript
   shell [cmd...]  a root shell in the guest, or run cmd there
   deploy          build the guest config and activate it in the running VM
   push [branch]   send this checkout's branch to the shared repo the agent
@@ -737,6 +759,7 @@ do_image_create() {
   log "creating guest disk (cap $((disk_mb / 1024)) GB, sparse)"
   cp --sparse=always "$BOOT/disk/nixos.img" "$DISK"; chmod u+w "$DISK"
   truncate -s "${disk_mb}M" "$DISK"
+  record_deployed_from
   log "image ready; vmcav start"
 }
 
@@ -893,7 +916,34 @@ do_deploy() {
     log "the kernel changed; the guest is running the old one until a restart"
     log "  (vmcav stop && vmcav start)"
   fi
+  record_deployed_from
   log "deployed"
+}
+
+# Which commit the guest was last built from. The guest boots what its own disk
+# says, so pulling on the host changes nothing in it until a deploy, and
+# nothing used to say so: the symptom was old guest behaviour with a current
+# `vmcav version`, which reports the host script and not the guest.
+#
+# The commit rather than a store path, because the question being answered is
+# "is the guest behind my checkout", and a store path cannot answer that
+# without a build.
+record_deployed_from() {
+  git -C "$REPO" rev-parse HEAD > "$STATE_DIR/deployed-from" 2>/dev/null || true
+}
+
+# Say so when the guest is older than the checkout. A hint rather than a
+# verdict: the guest is built from the working tree, so a deploy with
+# uncommitted changes and a later commit both land here, and erring toward
+# "deploy" costs a rebuild that is mostly cached.
+warn_if_guest_is_behind() {
+  local was now
+  was=$(cat "$STATE_DIR/deployed-from" 2>/dev/null || true)
+  now=$(git -C "$REPO" rev-parse HEAD 2>/dev/null || true)
+  [ -n "$was" ] && [ -n "$now" ] || return 0
+  [ "$was" = "$now" ] && return 0
+  log "the guest was built from $(git -C "$REPO" rev-parse --short "$was" 2>/dev/null || echo "${was:0:7}")"
+  log "  your checkout is at $(git -C "$REPO" rev-parse --short "$now"); vmcav deploy to catch it up"
 }
 
 # What a guest boots is recorded on its own disk, in the system profile it
