@@ -41,6 +41,8 @@ func main() {
 		vmCacheKey(os.Args[2:])
 	case "vsock-connect":
 		vmVsockConnect(os.Args[2:])
+	case "guest":
+		guestCommand(os.Args[2:])
 	case "sessions":
 		sessionsCommand(os.Args[2:])
 	default:

@@ -54,15 +54,29 @@ that failed took its journal with it.
 What makes it worth keeping rather than forgetting: `clone-repo` is a
 `oneshot` with no retry, and what it depends on is not in the guest. It
 clones through the vsock bridge to a git daemon on the host, so anything
-transient on the far side of that boundary at the wrong moment is
-unrecoverable and stops the agent from existing at all. Whether that is what
-happened is unestablished; the ordering (`after`/`wants` on
-`vsock-git.service`) only waits for the guest's own socat, which is up long
-before the host is necessarily answering.
+transient at the wrong moment is unrecoverable and stops the agent from
+existing at all.
 
-Open: whether to make the unit survive a transient failure (a retry, or a
-`Restart` with a bounded limit) or to leave it failing loudly on the argument
-that a guest which cannot reach the host has nothing useful to do anyway.
+The likeliest mechanism is guest-local, and it is not the one first written
+here. `clone-repo` has `after`/`wants` on `vsock-git.service`, which is a
+plain `socat TCP-LISTEN:9418 ... VSOCK-CONNECT:2:7300`. systemd calls such a
+unit active the instant the process execs, not when it has bound the port, so
+`git clone git://127.0.0.1/...` can arrive before anything is listening and
+get a connection refused. The host side is a weaker suspect than it looked:
+`start_git_daemon` runs before `cave-vm start`, so the host daemon is
+listening before the guest begins to boot.
+
+That points at a fix better than a retry, which would only paper over it:
+make the bridge a `.socket` unit. Socket activation has systemd bind the
+listening port itself before any dependent unit runs, which turns the
+ordering from a hope into a guarantee, and it applies to every guest-side
+bridge rather than to this one caller.
+
+Open: whether that is enough on its own, or whether the unit should also
+fail loudly rather than retry, on the argument that a guest which cannot
+reach the host has nothing useful to do anyway. Also unresolved and cheap:
+the run that failed took its journal with it, so whatever the cause, the
+evidence should survive the next one.
 
 ## Preserve uncommitted work across `reformat`
 
@@ -200,6 +214,11 @@ is the precedent rather than the exception.
 
 ## Multiple agents per VM
 
+**Deliberately deferred.** The near-term goal is one agent building the
+coding cave from inside the coding cave, and one agent is enough for that.
+Nothing below should be built ahead of that milestone; it is recorded so the
+single-agent assumptions are known rather than discovered.
+
 A VM is meant to hold many agents. Everything built so far assumes exactly
 one, in ways that are cheap to list and not cheap to change:
 
@@ -311,6 +330,24 @@ to rebase rather than growing a merge nobody tested.
 Open: whether the spec ref means "the agent's branch" (agent deploys without
 approval, human is the outsider) or "what the VM runs" (both move it, the
 human's deploy is a first-class command). That choice decides the other two.
+
+Reopened by the control RPC, and by phase 4 landing after the above was
+settled: whether deploy stays a push. `nix copy` over ssh was the only way to
+get a closure into the guest when it was decided. The guest now has the host's
+store on vsock 7100 and verified it works with crinj absent, so deploy could
+invert: name a toplevel over the control RPC, let the guest substitute the
+closure itself, then activate. That is a pull, it removes deploy's dependency
+on ssh, and it makes sshd a debugging affordance rather than part of the
+control plane.
+
+Which raises the question that decides how much of this is worth doing:
+whether the guest keeps sshd at all. Attach does not need it (a raw vsock
+stream plus a resize message is what a pty relay is), session sync does not
+need it, and ssh's authentication is close to redundant on a link whose host
+end is a unix socket only the VM's owner can open, and who can already power
+the guest off through the API socket. Keeping both a control RPC and an ssh
+control path is the outcome to avoid; keeping sshd purely for a human is
+defensible and should be a decision rather than a leftover.
 
 ## Nothing runs the Mac host end to end
 

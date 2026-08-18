@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -25,6 +26,7 @@ import (
 	"time"
 
 	"codingcave.dev/cave-vm/internal/agentd"
+	"codingcave.dev/cave-vm/internal/control"
 	"codingcave.dev/cave-vm/internal/sessions"
 )
 
@@ -48,15 +50,62 @@ func main() {
 		attach(args)
 	case "sessions":
 		transcripts(args)
+	case "serve":
+		serve(args)
 	default:
 		usage()
 	}
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: cave-guestd session|list|attach")
+	fmt.Fprintln(os.Stderr, "usage: cave-guestd session|list|attach|serve")
 	fmt.Fprintln(os.Stderr, "       cave-guestd sessions list|read <id>|write <id>")
 	os.Exit(2)
+}
+
+// serve answers the host's control plane on vsock 7001. systemd binds the
+// socket (ListenStream=vsock::7001) and passes it in, so the port is listening
+// from the moment the socket unit is enabled, whether or not this process has
+// started yet, and a caller cannot race the daemon's startup.
+//
+// The token comes from the seed disk, which is where every other host-provided
+// secret arrives, and is read at startup rather than per request: the seed is
+// read-only and cannot change under a running guest.
+func serve(args []string) {
+	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	dir := fs.String("dir", defaultDir, "directory of session sockets")
+	tokenPath := fs.String("token", "/etc/cave-host/control-token", "shared secret from the seed")
+	addr := fs.String("addr", "", "listen here instead of on the socket systemd passed")
+	fs.Parse(args)
+
+	token, err := control.ReadToken(*tokenPath)
+	if err != nil {
+		die(err)
+	}
+	ln, err := control.ActivationListener()
+	if err != nil {
+		die(err)
+	}
+	if ln == nil {
+		if *addr == "" {
+			die(fmt.Errorf("no socket from systemd and no -addr; nothing to listen on"))
+		}
+		if ln, err = net.Listen("tcp", *addr); err != nil {
+			die(err)
+		}
+	}
+	g := control.System{
+		Sessions: *dir,
+		Unit:     unitPattern,
+		List:     agentd.List,
+	}
+	srv := &http.Server{
+		Handler: control.Handler(g, token),
+		// A control call is a question about local state; anything slower than
+		// this is a hung guest, and holding the connection open hides that.
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	die(srv.Serve(ln))
 }
 
 func die(err error) {

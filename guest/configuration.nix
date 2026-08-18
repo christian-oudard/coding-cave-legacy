@@ -593,6 +593,48 @@ in
     };
   };
 
+  # --- The control plane ---
+  # The host's command channel, JSON over HTTP on vsock 7001. Everything
+  # routine `cav` asks the guest comes through here, so that ssh is a human's
+  # way in and nothing else depends on it.
+  #
+  # A .socket unit, and systemd binds AF_VSOCK itself, which is worth more than
+  # not shelling out to socat: the port is listening from the moment the socket
+  # is enabled, before the daemon behind it has started, so a caller cannot
+  # race the daemon's startup. A socat bridge only ever approximated that,
+  # since systemd calls such a unit active the instant the process execs rather
+  # than when it has bound anything.
+  systemd.sockets.cave-control = {
+    description = "Host control plane (vsock 7001)";
+    wantedBy = [ "sockets.target" ];
+    socketConfig = {
+      # Empty CID means "this guest", whichever one the VMM assigned.
+      ListenStream = "vsock::7001";
+      # One connection per accept would fork a daemon per call; the daemon
+      # serves the listener itself and lives across calls.
+      Accept = false;
+    };
+  };
+
+  systemd.services.cave-control = {
+    description = "Host control plane";
+    # No wantedBy: the socket starts this, and a guest nobody talks to should
+    # not run it. It answers questions about the session units rather than
+    # owning them, so it can be restarted under a live agent, which is exactly
+    # what a deploy from inside the VM will do to it.
+    requires = [ "cave-control.socket" ];
+    after = [ "cave-control.socket" ];
+    # The token is host-provided and arrives on the seed disk. Without it there
+    # is nothing to authenticate against and the daemon refuses to start, which
+    # is the right failure: an unauthenticated control plane is worse than none.
+    unitConfig.ConditionPathExists = "/etc/cave-host/control-token";
+    serviceConfig = {
+      ExecStart = "${caveGuestd}/bin/cave-guestd serve -dir ${sessionDir}";
+      Restart = "on-failure";
+      RestartSec = 1;
+    };
+  };
+
   # The root agent is session 1, and is the one instance that starts by itself:
   # it is doing work whether or not anyone attaches. Every other instance is
   # created by an attach. A drop-in rather than a unit, so the template above

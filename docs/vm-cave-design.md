@@ -424,6 +424,63 @@ Control RPC (port 7001, JSON over HTTP, no framework): `POST /agents`
 `POST /agents/<n>/stop`, `GET /health`. cave-vm is the only client; the
 protocol is internal and versioned by the image/binary shipping together.
 
+It exists because the VM is an appliance driven by `cav`, not a machine you
+log into, and the cost of pretending otherwise is measurable. Against the
+running guest over this vsock plane: a cold ssh call costs 85ms, and 91ms
+once it runs something worth asking about; multiplexed ssh costs 10ms and
+needs a master connection kept alive; a vsock connection plus a full round
+trip to a guest listener that forks per connection costs 1.9ms, and a round
+trip on an already-open connection costs 0.035ms. The plane is free and
+almost all of ssh's cost is key exchange plus sshd session setup. A `status`
+that asks the guest once is merely sluggish; one that asks per agent is
+visibly slow, and that is the command a human runs most.
+
+Two consequences. The protocol needs a stream mode as well as
+request/response, or terminal attach cannot live on it: a pty relay is a byte
+stream plus a resize message, which a vsock connection already is, so a
+separate connection opening with an `ATTACH <id>` preamble covers it, the same
+shape as CHV's own `CONNECT` handshake. And multiplexing is by agent id inside
+the request, never by port, since no inbound port may be allocated after boot.
+
+**The transport is not assumed to be vsock.** A cave may eventually be hosted
+somewhere other than this machine, so the protocol is HTTP over a stream and
+the stream is a vsock connection locally, a TLS connection remotely, and
+nothing in the protocol can tell the difference. The consequence is
+authentication: on a local socket the access control is the filesystem, and
+over a network there is none, so a design that leans on the former has no
+remote story at all.
+
+So the RPC carries a bearer token on every call, including local ones. Locally
+the token lives in the state dir under the owner's permissions, which is the
+same protection the socket already had, and it costs a header. There is
+deliberately no local-mode exemption: one code path, one set of privileges,
+and no capability that exists only when the caller happens to be on the same
+machine. It also means the remote work later is a listener and a certificate
+rather than a protocol change.
+
+Built, and measured against the running guest: `health` and `agents` answer in
+4ms end to end including the host process starting, where the ssh calls they
+replace cost 82-113ms. `status` uses it, `shell` still uses ssh.
+
+The guest binds nothing itself. A `.socket` unit with
+`ListenStream=vsock::7001` has systemd bind AF_VSOCK before the daemon behind
+it starts, so a caller cannot race startup, which is also the fix the guest's
+other bridges want (see the `clone-repo` entry in `vm-cave-todo.md`).
+
+Two things about AF_VSOCK in Go that only appear against a real socket, since
+both fail with the same unhelpful `address family not supported by protocol`:
+`net.FileListener` cannot adopt the descriptor systemd passes, because it
+calls `getsockname` and the net package knows only inet and unix; and
+`syscall.Accept4` discards the accepted connection, because it converts a peer
+address it has no case for. So the daemon accepts with the raw `accept4` and
+a NULL address, and wraps the result as a `net.Conn` over an `*os.File`. This
+is the class of bug the cross-platform doc predicts for vsock generally: a
+second-class path where failures are silent or misattributed.
+
+What this does not settle is whether the guest keeps sshd at all. It is
+currently load-bearing for `deploy` (`nix copy` over a vsock ProxyCommand)
+and for a human debugging the guest by hand; see `vm-cave-todo.md`.
+
 ## The cave environment, and the command surface
 
 One environment, specified by one file: `~/.config/coding-cave/cave.nix` on

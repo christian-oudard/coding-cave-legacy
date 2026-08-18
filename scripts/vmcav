@@ -157,6 +157,13 @@ stage_seed() {
   [ -f "$GUESTCRED" ] && install -m600 "$GUESTCRED" "$SEED/credentials.json" || true
   [ -f "$SSHKEY" ] || ssh-keygen -t ed25519 -N '' -f "$SSHKEY" -C vmcav >/dev/null
   cp -f "$SSHKEY.pub" "$SEED/authorized_keys"
+  # The control plane's shared secret, minted on first use like the cache key.
+  # It is a bearer token even though the vsock socket is already owner-only,
+  # because the same protocol has to work for a cave that is not on this
+  # machine, and a local-only exemption is a capability that exists on one
+  # transport and not the other.
+  install -m600 /dev/null "$SEED/control-token"
+  guest_rpc token > "$SEED/control-token"
   stage_pubring
   stage_gitconfig
   stage_nix_conf
@@ -432,15 +439,17 @@ do_status() {
   local booted current
   booted=$(sed -n 's|.*init=\(/nix/store/[^ "]*\)/init.*|\1|p' \
     "$STATE_DIR/run-vm.sh" 2>/dev/null || true)
-  current=$( (GUEST_SSH_TTY=-T guest_ssh readlink -f /run/current-system) 2>/dev/null \
-    | tr -d '\r' || true)
+  # Over the control plane, not ssh: this is the command a human runs most,
+  # and a cold ssh call costs 85ms against under 2ms here. ssh stays for
+  # `vmcav shell`, which is a person wanting a shell rather than a command
+  # needing an answer.
+  current=$(guest_rpc health 2>/dev/null | sed -n 's/^system //p' || true)
 
-  # The daemon is the register of who is running, so ask it rather than
-  # counting sockets or processes: it reports each agent's id and its pty
-  # size, and it knows the difference between an agent and its corpse.
+  # The guest is the register of who is running, so ask it rather than
+  # counting sockets or processes: a socket exists exactly as long as the
+  # session process holds it, so it knows an agent from its corpse.
   local sessions n
-  sessions=$( (GUEST_SSH_TTY=-T guest_ssh "cave-guestd list") 2>/dev/null \
-    | tr -d '\r' | grep ' running ' || true)
+  sessions=$(guest_rpc agents 2>/dev/null | grep ' running ' || true)
   n=$(printf '%s\n' "$sessions" | grep -c . || true)
   if [ "${n:-0}" = 0 ]; then
     echo "agents: none running (vmcav agent starts one)"
@@ -477,6 +486,11 @@ cave_vm() {
   [ -d "$SHARED" ] || { log "no shared repo yet at $SHARED (vmcav start creates it)"; return 1; }
   cave-vm "$1" -C "$SHARED" "${@:2}"
 }
+
+# The control plane: everything routine the host asks a running guest. Separate
+# from cave_vm above because that one is host-side git and takes -C; this takes
+# the state dir and talks to the VM.
+guest_rpc() { cave-vm guest --state "$STATE_DIR" "$@"; }
 
 # Terminal state is the caller's, and a remote full-screen program is what
 # wrecks it. ssh restores termios on its own clean exit and nothing else: not

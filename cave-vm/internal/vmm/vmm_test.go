@@ -43,7 +43,8 @@ func spec(p Paths) Spec {
 func TestPortsAreFixedAndDirected(t *testing.T) {
 	ports := Ports(Services{Crinj: "crinj:1", Git: "git:2"})
 	want := map[uint32]Dir{
-		22: FromHost, 7100: FromGuest, 7200: FromGuest, 7300: FromGuest, 7400: FromGuest,
+		22: FromHost, 7001: FromHost,
+		7100: FromGuest, 7200: FromGuest, 7300: FromGuest, 7400: FromGuest,
 	}
 	if len(ports) != len(want) {
 		t.Fatalf("port count = %d, want %d", len(ports), len(want))

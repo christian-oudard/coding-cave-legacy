@@ -75,12 +75,10 @@ type Services struct {
 // the launch argv, so a port that appeared only when its service was
 // configured would change the VM's device set, and the plane process and the
 // launcher would disagree about what the guest can dial.
-//
-// 7001 (control RPC) is in the design and absent here because it does not
-// exist yet; adding it is a new entry plus a reboot, not a runtime allocation.
 func Ports(svc Services) []Port {
 	return []Port{
 		{Num: 22, Dir: FromHost, Name: "ssh"},
+		{Num: 7001, Dir: FromHost, Name: "control"},
 		{Num: 7100, Dir: FromGuest, Name: "nix", Serve: svc.Nix},
 		{Num: 7200, Dir: FromGuest, Name: "crinj", Relay: svc.Crinj},
 		{Num: 7300, Dir: FromGuest, Name: "git", Relay: svc.Git},
