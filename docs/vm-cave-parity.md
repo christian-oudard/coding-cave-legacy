@@ -60,9 +60,25 @@ Phase 7, about half landed. Present: the vsock git bridge on 7300, the
 pre-receive and post-receive hooks, and `review`, `diff`, `approve` as
 fast-forward of a whole agent branch onto its base.
 
+The round trip is verified end to end rather than assumed. From inside the
+guest a bare `git push` lands on `agent-1/vm-cave` (the guest's `/etc/gitconfig`
+sets `push.default = current` and `autoSetupRemote`), `vmcav review` shows the
+commit on the host, and a force-push to reset the agent branch is accepted
+because the agent itself pushed that history. The guard holds in both
+directions it is meant to: a push to the base branch and a push to another
+agent's namespace are both refused by `pre-receive`, with the agent id coming
+from the daemon rather than the client.
+
+So the minimum for a productive single agent is present. What is missing
+below is ergonomics, and each item has a plain-git equivalent a human can run.
+
 - `pull` and `pull --force`: move an agent's work into the host's view of it
-- `push` and `push --force`: send host-side edits back through the shared
-  remote into the agent's worktree
+- `push`: half of it exists. `vmcav push [branch] [--force]` sends the
+  checkout's branch to the shared repo the agent clones from, and `start` does
+  it for the current base branch, which is what keeps an agent working against
+  current code. What is missing is `main`'s other half: a push to an *agent*
+  branch there updates that agent's workspace, where here it would only move a
+  ref the agent has yet to fetch
 - `checkout`: retarget an agent to a different base and rebase its unmerged
   work onto it
 - `reject`: roll a base branch back and delete the approval record, with the

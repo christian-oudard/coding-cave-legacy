@@ -356,6 +356,53 @@ install_shared_hooks() {
   chmod 755 "$h/pre-receive" "$h/post-receive"
 }
 
+# Carry the human's commits into the shared repo, which is the agent's origin.
+# Without this the shared repo is a snapshot taken when the VM was created:
+# the agent clones a base that is however many commits stale, rebases onto it,
+# and conflicts with work it cannot see. Observed, not theoretical.
+#
+# A fetch into the bare repo rather than a push out of the checkout. Fetch
+# does not run pre-receive at all, and it refuses a non-fast-forward without
+# a leading +, so the safe case needs no flag and the unsafe one cannot happen
+# by accident.
+#
+# Base branches only: an agent branch belongs to the agent, and the shared
+# repo's copy is the one it pushed.
+refresh_shared_base() {
+  local branch
+  branch=$(git -C "$REPO" symbolic-ref --quiet --short HEAD 2>/dev/null) || return 0
+  case "$branch" in agent-*/*) return 0 ;; esac
+  git -C "$REPO" rev-parse --verify --quiet "refs/heads/$branch" >/dev/null || return 0
+  if git -C "$SHARED" fetch --quiet "$REPO" \
+       "refs/heads/$branch:refs/heads/$branch" 2>/dev/null; then
+    return 0
+  fi
+  log "warning: the shared repo could not fast-forward '$branch' from your checkout"
+  log "  the agent will start from the base it already has (vmcav push --force to move it)"
+  return 0
+}
+
+# The human's half of the git flow: send this checkout's branch to the shared
+# remote, where the agent's origin points. `main` spells this `cav push`, and
+# it is what keeps an agent working against current code rather than against
+# whatever was there when its VM was made.
+do_push() {
+  local force="" branch
+  [ "${1:-}" = "--force" ] && { force="+"; shift; }
+  branch="${1:-$(git -C "$REPO" symbolic-ref --quiet --short HEAD)}"
+  [ -n "$branch" ] || { log "no branch to push (detached HEAD; name one)"; return 1; }
+  ensure_shared_repo
+  git -C "$REPO" rev-parse --verify --quiet "refs/heads/$branch" >/dev/null \
+    || { log "no such branch in this checkout: $branch"; return 1; }
+  if ! git -C "$SHARED" fetch --quiet "$REPO" \
+        "${force}refs/heads/$branch:refs/heads/$branch"; then
+    log "'$branch' is not a fast-forward of the shared repo's copy"
+    log "  someone else moved it; rebase, or vmcav push --force to overwrite"
+    return 1
+  fi
+  log "$branch -> shared repo ($(git -C "$SHARED" rev-parse --short "$branch"))"
+}
+
 start_git_daemon() {
   ensure_shared_repo
   install_shared_hooks
@@ -586,6 +633,8 @@ usage: vmcav <command>
   agent           attach to the agent's claude session (detach: ctrl-\)
   shell [cmd...]  a root shell in the guest, or run cmd there
   deploy          build the guest config and activate it in the running VM
+  push [branch]   send this checkout's branch to the shared repo the agent
+                  clones from (--force to move it non-fast-forward)
   review [agent]  what the agent has pushed and not had landed
   diff [agent]    the same range, in full
   approve [agent] fast-forward the base branch onto the agent's work
@@ -847,7 +896,7 @@ do_start() {
   initrd=$(guest_boot_file "$ipath") || return 1
 
   # Preconditions are past; from here on start has side effects.
-  stage_seed; build_seed_image; start_git_daemon
+  stage_seed; build_seed_image; start_git_daemon; refresh_shared_base
   crinj_reachable && log "crinj reachable on :$CRINJ_PORT" \
     || log "warning: crinj not reachable on 127.0.0.1:$CRINJ_PORT (no egress/auth for the agent)"
   start_gpg_broker
@@ -890,6 +939,7 @@ case "${1:-help}" in
   agent) do_agent ;;
   deploy) do_deploy ;;
   review|diff|approve) cave_vm "$@" ;;
+  push) shift; do_push "$@" ;;
   shell) shift; do_shell "$@" ;;
   vsock-connect) shift; do_vsock_connect "$@" ;;
   version|--version|-V) do_version ;;

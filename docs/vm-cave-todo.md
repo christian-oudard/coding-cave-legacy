@@ -129,6 +129,45 @@ parked in the host state dir keeps the branch clean, and invents a second
 place work can live. Also unresolved whether this belongs to reformat at all,
 or is a guest-side habit (autocommit unit, periodic push).
 
+## Nothing carries the human's commits into the shared repo
+
+The blocker a first real dogfooding run hits, and it is not on any list above.
+`ensure_shared_repo` clones the project's bare repo once, at first `start`, and
+after that nothing updates it from the working checkout. The agent's `origin`
+is that bare repo, so an agent cloning or fetching sees the base as it stood
+when the VM was first created, however many commits ago.
+
+The designed flow explains why: agent work goes up as `agent-<id>/<base>`,
+`cav approve` fast-forwards it into `<base>` *in the shared repo*, and the
+human pulls from there. Under that flow the shared repo leads and the
+checkout follows. But a human who commits in their own checkout, which is what
+happens the moment a person and an agent work on the same project, leads
+instead, and nothing carries it across. The agent then rebases onto a base
+that is stale by everything the human did, and the first symptom is a
+conflict against work it cannot see.
+
+Observed rather than reasoned: the guest ran the test suite against a tree 34
+commits behind and reported a failure that had already been fixed. The
+one-liner that unblocks it is a fetch into the bare repo
+(`git -C <shared> fetch <checkout> <base>:<base>`), which needs no hook and no
+push, since fetch does not run `pre-receive`.
+
+**Fixed for the common case.** `start` fetches the checkout's current base
+branch into the shared repo, and `vmcav push [branch] [--force]` does it on
+demand. A fetch into the bare repo rather than a push out of the checkout,
+because fetch does not run `pre-receive` at all and refuses a
+non-fast-forward without a leading `+`, so the safe case needs no flag and
+the unsafe one cannot happen by accident. Agent branches are left alone: the
+shared repo's copy is the one the agent pushed.
+
+Still open, and now a smaller question than it looked: whether the human's
+checkout should instead push through the same gate the agent does, or whether
+the shared repo should stop being a snapshot and become a remote of the
+checkout. Both are positions on who owns the base, and neither is needed to
+dogfood. Also unbuilt, and the reason `push` is only half of `main`'s: there,
+a push to an *agent* branch updates that agent's workspace, where here it
+moves a ref the agent has yet to fetch.
+
 ## Session management
 
 Mostly built, and the design is in `vm-cave-design.md`. Records are host
