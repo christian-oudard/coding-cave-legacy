@@ -421,12 +421,18 @@ start_git_daemon() {
   # them apart in principle rather than merely in practice, and only the side
   # that opened them can. That, not the port table, is why the stamp has to
   # move into the guest (docs/vm-cave-todo.md).
-  # One guest today = one identity, and one daemon: AGENT_ID is a placeholder
-  # until vmcav draws it from the cave-vm registry. Note the guest defaults to
-  # 1 independently, in clone-repo, so the two must agree or every push is
-  # rejected as out-of-namespace. A daemon per agent is not where this goes:
-  # that needs a vsock port per agent, and the port table is fixed in the VM's
-  # launch argv (docs/vm-cave-todo.md).
+  # VM-wide, and that is the flaw rather than a placeholder to fill in.
+  # `start` starts the VM, which serves every agent in it, so at this point
+  # nobody knows who will push. It is correct only while there is exactly one
+  # agent. Note the guest defaults to 1 independently, in clone-repo, so the
+  # two must agree or every push is rejected as out-of-namespace.
+  #
+  # Neither a daemon per agent nor an id staged into the seed fixes it: the
+  # first needs a vsock port per agent and the port table is fixed in the VM's
+  # launch argv, and the second bakes one agent's identity into a disk shared
+  # by all of them. The id has to arrive with the connection, stamped by
+  # cave-guestd on the guest side of one shared port, which needs caves to
+  # exist first (docs/vm-cave-todo.md).
   #
   # One directory is whitelisted and it is the shared repo, so a request for
   # any other path on this port resolves to nothing.

@@ -346,10 +346,36 @@ connection arrives on the same socket, so with several agents the host cannot
 tell them apart in principle rather than merely in practice. Only the side
 that opened the connection can.
 
-So the stamp moves into the guest. Once agents are separate uids behind
-bwrap, `cave-guestd` sits outside every agent's sandbox and knows which cave
-opened a connection, so it can attach the id on the way out over the one git
-port. That trades "the host injects it, unforgeable from inside the VM" for
+There is a further consequence that rules out the obvious repair as well.
+`vmcav start` starts the VM, not an agent, and every agent in it shares that
+VM. So no host-side artifact can carry the answer either: putting an agent id
+in the seed disk, which is the established way a host fact reaches the guest,
+would bake one agent's identity into a disk serving all of them. The current
+`AGENT_ID` at start time has the same flaw and is correct only for as long as
+there is exactly one agent.
+
+**The shape that does work: demultiplex inside the guest.** `main` runs a
+listener per agent on the host, and the VM runs one per cave in the guest: a
+socket `cave-guestd` owns, one per cave, all funnelled onto the single vsock
+7300, with guestd prefixing each connection with the id of the cave it came
+from. The host relay reads the prefix and hands it to `receive-pack`. One
+vsock port however many agents, so the launch argv is untouched and it ports
+to vfkit unchanged.
+
+The agent cannot forge the prefix because bwrap gives it exactly one socket
+path and no route to 7300, and guestd sits outside every sandbox. That is the
+same trust structure as `main` with the enforcement moved from a kernel
+firewall to the sandbox's filesystem view.
+
+Blocked on caves, which is design phase 6 and does not exist yet: with one
+root agent there is nothing for guestd to tell apart, so building the demux
+now would be machinery with no input. Until then one agent means one constant
+id, which is correct; what is wrong is any interface implying the host picks
+it per push.
+
+Once agents are separate uids behind bwrap, `cave-guestd` sits outside every
+agent's sandbox and knows which cave opened a connection, so it can attach
+the id on the way out over the one git port. That trades "the host injects it, unforgeable from inside the VM" for
 "guestd asserts it, unforgeable from inside a cave", which is the threat
 model already written down: the VM is the boundary to the host, and bwrap in
 the guest is a blast-radius choice between agents. A VM escape forges agent
