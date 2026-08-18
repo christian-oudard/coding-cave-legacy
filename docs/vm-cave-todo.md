@@ -56,17 +56,60 @@ or is a guest-side habit (autocommit unit, periodic push).
 
 ## Session management
 
-The agent's claude session lives in the pty cave-guestd holds and in the
-home directory on the guest disk, so it cannot be resumed from the host.
-`vm-root-agent.md` already needs a resume marker for the
-reboot-to-test-a-generation loop, which is the same problem seen from a
-different side.
+Mostly built, and the design is in `vm-cave-design.md`. Records are host
+state, under `~/.local/share/coding-cave/sessions/<uuid>.jsonl` with a
+`key=value` sidecar for agent and project, copied out with the host doing all
+the naming, never replaced by anything shorter or with a different prefix.
+`cave-vm sessions sync|restore|share|list` on the host, `cave-guestd sessions
+list|read|write` in the guest, over ssh for a running VM and over `debugfs`
+for a stopped one. Wired into `reformat`, `stop`, and the return from an
+attach.
 
-Settled in `vm-cave-design.md`, and no longer open: sessions are host state,
-in `main`'s existing layout and `sessions` table, copied out of the guest at
-checkpoints with the host doing all the naming. What is left is building it,
-which is a list verb, a read verb, a write verb for restore, and the
-checkpoint triggers.
+What is left:
+
+- **Nothing syncs for an agent that exits with nobody attached.** The plan is
+  not a timer: sync whenever the host talks to the guest about agents at all
+  (`status`, an attach, stopping one), which bounds staleness by "when you
+  last asked" and needs no clock. Unbuilt.
+- **Ownership is bookkeeping, not enforcement.** `sync -agent N` attributes
+  records to whoever the caller names, and `vmcav` always says `1`. Every
+  agent is root in one home, so any of them can write any transcript. The
+  archive does not depend on this (a rewritten record is set aside rather than
+  applied), but "its own sessions" means only what the sidecar says until the
+  per-agent split lands, which is the multiple-agents entry below.
+- **The `last` sighting only moves when bytes move**, so it says when a
+  record last grew rather than when it was last seen. Harmless today, wrong
+  if anything ever reads it as liveness.
+- **Memory is untouched**, deliberately, and needs its own rule: per-project,
+  shared between agents, rewritten rather than grown, so the length and prefix
+  checks that protect a transcript say nothing useful about it.
+
+## Starting and stopping agents, and knowing what is running
+
+There is no way to start a second agent, stop one, or ask what is running.
+`vmcav agent` attaches to "the" agent and `status` reports the VM plus
+whatever the guest's socket directory says.
+
+One defect worth recording rather than rediscovering: the host registry
+decides liveness with `alive(pid)` against a *host* pid, which is meaningless
+for an agent living in the VM. It is the same trap the VM pidfile already
+sprang, asking your own namespace about someone else's process and being told
+nothing is there. Nothing depends on it yet because there is only ever one
+agent, which is why it has not shown up as a bug.
+
+The shape proposed, and not yet agreed, is to split the two registers by what
+each actually owns. Liveness belongs to the guest, where systemd owns
+`cave-session@<id>` and the socket directory is the roster, so the host asks
+rather than tracking. Durable facts belong to the host registry, which
+already carries agent id, project, the root-agent flag and session id, and
+should allocate ids instead of the hardcoded `1`.
+
+Then `cav agent [id]` ensures the VM, ensures the unit and attaches, `cav
+agent stop <id>` stops the unit and syncs that agent's records, and `status`
+prints a line per agent from the guest joined to the registry's facts. Build
+order, each step visible on its own: `cave-guestd list` reporting state,
+start time and project; `status` showing it; start and stop by id; then id
+allocation.
 
 ## Agent hibernation
 
@@ -125,12 +168,19 @@ one, in ways that are cheap to list and not cheap to change:
   as much: it gates by namespace, not by agent)
 - one ssh identity and one `/root/coding-cave` working tree, so two agents
   would share a checkout
+- one home, so one `~/.claude/projects`: every agent can read and rewrite
+  every other agent's transcript, which is what keeps session ownership at
+  the level of bookkeeping
 
 Open: whether agents are separate unix users or all root with separate
 worktrees; where ids are allocated (the host registry, as in container
 caves, versus the guest); whether each gets its own vsock port and thus its
 own daemon identity, which is what would make the pre-receive guard exact;
 and what `vmcav agent` becomes when there are several.
+
+The lifecycle half of this is a separate entry above, and can land first: it
+makes who is running visible, which is the honest step before enforcing who
+owns what.
 
 Related: [Agent hibernation](#agent-hibernation) above, and the root-agent
 flag already in `cave-vm/internal/registry` that makes root a per-VM agent
@@ -215,7 +265,14 @@ human's deploy is a first-class command). That choice decides the other two.
 
 ## Nothing runs the Mac host end to end
 
-The hardware is no longer the blocker. The Apple silicon host that
+**Access to the Mac has since gone away, for the time being.** Nothing below
+can be re-checked until it comes back, so treat every macOS claim in this
+repo as of its recorded date and do not add more. Work proceeds from the VM
+downward on the Linux host, which is unaffected: the VMM split is already
+behind one interface, so the vfkit backend keeps building and keeps being
+unverified.
+
+The hardware was no longer the blocker. The Apple silicon host that
 `vm-cave-cross-platform.md` took its evidence from is provisioned and
 reachable over ssh, with vfkit v0.6.4 installed and working and 170 GB free.
 What is on it is the residue of that validation run: the guest artifacts it
