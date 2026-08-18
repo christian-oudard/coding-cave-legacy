@@ -57,6 +57,13 @@ let
 
   bridgeService = vsock: {
     description = "Carry one connection to host vsock ${toString vsock}";
+    # One instance per connection means transient failures accumulate: a peer
+    # that resets mid-transfer leaves socat exiting non-zero, and without this
+    # the instance sits in `failed` forever. That is not merely untidy. A unit
+    # left failed makes every later switch-to-configuration report the whole
+    # deploy as failed, which is the same trap logrotate sprang below, and it
+    # buries a real failure in a list of dead connections.
+    unitConfig.CollectMode = "inactive-or-failed";
     serviceConfig = {
       ExecStart = "${pkgs.socat}/bin/socat STDIO VSOCK-CONNECT:2:${toString vsock}";
       StandardInput = "socket";
@@ -312,6 +319,31 @@ in
         set -eu
         install -d -m 700 /root/.gnupg
         install -m 600 /etc/cave-host/pubring.kbx /root/.gnupg/pubring.kbx
+      ''}";
+    };
+  };
+
+  # What the agent knows that a checkout does not tell it: that it is root in a
+  # VM, which channels exist, that nothing it commits is visible until it
+  # pushes, and that the approval gate is the point rather than an obstacle.
+  # `vm-root-agent.md` calls for exactly this and nothing implemented it, so
+  # every agent so far started with the repo's CLAUDE.md, which is written for
+  # someone working on the host.
+  #
+  # A user-level CLAUDE.md rather than a system prompt: it composes with the
+  # repo's own instead of replacing them, and the agent can read the file it is
+  # working from.
+  systemd.services.install-agent-instructions = {
+    description = "Install the root agent's standing instructions";
+    wantedBy = [ "multi-user.target" ];
+    before = [ "vm-root-agent.service" ];
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+      ExecStart = "${pkgs.writeShellScript "install-agent-instructions" ''
+        set -eu
+        install -d -m 700 /root/.claude
+        install -m 644 ${./CLAUDE.md} /root/.claude/CLAUDE.md
       ''}";
     };
   };
