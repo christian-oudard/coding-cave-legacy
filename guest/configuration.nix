@@ -46,7 +46,7 @@ let
     wantedBy = [ "sockets.target" ];
     # Ordered ahead of everything that dials one of these on startup, which is
     # what a plain service could claim but not deliver.
-    before = [ "vm-root-agent.service" "clone-repo.service" ];
+    before = [ "vm-root-agent.service" ];
     socketConfig = {
       ListenStream = "127.0.0.1:${toString port}";
       # Accept, so systemd hands each connection to its own socat on stdin,
@@ -82,7 +82,11 @@ let
   # daemon when it has to restart a dead session, so the two cannot drift
   # into launching claude differently.
   caveAgent = pkgs.writeShellScriptBin "cave-agent" ''
-    cd /projects/coding-cave
+    # Which project, from the session's own environment. No default: an agent
+    # started without one has nothing to work on, and landing it in some other
+    # project's worktree is worse than failing.
+    : "''${CAVE_PROJECT:?no project}"
+    cd "/projects/$CAVE_PROJECT"
     exec ${claudeCode}/bin/claude --dangerously-skip-permissions "$@"
   '';
 
@@ -406,7 +410,7 @@ in
   systemd.services.install-gitconfig = {
     description = "Install git identity for root";
     wantedBy = [ "multi-user.target" ];
-    before = [ "clone-repo.service" "vm-root-agent.service" ];
+    before = [ "vm-root-agent.service" ];
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;
@@ -485,10 +489,9 @@ in
         if [ -f "$seed" ]; then base=$(cat "$seed")
         elif [ -f "$host" ]; then base=$(cat "$host")
         else base='{}'; fi
-        printf '%s' "$base" | ${pkgs.jq}/bin/jq \
-          '.projects["/projects/coding-cave"].hasTrustDialogAccepted = true
-           | .projects["/projects/coding-cave"].hasCompletedProjectOnboarding = true' \
-          > "$seed.tmp"
+        # No project trusted here: which projects exist is not known at boot.
+        # clone-repo@ accepts the dialog for the project it checks out.
+        printf '%s' "$base" > "$seed.tmp"
         mv "$seed.tmp" "$seed"
         chmod 600 "$seed"
 
@@ -513,8 +516,17 @@ in
   # journal and the agent hard-depends on it: no repo, no agent (fail
   # loudly). CAVE_REPO_URL defaults to the host git daemon, reached on
   # localhost where the vsock-git bridge re-exposes it.
-  systemd.services.clone-repo = {
-    description = "Clone the coding-cave repo for the agent";
+  # Check a project out for one agent. Not a boot unit: which project an agent
+  # works on, and from which branch, is known when the agent is created and not
+  # before, so a VM that boots with a checkout has guessed. It used to guess
+  # twice over, hardcoding the coding-cave repo and taking the base branch from
+  # whatever HEAD the shared bare repo froze at when it was first created.
+  #
+  # A template, one instance per agent, taking its project and base from the
+  # environment file the session's own unit reads: the two are started as a
+  # pair, so they cannot disagree about which worktree the agent lands in.
+  systemd.services."clone-repo@" = {
+    description = "Check out a project for agent %i";
     # The git bridge, not network-online.target: there is no NIC, so
     # networkd-wait-online would only ever time out.
     # The socket, not a service: systemd has bound 9418 by the time this
@@ -522,43 +534,60 @@ in
     # service only ever meant waiting for a process to exist.
     after = [ "vsock-git.socket" ];
     requires = [ "vsock-git.socket" ];
-    before = [ "vm-root-agent.service" ];
-    wantedBy = [ "multi-user.target" ];
     path = [ pkgs.git ];
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;
+      EnvironmentFile = "/run/cave/sessions/%i.env";
       ExecStart = "${pkgs.writeShellScript "clone-repo" ''
         set -eu
-        repo=/projects/coding-cave
+        # Every one of these is supplied when the agent is created. No
+        # defaults: a default here is a guess about what someone is working
+        # on, which is the bug this unit used to be.
+        : "''${CAVE_PROJECT:?no project}" "''${CAVE_BASE:?no base branch}"
+        : "''${CAVE_AGENT_ID:?no agent id}"
+        repo="/projects/$CAVE_PROJECT"
         # Worktrees live at /projects/<slug>, the same place the container
         # caves put them, rather than in the agent's home. git clone creates
         # the leaf and not the parent.
         install -d -m 755 /projects
-        # The project's shared bare repo, which is the only thing the host
-        # daemon serves. Never the human's working checkout: an agent must not
-        # be able to write a branch into the tree someone is standing in.
-        url="''${CAVE_REPO_URL:-git://127.0.0.1/cave-shared.git}"
-        agent="''${CAVE_AGENT_ID:-1}"
-        if [ -d "$repo/.git" ]; then
-          echo "clone-repo: repo already present at $repo"
+        # The project's shared bare repo on the host. Never the human's
+        # working checkout: an agent must not be able to write a branch into
+        # the tree someone is standing in.
+        url="''${CAVE_REPO_URL:-git://127.0.0.1/$CAVE_PROJECT.git}"
+        # Land on the agent branch, the only namespace pre-receive accepts
+        # (refs/heads/agent-N/<base>). Track the remote branch if it already
+        # exists, else fork it from the base the agent was given.
+        branch="agent-$CAVE_AGENT_ID/$CAVE_BASE"
+        if [ ! -d "$repo/.git" ]; then
+          echo "clone-repo: cloning $url"
+          git clone "$url" "$repo"
+        fi
+        cd "$repo"
+        git fetch -q origin
+        if [ -n "$(git status --porcelain)" ]; then
+          # Somebody is working in here. Switching branches under them would
+          # be the one thing a reformat is for.
+          echo "clone-repo: $repo has uncommitted changes; leaving it alone"
           exit 0
         fi
-        echo "clone-repo: cloning $url"
-        git clone "$url" "$repo"
-        cd "$repo"
-        # Land on the agent branch, the only namespace pre-receive accepts
-        # (refs/heads/agent-N/<base>). vmcav also builds the guest from this
-        # ref, so for the agent, pushing is deploying. Track the remote branch
-        # if it already exists, else fork it from the branch just cloned.
-        base=$(git symbolic-ref --short HEAD)
-        branch="agent-$agent/$base"
         if git rev-parse --verify --quiet "refs/remotes/origin/$branch" >/dev/null; then
-          git checkout -B "$branch" --track "origin/$branch"
+          git checkout -q -B "$branch" --track "origin/$branch"
         else
-          git checkout -B "$branch"
+          git checkout -q -B "$branch" "origin/$CAVE_BASE"
         fi
-        echo "clone-repo: cloned OK, on $branch (base $base)"
+        # Accept claude's trust and onboarding dialogs for this worktree. Here
+        # rather than in seed-claude-config, because the key is the project
+        # path and nothing knows that until an agent is given a project.
+        cfg=/root/.claude.json
+        [ -f "$cfg" ] || echo '{}' > "$cfg"
+        ${pkgs.jq}/bin/jq --arg p "$repo" \
+          '.projects[$p].hasTrustDialogAccepted = true
+           | .projects[$p].hasCompletedProjectOnboarding = true' \
+          "$cfg" > "$cfg.tmp"
+        mv "$cfg.tmp" "$cfg"
+        chmod 600 "$cfg"
+        echo "clone-repo: $repo on $branch (base $CAVE_BASE)"
       ''}";
     };
   };
@@ -578,14 +607,18 @@ in
   # that went looking for it.
   systemd.services."cave-session@" = {
     description = "Agent session %i (claude as root, its pty held by cave-guestd)";
-    after = [ "vsock-crinj.socket" "seed-claude-config.service" "clone-repo.service" ];
+    after = [ "vsock-crinj.socket" "seed-claude-config.service" "clone-repo@%i.service" ];
     wants = [ "vsock-crinj.socket" ];
-    requires = [ "seed-claude-config.service" "clone-repo.service" ];
+    requires = [ "seed-claude-config.service" "clone-repo@%i.service" ];
     # Still false, for the one case the split does not cover: this unit's own
     # definition changing. A session is exactly what may not be restarted
     # under a working agent, so a new binary reaches sessions started after
     # the deploy, and the live ones keep the one they have.
     restartIfChanged = false;
+    # The project and base this session was created for. Same file the
+    # checkout unit reads, so the two cannot disagree about which worktree the
+    # agent lands in.
+    serviceConfig.EnvironmentFile = "/run/cave/sessions/%i.env";
     # Deliberately not a list of store paths. This unit is not restarted by a
     # switch, by design, so anything resolved when it started is frozen for as
     # long as the daemon lives: an agent that rebuilt its own system would
@@ -671,12 +704,9 @@ in
     };
   };
 
-  # The root agent is session 1, and is the one instance that starts by itself:
-  # it is doing work whether or not anyone attaches. Every other instance is
-  # created by an attach. A drop-in rather than a unit, so the template above
-  # stays the single definition of what a session is.
-  systemd.units."cave-session@1.service" = {
-    overrideStrategy = "asDropin";
-    wantedBy = [ "multi-user.target" ];
-  };
+  # Nothing starts a session at boot. Which project an agent works on is known
+  # when the agent is created, so a VM that came up with one running had
+  # guessed: it hardcoded this repo and took the branch from whatever HEAD the
+  # shared bare repo happened to freeze at. `vmcav agent <project> [branch]`
+  # writes the session's environment file and starts the pair.
 }

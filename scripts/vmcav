@@ -30,6 +30,10 @@ CAVE_VM_SRC="${CAVE_VM_SRC:-$REPO/cave-vm}"
 # container caves push to. Not the working checkout -- an agent must not be
 # able to write a branch into the tree someone is standing in.
 SHARED="$REPO/.coding-cave/cave-shared.git"
+# The project's slug, derived from the checkout the way `cav` derives one. The
+# guest clones git://127.0.0.1/<slug>.git, so the daemon serves the shared repo
+# under that name too: a project is a name an agent is given, not a constant.
+SLUG="$(basename "$REPO")"
 CONFIG="${CODING_CAVE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/coding-cave/config.toml}"
 STATE_DIR="${STATE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/coding-cave/vm}"
 CRINJ_PORT="${CRINJ_PORT:-10255}"
@@ -234,7 +238,7 @@ agent_ready() {
 # spawned: the gap between those is a minute of boot, and every command in
 # it fails in a way that reads like a bug.
 wait_for_guest() {
-  local i=0 max="${CAVE_BOOT_TIMEOUT:-180}" ssh_ok=""
+  local i=0 max="${CAVE_BOOT_TIMEOUT:-180}"
   log "waiting for the guest to finish booting"
   while [ "$i" -lt "$max" ]; do
     if ! is_running; then
@@ -242,23 +246,18 @@ wait_for_guest() {
       tail -5 "$CONSOLE" >&2 2>/dev/null || true
       return 1
     fi
-    # sshd answering is not the thing you are waiting for: it comes up well
-    # before the agent does, so calling that "ready" sends you straight to an
-    # attach that fails. Remember it, but keep waiting for the agent.
-    [ -n "$ssh_ok" ] || { guest_ready && ssh_ok=1; }
+    # sshd answering is the whole of "booted" now. This used to wait for an
+    # agent session as well, which was right while one started at boot and is
+    # wrong now that a project is something an agent is given: there is
+    # nothing to wait for until you run `vmcav agent`.
+    #
     # No duration: it would time this loop and not the start you waited
     # through, and a number that disagrees with the clock is worse than none.
-    [ -n "$ssh_ok" ] && agent_ready && { log "guest and agent ready"; return 0; }
+    guest_ready && { log "guest ready"; return 0; }
     sleep 1; i=$((i + 1))
   done
-  # Which of the two never arrived is the whole diagnosis, so say it.
-  if [ -n "$ssh_ok" ]; then
-    log "the guest is up but no agent session appeared in ${max}s"
-    log "  see: vmcav shell journalctl -u cave-session@1"
-  else
-    log "the guest did not answer ssh in ${max}s; it is still running."
-    log "  see $CONSOLE, or raise CAVE_BOOT_TIMEOUT"
-  fi
+  log "the guest did not answer ssh in ${max}s; it is still running."
+  log "  see $CONSOLE, or raise CAVE_BOOT_TIMEOUT"
   return 1
 }
 
@@ -407,6 +406,10 @@ start_git_daemon() {
   ensure_shared_repo
   install_shared_hooks
   local dir; dir=$(dirname "$SHARED")
+  # <slug>.git beside the shared repo, so the guest asks for the project by
+  # name. A symlink rather than a rename: the shared repo is the same one the
+  # container caves use, and they know it by its own path.
+  [ -e "$dir/$SLUG.git" ] || ln -s "$(basename "$SHARED")" "$dir/$SLUG.git"
   pgrep -f "git daemon.*--base-path=$dir" >/dev/null 2>&1 && return
   # Who the daemon attributes a push to. Not the daemon's own identity: it is
   # what the daemon asserts about whoever connected, injected as env so
@@ -438,7 +441,8 @@ start_git_daemon() {
   # any other path on this port resolves to nothing.
   CODING_CAVE_AGENT_ID="${AGENT_ID:-1}" \
   git daemon --reuseaddr --export-all --enable=upload-pack --enable=receive-pack \
-    --base-path="$dir" --port="$GIT_PORT" --detach --pid-file="$GITPID" "$SHARED"
+    --base-path="$dir" --port="$GIT_PORT" --detach --pid-file="$GITPID" \
+    "$SHARED" "$dir/$SLUG.git"
   log "git daemon serving $SHARED on :$GIT_PORT (pushes attributed to agent ${AGENT_ID:-1})"
 }
 stop_git_daemon() { [ -f "$GITPID" ] && { kill "$(cat "$GITPID")" 2>/dev/null || true; rm -f "$GITPID"; }; }
@@ -605,7 +609,32 @@ guest_ssh() {
 
 # Drive the agent: attach to the pty its cave-session@ instance holds.
 # Detach with ctrl-\ , which leaves the agent running.
+# Create an agent and attach to it. The project and the base branch are given
+# here because here is the first moment anyone knows them: the VM boots with no
+# checkout, and starting one at boot is how it used to end up on a hardcoded
+# repo at whatever branch the shared repo's HEAD had frozen at.
+#
+# Both default to what you are standing in, which is almost always what you
+# mean, and neither is remembered anywhere on the host: the guest holds the
+# agent's own record of what it was created for.
 do_agent() {
+  local project="''${1:-$SLUG}" base="''${2:-}"
+  if [ -z "$base" ]; then
+    base=$(git -C "$REPO" symbolic-ref --quiet --short HEAD) \
+      || { log "detached HEAD; name a base branch:  vmcav agent $project <branch>"; return 1; }
+  fi
+  case "$base" in agent-*/*)
+    log "'$base' is an agent branch, not a base; naming one is what approve is for"
+    return 1 ;;
+  esac
+  is_running || { log "the vm is not running (vmcav start)"; return 1; }
+  log "agent 1: $project @ $base"
+  guest_ssh "cave-guestd start -id 1 -project $project -base $base" \
+    || { log "could not start the agent"; return 1; }
+  do_attach
+}
+
+do_attach() {
   # The client sends its own size on attach and on every SIGWINCH, and the
   # session replays what the agent printed while nobody was watching, so this
   # is a plain attach with nothing to set up first. An agent that has exited
@@ -655,7 +684,8 @@ usage: vmcav <command>
   start           boot the VM detached (idempotent; needs an image)
   stop            ACPI power-down, SIGTERM/SIGKILL fallback
   status          whether it is up, which generation, where the console is
-  agent           attach to the agent's claude session (detach: ctrl-\)
+  agent [proj] [branch]
+                  create the agent for a project and attach (detach: ctrl-\)
   shell [cmd...]  a root shell in the guest, or run cmd there
   deploy          build the guest config and activate it in the running VM
   push [branch]   send this checkout's branch to the shared repo the agent
@@ -944,7 +974,7 @@ do_start() {
   # the host not consulted: a record that is not on disk when claude starts
   # does not exist as far as the agent is concerned.
   restore_sessions
-  log "attach with: vmcav agent"
+  log "no agents yet; start one:  vmcav agent [project] [branch]"
 }
 
 do_stop() {
@@ -962,7 +992,7 @@ case "${1:-help}" in
   start) shift; do_start "$@" ;;
   stop) do_stop ;;
   status) do_status ;;
-  agent) do_agent ;;
+  agent) shift; do_agent "$@" ;;
   deploy) do_deploy ;;
   review|diff|approve) cave_vm "$@" ;;
   push) shift; do_push "$@" ;;

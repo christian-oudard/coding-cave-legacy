@@ -22,6 +22,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -52,13 +53,75 @@ func main() {
 		transcripts(args)
 	case "serve":
 		serve(args)
+	case "start":
+		start(args)
 	default:
 		usage()
 	}
 }
 
+// start creates an agent: it records which project and base branch the agent
+// was given, then starts the unit pair that checks the project out and runs
+// the agent in it.
+//
+// The environment file is the whole mechanism, and it exists because a
+// project is a per-agent fact. It used to be a boot-time constant, which
+// meant the VM decided what an agent worked on before any agent existed, and
+// got it wrong in two ways at once: the repo was hardcoded and the branch was
+// whatever HEAD the shared bare repo froze at when it was created.
+func start(args []string) {
+	fs := flag.NewFlagSet("start", flag.ExitOnError)
+	dir := fs.String("dir", defaultDir, "directory of session sockets")
+	id := fs.String("id", "1", "agent id")
+	project := fs.String("project", "", "project slug to check out (required)")
+	base := fs.String("base", "", "base branch to work from (required)")
+	fs.Parse(args)
+	if *project == "" || *base == "" {
+		die(fmt.Errorf("start needs -project and -base"))
+	}
+	// Both become a path and a branch name in a shell script, and both arrive
+	// from the host, so neither may carry anything that changes what that
+	// script means.
+	for what, v := range map[string]string{"project": *project, "base": *base} {
+		if err := validRef(v); err != nil {
+			die(fmt.Errorf("%s: %w", what, err))
+		}
+	}
+	if err := os.MkdirAll(*dir, 0o700); err != nil {
+		die(err)
+	}
+	env := fmt.Sprintf("CAVE_AGENT_ID=%s\nCAVE_PROJECT=%s\nCAVE_BASE=%s\n", *id, *project, *base)
+	if err := os.WriteFile(filepath.Join(*dir, *id+".env"), []byte(env), 0o600); err != nil {
+		die(err)
+	}
+	if err := startUnit(*id); err != nil {
+		die(err)
+	}
+}
+
+// validRef keeps a host-supplied project or branch from being anything but a
+// name. The host is the only caller and would not send anything strange, which
+// is exactly the assumption worth not making where a string becomes a path.
+func validRef(s string) error {
+	if s == "" || len(s) > 128 || strings.HasPrefix(s, "-") || strings.HasPrefix(s, "/") {
+		return fmt.Errorf("%q is not a usable name", s)
+	}
+	if strings.Contains(s, "..") {
+		return fmt.Errorf("%q contains ..", s)
+	}
+	for _, r := range s {
+		ok := r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' ||
+			r == '-' || r == '_' || r == '.' || r == '/'
+		if !ok {
+			return fmt.Errorf("%q contains %q", s, r)
+		}
+	}
+	return nil
+}
+
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage: cave-guestd session|list|attach|serve")
+	fmt.Fprintln(os.Stderr, "       cave-guestd start -id N -project SLUG -base BRANCH")
 	fmt.Fprintln(os.Stderr, "       cave-guestd sessions list|read <id>|write <id>")
 	os.Exit(2)
 }
