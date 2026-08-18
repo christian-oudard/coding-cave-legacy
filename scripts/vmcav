@@ -645,8 +645,25 @@ do_agent() {
   # from either, so this is the only agent there is.
   local id=1
   log "agent $id: $project @ $base (pushes land on agent-$id/$base)"
-  guest_ssh "cave-guestd start -id $id -project $project -base $base" \
-    || { log "could not start the agent"; return 1; }
+  # Captured rather than passed through, so that a guest too old to know the
+  # command gets diagnosed instead of dumping cave-guestd's usage at you. That
+  # is the failure people actually hit, because a host script and the binary
+  # inside the guest are two versions that move independently.
+  local out rc=0
+  out=$(GUEST_SSH_TTY=-T guest_ssh \
+    "cave-guestd start -id $id -project $project -base $base" 2>&1) || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    if printf '%s' "$out" | grep -q 'usage: cave-guestd'; then
+      log "the guest's cave-guestd does not know 'start', so it is older than"
+      log "  this script. The guest boots what its own disk says, so:"
+      log "    vmcav deploy && vmcav stop && vmcav start"
+      return 1
+    fi
+    printf '%s\n' "$out" >&2
+    log "could not start the agent"
+    return 1
+  fi
+  [ -n "$out" ] && printf '%s\n' "$out" >&2
   do_attach
 }
 
@@ -940,6 +957,9 @@ warn_if_guest_is_behind() {
   local was now
   was=$(cat "$STATE_DIR/deployed-from" 2>/dev/null || true)
   now=$(git -C "$REPO" rev-parse HEAD 2>/dev/null || true)
+  # Silent with no record. A guest built before anything recorded one is a
+  # one-off state that the next deploy ends, and a permanent warning about a
+  # transient condition is worse than the condition.
   [ -n "$was" ] && [ -n "$now" ] || return 0
   [ "$was" = "$now" ] && return 0
   log "the guest was built from $(git -C "$REPO" rev-parse --short "$was" 2>/dev/null || echo "${was:0:7}")"
