@@ -24,6 +24,45 @@ let
     else throw ("cave-vm source not found: export CAVE_VM_SRC and build with "
       + "--impure (host), or build --impure in the guest where ${inGuest} exists");
 
+  # Guest-side leg of the service plane, one shape for all four outbound
+  # bridges: a localhost port the rest of the guest talks to, carried over
+  # vsock to the host service behind it. CID 2 is the host (VMADDR_CID_HOST).
+  # Re-exposing each service on localhost is what lets the proxy env, the nix
+  # substituter and the agent's git remotes stay ignorant of vsock entirely.
+  #
+  # Socket-activated rather than a long-lived socat, because the alternative
+  # was a race: systemd calls a `socat TCP-LISTEN` unit active the instant the
+  # process execs, not when it has bound the port, so a unit ordered after it
+  # can still arrive to find nothing listening. `clone-repo` failing at boot
+  # and taking the agent down with it is the observed shape of that
+  # (docs/vm-cave-todo.md). systemd binds these itself at sockets.target,
+  # before anything that depends on them runs, so the ordering is a guarantee.
+  #
+  # It also deletes machinery: no Restart=always papering over a host bridge
+  # that was not listening yet, and no requirement that the host end be up
+  # before the guest can queue a connection, because the kernel holds it.
+  bridgeSocket = port: description: {
+    inherit description;
+    wantedBy = [ "sockets.target" ];
+    # Ordered ahead of everything that dials one of these on startup, which is
+    # what a plain service could claim but not deliver.
+    before = [ "vm-root-agent.service" "clone-repo.service" ];
+    socketConfig = {
+      ListenStream = "127.0.0.1:${toString port}";
+      # Accept, so systemd hands each connection to its own socat on stdin,
+      # which is what socat's own `fork` did anyway.
+      Accept = true;
+    };
+  };
+
+  bridgeService = vsock: {
+    description = "Carry one connection to host vsock ${toString vsock}";
+    serviceConfig = {
+      ExecStart = "${pkgs.socat}/bin/socat STDIO VSOCK-CONNECT:2:${toString vsock}";
+      StandardInput = "socket";
+    };
+  };
+
   caveGuestd = pkgs.buildGoModule {
     pname = "cave-guestd";
     version = "0";
@@ -218,41 +257,45 @@ in
   # whether the check would still fail is untested.
   services.logrotate.enable = false;
 
-  # Guest-side leg of the service plane. CHV's vsock is the unix-socket
-  # hybrid: a guest connection to port N surfaces on the host as the unix
-  # socket <vsock.sock>_N, which vmcav bridges to the real service. CID 2 is
-  # the host (VMADDR_CID_HOST). Re-exposing each service on localhost is what
-  # lets the rest of this config, the proxy env, and the agent's git remotes
-  # stay ignorant of vsock. Restart=always because the host bridge may not be
-  # listening yet when the guest boots.
-  systemd.services.vsock-crinj = {
-    description = "Bridge 127.0.0.1:10255 to host crinj over vsock 7200";
-    wantedBy = [ "multi-user.target" ];
-    before = [ "vm-root-agent.service" ];
-    serviceConfig = {
-      ExecStart = "${pkgs.socat}/bin/socat "
-        + "TCP-LISTEN:10255,bind=127.0.0.1,fork,reuseaddr VSOCK-CONNECT:2:7200";
-      Restart = "always";
-      RestartSec = 1;
+  # The service plane's guest end. CHV's vsock is the unix-socket hybrid: a
+  # guest connection to port N surfaces on the host as the unix socket
+  # <vsock.sock>_N, which cave-vm answers. See bridgeSocket in the let block
+  # above for the shape and for why these are socket units rather than
+  # long-lived socats.
+  systemd.sockets = {
+    vsock-crinj = bridgeSocket 10255 "Bridge 127.0.0.1:10255 to host crinj over vsock 7200";
+    vsock-gpg = bridgeSocket 7400 "Bridge 127.0.0.1:7400 to the host gpg signing broker over vsock 7400";
+    vsock-nix = bridgeSocket 7100 "Bridge 127.0.0.1:7100 to the host nix binary cache over vsock 7100";
+    vsock-git = bridgeSocket 9418 "Bridge 127.0.0.1:9418 to the host git daemon over vsock 7300";
+
+    # The host's command channel, JSON over HTTP. The same argument as the
+    # bridges, one layer down: systemd binds AF_VSOCK itself, so the port is
+    # listening before the daemon behind it has started and a caller cannot
+    # race its startup. Not a bridge, so it is spelled out: the guest is the
+    # server here, and cave-guestd accepts on the socket rather than socat
+    # handing one connection to something else.
+    cave-control = {
+      description = "Host control plane (vsock 7001)";
+      wantedBy = [ "sockets.target" ];
+      socketConfig = {
+        # An empty CID means "this guest", whichever one the VMM assigned.
+        ListenStream = "vsock::7001";
+        # One daemon serving the listener, not one process per connection.
+        Accept = false;
+      };
     };
   };
+
+  systemd.services."vsock-crinj@" = bridgeService 7200;
+  systemd.services."vsock-gpg@" = bridgeService 7400;
+  systemd.services."vsock-nix@" = bridgeService 7100;
+  systemd.services."vsock-git@" = bridgeService 7300;
 
   # Signing. The gpg-agent socket is deliberately NOT forwarded: a unix socket
   # cannot cross the VM boundary, and re-exposing the agent on a port would
   # hand signing to every process that can reach it, which is strictly weaker
   # than the 0600 socket a container cave gets. Instead the host runs a broker
   # that accepts a payload, validates the arguments, pins the key, and signs.
-  systemd.services.vsock-gpg = {
-    description = "Bridge 127.0.0.1:7400 to the host gpg signing broker over vsock 7400";
-    wantedBy = [ "multi-user.target" ];
-    before = [ "vm-root-agent.service" ];
-    serviceConfig = {
-      ExecStart = "${pkgs.socat}/bin/socat "
-        + "TCP-LISTEN:7400,bind=127.0.0.1,fork,reuseaddr VSOCK-CONNECT:2:7400";
-      Restart = "always";
-      RestartSec = 1;
-    };
-  };
 
   # Public keyring, so `git log --show-signature` and any verification the
   # agent does resolve locally instead of round-tripping to the host. Public
@@ -270,34 +313,6 @@ in
         install -d -m 700 /root/.gnupg
         install -m 600 /etc/cave-host/pubring.kbx /root/.gnupg/pubring.kbx
       ''}";
-    };
-  };
-
-  # The host's /nix/store, served as an ordinary binary cache. This is the one
-  # thing no container sandbox can offer: packages the host already has are
-  # copied in over vsock instead of being fetched again, and the guest verifies
-  # signatures, so a trusted transport is not what is being relied on.
-  systemd.services.vsock-nix = {
-    description = "Bridge 127.0.0.1:7100 to the host nix binary cache over vsock 7100";
-    wantedBy = [ "multi-user.target" ];
-    before = [ "vm-root-agent.service" ];
-    serviceConfig = {
-      ExecStart = "${pkgs.socat}/bin/socat "
-        + "TCP-LISTEN:7100,bind=127.0.0.1,fork,reuseaddr VSOCK-CONNECT:2:7100";
-      Restart = "always";
-      RestartSec = 1;
-    };
-  };
-
-  systemd.services.vsock-git = {
-    description = "Bridge 127.0.0.1:9418 to the host git daemon over vsock 7300";
-    wantedBy = [ "multi-user.target" ];
-    before = [ "clone-repo.service" ];
-    serviceConfig = {
-      ExecStart = "${pkgs.socat}/bin/socat "
-        + "TCP-LISTEN:9418,bind=127.0.0.1,fork,reuseaddr VSOCK-CONNECT:2:7300";
-      Restart = "always";
-      RestartSec = 1;
     };
   };
 
@@ -470,8 +485,11 @@ in
     description = "Clone the coding-cave repo for the agent";
     # The git bridge, not network-online.target: there is no NIC, so
     # networkd-wait-online would only ever time out.
-    after = [ "vsock-git.service" ];
-    wants = [ "vsock-git.service" ];
+    # The socket, not a service: systemd has bound 9418 by the time this
+    # runs, which is the whole point of the change. Waiting on a socat
+    # service only ever meant waiting for a process to exist.
+    after = [ "vsock-git.socket" ];
+    requires = [ "vsock-git.socket" ];
     before = [ "vm-root-agent.service" ];
     wantedBy = [ "multi-user.target" ];
     path = [ pkgs.git ];
@@ -524,8 +542,8 @@ in
   # that went looking for it.
   systemd.services."cave-session@" = {
     description = "Agent session %i (claude as root, its pty held by cave-guestd)";
-    after = [ "vsock-crinj.service" "seed-claude-config.service" "clone-repo.service" ];
-    wants = [ "vsock-crinj.service" ];
+    after = [ "vsock-crinj.socket" "seed-claude-config.service" "clone-repo.service" ];
+    wants = [ "vsock-crinj.socket" ];
     requires = [ "seed-claude-config.service" "clone-repo.service" ];
     # Still false, for the one case the split does not cover: this unit's own
     # definition changing. A session is exactly what may not be restarted
@@ -596,26 +614,8 @@ in
   # --- The control plane ---
   # The host's command channel, JSON over HTTP on vsock 7001. Everything
   # routine `cav` asks the guest comes through here, so that ssh is a human's
-  # way in and nothing else depends on it.
-  #
-  # A .socket unit, and systemd binds AF_VSOCK itself, which is worth more than
-  # not shelling out to socat: the port is listening from the moment the socket
-  # is enabled, before the daemon behind it has started, so a caller cannot
-  # race the daemon's startup. A socat bridge only ever approximated that,
-  # since systemd calls such a unit active the instant the process execs rather
-  # than when it has bound anything.
-  systemd.sockets.cave-control = {
-    description = "Host control plane (vsock 7001)";
-    wantedBy = [ "sockets.target" ];
-    socketConfig = {
-      # Empty CID means "this guest", whichever one the VMM assigned.
-      ListenStream = "vsock::7001";
-      # One connection per accept would fork a daemon per call; the daemon
-      # serves the listener itself and lives across calls.
-      Accept = false;
-    };
-  };
-
+  # way in and nothing else depends on it. Its socket is declared with the
+  # bridges above; this is the daemon behind it.
   systemd.services.cave-control = {
     description = "Host control plane";
     # No wantedBy: the socket starts this, and a guest nobody talks to should

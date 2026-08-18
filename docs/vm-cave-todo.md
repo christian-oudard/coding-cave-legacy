@@ -66,19 +66,43 @@ get a connection refused. The host side is a weaker suspect than it looked:
 `start_git_daemon` runs before `cave-vm start`, so the host daemon is
 listening before the guest begins to boot.
 
-That points at a fix better than a retry, which would only paper over it:
-make the bridge a `.socket` unit. Socket activation has systemd bind the
-listening port itself before any dependent unit runs, which turns the
-ordering from a hope into a guarantee, and it applies to every guest-side
-bridge rather than to this one caller.
+**Fixed, without a retry.** All four outbound bridges are `.socket` units now,
+so systemd binds the port itself at `sockets.target`, before anything ordered
+after them runs, and hands each connection to its own socat on stdin. The
+ordering is a guarantee rather than a hope, and `clone-repo` requires
+`vsock-git.socket` rather than a service that only proved a process existed.
+It also deleted machinery: no `Restart=always` papering over a host bridge
+that was not listening yet, since the kernel now holds the connection until
+something answers.
 
-Open: whether that is enough on its own, or whether the unit should also
-fail loudly rather than retry, on the argument that a guest which cannot
-reach the host has nothing useful to do anyway. Also unresolved and cheap:
-the run that failed took its journal with it, so whatever the cause, the
-evidence should survive the next one.
+Verified on a cold boot: all four bridges carry traffic (git, crinj to the
+internet, the nix cache), `clone-repo` succeeds, and no unit is in a failed
+state.
 
-## Preserve uncommitted work across `reformat`
+Still open, and cheap: the run that failed took its journal with it, so
+whatever the cause, the evidence should survive the next one. Also untouched:
+`vsock-ssh` is still a `VSOCK-LISTEN` socat, deliberately left alone because
+it is the channel a deploy needs and a broken one is only recoverable by
+reformat. It should become a socket unit the same way, and `cave-control`
+already proves the shape works for AF_VSOCK.
+
+## Uncommitted work does not survive `reformat`, and that is the rule
+
+**Settled, and kept here because it reads like a gap and is not one.** A
+reformat destroys the guest disk, and with it any worktree the agent has not
+committed. That is the intended behaviour: committing is what makes work real,
+pushing to `agent-<id>/<base>` is what puts it where a human can see it, and
+the approval gate is the only way it becomes host state. A second path for
+preserving work would be a second way for bytes to leave the VM, competing
+with the gate for no benefit.
+
+So the VM is cattle in the strong sense. The agent's obligation is to commit
+early; the tool's obligation is not to pretend otherwise.
+
+The text below is what was considered before that decision, retained only so
+the options are not re-derived.
+
+## Preserve uncommitted work across `reformat` (superseded)
 
 `vmcav image reformat` destroys the guest disk, which is the only copy of anything
 the agent has not pushed. Committed work survives because pushing to
@@ -133,7 +157,12 @@ What is left:
   if anything ever reads it as liveness.
 - **Memory is untouched**, deliberately, and needs its own rule: per-project,
   shared between agents, rewritten rather than grown, so the length and prefix
-  checks that protect a transcript say nothing useful about it.
+  checks that protect a transcript say nothing useful about it. Worth knowing
+  before designing a channel for it: memory is per-project and lives at
+  `~/.claude/projects/<encoded-cwd>/memory/`, which is the directory the
+  transcript sync already walks. So carrying it is an extension of a path that
+  exists rather than a new mechanism, and the reason it does not happen today
+  is only that the sync matches `<uuid>.jsonl` and nothing else.
 
 ## Starting and stopping agents, and knowing what is running
 
