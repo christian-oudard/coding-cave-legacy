@@ -318,23 +318,49 @@ caves, versus the guest); and what `vmcav agent` becomes when there are
 several.
 
 **Not open, and worth deleting before someone builds it: a vsock port and a
-git daemon per agent.** It was the obvious way to make the `pre-receive`
-guard exact, since an id injected by a host-side daemon is unforgeable from
-inside the VM, and one daemon per agent gives one id per agent. It does not
-port. Under vfkit every vsock port is a `--device` argument fixed in the VM's
-launch argv, in both directions, so nothing may allocate a port per agent at
-runtime. `vm-cave-cross-platform.md` predicted this exact discovery: a
-feature of this shape works on Linux and is found unportable late.
+git daemon per agent.**
 
-What is left is to move where the id is asserted rather than how it travels.
-Once agents are separate uids behind bwrap, `cave-guestd` sits outside every
-agent's sandbox and knows which cave opened a connection, so it can stamp the
-id on the way out over the one git port. That trades "the host injects it,
-unforgeable from inside the VM" for "guestd asserts it, unforgeable from
-inside a cave", which is the threat model already written down: the VM is the
-boundary to the host, and bwrap in the guest is a blast-radius choice between
-agents. A VM escape forges agent identity either way, and it has already lost
-more than that.
+Start from what `CODING_CAVE_AGENT_ID` actually is, because the name invites
+the mistake. It is not the daemon's identity; the daemon is not an agent. It
+is what the daemon asserts about whoever connected to it, and it works today
+only because there is exactly one client. So the id belongs to a
+*connection*, not to a process.
+
+A listener per agent is how `main` binds the id to a connection, and there it
+is correct rather than a workaround. Three things hold it up: a listener per
+agent (`socat TCP-LISTEN:<agent port>,fork EXEC:cav-git-daemon`, carrying that
+agent's id in its environment), a network namespace per cave, and a firewall
+in that namespace whose allowlist is the agent's own daemon port plus crinj.
+So one cave cannot reach another's port and be attributed as it. The kernel
+enforces the attribution, not a convention.
+
+The VM cannot copy any of that. It needs a vsock port per agent to get a
+listener per agent, and under vfkit every port is a `--device` argument fixed
+in the launch argv, so nothing may allocate one at runtime;
+`vm-cave-cross-platform.md` predicted exactly this shape of discovery. And
+there is no per-cave network namespace in the guest to firewall, since caves
+do not exist there yet at all.
+
+The deeper reason it cannot be a host-side stamp at all: every agent's
+connection arrives on the same socket, so with several agents the host cannot
+tell them apart in principle rather than merely in practice. Only the side
+that opened the connection can.
+
+So the stamp moves into the guest. Once agents are separate uids behind
+bwrap, `cave-guestd` sits outside every agent's sandbox and knows which cave
+opened a connection, so it can attach the id on the way out over the one git
+port. That trades "the host injects it, unforgeable from inside the VM" for
+"guestd asserts it, unforgeable from inside a cave", which is the threat
+model already written down: the VM is the boundary to the host, and bwrap in
+the guest is a blast-radius choice between agents. A VM escape forges agent
+identity either way, and by then it has lost more than that.
+
+Name the weakening rather than discovering it later: on `main` the
+attribution is enforced by a kernel firewall, and here it would rest on
+guestd being correct. What does not change is who is protected from whom. The
+host's gate still refuses any push outside `agent-*/`, whatever id is
+claimed, so the worst a forged id buys is writing into another agent's branch
+namespace inside the same VM.
 
 The lifecycle half of this is a separate entry above, and can land first: it
 makes who is running visible, which is the honest step before enforcing who

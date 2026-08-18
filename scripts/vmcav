@@ -408,10 +408,19 @@ start_git_daemon() {
   install_shared_hooks
   local dir; dir=$(dirname "$SHARED")
   pgrep -f "git daemon.*--base-path=$dir" >/dev/null 2>&1 && return
-  # Inject the guest's agent identity into the daemon: git-daemon's
-  # receive-pack children and their hooks inherit this env, so the hook reads
-  # an id the sandbox cannot forge. Every agent gets a normal number (the
-  # registry issues from 1); root is a separate property, not a reserved id.
+  # Who the daemon attributes a push to. Not the daemon's own identity: it is
+  # what the daemon asserts about whoever connected, injected as env so
+  # git-daemon's receive-pack children and their hooks inherit it, and the
+  # hook reads an id the client never sent and so cannot forge. Every agent
+  # gets a normal number (the registry issues from 1); root is a separate
+  # property, not a reserved id.
+  #
+  # The id therefore belongs to a connection, not to a process, and this only
+  # works because there is exactly one client. Every agent's connection
+  # arrives on the same socket, so when there are several the host cannot tell
+  # them apart in principle rather than merely in practice, and only the side
+  # that opened them can. That, not the port table, is why the stamp has to
+  # move into the guest (docs/vm-cave-todo.md).
   # One guest today = one identity, and one daemon: AGENT_ID is a placeholder
   # until vmcav draws it from the cave-vm registry. Note the guest defaults to
   # 1 independently, in clone-repo, so the two must agree or every push is
@@ -424,7 +433,7 @@ start_git_daemon() {
   CODING_CAVE_AGENT_ID="${AGENT_ID:-1}" \
   git daemon --reuseaddr --export-all --enable=upload-pack --enable=receive-pack \
     --base-path="$dir" --port="$GIT_PORT" --detach --pid-file="$GITPID" "$SHARED"
-  log "git daemon serving $SHARED on :$GIT_PORT (agent ${AGENT_ID:-1})"
+  log "git daemon serving $SHARED on :$GIT_PORT (pushes attributed to agent ${AGENT_ID:-1})"
 }
 stop_git_daemon() { [ -f "$GITPID" ] && { kill "$(cat "$GITPID")" 2>/dev/null || true; rm -f "$GITPID"; }; }
 
