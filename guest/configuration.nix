@@ -537,7 +537,14 @@ in
     path = [ pkgs.git ];
     serviceConfig = {
       Type = "oneshot";
-      RemainAfterExit = true;
+      # Deliberately NOT RemainAfterExit, which this had while it ran once per
+      # boot. A oneshot that stays active is a dependency systemd considers
+      # permanently satisfied, so starting the session again would skip the
+      # checkout entirely: delete the worktree and the agent comes back with
+      # its cwd pointing at nothing. Going inactive on success means every
+      # session start re-verifies the checkout, which is what "the agent is
+      # given a project" has to mean if it is to survive the project being
+      # removed.
       EnvironmentFile = "/run/cave/sessions/%i.env";
       ExecStart = "${pkgs.writeShellScript "clone-repo" ''
         set -eu
