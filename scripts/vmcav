@@ -412,9 +412,12 @@ start_git_daemon() {
   # receive-pack children and their hooks inherit this env, so the hook reads
   # an id the sandbox cannot forge. Every agent gets a normal number (the
   # registry issues from 1); root is a separate property, not a reserved id.
-  # One guest today = one identity; AGENT_ID is a placeholder until vmcav
-  # draws it from the cave-vm registry, and per-agent daemons/ports arrive
-  # with the multi-agent work.
+  # One guest today = one identity, and one daemon: AGENT_ID is a placeholder
+  # until vmcav draws it from the cave-vm registry. Note the guest defaults to
+  # 1 independently, in clone-repo, so the two must agree or every push is
+  # rejected as out-of-namespace. A daemon per agent is not where this goes:
+  # that needs a vsock port per agent, and the port table is fixed in the VM's
+  # launch argv (docs/vm-cave-todo.md).
   #
   # One directory is whitelisted and it is the shared repo, so a request for
   # any other path on this port resolves to nothing.

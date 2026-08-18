@@ -314,9 +314,27 @@ one, in ways that are cheap to list and not cheap to change:
 
 Open: whether agents are separate unix users or all root with separate
 worktrees; where ids are allocated (the host registry, as in container
-caves, versus the guest); whether each gets its own vsock port and thus its
-own daemon identity, which is what would make the pre-receive guard exact;
-and what `vmcav agent` becomes when there are several.
+caves, versus the guest); and what `vmcav agent` becomes when there are
+several.
+
+**Not open, and worth deleting before someone builds it: a vsock port and a
+git daemon per agent.** It was the obvious way to make the `pre-receive`
+guard exact, since an id injected by a host-side daemon is unforgeable from
+inside the VM, and one daemon per agent gives one id per agent. It does not
+port. Under vfkit every vsock port is a `--device` argument fixed in the VM's
+launch argv, in both directions, so nothing may allocate a port per agent at
+runtime. `vm-cave-cross-platform.md` predicted this exact discovery: a
+feature of this shape works on Linux and is found unportable late.
+
+What is left is to move where the id is asserted rather than how it travels.
+Once agents are separate uids behind bwrap, `cave-guestd` sits outside every
+agent's sandbox and knows which cave opened a connection, so it can stamp the
+id on the way out over the one git port. That trades "the host injects it,
+unforgeable from inside the VM" for "guestd asserts it, unforgeable from
+inside a cave", which is the threat model already written down: the VM is the
+boundary to the host, and bwrap in the guest is a blast-radius choice between
+agents. A VM escape forges agent identity either way, and it has already lost
+more than that.
 
 The lifecycle half of this is a separate entry above, and can land first: it
 makes who is running visible, which is the honest step before enforcing who
