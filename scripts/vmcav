@@ -443,7 +443,10 @@ start_git_daemon() {
   git daemon --reuseaddr --export-all --enable=upload-pack --enable=receive-pack \
     --base-path="$dir" --port="$GIT_PORT" --detach --pid-file="$GITPID" \
     "$SHARED" "$dir/$SLUG.git"
-  log "git daemon serving $SHARED on :$GIT_PORT (pushes attributed to agent ${AGENT_ID:-1})"
+  # Deliberately silent about the agent id. At start there is no agent, so
+  # announcing who pushes get attributed to describes nobody; it is said when
+  # an agent is created, which is when it becomes true.
+  log "git daemon serving $SHARED on :$GIT_PORT"
 }
 stop_git_daemon() { [ -f "$GITPID" ] && { kill "$(cat "$GITPID")" 2>/dev/null || true; rm -f "$GITPID"; }; }
 
@@ -618,7 +621,7 @@ guest_ssh() {
 # mean, and neither is remembered anywhere on the host: the guest holds the
 # agent's own record of what it was created for.
 do_agent() {
-  local project="''${1:-$SLUG}" base="''${2:-}"
+  local project="${1:-$SLUG}" base="${2:-}"
   if [ -z "$base" ]; then
     base=$(git -C "$REPO" symbolic-ref --quiet --short HEAD) \
       || { log "detached HEAD; name a base branch:  vmcav agent $project <branch>"; return 1; }
@@ -628,8 +631,12 @@ do_agent() {
     return 1 ;;
   esac
   is_running || { log "the vm is not running (vmcav start)"; return 1; }
-  log "agent 1: $project @ $base"
-  guest_ssh "cave-guestd start -id 1 -project $project -base $base" \
+  # One id, in one place. The host cannot allocate these yet (the registry
+  # can, vmcav does not ask it), and it cannot know which agent a push came
+  # from either, so this is the only agent there is.
+  local id=1
+  log "agent $id: $project @ $base (pushes land on agent-$id/$base)"
+  guest_ssh "cave-guestd start -id $id -project $project -base $base" \
     || { log "could not start the agent"; return 1; }
   do_attach
 }
