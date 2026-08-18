@@ -255,8 +255,15 @@ func TestSyncContinuesPastAFailure(t *testing.T) {
 		sidB + ".jsonl": "b\n",
 	})
 	// Make one unreadable, which is what a vanished or broken file looks like.
+	// A dangling symlink rather than chmod 0: the agent in the guest runs as
+	// root, root ignores mode bits, and a test that simulates a failure by
+	// removing permissions therefore stops simulating anything the moment it
+	// runs where the agent actually lives. This fails for every user.
 	bad := filepath.Join(l.projects(), EncodeProject("/root/coding-cave"), sidA+".jsonl")
-	if err := os.Chmod(bad, 0); err != nil {
+	if err := os.Remove(bad); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(t.TempDir(), "gone"), bad); err != nil {
 		t.Fatal(err)
 	}
 	a := archive(t, nil)
