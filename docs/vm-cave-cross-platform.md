@@ -46,7 +46,20 @@ vfkit is the only macOS VMM process covering CHV's full feature set:
 | no NIC | omit | omit |
 | privilege | `/dev/kvm` | entitlement, no device |
 
-It also ships a **pre-signed** binary carrying
+One row the table cannot carry, because the two are not the same size:
+**pause and resume exist on both, snapshot exists only on Linux.** Cloud
+Hypervisor pauses, writes `config.json`, `memory-ranges` and `state.json` to a
+directory, and restores that into a fresh process, which comes back paused.
+vfkit's `POST /vm/state` accepts `Pause`, `Resume`, `Stop` and `HardStop` and
+nothing else. Virtualization.framework has had save and restore since macOS 14
+and vfkit's state enum names `Saving` and `Restoring`, so this is an unexposed
+capability rather than a missing one, but there is no way to ask for it today.
+Pause and resume therefore belong in the backend interface and snapshot does
+not: it is a Linux-only operational convenience, and no feature may be built
+on it. The consequence for agent hibernation is recorded in
+`vm-cave-todo.md`.
+
+vfkit also ships a **pre-signed** binary carrying
 `com.apple.security.virtualization`, which a nix-built binary would not have
 and which is otherwise a codesigning problem.
 
@@ -130,10 +143,13 @@ reasons the agent cannot diagnose or fix. `aarch64-linux` cache coverage is
 good but not identical, so a package that substitutes on x86 may build from
 source, which on four cores is not free.
 
-The mitigation is `vfkit --device rosetta`, which shares Rosetta into the
-guest over virtio-fs and registers it through `binfmt_misc`, letting the
-aarch64 guest execute x86_64 Linux binaries. Designing it in is what makes the
-two environments behaviourally equivalent rather than merely similar.
+The mitigation available is `vfkit --device rosetta`, which shares Rosetta
+into the guest over virtio-fs and registers it through `binfmt_misc`, letting
+the aarch64 guest execute x86_64 Linux binaries. It is deliberately not
+designed in: the aarch64 guest runs native, and the two environments are
+accepted as similar rather than equivalent. Rosetta becomes worth building
+when an agent is actually blocked on an x86-only toolchain, which is the
+entry it has in `vm-cave-todo.md`.
 
 Two smaller architecture consequences: the kernel artifact is `bzImage` on
 x86 and `Image` on aarch64, and the console is `ttyS0` on x86 (the 8250 port,

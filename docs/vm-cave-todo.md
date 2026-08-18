@@ -4,6 +4,37 @@ Things known to be missing or wrong, kept out of `vm-cave-design.md` because
 they are not phases of the build-out: they are gaps the bootstrap has
 surfaced. Each says what is broken and what is undecided, not what to do.
 
+## The guest clock is never corrected
+
+First in this file because it is low in the stack and everything above it
+fails confusingly. The guest has no timesyncd, no NTP, no
+`qemu-guest-agent` and no NIC to reach a time server with. It takes the
+clock from the host at boot and nothing touches it afterwards.
+
+On x86 under KVM this mostly hides: `kvm-clock` tracks host adjustments
+across a suspend. Under HVF on aarch64 the guest is on `arch_sys_counter`,
+which does not, so a closed lid leaves the guest behind by however long the
+host slept. A stale clock fails TLS certificate validation, which fails
+every agent request, and nothing in that failure points at the clock. ssh is
+unaffected, since host keys carry no validity dates, so the channel that
+could correct it keeps working while everything else is dead.
+
+vfkit ships `--timesync` for exactly this and it is not usable here: it
+speaks to `qemu-guest-agent` over vsock, which is a whole guest agent shipped
+for one syscall. The host already talks to the guest, and whatever it says
+can carry the host's UTC time.
+
+Separately, and not the same problem: the timezone is a host information
+leak. `main` pins the cave's `/etc/localtime` to UTC so the host's geographic
+region stays outside the sandbox, with `coding-cave.timeZone` and a host `$TZ`
+as the only levers. The guest owns its own `/etc/localtime`, so the mechanism
+differs and the contract must not.
+
+Open: what triggers the correction. Every host-to-guest call is the cheapest,
+and bounds staleness by "when you last asked", which is the rule the session
+sync already uses. A guest-side timer needs a clock it has no reason to
+trust. A resume hook needs the host to notice its own suspend.
+
 ## `clone-repo` failed once and has not reproduced
 
 Seen once, on a from-scratch `image create` into a never-booted disk: the
@@ -42,6 +73,12 @@ the agent has not pushed. Committed work survives because pushing to
 The agent is told to commit early, but "the tool eats your work if you
 forget" is not a workable contract, and reformat is the one command a
 broken bootstrap forces you to run.
+
+The stance this sits under: the VM is cattle. Anything worth keeping leaves
+by a git commit, which is also the only way it passes the approval gate, so
+there is no second escape route to build and no state worth preserving for
+its own sake. That makes this entry narrow rather than large: the question is
+only what to do about work an agent has written and not yet committed.
 
 Still open, and now the only thing in this file that is. Session state moved
 to the host (`vm-cave-design.md`), but a worktree cannot follow it: it is a
@@ -130,12 +167,18 @@ fresh one, and restoring cwd, branch and whatever the agent had in flight.
 
 Open, and genuinely undecided:
 
-- The level it happens at. Session-level (each agent's claude session id
-  recorded and resumed with `--resume`, which is what the container cave
-  does through the registry) or machine-level (Cloud Hypervisor can pause,
-  snapshot and restore a VM's memory, so every agent comes back mid-thought
-  with no per-agent machinery at all). The second is tempting and couples
-  restore to CHV's snapshot format and to the disk being untouched.
+- The level it happens at. Settled: session-level, each agent's claude
+  session id recorded and resumed with `--resume`, which is what the
+  container cave does through the registry. Machine-level was tempting,
+  since Cloud Hypervisor can pause, snapshot and restore a VM's memory and
+  every agent would come back mid-thought with no per-agent machinery at
+  all. It is out because it does not exist on the other host: vfkit's
+  `POST /vm/state` takes `Pause`, `Resume`, `Stop` and `HardStop` and
+  nothing else, and although Virtualization.framework has had save and
+  restore since macOS 14, and vfkit's own state enum names `Saving` and
+  `Restoring`, there is no way to ask for either. Pause and resume are the
+  portable pair and belong in the backend interface for maintenance;
+  snapshot is a Linux-only convenience that nothing may depend on.
 - Who holds the roster of live agents: the host registry, as with container
   caves, or the guest, with the host asking.
 - What a redeploy does to hibernated agents. An in-guest `nixos-rebuild
@@ -302,6 +345,28 @@ and what would make the Mac a first-class host rather than a demo. The second
 is real scope and lands ahead of where `vm-cave-design.md` currently puts it.
 Also unresolved: the aarch64 guest needs a Linux builder, so re-provisioning
 Lima is a prerequisite either way.
+
+## Rosetta, optional and later
+
+`vfkit --device rosetta` shares Apple's translation runtime into the guest
+over virtio-fs; the guest registers it through `binfmt_misc` and then executes
+`x86_64` Linux binaries on an `aarch64` guest.
+`vm-cave-cross-platform.md` treats it as what would make the two hosts
+behaviourally equivalent rather than merely similar.
+
+Deferred, and running the guest natively is the position: an aarch64 guest on
+an aarch64 host is the straightforward configuration, and nix content is built
+per system and equivalent either way. What Rosetta buys is the bytes nix never
+sees, npm optional dependencies shipped as x86 binaries, pip wheels,
+Playwright's browser download, `go install` output, container images, plus
+`nix.settings.extra-platforms` for the cases where aarch64 cache coverage is
+thin enough to mean compiling on four cores.
+
+So the trigger to build it is evidence rather than principle: an agent blocked
+on a toolchain that ships x86-only. Two things to establish first, since
+neither shows up where it would be noticed: Rosetta's instruction coverage (no
+AVX historically, AVX2 in recent macOS) and whether it is installed on the host
+at all.
 
 ## Where the effort should go, given the field
 
