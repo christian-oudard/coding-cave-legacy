@@ -100,7 +100,7 @@ approval, all without any credential existing inside the VM.
 ## The agent runtime
 
 - `vm-root-agent.service`, a systemd unit in the guest config: a
-  cave-guestd session running claude-code as root in `/root/coding-cave` (a clone of
+  cave-guestd session running claude-code as root in `/projects/coding-cave` (a clone of
   the vm-cave branch, remote pointing at the host git daemon). The unit is
   part of the NixOS configuration, so the agent redeploys its own runtime
   like everything else, with generations as the undo.
@@ -115,7 +115,7 @@ approval, all without any credential existing inside the VM.
 The core capability requested: the agent changes the system it is running
 on, safely, without a human in the loop.
 
-1. **Edit** guest config and Go code in `/root/coding-cave`.
+1. **Edit** guest config and Go code in `/projects/coding-cave`.
 2. **Switch**: `nixos-rebuild switch --flake .#cave-guest-dev`. Userspace
    changes (guestd, pkgdd config, units, the agent's own service) activate
    in place; the session and the claude process survive because the daemon

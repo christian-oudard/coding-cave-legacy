@@ -17,7 +17,7 @@ let
   caveVmSrc =
     let
       env = builtins.getEnv "CAVE_VM_SRC";
-      inGuest = "/root/coding-cave/cave-vm";
+      inGuest = "/projects/coding-cave/cave-vm";
     in
     if env != "" then env
     else if builtins.pathExists inGuest then inGuest
@@ -82,7 +82,7 @@ let
   # daemon when it has to restart a dead session, so the two cannot drift
   # into launching claude differently.
   caveAgent = pkgs.writeShellScriptBin "cave-agent" ''
-    cd /root/coding-cave
+    cd /projects/coding-cave
     exec ${claudeCode}/bin/claude --dangerously-skip-permissions "$@"
   '';
 
@@ -476,8 +476,8 @@ in
         set -eu
         # The base is this VM's own previous state, captured before the last
         # reformat, never the host's ~/.claude.json: those flags are keyed to
-        # the host's project paths, so they never applied to /root/coding-cave
-        # anyway, and the rest of that file is the host's history and MCP
+        # the host's own projects and its own history and MCP config, none of
+        # which has any business in here. Note the path now matches what a
         # config, which has no business in here. An empty base is fine, the
         # keys forced below are the ones that matter.
         seed=/root/.claude.json
@@ -486,8 +486,8 @@ in
         elif [ -f "$host" ]; then base=$(cat "$host")
         else base='{}'; fi
         printf '%s' "$base" | ${pkgs.jq}/bin/jq \
-          '.projects["/root/coding-cave"].hasTrustDialogAccepted = true
-           | .projects["/root/coding-cave"].hasCompletedProjectOnboarding = true' \
+          '.projects["/projects/coding-cave"].hasTrustDialogAccepted = true
+           | .projects["/projects/coding-cave"].hasCompletedProjectOnboarding = true' \
           > "$seed.tmp"
         mv "$seed.tmp" "$seed"
         chmod 600 "$seed"
@@ -530,7 +530,11 @@ in
       RemainAfterExit = true;
       ExecStart = "${pkgs.writeShellScript "clone-repo" ''
         set -eu
-        repo=/root/coding-cave
+        repo=/projects/coding-cave
+        # Worktrees live at /projects/<slug>, the same place the container
+        # caves put them, rather than in the agent's home. git clone creates
+        # the leaf and not the parent.
+        install -d -m 755 /projects
         # The project's shared bare repo, which is the only thing the host
         # daemon serves. Never the human's working checkout: an agent must not
         # be able to write a branch into the tree someone is standing in.

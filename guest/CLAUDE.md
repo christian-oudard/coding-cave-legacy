@@ -48,7 +48,7 @@ vm-cave-todo.md` holds what is known to be missing and undecided, and
 
 Prefer config over imperative state: a change that survives only until the
 next boot is not a change. You can rebuild the system you are running with
-`nixos-rebuild switch --flake /root/coding-cave/guest#cave-guest --impure`,
+`nixos-rebuild switch --flake /projects/coding-cave/guest#cave-guest --impure`,
 which is the same closure the host would deploy. A kernel change needs the
 host to restart the VM, and everything else takes effect in place.
 

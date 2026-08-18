@@ -300,7 +300,7 @@ one, in ways that are cheap to list and not cheap to change:
 - the git daemon injects `CODING_CAVE_AGENT_ID=1` for the whole guest, so
   the pre-receive guard cannot tell co-resident agents apart (the hook says
   as much: it gates by namespace, not by agent)
-- one ssh identity and one `/root/coding-cave` working tree, so two agents
+- one ssh identity and one `/projects/coding-cave` working tree, so two agents
   would share a checkout
 - one home, so one `~/.claude/projects`: every agent can read and rewrite
   every other agent's transcript, which is what keeps session ownership at

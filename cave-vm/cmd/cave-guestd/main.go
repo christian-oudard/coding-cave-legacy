@@ -79,7 +79,7 @@ func serve(args []string) {
 	// The same three paths the `sessions` subcommand takes, and for the same
 	// reasons; see transcripts below.
 	claude := fs.String("claude", filepath.Join(homeDir(), ".claude"), "the agent's ~/.claude")
-	cwd := fs.String("cwd", "/root/coding-cave", "the cwd a restored session resumes in")
+	cwd := fs.String("cwd", "/projects/coding-cave", "the cwd a restored session resumes in")
 	shareDir := fs.String("shared-dir", "/cave/sessions", "where every agent's records are readable")
 	fs.Parse(args)
 
@@ -249,7 +249,7 @@ func transcripts(args []string) {
 	// under the directory encoding the cwd it is resumed in. The agent's
 	// worktree, matching what cave-agent cds to; when caves become per-agent
 	// this comes from the cave's own record instead of a default.
-	cwd := fs.String("cwd", "/root/coding-cave", "the cwd a restored session resumes in")
+	cwd := fs.String("cwd", "/projects/coding-cave", "the cwd a restored session resumes in")
 	// Every agent's records, for reading rather than resuming. Outside
 	// ~/.claude so claude never scans it, which is what keeps another agent's
 	// session out of this agent's picker while still being readable.

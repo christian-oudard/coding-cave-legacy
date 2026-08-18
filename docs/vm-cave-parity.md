@@ -49,7 +49,7 @@ port per agent).
 
 - the git daemon injects `CODING_CAVE_AGENT_ID=1` for the whole guest, so the
   pre-receive guard cannot tell co-resident agents apart
-- one ssh identity and one `/root/coding-cave` checkout, so two agents would
+- one ssh identity and one `/projects/coding-cave` checkout, so two agents would
   share a working tree
 - `vmcav agent` attaches to "the" agent with no way to name one, though
   `cave-guestd attach <id>` underneath it already takes an id
