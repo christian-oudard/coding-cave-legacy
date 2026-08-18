@@ -300,6 +300,16 @@ one, in ways that are cheap to list and not cheap to change:
 - the git daemon injects `CODING_CAVE_AGENT_ID=1` for the whole guest, so
   the pre-receive guard cannot tell co-resident agents apart (the hook says
   as much: it gates by namespace, not by agent)
+- **one worktree per project, shared by every agent.** `/projects/<slug>` has
+  no agent id in it, and every agent is root in one namespace, so a project
+  checked out for one agent is not merely readable by the others, it is the
+  same tree. `main` has the same path and no such problem, because bwrap gives
+  each agent a private mount namespace and therefore its own view of
+  `/projects/<slug>`. So the fix is caves rather than a path scheme, and
+  putting an id in the path now would diverge from `main` for no gain.
+  Meanwhile `clone-repo@` refuses to take a worktree that is on another
+  agent's branch, since sharing is survivable and silent reassignment under a
+  running agent is not.
 - one ssh identity and one `/projects/coding-cave` working tree, so two agents
   would share a checkout
 - one home, so one `~/.claude/projects`: every agent can read and rewrite

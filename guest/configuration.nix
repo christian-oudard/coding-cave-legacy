@@ -565,6 +565,25 @@ in
         fi
         cd "$repo"
         git fetch -q origin
+        # One worktree per project, and no caves yet, so every agent would
+        # share this one. `main` gives each agent its own view of
+        # /projects/<slug> through a private mount namespace; until the guest
+        # has caves there is one tree, and switching it to another agent's
+        # branch would yank the ground out from under a running agent. Refuse
+        # instead: shared is survivable, silently reassigned is not.
+        current=$(git symbolic-ref --quiet --short HEAD || echo "")
+        case "$current" in
+          agent-*/*)
+            owner=''${current#agent-}
+            owner=''${owner%%/*}
+            if [ "$owner" != "$CAVE_AGENT_ID" ]; then
+              echo "clone-repo: $repo belongs to agent $owner (on $current)." >&2
+              echo "  One worktree per project until caves exist, so agent" >&2
+              echo "  $CAVE_AGENT_ID cannot have it. Stop that agent first." >&2
+              exit 1
+            fi
+            ;;
+        esac
         if [ -n "$(git status --porcelain)" ]; then
           # Somebody is working in here. Switching branches under them would
           # be the one thing a reformat is for.
