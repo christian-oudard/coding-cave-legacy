@@ -127,8 +127,15 @@ that remains is uncommitted work, not the logs.
 
 ## No counterpart at all
 
-- `cav cp` in both directions, its refusal to copy symlinks out, its
-  overwrite prompts, and its tab completion of cave-side paths
+- `cav cp`: the transport is already there and the ergonomics are not. `scp`
+  over the ssh config's vsock ProxyCommand copies both directions and
+  recursively, verified against the running guest, so what is missing is the
+  addressing (`cave:<path>` against the agent's worktree, `~/` for its home,
+  `@<n>` when there is more than one agent), the overwrite prompts and the
+  completion. The refusal to copy symlinks out does not carry over: it guards
+  against a symlink naming a host path through a shared namespace, and a guest
+  symlink can name only guest paths (checked: one pointing at `/etc/shadow`
+  yields the guest's).
 - `cav completion bash|zsh|fish`, and the dynamic callbacks it depends on
 - inter-agent comms: `--comms`, the `send_message` tool, channel events, the
   broker and channel server behind them
