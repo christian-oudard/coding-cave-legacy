@@ -171,6 +171,12 @@ one, in ways that are cheap to list and not cheap to change:
 - one home, so one `~/.claude/projects`: every agent can read and rewrite
   every other agent's transcript, which is what keeps session ownership at
   the level of bookkeeping
+- `/root` is written literally about twenty times across the guest's seeding
+  units (gnupg, authorized_keys, gitconfig, `claude.json`, the credentials,
+  the checkout) and `HOME` is set to it in the session unit. So moving an
+  agent off that home is not one setting: a unit missed keeps seeding `/root`
+  while the agent reads somewhere else, and it fails by the agent quietly
+  having no credentials rather than by anything erroring
 
 Open: whether agents are separate unix users or all root with separate
 worktrees; where ids are allocated (the host registry, as in container

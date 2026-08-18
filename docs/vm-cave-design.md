@@ -516,6 +516,16 @@ holding `/home`, with `reformat` recreating only the system disk. It survives
 a reformat and nothing else, it is opaque from the host without `debugfs`, and
 it buries the one thing worth backing up inside a 100 GB sparse image.
 
+That rejection covers splitting the guest disk at all, not just this one cut.
+Any split trades a filesystem boundary for a durability guarantee weaker than
+the host copy already gives, and it charges for the boundary: each device
+carries its own free-space budget, so either they are all over-provisioned
+against one shared cap (in which case a full disk still stops everything, and
+the split bought nothing) or one fills while another sits empty. The guest
+also cannot be repaired from a rootless host, which has no way to mount an
+image. So the guest disk stays one filesystem, and durability is the host's
+job.
+
 Everything above this line is `main`'s arrangement, and it is reused as is:
 the same layout, the same permanent `sessions` table, registration of a
 transcript when it appears rather than when it was predicted (background jobs
