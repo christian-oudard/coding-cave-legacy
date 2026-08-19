@@ -11,8 +11,9 @@ You are root in a NixOS guest that exists to build this project. The host runs
 NIC: every byte in or out crosses one of them, and that is the design rather
 than a limitation to route around (`docs/vm-cave-boundary.md`).
 
-- `git://127.0.0.1/cave-shared.git` is `origin`, the project's shared bare
-  repo on the host, over vsock.
+- `git://127.0.0.1/<project>.git` is `origin`, the project's shared bare
+  repo on the host, over vsock. The path is the project name, not the bare
+  repo's filename there; `git remote -v` tells you which.
 - `http://127.0.0.1:10255` is the proxy, and the only way to the internet.
 - `http://127.0.0.1:7100` is the host's nix store as a binary cache, so
   `nix build` and `nix develop` mostly substitute rather than compile.
