@@ -101,6 +101,15 @@
             export HOME=$TMPDIR REPO=$PWD/repo
             bash repo/scripts/test-git-hooks.sh && touch $out
           '';
+        # Same shape, and the same reason: it sources vmcav for its functions
+        # and never starts a VM, so scripts/ is the whole input.
+        vmcav-status = pkgs.runCommand "vmcav-status-test"
+          { nativeBuildInputs = with pkgs; [ bash git ]; }
+          ''
+            mkdir -p repo && cp -r ${./scripts} repo/scripts
+            export HOME=$TMPDIR
+            bash repo/scripts/test-vmcav-status.sh && touch $out
+          '';
       });
 
       devShells = forAll (pkgs: {

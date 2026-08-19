@@ -490,7 +490,23 @@ do_status() {
   # Nothing announces a push: the agent commits, the daemon accepts it, and
   # the ref moves in silence. Status is where you find out one arrived, and it
   # says so with the VM stopped too, because the work arrived either way.
-  if ! is_running; then echo "vm: stopped"; cave_vm pending || true; return 0; fi
+  if ! is_running; then
+    # Whether there is an image at all, because "stopped" answered two
+    # different questions with one word: a VM you can start, and a VM that was
+    # never created. Only `start` knew the difference, and only by refusing.
+    if [ -f "$DISK" ]; then
+      echo "vm: stopped"
+      # Staleness is most worth saying here, not less: `start` boots what the
+      # disk says, so a stopped guest is exactly the one about to run old code.
+      # It used to be reported only in the running branch below, which is after
+      # the moment you could have acted on it.
+      warn_if_guest_is_behind
+    else
+      echo "vm: no image yet (vmcav image create)"
+    fi
+    cave_vm pending || true
+    return 0
+  fi
   # An empty pid means the VM is running under a supervisor this side cannot
   # see: another cave, or the host. Say so rather than printing a pid nobody
   # can use, and do not go on to ask the guest questions -- the ssh path here
@@ -937,33 +953,68 @@ do_deploy() {
   log "deployed"
 }
 
-# Which commit the guest was last built from. The guest boots what its own disk
-# says, so pulling on the host changes nothing in it until a deploy, and
-# nothing used to say so: the symptom was old guest behaviour with a current
-# `vmcav version`, which reports the host script and not the guest.
+shortrev() { git -C "$REPO" rev-parse --short "$1" 2>/dev/null || printf '%s' "${1:0:7}"; }
+
+# What the guest was last built from. The guest boots what its own disk says,
+# so pulling on the host changes nothing in it until a deploy, and nothing used
+# to say so: the symptom was old guest behaviour with a current `vmcav
+# version`, which reports the host script and not the guest.
 #
 # The commit rather than a store path, because the question being answered is
 # "is the guest behind my checkout", and a store path cannot answer that
 # without a build.
-record_deployed_from() {
-  git -C "$REPO" rev-parse HEAD > "$STATE_DIR/deployed-from" 2>/dev/null || true
+#
+# HEAD alone is half an answer, though, because the build reads the working
+# tree and not a commit. A deploy with guest/ or cave-vm/ dirty produces a
+# guest that no commit describes, and recording the bare commit made that read
+# back as an exact match: status went quiet about the one guest whose contents
+# nothing on the host records. Hence the `-dirty` suffix, the same marker
+# `version` already uses for the same reason.
+#
+# Scoped to the two paths the build actually reads. Whole-repo dirt would stand
+# while any doc or script was edited, which is most of the time, and a warning
+# that is always on is one nobody reads.
+guest_source_rev() {
+  local rev; rev=$(git -C "$REPO" rev-parse HEAD 2>/dev/null) || return 1
+  # --porcelain rather than `diff --quiet`, so an untracked file counts: the
+  # build copies the directory, so a file git has never seen is still an input.
+  [ -z "$(git -C "$REPO" status --porcelain -- guest cave-vm 2>/dev/null)" ] \
+    || rev="$rev-dirty"
+  printf '%s' "$rev"
 }
 
-# Say so when the guest is older than the checkout. A hint rather than a
-# verdict: the guest is built from the working tree, so a deploy with
-# uncommitted changes and a later commit both land here, and erring toward
-# "deploy" costs a rebuild that is mostly cached.
+record_deployed_from() {
+  local rev; rev=$(guest_source_rev) || return 0
+  # Through a temp file: a plain redirect truncates before git runs, so a
+  # rev-parse that failed destroyed a good record and left an empty one, after
+  # which the check below read no record and stayed silent for good.
+  printf '%s\n' "$rev" > "$STATE_DIR/deployed-from.tmp" \
+    && mv "$STATE_DIR/deployed-from.tmp" "$STATE_DIR/deployed-from"
+}
+
+# Say so when the guest is not what the checkout would build. A hint rather
+# than a verdict: the comparison is by commit, so a commit touching only docs
+# lands here too, and erring toward "deploy" costs a rebuild that is mostly
+# cached.
 warn_if_guest_is_behind() {
   local was now
   was=$(cat "$STATE_DIR/deployed-from" 2>/dev/null || true)
-  now=$(git -C "$REPO" rev-parse HEAD 2>/dev/null || true)
+  now=$(guest_source_rev) || return 0
   # Silent with no record. A guest built before anything recorded one is a
   # one-off state that the next deploy ends, and a permanent warning about a
   # transient condition is worse than the condition.
-  [ -n "$was" ] && [ -n "$now" ] || return 0
+  [ -n "$was" ] || return 0
+  # Dirty first, and regardless of whether the commit still matches: what was
+  # built is not in any commit, so nothing here can tell you whether the tree
+  # has moved since. Saying "up to date" would be a guess presented as a fact.
+  if [ "${was%-dirty}" != "$was" ]; then
+    log "the guest was built from uncommitted changes on $(shortrev "${was%-dirty}")"
+    log "  nothing records what those were; vmcav deploy to be sure"
+    return 0
+  fi
   [ "$was" = "$now" ] && return 0
-  log "the guest was built from $(git -C "$REPO" rev-parse --short "$was" 2>/dev/null || echo "${was:0:7}")"
-  log "  your checkout is at $(git -C "$REPO" rev-parse --short "$now"); vmcav deploy to catch it up"
+  log "the guest was built from $(shortrev "$was")"
+  log "  your checkout is at $(shortrev "${now%-dirty}"); vmcav deploy to catch it up"
 }
 
 # What a guest boots is recorded on its own disk, in the system profile it
@@ -1064,6 +1115,10 @@ do_stop() {
   cave-vm stop --state "$STATE_DIR" --disk "$DISK" || true
   stop_git_daemon; stop_gpg_broker
 }
+
+# Everything above is definitions, so a test can source this file and call one
+# function without a VM, a disk, or a guest. Sourced, the dispatch is skipped.
+return 0 2>/dev/null || true
 
 case "${1:-help}" in
   start) shift; do_start "$@" ;;
