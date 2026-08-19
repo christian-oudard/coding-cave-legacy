@@ -434,6 +434,97 @@ also what `vmcav agent` would need to pick between; and whether the
 harness-specific seeding is a list of files the harness declares, so adding
 one is config rather than code.
 
+## Graphical work: headless compositors and input injection
+
+Asked for by a project outside this repo. A dictation tool supports exactly
+one window manager (sway), and to support the rest it has to inject keystrokes
+into a compositor and read back what arrived. Every remaining question there
+was produced by reading source rather than by testing, because no cave has a
+compositor in it. The deterministic test the project wants is: start a
+headless compositor, focus a terminal running `cat > /tmp/out`, fire the tool
+against a canned WAV, and assert the file contents.
+
+**Why this belongs to the VM and not to `main`.** A container cave can already
+be handed a device with `cav -d`, and `-d /dev/uinput` must never be offered.
+uinput is a kernel-global facility, and a cave holding that node creates a
+virtual keyboard in the *host's* kernel: an agent testing keystroke injection
+would be typing into the human's real session, with no sandbox anywhere in the
+path. The VM's kernel is its own, so the same test injects into the guest and
+stops there. This is a capability the container caves cannot be configured
+into, rather than one they merely lack.
+
+What the guest does not have today:
+
+- **No uinput.** No `boot.kernelModules`, no `/dev/uinput`. NixOS has
+  `hardware.uinput.enable`, which loads the module and gives the node a group;
+  checked against this nixpkgs, it resolves.
+- **No software GL.** There is no `/dev/dri` and there should not be, so every
+  compositor here renders on llvmpipe or pixman. That is a mesa closure in the
+  environment, not a guest capability.
+- **No `XDG_RUNTIME_DIR`** in the agent's unit, which every Wayland compositor
+  wants before it starts.
+- **No terminal emulator and no font**, which the sink half of the test needs.
+
+**Where the desktop stack lives is the real question.** `systemPackages` is a
+deliberate floor and is also the agent's PATH, and the matrix here is sway,
+river, Hyprland, labwc, mutter, kwin, Xvfb plus i3, and three injection tools.
+That is one project's dependency set, so it belongs in a per-project
+environment, which is design phase 9 (`cave.nix`) and does not exist. What is
+undecided is whether phase 9 has to land first or whether a project can carry
+it in its own flake and `nix develop` today: the guest substitutes closures
+from the host store over 7100, so the cost is a host-side build rather than a
+guest one. The guest-image share of this is small either way, and is only the
+kernel module, the device node, and who may open it.
+
+Related, and blocked on caves: whether an unprivileged user can drive uinput
+at all is the question the project actually has to answer, and it cannot be
+tested in a guest where every agent is root. That is phase 6.
+
+**The blocker is not the desktop stack, it is that the guest serves one
+project.** The guest side is already parameterized: `clone-repo@` and
+`cave-session@` are templates that take a project, `/projects/<slug>` has no
+constant in it, and `vmcav agent <project> <base>` takes the name. The host
+side is not. `start_git_daemon` whitelists exactly two paths, the shared repo
+and a `<slug>.git` symlink beside it, both derived from the checkout `vmcav`
+was run in, so asking for any other project resolves to nothing. Standing in a
+second checkout instead does not help: the state dir is machine-wide but
+`SHARED` and `SLUG` are per-checkout, so a second `start` tries to bind a
+second daemon on 9418 and fails.
+
+So a second project needs a machine-wide directory of shared repos, one per
+project, that the daemon serves together. Undecided: whether that directory
+holds symlinks into each checkout's `.coding-cave/cave-shared.git`, which
+keeps the container caves' path and makes the daemon's base path leave this
+project's tree, or whether the shared repos move under the state dir and the
+per-checkout path becomes the link. The second is cleaner and diverges from
+`main`, which knows those repos by their own path.
+
+The alternative is real and should be named rather than discovered: a public
+project can be cloned straight from the internet through crinj, which needs
+none of the above and works today. It also puts the work outside the approval
+gate, which is the thesis, so it is a fallback for reading someone else's code
+rather than a way to develop in here.
+
+**Sizing is per-VM, not per-agent.** The defaults are 4 vCPU and 4096 MiB for
+the whole machine, and CPU-only speech inference next to a kwin session shares
+them with every other agent in it. The flags exist, so this is not a blocker;
+whether the default moves is a question about what a host can spare, and
+nothing measures it yet.
+
+**Egress is unverified.** The model weights come from HuggingFace, so crinj's
+policy has to admit it. Nobody has tried.
+
+**Audio stays outside.** No sound device in the guest, and none should be
+added: a microphone reaching in is a host-to-guest crossing of the worst kind,
+and `vm-cave-boundary.md` has no room for it. The canned-WAV test needs no
+device. Open, and smaller: whether the tool starts at all without a sink, and
+whether a null PipeWire sink in the guest is enough if it does not.
+
+**Nothing carries a picture out.** A compositor bug is a screenshot, `grim`
+writes it to a guest file, the agent can read it and a human cannot. This is
+the missing `cav cp` that `vm-cave-parity.md` already records, and this is the
+first work that makes it hurt.
+
 ## Image management, much later
 
 `vmcav image create` builds one image into one disk at one path, for one VM.
