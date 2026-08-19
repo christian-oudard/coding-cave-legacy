@@ -455,15 +455,21 @@ into, rather than one they merely lack.
 
 What the guest does not have today:
 
-- **No uinput.** No `boot.kernelModules`, no `/dev/uinput`. NixOS has
-  `hardware.uinput.enable`, which loads the module and gives the node a group;
-  checked against this nixpkgs, it resolves.
+- ~~**No uinput.**~~ **Done.** `hardware.uinput.enable`, which is the module,
+  the `uinput` group, and a udev rule at 0660 with `static_node=uinput` so the
+  node exists whether or not anything has loaded the module.
+- ~~**No `XDG_RUNTIME_DIR`**~~ **Done.** `/run/cave-agent-%i`, created and
+  removed by the session unit's own `RuntimeDirectory=` at 0700. Not
+  `/run/user/0`, which belongs to logind for a root ssh login and would be
+  deleted under a live `vmcav shell` when the session stopped.
 - **No software GL.** There is no `/dev/dri` and there should not be, so every
   compositor here renders on llvmpipe or pixman. That is a mesa closure in the
   environment, not a guest capability.
-- **No `XDG_RUNTIME_DIR`** in the agent's unit, which every Wayland compositor
-  wants before it starts.
 - **No terminal emulator and no font**, which the sink half of the test needs.
+
+Both of the above are verified by evaluating the guest config, not by booting
+one. Neither can be a flake check: the guest evaluates only with `--impure`,
+since crinj's CA and the Go module's path arrive from the environment.
 
 **Where the desktop stack lives is the real question.** `systemPackages` is a
 deliberate floor and is also the agent's PATH, and the matrix here is sway,

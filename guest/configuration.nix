@@ -447,6 +447,24 @@ in
     !include /etc/cave-host/nix.conf
   '';
 
+  # --- Synthetic input, for agents working on window managers ---
+  # /dev/uinput, which is what lets an agent start a headless compositor and
+  # type into it. The module, the `uinput` group and a udev rule at 0660 with
+  # static_node=uinput, so the node exists whether or not anything has loaded
+  # the module yet.
+  #
+  # This belongs to the guest and could not belong to a container cave. uinput
+  # is kernel-global: a cave handed that device node creates a virtual keyboard
+  # in the *host's* kernel, so an agent testing keystroke injection would be
+  # typing into the human's real session with no sandbox in the path. The guest
+  # runs its own kernel, so the same test stops at the VM boundary. It is the
+  # one capability here that `cav -d` must never be used to imitate.
+  #
+  # No compositor, no mesa and no injection tools in this image. Those are one
+  # project's dependency set and belong in that project's own flake, which the
+  # guest can build because it substitutes from the host store over 7100.
+  hardware.uinput.enable = true;
+
   # --- Guest toolchain: the minimal floor, nothing more ---
   # This list is also the agent's PATH: its unit resolves tools through
   # /run/current-system/sw/bin rather than through store paths frozen when the
@@ -686,6 +704,17 @@ in
       # passes its own environment to the agent, so it has to be stated here.
       # Only the type: the size comes from whatever terminal attaches.
       TERM = "xterm-256color";
+      # Where a Wayland display socket goes. Every compositor requires this
+      # and refuses to start without it, and a system unit has none, because
+      # logind sets it only for a login session.
+      #
+      # Deliberately not /run/user/0, which is logind's to create and delete
+      # for a root ssh login: RuntimeDirectory= below would take ownership of
+      # that path and remove it when the session stopped, pulling it out from
+      # under any `vmcav shell` that happened to be open. A path of this
+      # unit's own shares with nothing, and carries the instance id, which is
+      # what several agents in one guest need anyway.
+      XDG_RUNTIME_DIR = "/run/cave-agent-%i";
     };
     serviceConfig = {
       # The session process stays in the foreground and exits with its agent,
@@ -700,6 +729,11 @@ in
       # it, and still launch the previous claude forever.
       ExecStart = "${caveGuestd}/bin/cave-guestd session -id %i -dir ${sessionDir} "
         + "-- /run/current-system/sw/bin/cave-agent";
+      # Creates XDG_RUNTIME_DIR above and removes it when the session stops.
+      # 0700 because the spec has it private to its owner, and compositors
+      # check the mode rather than trusting the variable.
+      RuntimeDirectory = "cave-agent-%i";
+      RuntimeDirectoryMode = "0700";
       # An agent that exits stays exited. Coming back is someone asking for it
       # again, which starts this unit afresh.
       Restart = "no";
