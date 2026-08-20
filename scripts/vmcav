@@ -709,6 +709,25 @@ allocate_agent_id() {
   echo "$n"
 }
 
+# Why the start failed, in the terminal that failed, rather than a pointer to
+# a journal you would have to open a shell in the guest to read.
+#
+# systemd's own message ("a dependency job for cave-session@N failed") names
+# the unit that could not start and never the one that stopped it, and the
+# dependency is always the interesting one: a session fails at its checkout
+# far more often than at itself. Read-only, and only on the failure path.
+explain_session_failure() {
+  local id="$1" unit
+  for unit in "clone-repo@$id" seed-claude-config; do
+    GUEST_SSH_TTY=-T guest_ssh "systemctl is-failed --quiet $unit" \
+      >/dev/null 2>&1 || continue
+    log "$unit failed:"
+    GUEST_SSH_TTY=-T guest_ssh \
+      "journalctl -u $unit -n 20 --no-pager -o cat" 2>/dev/null \
+      | sed 's/^/  /' >&2
+  done
+}
+
 do_agent() {
   # `stop` as the first word is the verb, not a project. A project named
   # "stop" would be pathological, and the alternative is a second top-level
@@ -737,6 +756,11 @@ do_agent() {
     return 1 ;;
   esac
   is_running || { log "the vm is not running (vmcav start)"; return 1; }
+  # Said before the attempt, not after it. A guest older than the checkout
+  # fails here as a systemd dependency job, which names neither the version
+  # nor the reason; by the time you have read that, the useful sentence is
+  # one you already had.
+  warn_if_guest_is_behind
   local id
   id=$(allocate_agent_id "$want_root") || return 1
   if [ "$id" = "$ROOT_AGENT_ID" ]; then
@@ -759,6 +783,7 @@ do_agent() {
       return 1
     fi
     printf '%s\n' "$out" >&2
+    explain_session_failure "$id"
     log "could not start the agent"
     return 1
   fi
