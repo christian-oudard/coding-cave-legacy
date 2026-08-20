@@ -11,6 +11,10 @@ You are root in a NixOS guest that exists to build this project. The host runs
 NIC: every byte in or out crosses one of them, and that is the design rather
 than a limitation to route around (`docs/vm-cave-boundary.md`).
 
+- `/projects/<project>/<your id>` is your worktree, and every agent has its
+  own. Nothing stops you reading or writing another agent's, and being root
+  you could; that they are separate is what keeps two agents from overwriting
+  each other, not a wall between you.
 - `git://127.0.0.1/<project>.git` is `host-cave`, the project's shared bare
   repo on the host, over vsock. Not `origin`: it is the host's copy, one
   approval away from being anybody else's, and the name says so. The path is
@@ -58,7 +62,7 @@ vm-cave-todo.md` holds what is known to be missing and undecided, and
 
 Prefer config over imperative state: a change that survives only until the
 next boot is not a change. You can rebuild the system you are running with
-`nixos-rebuild switch --flake /projects/coding-cave/guest#cave-guest-dev --impure`,
+`nixos-rebuild switch --flake /projects/coding-cave/0/guest#cave-guest-dev --impure`,
 which is the same closure the host would deploy. A kernel change needs the
 host to restart the VM, and everything else takes effect in place.
 

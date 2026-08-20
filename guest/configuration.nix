@@ -17,7 +17,10 @@ let
   caveVmSrc =
     let
       env = builtins.getEnv "CAVE_VM_SRC";
-      inGuest = "/projects/coding-cave/cave-vm";
+      # The root agent's worktree specifically. Worktrees are per-agent now,
+      # and the one that rebuilds the guest is agent 0's by definition: it is
+      # the agent whose job this is.
+      inGuest = "/projects/coding-cave/0/cave-vm";
     in
     if env != "" then env
     else if builtins.pathExists inGuest then inGuest
@@ -85,8 +88,11 @@ let
     # Which project, from the session's own environment. No default: an agent
     # started without one has nothing to work on, and landing it in some other
     # project's worktree is worse than failing.
-    : "''${CAVE_PROJECT:?no project}"
-    cd "/projects/$CAVE_PROJECT"
+    : "''${CAVE_PROJECT:?no project}" "''${CAVE_AGENT_ID:?no agent id}"
+    # The agent's own worktree, not the project's: there is one per agent
+    # now, and landing in another agent's is the same class of mistake as
+    # landing in another project's.
+    cd "/projects/$CAVE_PROJECT/$CAVE_AGENT_ID"
     exec ${claudeCode}/bin/claude --dangerously-skip-permissions "$@"
   '';
 
@@ -591,11 +597,40 @@ in
         # on, which is the bug this unit used to be.
         : "''${CAVE_PROJECT:?no project}" "''${CAVE_BASE:?no base branch}"
         : "''${CAVE_AGENT_ID:?no agent id}"
-        repo="/projects/$CAVE_PROJECT"
-        # Worktrees live at /projects/<slug>, the same place the container
-        # caves put them, rather than in the agent's home. git clone creates
-        # the leaf and not the parent.
-        install -d -m 755 /projects
+        # One worktree per agent, at /projects/<slug>/<id>, which is the
+        # layout `main` files them under (worktrees/<slug>/<agent>). It used
+        # to be /projects/<slug> for everyone, and that single tree is what
+        # made two agents impossible: the second one to start would either
+        # take the first's checkout out from under it or be refused.
+        #
+        # The separation stops there, deliberately. Nothing stops one agent
+        # reading or writing another's tree, and with the root agent being
+        # root nothing could without a second mechanism. Inside the guest
+        # agents are colleagues, not strangers; the boundary that means
+        # anything is the VM's (docs/vm-cave-boundary.md).
+        repo="/projects/$CAVE_PROJECT/$CAVE_AGENT_ID"
+        # A guest from before the split has its one checkout sitting exactly
+        # where the per-agent directory now goes, so the clone below would
+        # nest a repo inside a repo and leave the old tree as cruft nobody
+        # ever looks at again. Move it under the id its branch already names
+        # instead: that is whose tree it is, whether or not it is the agent
+        # starting now, and nothing is deleted either way.
+        legacy="/projects/$CAVE_PROJECT"
+        if [ -d "$legacy/.git" ]; then
+          on=$(git -C "$legacy" symbolic-ref --quiet --short HEAD || echo "")
+          case "$on" in
+            agent-*/*) owner=''${on#agent-}; owner=''${owner%%/*} ;;
+            *) owner="$CAVE_AGENT_ID" ;;
+          esac
+          echo "clone-repo: moving the pre-split checkout to $legacy/$owner (on ''${on:-detached})"
+          tmp=$(mktemp -d /projects/.migrate.XXXXXX)
+          mv "$legacy" "$tmp/tree"
+          install -d -m 755 "$legacy"
+          mv "$tmp/tree" "$legacy/$owner"
+          rmdir "$tmp"
+        fi
+        # git clone creates the leaf and not the parents.
+        install -d -m 755 "/projects/$CAVE_PROJECT"
         # The project's shared bare repo on the host. Never the human's
         # working checkout: an agent must not be able to write a branch into
         # the tree someone is standing in.
@@ -625,21 +660,20 @@ in
           git remote rename origin host-cave
         fi
         git fetch -q host-cave
-        # One worktree per project, and no caves yet, so every agent would
-        # share this one. `main` gives each agent its own view of
-        # /projects/<slug> through a private mount namespace; until the guest
-        # has caves there is one tree, and switching it to another agent's
-        # branch would yank the ground out from under a running agent. Refuse
-        # instead: shared is survivable, silently reassigned is not.
+        # The path already names the agent, so another agent's branch being
+        # checked out here is not a collision to arbitrate -- it is a sign
+        # that something put the wrong tree in the wrong place. Kept as the
+        # check it now is: refuse rather than switch the branch under whoever
+        # is actually working in it.
         current=$(git symbolic-ref --quiet --short HEAD || echo "")
         case "$current" in
           agent-*/*)
             owner=''${current#agent-}
             owner=''${owner%%/*}
             if [ "$owner" != "$CAVE_AGENT_ID" ]; then
-              echo "clone-repo: $repo belongs to agent $owner (on $current)." >&2
-              echo "  One worktree per project until caves exist, so agent" >&2
-              echo "  $CAVE_AGENT_ID cannot have it. Stop that agent first." >&2
+              echo "clone-repo: $repo is on $current, which belongs to agent $owner." >&2
+              echo "  This is agent $CAVE_AGENT_ID's directory, so that should not" >&2
+              echo "  happen; leaving it alone rather than switching branches." >&2
               exit 1
             fi
             ;;

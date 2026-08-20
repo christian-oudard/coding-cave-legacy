@@ -137,6 +137,19 @@ and the stamp is not something the host can tie to a session. The gate that
 matters is unaffected, since it refuses base branches by namespace and not by
 believing who anybody is.
 
+**Done, and what it left behind.** Worktrees are per agent at
+`/projects/<slug>/<id>`, which is `main`'s layout, and `clone-repo@` moves a
+pre-split checkout under the id its branch names rather than nesting a clone
+inside it. Still single-tenant: `cave-guestd`'s `-cwd` is one flag on a daemon
+that serves every agent, and it decides which project directory a restored
+transcript is filed under. With one worktree that default was simply true;
+with several it is true for one agent and wrong for the rest, so checkpoint
+and restore work for whoever matches the default and silently misfile for
+anyone else. The daemon already knows each agent's project -- it reads
+`/run/cave/sessions/<id>.env` -- so the fix is to derive the cwd per agent
+rather than to take it as a flag, and `sessions.Local` has to carry the agent
+rather than being built once.
+
 ## Uncommitted work does not survive `reformat`, and that is the rule
 
 **Settled, and kept here because it reads like a gap and is not one.** A
