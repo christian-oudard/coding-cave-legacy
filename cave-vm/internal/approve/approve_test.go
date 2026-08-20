@@ -11,16 +11,21 @@ import (
 
 func run(t *testing.T, dir string, args ...string) string {
 	t.Helper()
+	out, err := tryRun(dir, args...)
+	if err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	return out
+}
+
+func tryRun(dir string, args ...string) (string, error) {
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
 	cmd.Env = append(os.Environ(),
 		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
 		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
 		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
 	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
-	}
-	return strings.TrimSpace(string(out))
+	return strings.TrimSpace(string(out)), err
 }
 
 func write(t *testing.T, dir, name, content string) {
@@ -36,33 +41,102 @@ func commit(t *testing.T, dir, msg string) {
 	run(t, dir, "commit", "-q", "-m", msg)
 }
 
-// newRepo builds the shape the guest's pushes leave behind: a base branch,
-// and an agent branch two commits ahead of it. The agent's commits touch
-// agent.txt and the base's history does not, so a diverging base does not
-// also produce a content conflict.
-func newRepo(t *testing.T) string {
+// world is the shape the flow actually runs in: the human's working checkout,
+// and the shared bare repo it knows as `cave`, which is the only place the
+// agent's branches exist. Nothing here is ever the agent's own checkout --
+// from the host's side that is on the far end of a git daemon.
+type world struct{ repo, shared string }
+
+// newWorld builds a base branch, and an agent branch two commits ahead of it
+// in the shared repo only. The agent's commits touch agent.txt and the base's
+// history does not, so a diverging base does not also produce a content
+// conflict.
+func newWorld(t *testing.T) world {
 	t.Helper()
 	dir := t.TempDir()
-	run(t, dir, "init", "-q", "-b", "main")
-	write(t, dir, "base.txt", "base\n")
-	commit(t, dir, "base commit")
-	run(t, dir, "checkout", "-q", "-b", "agent-1/main")
-	write(t, dir, "agent.txt", "one\n")
-	commit(t, dir, "agent commit one")
-	write(t, dir, "agent.txt", "one\ntwo\n")
-	commit(t, dir, "agent commit two")
-	run(t, dir, "checkout", "-q", "main")
-	return dir
+	w := world{repo: filepath.Join(dir, "repo"), shared: filepath.Join(dir, "cave-shared.git")}
+	if err := os.Mkdir(w.repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run(t, w.repo, "init", "-q", "-b", "main")
+	write(t, w.repo, "base.txt", "base\n")
+	commit(t, w.repo, "base commit")
+
+	run(t, ".", "clone", "--bare", "-q", w.repo, w.shared)
+	run(t, w.shared, "remote", "remove", "origin")
+	run(t, w.repo, "remote", "add", Remote, w.shared)
+
+	w.agentPushes(t, "1", "main", "one\n", "agent commit one")
+	w.agentPushes(t, "1", "main", "one\ntwo\n", "agent commit two")
+	return w
 }
 
-func tip(t *testing.T, dir, branch string) string {
+// agentPushes puts a commit on agent-<id>/<base> in the shared repo without
+// leaving anything behind in the checkout, which is what a push over the
+// vsock bridge looks like from here. It builds on whatever that branch
+// already has, or forks the base, or -- for a branch whose base does not
+// exist at all -- whatever is under HEAD.
+func (w world) agentPushes(t *testing.T, id, base, body, msg string) string {
 	t.Helper()
-	return run(t, dir, "rev-parse", "refs/heads/"+branch)
+	back := head(t, w.repo)
+	branch := "agent-" + id + "/" + base
+	// What the shared repo has, not what this checkout knows about it: the
+	// tracking ref is deliberately left stale below, and the agent builds on
+	// its own branch regardless of whether the host has fetched it.
+	start, err := tryRun(w.shared, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch)
+	if err != nil || start == "" {
+		start = base
+		if _, err := tryRun(w.repo, "rev-parse", "--verify", "--quiet", "refs/heads/"+base); err != nil {
+			start = back
+		}
+	}
+	run(t, w.repo, "checkout", "-q", "-B", "tmp-agent", start)
+	write(t, w.repo, "agent.txt", body)
+	commit(t, w.repo, msg)
+	sha := run(t, w.repo, "rev-parse", "HEAD")
+	run(t, w.repo, "push", "-q", "--force", Remote, "HEAD:refs/heads/"+branch)
+	// The real push arrives over a git daemon, so this checkout learns about
+	// it only by fetching. Pushing from here updates the tracking ref as a
+	// side effect, which would hide the staleness these tests are about.
+	tryRun(w.repo, "update-ref", "-d", "refs/remotes/"+Remote+"/"+branch)
+	// Switching back drops agent.txt, or restores the version the branch
+	// being returned to has: it is tracked either way.
+	run(t, w.repo, "checkout", "-q", back)
+	run(t, w.repo, "branch", "-qD", "tmp-agent")
+	return sha
+}
+
+func (w world) fetch(t *testing.T) {
+	t.Helper()
+	if err := Fetch(w.repo); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (w world) resolve(t *testing.T, agent string) Candidate {
+	t.Helper()
+	w.fetch(t)
+	c, err := Resolve(w.repo, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+func tip(t *testing.T, dir, ref string) string {
+	t.Helper()
+	return run(t, dir, "rev-parse", ref)
+}
+
+func head(t *testing.T, dir string) string {
+	t.Helper()
+	return run(t, dir, "symbolic-ref", "--short", "HEAD")
 }
 
 func TestPendingFindsTheAgentBranch(t *testing.T) {
-	dir := newRepo(t)
-	got, err := Pending(dir)
+	w := newWorld(t)
+	w.fetch(t)
+	got, err := Pending(w.repo)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,10 +149,39 @@ func TestPendingFindsTheAgentBranch(t *testing.T) {
 	}
 }
 
+// The bug this whole package was restructured for: a push the checkout has
+// not fetched is still pending, and reading stale remote-tracking refs is how
+// an approve reports success over work nobody can see.
+func TestPendingSeesAPushItHasNotFetchedYet(t *testing.T) {
+	w := newWorld(t)
+	w.fetch(t)
+	w.agentPushes(t, "2", "main", "second agent\n", "another agent's commit")
+
+	before, err := Pending(w.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(before) != 1 {
+		t.Fatalf("stale refs already show %d candidates", len(before))
+	}
+	w.fetch(t)
+	after, err := Pending(w.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != 2 {
+		t.Fatalf("got %d candidates after fetching, want 2: %+v", len(after), after)
+	}
+}
+
 func TestPendingIgnoresABranchThatIsNotAhead(t *testing.T) {
-	dir := newRepo(t)
-	run(t, dir, "merge", "--ff-only", "agent-1/main")
-	got, err := Pending(dir)
+	w := newWorld(t)
+	c := w.resolve(t, "")
+	if _, err := Land(w.repo, c); err != nil {
+		t.Fatal(err)
+	}
+	w.fetch(t)
+	got, err := Pending(w.repo)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,10 +193,10 @@ func TestPendingIgnoresABranchThatIsNotAhead(t *testing.T) {
 // An agent branch whose base has been deleted has nowhere to land, so it is
 // not a candidate rather than an error at approve time.
 func TestPendingIgnoresABranchWithNoBase(t *testing.T) {
-	dir := newRepo(t)
-	run(t, dir, "checkout", "-q", "-b", "agent-3/gone", "agent-1/main")
-	run(t, dir, "checkout", "-q", "main")
-	got, err := Pending(dir)
+	w := newWorld(t)
+	w.agentPushes(t, "3", "gone", "orphan\n", "no base for this")
+	w.fetch(t)
+	got, err := Pending(w.repo)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,9 +208,10 @@ func TestPendingIgnoresABranchWithNoBase(t *testing.T) {
 }
 
 func TestResolveReportsNothingPending(t *testing.T) {
-	dir := newRepo(t)
-	run(t, dir, "branch", "-D", "agent-1/main")
-	if _, err := Resolve(dir, ""); !errors.Is(err, ErrNothingPending) {
+	w := newWorld(t)
+	run(t, w.shared, "branch", "-D", "agent-1/main")
+	w.fetch(t)
+	if _, err := Resolve(w.repo, ""); !errors.Is(err, ErrNothingPending) {
 		t.Fatalf("got %v", err)
 	}
 }
@@ -115,21 +219,19 @@ func TestResolveReportsNothingPending(t *testing.T) {
 // Landing the wrong agent's work is not something you find out about until
 // later, so an unnamed agent with two candidates is refused, not guessed.
 func TestResolveRefusesToGuessBetweenAgents(t *testing.T) {
-	dir := newRepo(t)
-	run(t, dir, "checkout", "-q", "-b", "agent-2/main", "main")
-	write(t, dir, "other.txt", "other\n")
-	commit(t, dir, "the other agent")
-	run(t, dir, "checkout", "-q", "main")
+	w := newWorld(t)
+	w.agentPushes(t, "2", "main", "other\n", "the other agent")
+	w.fetch(t)
 
 	var amb *AmbiguousError
-	_, err := Resolve(dir, "")
+	_, err := Resolve(w.repo, "")
 	if !errors.As(err, &amb) {
 		t.Fatalf("got %v, want an ambiguity", err)
 	}
 	if len(amb.Candidates) != 2 {
 		t.Fatalf("got %d candidates", len(amb.Candidates))
 	}
-	c, err := Resolve(dir, "2")
+	c, err := Resolve(w.repo, "2")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,117 +240,208 @@ func TestResolveRefusesToGuessBetweenAgents(t *testing.T) {
 	}
 }
 
-func TestLandFastForwardsACheckedOutBase(t *testing.T) {
-	dir := newRepo(t)
-	want := tip(t, dir, "agent-1/main")
-	c, err := Resolve(dir, "")
-	if err != nil {
+// Standing on an agent branch is an answer: review put you there, so approve
+// does not ask which agent again.
+func TestResolvePrefersTheBranchYouAreStandingOn(t *testing.T) {
+	w := newWorld(t)
+	w.agentPushes(t, "2", "main", "other\n", "the other agent")
+	w.fetch(t)
+	if err := Checkout(w.repo, Candidate{Branch: "agent-2/main", Base: "main", Agent: "2"}); err != nil {
 		t.Fatal(err)
 	}
-	n, err := Land(dir, c)
+	c, err := Resolve(w.repo, "")
+	if err != nil {
+		t.Fatalf("got %v, want the branch under HEAD", err)
+	}
+	if c.Branch != "agent-2/main" {
+		t.Fatalf("resolved %s while standing on agent-2/main", c.Branch)
+	}
+}
+
+func TestCheckoutPutsTheWorktreeOnTheAgentsCode(t *testing.T) {
+	w := newWorld(t)
+	c := w.resolve(t, "")
+	if err := Checkout(w.repo, c); err != nil {
+		t.Fatal(err)
+	}
+	if got := head(t, w.repo); got != "agent-1/main" {
+		t.Fatalf("HEAD is on %s", got)
+	}
+	body, err := os.ReadFile(filepath.Join(w.repo, "agent.txt"))
+	if err != nil || string(body) != "one\ntwo\n" {
+		t.Fatalf("worktree is not the agent's: %q %v", body, err)
+	}
+}
+
+// Reviewing twice with a push in between: the agent's history is the truth,
+// so a local copy that has drifted from it is reset rather than merged.
+func TestCheckoutResetsALocalCopyThatHasDrifted(t *testing.T) {
+	w := newWorld(t)
+	if err := Checkout(w.repo, w.resolve(t, "")); err != nil {
+		t.Fatal(err)
+	}
+	write(t, w.repo, "local.txt", "not the agent's\n")
+	commit(t, w.repo, "a commit only this checkout has")
+
+	want := w.agentPushes(t, "1", "main", "one\ntwo\nthree\n", "agent commit three")
+	c := w.resolve(t, "")
+	if err := Checkout(w.repo, c); err != nil {
+		t.Fatal(err)
+	}
+	if got := tip(t, w.repo, "HEAD"); got != want {
+		t.Fatalf("HEAD is at %s, want the pushed tip %s", got, want)
+	}
+	if _, err := os.Stat(filepath.Join(w.repo, "local.txt")); !os.IsNotExist(err) {
+		t.Fatal("the drifted commit survived the reset")
+	}
+}
+
+// The ordinary flow, end to end: review, then approve, and you come away
+// standing on the base with the work in it. This is what the shared-repo-only
+// version got wrong -- it moved a ref the checkout could not see.
+func TestLandLeavesYouOnTheBaseWithTheWork(t *testing.T) {
+	w := newWorld(t)
+	c := w.resolve(t, "")
+	want := tip(t, w.repo, c.Ref())
+	if err := Checkout(w.repo, c); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := Land(w.repo, c)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if n != 2 {
 		t.Fatalf("landed %d commits, want 2", n)
 	}
-	if got := tip(t, dir, "main"); got != want {
-		t.Fatalf("main is at %s, want %s", got, want)
+	if got := head(t, w.repo); got != "main" {
+		t.Fatalf("approve left HEAD on %s", got)
+	}
+	if got := tip(t, w.repo, "refs/heads/main"); got != want {
+		t.Fatalf("local main is at %s, want %s", got, want)
 	}
 	// The worktree has to come along, or every landed file shows up as a
 	// staged deletion in the shell you are standing in.
-	body, err := os.ReadFile(filepath.Join(dir, "agent.txt"))
+	body, err := os.ReadFile(filepath.Join(w.repo, "agent.txt"))
 	if err != nil || string(body) != "one\ntwo\n" {
 		t.Fatalf("worktree not updated: %q %v", body, err)
 	}
 }
 
-func TestLandMovesABaseThatIsNotCheckedOut(t *testing.T) {
-	dir := newRepo(t)
-	run(t, dir, "checkout", "-q", "-b", "sidetrack")
-	want := tip(t, dir, "agent-1/main")
-	c, _ := Resolve(dir, "")
-	if _, err := Land(dir, c); err != nil {
+// The agent's origin has to move too, or its next rebase is onto a base that
+// is missing its own landed work.
+func TestLandMovesTheBaseInTheSharedRepo(t *testing.T) {
+	w := newWorld(t)
+	c := w.resolve(t, "")
+	want := tip(t, w.repo, c.Ref())
+	if _, err := Land(w.repo, c); err != nil {
 		t.Fatal(err)
 	}
-	if got := tip(t, dir, "main"); got != want {
-		t.Fatalf("main is at %s, want %s", got, want)
-	}
-	if got := run(t, dir, "symbolic-ref", "--short", "HEAD"); got != "sidetrack" {
-		t.Fatalf("HEAD moved to %s", got)
+	if got := tip(t, w.shared, "refs/heads/main"); got != want {
+		t.Fatalf("the shared repo's main is at %s, want %s", got, want)
 	}
 }
 
-// The real target: the project's shared bare repo, where agent branches
-// actually land. Nobody is standing in it, so the ref just moves, and HEAD
-// naming the base must not be read as "the base is checked out".
-func TestLandMovesTheBaseInABareRepo(t *testing.T) {
-	src := newRepo(t)
-	bare := filepath.Join(t.TempDir(), "shared.git")
-	run(t, ".", "clone", "--bare", "-q", src, bare)
+// A branch with nothing left on it is a phantom: invisible in status,
+// confusing in review. The agent's next push recreates it.
+func TestLandCleansUpTheAgentBranch(t *testing.T) {
+	w := newWorld(t)
+	c := w.resolve(t, "")
+	if err := Checkout(w.repo, c); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Land(w.repo, c); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tryRun(w.shared, "rev-parse", "--verify", "--quiet", "refs/heads/"+c.Branch); err == nil {
+		t.Fatal("the agent branch is still in the shared repo")
+	}
+	if _, err := tryRun(w.repo, "rev-parse", "--verify", "--quiet", "refs/heads/"+c.Branch); err == nil {
+		t.Fatal("the local copy of the agent branch survived")
+	}
+	if _, err := tryRun(w.repo, "rev-parse", "--verify", "--quiet", c.Ref()); err == nil {
+		t.Fatal("the remote-tracking ref was not pruned")
+	}
+}
 
-	c, err := Resolve(bare, "")
-	if err != nil {
+func TestLandFromTheBaseBranch(t *testing.T) {
+	w := newWorld(t)
+	c := w.resolve(t, "")
+	want := tip(t, w.repo, c.Ref())
+	if got := head(t, w.repo); got != "main" {
+		t.Fatalf("this test means to start on the base, not %s", got)
+	}
+	if _, err := Land(w.repo, c); err != nil {
 		t.Fatal(err)
 	}
-	want := tip(t, bare, "agent-1/main")
-	n, err := Land(bare, c)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n != 2 {
-		t.Fatalf("landed %d commits, want 2", n)
-	}
-	if got := tip(t, bare, "main"); got != want {
-		t.Fatalf("main is at %s, want %s", got, want)
+	if got := tip(t, w.repo, "refs/heads/main"); got != want {
+		t.Fatalf("local main is at %s, want %s", got, want)
 	}
 }
 
 func TestLandRefusesWhenTheBaseHasMovedOn(t *testing.T) {
-	dir := newRepo(t)
-	write(t, dir, "local.txt", "local\n")
-	commit(t, dir, "base moved on")
-	before := tip(t, dir, "main")
+	w := newWorld(t)
+	write(t, w.repo, "local.txt", "local\n")
+	commit(t, w.repo, "base moved on")
+	run(t, w.repo, "push", "-q", Remote, "main")
+	w.fetch(t)
+	before := tip(t, w.shared, "refs/heads/main")
 
-	c, _ := Resolve(dir, "")
+	c, err := Resolve(w.repo, "")
+	if err != nil {
+		t.Fatal(err)
+	}
 	var nff *NotFastForwardError
-	if _, err := Land(dir, c); !errors.As(err, &nff) {
+	if _, err := Land(w.repo, c); !errors.As(err, &nff) {
 		t.Fatalf("got %v, want a non-fast-forward", err)
 	}
-	if got := tip(t, dir, "main"); got != before {
+	if got := tip(t, w.shared, "refs/heads/main"); got != before {
 		t.Fatal("a refused approve moved the base anyway")
 	}
 }
 
 // git's own rule, not one invented here: uncommitted work that the landing
-// commits would overwrite stops the merge.
+// commits would overwrite stops the merge. Nothing else has moved when it
+// does, which is why the checkout is the first thing Land touches.
 func TestLandRefusesOverUncommittedWork(t *testing.T) {
-	dir := newRepo(t)
-	write(t, dir, "agent.txt", "mine\n")
-	before := tip(t, dir, "main")
+	w := newWorld(t)
+	c := w.resolve(t, "")
+	write(t, w.repo, "agent.txt", "mine\n")
+	before := tip(t, w.shared, "refs/heads/main")
 
-	c, _ := Resolve(dir, "")
-	if _, err := Land(dir, c); err == nil {
+	if _, err := Land(w.repo, c); err == nil {
 		t.Fatal("landed over uncommitted work")
 	}
-	if got := tip(t, dir, "main"); got != before {
-		t.Fatal("a refused approve moved the base anyway")
+	if got := tip(t, w.shared, "refs/heads/main"); got != before {
+		t.Fatal("a refused approve moved the shared base anyway")
+	}
+	if _, err := tryRun(w.shared, "rev-parse", "--verify", "--quiet", "refs/heads/"+c.Branch); err != nil {
+		t.Fatal("a refused approve deleted the agent branch")
 	}
 }
 
 func TestReviewOutput(t *testing.T) {
-	dir := newRepo(t)
-	c, _ := Resolve(dir, "")
-	log, err := Log(dir, c)
+	w := newWorld(t)
+	c := w.resolve(t, "")
+	log, err := Log(w.repo, c)
 	if err != nil || !strings.Contains(log, "agent commit two") {
 		t.Fatalf("log %q %v", log, err)
 	}
-	stat, err := Stat(dir, c)
+	stat, err := Stat(w.repo, c)
 	if err != nil || !strings.Contains(stat, "agent.txt") {
 		t.Fatalf("stat %q %v", stat, err)
 	}
-	diff, err := Diff(dir, c)
-	if err != nil || !strings.Contains(diff, "+two") {
-		t.Fatalf("diff %q %v", diff, err)
+}
+
+// A checkout with no shared repo is a situation to name, not a git error to
+// pass through: it means nothing has ever created one for this project.
+func TestNoRemoteIsItsOwnAnswer(t *testing.T) {
+	dir := t.TempDir()
+	run(t, dir, "init", "-q", "-b", "main")
+	if _, err := Shared(dir); !errors.Is(err, ErrNoRemote) {
+		t.Fatalf("got %v, want ErrNoRemote", err)
+	}
+	if err := Fetch(dir); !errors.Is(err, ErrNoRemote) {
+		t.Fatalf("got %v, want ErrNoRemote", err)
 	}
 }

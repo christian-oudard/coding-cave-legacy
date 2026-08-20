@@ -86,6 +86,46 @@ it is the channel a deploy needs and a broken one is only recoverable by
 reformat. It should become a socket unit the same way, and `cave-control`
 already proves the shape works for AF_VSOCK.
 
+## The root agent should be agent 0, and there should be a second one
+
+Two agents at once, one root and one not, is the next thing this guest is
+being pushed toward, and the id is the first thing in the way. `vmcav agent`
+hardcodes `local id=1`, so the agent that builds the guest from inside it --
+the root one, the only one there has ever been -- is agent 1, and the first
+ordinary agent would collide with it or be handed 2 for no reason anyone
+could state.
+
+Reserve 0 for it. The root agent is not one of the numbered agents: it is the
+one that redeploys the system the others run in, it exists before any project
+is assigned, and it is the only one for which "root in the guest" is the point
+rather than a hazard. A reserved id says that in the branch namespace, where
+`agent-0/<base>` is visibly not part of the sequence, and it leaves 1..N to
+mean what it means in `main` -- one per agent a human created.
+
+Most of the machinery is already indifferent to the number. `pre-receive`
+gates by whatever id the daemon injects and `scripts/test-git-hooks.sh`
+already exercises agent 0. `clone-repo@` and `cave-session@` are templates
+instanced by id. What is not: the hardcoded 1 in `vmcav agent`, and this VM's
+own checkout, which is on `agent-1/vm-cave` and would have to be recreated as
+`agent-0/vm-cave` or left as a legacy branch until it lands.
+
+The harder half is that the id does not currently belong to an agent at all.
+It belongs to the git daemon: `start_git_daemon` exports one
+`CODING_CAVE_AGENT_ID` for every connection on one port, so two agents pushing
+through it are the same agent as far as `pre-receive` can tell, and the
+namespace guard stops separating anyone. Reserving 0 is worth doing on its own
+-- it names the root agent correctly -- but it does not make two agents
+distinguishable, and nothing else will until the id arrives with the
+connection rather than with the daemon.
+
+Open, and the reason this is a note rather than a change: whether the second
+agent is non-root by being a different unix user in the same guest, with the
+worktree, the ssh identity and the daemon's idea of who is pushing split per
+agent, or whether root-vs-not is the distinction that finally requires caves
+inside the guest. The first is cheaper and is probably enough to run two
+agents tomorrow; the second is what `main`'s per-agent isolation actually
+buys, and doing the cheap one first should not quietly become the answer.
+
 ## Uncommitted work does not survive `reformat`, and that is the rule
 
 **Settled, and kept here because it reads like a gap and is not one.** A
@@ -98,6 +138,13 @@ with the gate for no benefit.
 
 So the VM is cattle in the strong sense. The agent's obligation is to commit
 early; the tool's obligation is not to pretend otherwise.
+
+What has since changed is the gap between committing and publishing, not this
+rule. The guest's `git` pushes the agent branch after any command that moves
+it (`guest/cave-git.sh`), so a commit is on the host the moment it exists and
+"commit early" no longer also means "remember to push". Everything above still
+holds for a worktree that was never committed, which is the only thing a
+reformat now destroys.
 
 The text below is what was considered before that decision, retained only so
 the options are not re-derived.
@@ -133,7 +180,7 @@ or is a guest-side habit (autocommit unit, periodic push).
 
 The blocker a first real dogfooding run hits, and it is not on any list above.
 `ensure_shared_repo` clones the project's bare repo once, at first `start`, and
-after that nothing updates it from the working checkout. The agent's `origin`
+after that nothing updates it from the working checkout. The agent's `host-cave`
 is that bare repo, so an agent cloning or fetching sees the base as it stood
 when the VM was first created, however many commits ago.
 
@@ -571,10 +618,14 @@ Settled, so that it is not re-derived:
   works on, not where the guest config comes from. `CAVE_GUEST_REF`, the
   hardcoded `agent-1`, and the spec-commit state all go away with it.
 
-Done: the host consumes what an agent pushes. `vmcav review`, `vmcav diff`
-and `vmcav approve` are the last hop, and `vmcav status` says when work is
+Done: the host consumes what an agent pushes. `vmcav review` and
+`vmcav approve` are the last hop, and `vmcav status` says when work is
 waiting. Fast-forward only, so a base that has moved on sends the agent back
-to rebase rather than growing a merge nobody tested.
+to rebase rather than growing a merge nobody tested. Both verbs work in the
+human's checkout against the `cave` remote, the way `main` does it: review
+checks the agent's branch out, approve lands it here and in the shared repo.
+There was a `vmcav diff` and it is gone -- reviewing means reading the code
+with the tools you already have, and `main` never had one.
 
 Open: whether the spec ref means "the agent's branch" (agent deploys without
 approval, human is the outsider) or "what the VM runs" (both move it, the

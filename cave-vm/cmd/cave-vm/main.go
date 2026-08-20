@@ -25,7 +25,7 @@ func main() {
 	switch cmd := os.Args[1]; cmd {
 	case "version":
 		fmt.Println(version)
-	case "pending", "review", "diff", "approve":
+	case "pending", "review", "approve":
 		gitCommand(cmd, os.Args[2:])
 	case "start":
 		vmStart(os.Args[2:])
@@ -51,8 +51,9 @@ func main() {
 }
 
 func gitCommand(cmd string, args []string) {
-	// -C, so the caller decides which checkout this is about. vmcav passes
-	// the repo it already resolved; a bare invocation means the cwd's.
+	// -C, so the caller decides which checkout this is about: the human's
+	// working checkout, not the shared bare repo. vmcav passes the repo it
+	// already resolved; a bare invocation means the cwd's.
 	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
 	dir := fs.String("C", ".", "repository to work in")
 	yes := fs.Bool("y", false, "skip the confirmation (approve)")
@@ -64,8 +65,6 @@ func gitCommand(cmd string, args []string) {
 		pending(*dir)
 	case "review":
 		review(*dir, agent)
-	case "diff":
-		showDiff(*dir, agent)
 	case "approve":
 		land(*dir, agent, *yes)
 	}
@@ -79,7 +78,7 @@ func plural(n int) string {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: cave-vm [pending|review|diff|approve|version]")
+	fmt.Fprintln(os.Stderr, "usage: cave-vm [pending|review|approve|version]")
 	fmt.Fprintln(os.Stderr, "       cave-vm [start|stop|serve|running|socket|cache-key|vsock-connect] --state DIR ...")
 	fmt.Fprintln(os.Stderr, "       cave-vm sessions -ssh-config F [checkpoint|restore <id>...|list]")
 	os.Exit(2)
@@ -93,6 +92,9 @@ func die(err error) {
 	switch {
 	case errors.Is(err, approve.ErrNothingPending):
 		fmt.Fprintln(os.Stderr, "nothing to approve")
+	case errors.Is(err, approve.ErrNoRemote):
+		fmt.Fprintf(os.Stderr, "this checkout has no '%s' remote, so there is no shared repo to read\n", approve.Remote)
+		fmt.Fprintln(os.Stderr, "  (vmcav start creates it, and adds the remote)")
 	case errors.As(err, &amb):
 		fmt.Fprintln(os.Stderr, "more than one agent has work pending; name one (approve <agent>):")
 		for _, c := range amb.Candidates {
@@ -107,7 +109,13 @@ func die(err error) {
 	os.Exit(1)
 }
 
+// resolve fetches first, always: the shared repo is where the agent pushes
+// and nothing tells this checkout that it happened, so acting on
+// remote-tracking refs without refreshing them is acting on a guess.
 func resolve(dir, agent string) approve.Candidate {
+	if err := approve.Fetch(dir); err != nil {
+		die(err)
+	}
 	c, err := approve.Resolve(dir, agent)
 	if err != nil {
 		die(err)
@@ -119,6 +127,11 @@ func resolve(dir, agent string) approve.Candidate {
 // is where you find out one arrived. Silent when there is nothing, so it can
 // be called unconditionally.
 func pending(dir string) {
+	// Silent about a missing remote too: status runs on every start, and a
+	// checkout with no shared repo yet has nothing to say, not a complaint.
+	if err := approve.Fetch(dir); err != nil {
+		return
+	}
 	all, err := approve.Pending(dir)
 	if err != nil {
 		die(err)
@@ -131,11 +144,17 @@ func pending(dir string) {
 	}
 }
 
-// review is what the agent did at the granularity you read first: subjects,
-// then which files and how much. `diff` is the same range in full.
+// review checks the agent's branch out in your working tree and says what is
+// on it: subjects, then which files and how much. Reading the change itself
+// is then your editor's job and your test runner's, which is why there is no
+// `diff` subcommand -- `main` has none either, and a diff this program prints
+// is a worse version of the one you already have tools for.
 func review(dir, agent string) {
 	c := resolve(dir, agent)
-	fmt.Fprintf(os.Stderr, "%s -> %s\n", c.Branch, c.Base)
+	if err := approve.Checkout(dir, c); err != nil {
+		die(err)
+	}
+	fmt.Fprintf(os.Stderr, "%s -> %s (checked out)\n", c.Branch, c.Base)
 	out, err := approve.Log(dir, c)
 	if err != nil {
 		die(err)
@@ -144,14 +163,7 @@ func review(dir, agent string) {
 	if stat, err := approve.Stat(dir, c); err == nil && stat != "" {
 		fmt.Println(stat)
 	}
-}
-
-func showDiff(dir, agent string) {
-	out, err := approve.Diff(dir, resolve(dir, agent))
-	if err != nil {
-		die(err)
-	}
-	fmt.Println(out)
+	fmt.Fprintf(os.Stderr, "land it: vmcav approve   (leave it: git checkout %s)\n", c.Base)
 }
 
 func land(dir, agent string, yes bool) {
@@ -169,7 +181,8 @@ func land(dir, agent string, yes bool) {
 	if err != nil {
 		die(err)
 	}
-	fmt.Fprintf(os.Stderr, "landed %d commit%s on %s\n", n, plural(n), c.Base)
+	fmt.Fprintf(os.Stderr, "landed %d commit%s on %s, here and in the shared repo\n",
+		n, plural(n), c.Base)
 }
 
 // Default no, like every other destructive-ish prompt in the cave: an empty

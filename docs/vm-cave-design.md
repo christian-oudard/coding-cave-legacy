@@ -89,7 +89,7 @@ match the Go module layout below and will not for a while. What exists:
 - **`scripts/vmcav`**, a shell script, still owns everything above the VMM:
   seed staging, the git daemon, the gpg broker, `agent`, `shell`,
   `image create|reformat`, and the prose of `status`. It delegates the VM
-  itself and every `review|diff|approve` to the Go binary. What remains of
+  itself and every `review|approve` to the Go binary. What remains of
   its portability debt is `mke2fs` for the seed image and the assumption
   that guest store paths exist on the host.
 - **`cave-vm/internal/`** is `agentd`, `approve`, `registry` and `vmm`, not

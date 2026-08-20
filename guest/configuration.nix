@@ -90,6 +90,25 @@ let
     exec ${claudeCode}/bin/claude --dangerously-skip-permissions "$@"
   '';
 
+  # The guest's git, which pushes what it commits (guest/cave-git.sh).
+  #
+  # It shadows git rather than sitting in front of it on PATH: the agent's
+  # unit, an ssh login and every subprocess claude spawns would each have to
+  # get that order right, and a git that silently stopped syncing looks
+  # exactly like a git that is working. Real git stays reachable at its own
+  # store path, which is what the wrapper runs.
+  caveGit = pkgs.symlinkJoin {
+    name = "cave-git-${pkgs.git.version}";
+    paths = [ pkgs.git ];
+    postBuild = ''
+      rm $out/bin/git
+      substitute ${./cave-git.sh} $out/bin/git \
+        --replace '#!/usr/bin/env bash' '#!${pkgs.bash}/bin/bash' \
+        --replace '@REAL_GIT@' '${pkgs.git}/bin/git'
+      chmod +x $out/bin/git
+    '';
+  };
+
   # git's gpg.program inside the guest. Signing is forwarded to the host
   # broker over the service plane, because the secret key deliberately cannot
   # reach the guest; everything else (notably verification) runs the real gpg
@@ -472,7 +491,8 @@ in
   # after a deploy. bash and nix are named explicitly for that reason, rather
   # than relied on as somebody else's default.
   environment.systemPackages = with pkgs; [
-    git
+    # Not pkgs.git: the guest's git is the one that pushes what it commits.
+    caveGit
     caveGuestd
     caveAgent
     claudeCode
@@ -586,10 +606,25 @@ in
         branch="agent-$CAVE_AGENT_ID/$CAVE_BASE"
         if [ ! -d "$repo/.git" ]; then
           echo "clone-repo: cloning $url"
-          git clone "$url" "$repo"
+          # host-cave, not origin, which is the name `main` gives the same
+          # remote inside a cave (constants::HOST_SHARED_REMOTE). It says what
+          # is on the other end: not the project's upstream, but the host's
+          # copy, one approval away from being anybody else's.
+          git clone -o host-cave "$url" "$repo"
         fi
         cd "$repo"
-        git fetch -q origin
+        # A checkout made before that name existed still calls it origin.
+        # Renamed rather than added, because two remotes for one repo is how a
+        # push ends up somewhere nobody is reviewing -- and the git wrapper
+        # pushes to host-cave by name, so a checkout that kept the old name
+        # would simply stop publishing, silently, which is the failure this
+        # whole arrangement exists to prevent.
+        if ! git remote get-url host-cave >/dev/null 2>&1 \
+           && git remote get-url origin >/dev/null 2>&1; then
+          echo "clone-repo: renaming the remote origin -> host-cave"
+          git remote rename origin host-cave
+        fi
+        git fetch -q host-cave
         # One worktree per project, and no caves yet, so every agent would
         # share this one. `main` gives each agent its own view of
         # /projects/<slug> through a private mount namespace; until the guest
@@ -615,10 +650,10 @@ in
           echo "clone-repo: $repo has uncommitted changes; leaving it alone"
           exit 0
         fi
-        if git rev-parse --verify --quiet "refs/remotes/origin/$branch" >/dev/null; then
-          git checkout -q -B "$branch" --track "origin/$branch"
+        if git rev-parse --verify --quiet "refs/remotes/host-cave/$branch" >/dev/null; then
+          git checkout -q -B "$branch" --track "host-cave/$branch"
         else
-          git checkout -q -B "$branch" "origin/$CAVE_BASE"
+          git checkout -q -B "$branch" "host-cave/$CAVE_BASE"
         fi
         # Accept claude's trust and onboarding dialogs for this worktree. Here
         # rather than in seed-claude-config, because the key is the project

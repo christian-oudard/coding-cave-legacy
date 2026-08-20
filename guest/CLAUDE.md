@@ -11,9 +11,11 @@ You are root in a NixOS guest that exists to build this project. The host runs
 NIC: every byte in or out crosses one of them, and that is the design rather
 than a limitation to route around (`docs/vm-cave-boundary.md`).
 
-- `git://127.0.0.1/<project>.git` is `origin`, the project's shared bare
-  repo on the host, over vsock. The path is the project name, not the bare
-  repo's filename there; `git remote -v` tells you which.
+- `git://127.0.0.1/<project>.git` is `host-cave`, the project's shared bare
+  repo on the host, over vsock. Not `origin`: it is the host's copy, one
+  approval away from being anybody else's, and the name says so. The path is
+  the project name, not the bare repo's filename there; `git remote -v` tells
+  you which.
 - `http://127.0.0.1:10255` is the proxy, and the only way to the internet.
 - `http://127.0.0.1:7100` is the host's nix store as a binary cache, so
   `nix build` and `nix develop` mostly substitute rather than compile.
@@ -22,11 +24,18 @@ than a limitation to route around (`docs/vm-cave-boundary.md`).
 
 ## How your work reaches a human
 
-Nothing here is visible outside the VM until you push. There is no automatic
-push in this VM, unlike a container cave, so a commit you have not pushed
-exists only on a disk that a `reformat` will destroy without asking twice.
+Nothing here is visible outside the VM until you push, and a commit that never
+leaves exists only on a disk a `reformat` will destroy without asking twice.
+So your `git` is not stock git: it pushes your branch after any command that
+moves it, the same way a container cave's does. Committing is the act that
+publishes.
 
-    git commit ... && git push
+    git commit ...          # the push happens with it
+
+It stays out of the way otherwise: nothing is pushed from a base branch, a
+`worktree-*` scratch branch, a detached HEAD, or a command that failed, and a
+push that cannot land warns on stderr rather than failing your commit. When it
+does warn, believe it -- the work is then in this VM and nowhere else.
 
 You are on `agent-1/vm-cave` and may push only to `agent-1/*`. Pushing to a
 base branch is refused by a hook on the host, which is not an obstacle to work
@@ -35,7 +44,7 @@ around: it is the approval gate. A human runs `vmcav review`, then
 
 When the base moves, rebase onto it rather than merging:
 
-    git fetch origin && git rebase origin/vm-cave
+    git fetch host-cave && git rebase host-cave/vm-cave
 
 If your branch and the base have diverged in ways a rebase will not settle,
 say so and stop. Do not force the history of a base branch.
@@ -49,7 +58,7 @@ vm-cave-todo.md` holds what is known to be missing and undecided, and
 
 Prefer config over imperative state: a change that survives only until the
 next boot is not a change. You can rebuild the system you are running with
-`nixos-rebuild switch --flake /projects/coding-cave/guest#cave-guest --impure`,
+`nixos-rebuild switch --flake /projects/coding-cave/guest#cave-guest-dev --impure`,
 which is the same closure the host would deploy. A kernel change needs the
 host to restart the VM, and everything else takes effect in place.
 

@@ -57,8 +57,8 @@ port per agent).
 ## Git flow
 
 Phase 7, about half landed. Present: the vsock git bridge on 7300, the
-pre-receive and post-receive hooks, and `review`, `diff`, `approve` as
-fast-forward of a whole agent branch onto its base.
+pre-receive and post-receive hooks, the guest's auto-pushing git, and
+`review`/`approve` as fast-forward of a whole agent branch onto its base.
 
 The round trip is verified end to end rather than assumed. From inside the
 guest a bare `git push` lands on `agent-1/vm-cave` (the guest's `/etc/gitconfig`
@@ -68,6 +68,26 @@ because the agent itself pushed that history. The guard holds in both
 directions it is meant to: a push to the base branch and a push to another
 agent's namespace are both refused by `pre-receive`, with the agent id coming
 from the daemon rather than the client.
+
+Three things about the shape of that flow now match `main` rather than
+differing from it, all three found by running it for real rather than by
+reading it:
+
+- The guest's `git` is a wrapper that pushes what it just committed
+  (`guest/cave-git.sh`, `main`'s `cav-rs/src/bin/git_wrapper.rs`). Before it,
+  a commit the agent forgot to push was one `reformat` from never having
+  existed, and "commit early" was a contract kept by remembering. Verified in
+  the guest after `nixos-rebuild switch`, not on the host alone: this
+  paragraph's own commit was made with no `git push` after it, and arrived on
+  `agent-1/vm-cave` in the shared repo.
+- `review` checks the agent's branch out in the human's checkout, so reviewing
+  is reading the code with the tools you already have. `vmcav diff` existed to
+  substitute for that and is gone; `main` never had one.
+- `approve` lands the work in the human's checkout as well as in the shared
+  repo, and leaves you standing on the base. It used to move a ref inside the
+  bare repo alone, which meant a successful approve followed by a `git log`
+  that did not have the commit -- the first real run of the flow ended exactly
+  there.
 
 So the minimum for a productive single agent is present. What is missing
 below is ergonomics, and each item has a plain-git equivalent a human can run.
@@ -86,7 +106,10 @@ below is ergonomics, and each item has a plain-git equivalent a human can run.
 - `approve --commit <sha>`: partial approval, dev branch preserved with the
   remainder
 - automatic rebase of every agent branch when a base branch moves
-- the host-side checkout of an agent branch that `pull` maintains
+- the host-side checkout of an agent branch that `pull` maintains as its own
+  thing. `review` checks one out in the checkout you are standing in, which
+  covers reading an agent's work; what is absent is a tree the host keeps
+  current without being asked
 
 ## Status, lifecycle, cleanup
 

@@ -47,10 +47,13 @@ Five, and no others. The guest has no NIC, no virtio-fs, and no host paths.
 
 - **Work, and only as git.** The agent pushes to the host's git daemon on
   vsock 7300, into the project's shared bare repo, where `pre-receive` gates it
-  by agent id and `cav approve` fast-forwards it into the real repo. This is
-  the sanctioned output path and it should stay the only one: anything that
-  makes a second way for bytes to become host state is competing with the
-  approval gate.
+  by agent id and `vmcav approve` fast-forwards it into the real repo. The
+  push is automatic -- the guest's `git` makes it after any command that moves
+  the agent branch -- which changes when work crosses, not what may cross or
+  what decides: every byte still arrives as a commit in one namespace, and the
+  gate still stands between it and any base branch. This is the sanctioned
+  output path and it should stay the only one: anything that makes a second
+  way for bytes to become host state is competing with the approval gate.
 - **Requests to the internet**, over vsock 7200 to crinj, which is the only
   path out of the machine and logs every CONNECT.
 - **Signature requests**, over vsock 7400 to the broker, one operation at a

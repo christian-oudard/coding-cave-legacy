@@ -9,7 +9,7 @@
       forAll = f: nixpkgs.lib.genAttrs systems (s: f nixpkgs.legacyPackages.${s});
 
       # The Go binaries. cave-vm is the host CLI the bootstrap script is
-      # migrating into: `vmcav review|diff|approve` already run it. cave-guestd
+      # migrating into: `vmcav review|approve` already run it. cave-guestd
       # is built here too, but it ships in the guest image, not on the host.
       caveVm = pkgs: pkgs.buildGoModule {
         pname = "cave-vm";
@@ -100,6 +100,17 @@
             mkdir -p repo && cp -r ${./scripts} repo/scripts
             export HOME=$TMPDIR REPO=$PWD/repo
             bash repo/scripts/test-git-hooks.sh && touch $out
+          '';
+        # The guest's git wrapper, tested on the host: it is a shell script
+        # against local repos, so the VM has nothing to do with whether it is
+        # correct. guest/ is in the inputs because that is where it lives.
+        cave-git = pkgs.runCommand "cave-git-test"
+          { nativeBuildInputs = with pkgs; [ bash git ]; }
+          ''
+            mkdir -p repo && cp -r ${./scripts} repo/scripts
+            cp -r ${./guest} repo/guest
+            export HOME=$TMPDIR REPO=$PWD/repo
+            bash repo/scripts/test-cave-git.sh && touch $out
           '';
         # Same shape, and the same reason: it sources vmcav for its functions
         # and never starts a VM, so scripts/ is the whole input.
