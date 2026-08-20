@@ -112,6 +112,15 @@
             export HOME=$TMPDIR REPO=$PWD/repo
             bash repo/scripts/test-cave-git.sh && touch $out
           '';
+        # Same shape again: sources vmcav, stubs the one call that needs a
+        # guest, starts nothing.
+        vmcav-agent-id = pkgs.runCommand "vmcav-agent-id-test"
+          { nativeBuildInputs = with pkgs; [ bash git ]; }
+          ''
+            mkdir -p repo && cp -r ${./scripts} repo/scripts
+            export HOME=$TMPDIR
+            bash repo/scripts/test-vmcav-agent-id.sh && touch $out
+          '';
         # Same shape, and the same reason: it sources vmcav for its functions
         # and never starts a VM, so scripts/ is the whole input.
         vmcav-status = pkgs.runCommand "vmcav-status-test"

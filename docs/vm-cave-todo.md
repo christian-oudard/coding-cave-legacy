@@ -118,13 +118,24 @@ namespace guard stops separating anyone. Reserving 0 is worth doing on its own
 distinguishable, and nothing else will until the id arrives with the
 connection rather than with the daemon.
 
-Open, and the reason this is a note rather than a change: whether the second
-agent is non-root by being a different unix user in the same guest, with the
-worktree, the ssh identity and the daemon's idea of who is pushing split per
-agent, or whether root-vs-not is the distinction that finally requires caves
-inside the guest. The first is cheaper and is probably enough to run two
-agents tomorrow; the second is what `main`'s per-agent isolation actually
-buys, and doing the cheap one first should not quietly become the answer.
+**Decided: agents are not isolated from each other yet.** Each gets its own
+worktree in the guest, kept there and never synced to the host, and that is
+the whole of the separation for now. Namespaces or bubblewrap inside the guest
+are a later question, deliberately deferred rather than skipped.
+
+What that buys and what it does not: two agents stop overwriting each other's
+files, which is what actually prevents them running today. It does not make
+one unable to read or write another's tree, and with the root agent being root
+it never could without a second mechanism. So the boundary that means anything
+stays the VM's, exactly as `docs/vm-cave-boundary.md` has it -- inside the
+guest, agents are colleagues rather than strangers, and the host's gate is
+what stands between any of them and a base branch.
+
+The honest consequence for the id: within one VM, attribution is a label
+rather than a guarantee. The root agent can push as anyone, because it is root
+and the stamp is not something the host can tie to a session. The gate that
+matters is unaffected, since it refuses base branches by namespace and not by
+believing who anybody is.
 
 ## Uncommitted work does not survive `reformat`, and that is the rule
 

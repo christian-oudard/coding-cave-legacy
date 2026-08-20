@@ -34,6 +34,13 @@ SHARED="$REPO/.coding-cave/cave-shared.git"
 # guest clones git://127.0.0.1/<slug>.git, so the daemon serves the shared repo
 # under that name too: a project is a name an agent is given, not a constant.
 SLUG="$(basename "$REPO")"
+# The agent that is root in the guest holds a reserved id rather than a low
+# one. It is not one of the agents a human created: it exists before any
+# project is assigned, it redeploys the system the others run in, and being
+# root is the point of it rather than a hazard. 0 says all of that in the
+# branch namespace, where agent-0/<base> is visibly not part of the sequence,
+# and leaves 1..N meaning what it means in `main`.
+ROOT_AGENT_ID=0
 CONFIG="${CODING_CAVE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/coding-cave/config.toml}"
 STATE_DIR="${STATE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/coding-cave/vm}"
 CRINJ_PORT="${CRINJ_PORT:-10255}"
@@ -444,7 +451,11 @@ start_git_daemon() {
   #
   # One directory is whitelisted and it is the shared repo, so a request for
   # any other path on this port resolves to nothing.
-  CODING_CAVE_AGENT_ID="${AGENT_ID:-1}" \
+  # Defaults to the root agent's id, because the root agent is the one that
+  # exists before anybody creates another and the only one that has ever
+  # pushed through here. That is a statement about today, not a design: the
+  # moment a second agent pushes, this stamp is wrong for one of them.
+  CODING_CAVE_AGENT_ID="${AGENT_ID:-$ROOT_AGENT_ID}" \
   git daemon --reuseaddr --export-all --enable=upload-pack --enable=receive-pack \
     --base-path="$dir" --port="$GIT_PORT" --detach --pid-file="$GITPID" \
     "$SHARED" "$dir/$SLUG.git"
@@ -663,6 +674,41 @@ guest_ssh() {
 # Both default to what you are standing in, which is almost always what you
 # mean, and neither is remembered anywhere on the host: the guest holds the
 # agent's own record of what it was created for.
+# Which id a new agent gets. The root agent's is reserved and asked for by
+# name; everyone else takes the lowest free number from 1 up.
+#
+# In use means either half of what an agent is: a session the guest is running
+# (it can be attached to) or a branch in the shared repo (it has pushed work
+# nobody has landed). An id whose branch approve deleted and whose session is
+# gone has nothing left to collide with, so it comes back around -- there is
+# no registry here to remember that it was ever spent, and inventing one to
+# avoid reuse would be inventing state to protect a number.
+allocate_agent_id() {
+  local want_root="$1"
+  if [ -n "$want_root" ]; then
+    echo "$ROOT_AGENT_ID"
+    return 0
+  fi
+  local used
+  used=$( { guest_rpc agents 2>/dev/null | awk '{print $1}'
+            # A prefix, not a glob: for-each-ref's * does not cross a slash,
+            # so refs/heads/agent-* matches no branch an agent has ever
+            # pushed. Filtering the whole list is what the Go side does too.
+            git -C "$SHARED" for-each-ref --format='%(refname:short)' \
+              refs/heads/ 2>/dev/null \
+              | sed -n 's|^agent-\([0-9][0-9]*\)/.*|\1|p'
+          } | sort -un )
+  local n=1
+  while printf '%s\n' "$used" | grep -qx "$n"; do
+    n=$((n + 1))
+  done
+  # The reserved id is not in the sequence, so it can never be handed out by
+  # counting: a root agent that has never run leaves 0 free, and this would
+  # otherwise give it to the first ordinary agent.
+  [ "$n" = "$ROOT_AGENT_ID" ] && n=$((n + 1))
+  echo "$n"
+}
+
 do_agent() {
   # `stop` as the first word is the verb, not a project. A project named
   # "stop" would be pathological, and the alternative is a second top-level
@@ -671,6 +717,15 @@ do_agent() {
     shift
     do_agent_stop "$@"
     return
+  fi
+  # --vm-root names the agent that is root in the guest: the one that
+  # redeploys the system every other agent runs in. It is not one of the
+  # numbered agents, so it holds a reserved id rather than a low one, and
+  # asking for it is deliberate rather than a default you can drift into.
+  local want_root=""
+  if [ "${1:-}" = "--vm-root" ]; then
+    want_root=1
+    shift
   fi
   local project="${1:-$SLUG}" base="${2:-}"
   if [ -z "$base" ]; then
@@ -682,11 +737,13 @@ do_agent() {
     return 1 ;;
   esac
   is_running || { log "the vm is not running (vmcav start)"; return 1; }
-  # One id, in one place. The host cannot allocate these yet (the registry
-  # can, vmcav does not ask it), and it cannot know which agent a push came
-  # from either, so this is the only agent there is.
-  local id=1
-  log "agent $id: $project @ $base (pushes land on agent-$id/$base)"
+  local id
+  id=$(allocate_agent_id "$want_root") || return 1
+  if [ "$id" = "$ROOT_AGENT_ID" ]; then
+    log "agent $id (vm root): $project @ $base (pushes land on agent-$id/$base)"
+  else
+    log "agent $id: $project @ $base (pushes land on agent-$id/$base)"
+  fi
   # Captured rather than passed through, so that a guest too old to know the
   # command gets diagnosed instead of dumping cave-guestd's usage at you. That
   # is the failure people actually hit, because a host script and the binary
@@ -714,8 +771,21 @@ do_agent() {
 # likely to want to resume from, and stopping it is the last moment the guest
 # still has it.
 do_agent_stop() {
-  local id="${1:-1}"
   is_running || { log "the vm is not running"; return 1; }
+  local id="${1:-}"
+  if [ -z "$id" ]; then
+    # The only one running is not a guess; two of them is, and stopping the
+    # wrong agent is not something you find out about until later.
+    local running
+    running=$(guest_rpc agents 2>/dev/null | awk '$2 == "running" {print $1}')
+    case $(printf '%s\n' "$running" | grep -c .) in
+      0) log "no agent is running"; return 1 ;;
+      1) id="$running" ;;
+      *) log "more than one agent is running; name one (vmcav agent stop <id>):"
+         printf '%s\n' "$running" | sed 's/^/  agent /' >&2
+         return 1 ;;
+    esac
+  fi
   guest_rpc stop "$id" || { log "could not stop agent $id"; return 1; }
   log "agent $id stopped"
   sync_sessions
@@ -771,8 +841,9 @@ usage: vmcav <command>
   start           boot the VM detached (idempotent; needs an image)
   stop            ACPI power-down, SIGTERM/SIGKILL fallback
   status          whether it is up, which generation, where the console is
-  agent [proj] [branch]
-                  create the agent for a project and attach (detach: ctrl-\)
+  agent [--vm-root] [proj] [branch]
+                  create an agent for a project and attach (detach: ctrl-\)
+                  --vm-root is the agent that is root in the guest, agent 0
   agent stop [id] stop an agent and bank its transcript
   shell [cmd...]  a root shell in the guest, or run cmd there
   deploy          build the guest config and activate it in the running VM
