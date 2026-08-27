@@ -264,7 +264,38 @@ let
     # mount namespace has already bound this agent's tree over /projects, so
     # there is no other agent's checkout here to land in by mistake and no id
     # to get wrong. Whoever is reading this in a shell sees the same path.
-    cd "/projects/$CAVE_PROJECT"
+    start="/projects/$CAVE_PROJECT"
+
+    # Unless the agent was created to stand somewhere under it. There is one
+    # thing that needs this and it is not a preference: claude files a
+    # session's transcript under the directory it ran in, so a session that
+    # entered a git worktree can only ever be resumed by starting in that
+    # worktree. Until this existed such a record was on disk, listed by
+    # nothing, and reachable by no route a human had -- which is the same as
+    # lost, for work that was never committed.
+    #
+    # Confined to the project rather than taken as given. It arrives from the
+    # host through the env file, and the one thing an agent must not be
+    # talked into is standing outside the tree it was handed: the mount
+    # namespace is what separates two agents, and a cwd is the one string
+    # here that could step over it.
+    if [ -n "''${CAVE_AGENT_CWD:-}" ]; then
+      case "$CAVE_AGENT_CWD" in
+        *..*)
+          echo "cave-agent: $CAVE_AGENT_CWD contains .." >&2; exit 1 ;;
+        "$start" | "$start"/*) ;;
+        *)
+          echo "cave-agent: $CAVE_AGENT_CWD is outside $start" >&2; exit 1 ;;
+      esac
+      if [ ! -d "$CAVE_AGENT_CWD" ]; then
+        # Not a warning that falls back to the project. Falling back would
+        # start the agent somewhere it was not asked to be, and the resume
+        # this exists for would silently find nothing.
+        echo "cave-agent: $CAVE_AGENT_CWD does not exist" >&2; exit 1
+      fi
+      start="$CAVE_AGENT_CWD"
+    fi
+    cd "$start"
 
     # Through PATH, so the environment's claude wins when there is one, and
     # the system's answers when there is not. Deliberately not the pinned

@@ -118,6 +118,8 @@ func start(args []string) {
 	project := fs.String("project", "", "project slug to check out (required)")
 	base := fs.String("base", "", "base branch to work from (required)")
 	root := fs.Bool("root", false, "this agent is the guest's root agent (runs as root)")
+	cwd := fs.String("cwd", "", "start the agent here rather than at the project root "+
+		"(must be inside it; for resuming a session recorded in a worktree)")
 	fs.Parse(args)
 	if *project == "" || *base == "" {
 		die(fmt.Errorf("start needs -project and -base"))
@@ -141,6 +143,30 @@ func start(args []string) {
 	// root be a property of an agent instead of a reserved number.
 	if *root {
 		env += "CAVE_AGENT_ROOT=1\n"
+	}
+	// Where the agent stands, when that is not the project root. Recorded
+	// beside the rest of its identity because it is the same kind of fact --
+	// decided once, when the agent is created, and read back by the launcher.
+	//
+	// Checked here as well as in cave-agent, and the duplication is deliberate:
+	// this is the side that turns a host string into guest state, and the two
+	// checks fail for different reasons. A `..` refused here never reaches the
+	// env file; one refused there never reaches a cd. Containment within the
+	// project is cave-agent's to enforce, because only the guest knows what
+	// /projects means inside a session's mount namespace.
+	if *cwd != "" {
+		if !strings.HasPrefix(*cwd, "/") {
+			die(fmt.Errorf("cwd %q is not absolute", *cwd))
+		}
+		if strings.Contains(*cwd, "..") {
+			die(fmt.Errorf("cwd %q contains ..", *cwd))
+		}
+		if strings.ContainsAny(*cwd, "\n\r") {
+			// It becomes a line in an EnvironmentFile, where a newline would
+			// be a second assignment rather than part of this one.
+			die(fmt.Errorf("cwd %q contains a newline", *cwd))
+		}
+		env += fmt.Sprintf("CAVE_AGENT_CWD=%s\n", *cwd)
 	}
 	if err := os.WriteFile(filepath.Join(*dir, *id+".env"), []byte(env), 0o600); err != nil {
 		die(err)
@@ -172,7 +198,7 @@ func validRef(s string) error {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage: cave-guestd session|list|attach|serve")
-	fmt.Fprintln(os.Stderr, "       cave-guestd start -id N -project SLUG -base BRANCH")
+	fmt.Fprintln(os.Stderr, "       cave-guestd start -id N -project SLUG -base BRANCH [-cwd DIR]")
 	fmt.Fprintln(os.Stderr, "       cave-guestd sessions list|read <id>|write <id>")
 	fmt.Fprintln(os.Stderr, "       cave-guestd env build [-force]")
 	fmt.Fprintln(os.Stderr, "       cave-guestd env seed -home DIR -user NAME")
