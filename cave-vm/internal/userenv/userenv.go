@@ -257,7 +257,15 @@ func toNix(v any) string {
 // than returning it as a fatal: the caller (a session about to start) should
 // carry on with the old environment rather than refuse to start the agent.
 func (e Env) Build() (string, error) {
-	cmd := exec.Command("nix", "build", "--no-link", "--print-out-paths")
+	// --out-link, not --no-link plus a symlink of our own. The difference is
+	// that nix registers an out-link as an indirect GC root, and a hand-made
+	// symlink in /var/lib is not a root at all. Without it a
+	// `nix-collect-garbage` deletes the built environment out from under every
+	// home that has one: the materialized files survive, because they are real
+	// copies, but ~/.cave-profile is a link into the store and would dangle,
+	// so every package the environment provided vanishes from PATH with
+	// nothing to say why.
+	cmd := exec.Command("nix", "build", "--out-link", e.Result(), "--print-out-paths")
 	cmd.Dir = e.Dir
 	// stderr inherited so a slow first build shows nix's own progress rather
 	// than going quiet for minutes.
@@ -272,15 +280,6 @@ func (e Env) Build() (string, error) {
 	}
 	if path == "" {
 		return "", fmt.Errorf("nix build printed no output path")
-	}
-	// Replaced by rename, so nothing ever observes a missing result.
-	tmp := e.Result() + ".tmp"
-	os.Remove(tmp)
-	if err := os.Symlink(path, tmp); err != nil {
-		return "", err
-	}
-	if err := os.Rename(tmp, e.Result()); err != nil {
-		return "", err
 	}
 	return path, nil
 }

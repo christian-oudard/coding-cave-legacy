@@ -430,6 +430,42 @@ EOF
     chmod +x $out/bin/cave-gpg
   '';
 
+  # `cav-host agent-tag`, the cave's byline, and the one piece of `main`'s
+  # in-cave command surface a statusline actually depends on.
+  #
+  # It exists here because a statusline is not cav's to own. `main`'s default
+  # is one line -- `exec cav-host agent-tag` -- and everything richer is the
+  # user's own script overriding statusLine.command and composing on top of
+  # this byline. A guest without the command does not merely lose a default:
+  # it makes every statusline written against a container cave fail here, and
+  # a statusline that fails renders as nothing with the reason nowhere.
+  #
+  # Same output as `main`'s cav_host.rs, deliberately, down to the "?" when it
+  # cannot tell. There the name comes from CODING_CAVE_AGENT_NAME, which the
+  # sandbox injects already joined; here the two halves arrive separately in
+  # the session's environment file, so they are joined here instead.
+  #
+  # `bell` and `version` are not implemented. bell writes to /proc/1/fd/1,
+  # which in a cave is the launching terminal and in this guest is systemd's
+  # console -- the same code would ring a bell nobody is listening to, which
+  # is worse than saying so.
+  caveHost = pkgs.writeShellScriptBin "cav-host" ''
+    case "''${1:-}" in
+      agent-tag)
+        printf 'Coding Cave - %s@%s\n' \
+          "''${CAVE_PROJECT:-?}" "''${CAVE_AGENT_ID:-?}"
+        ;;
+      bell|version)
+        echo "cav-host: $1 is not available in the VM cave." >&2
+        exit 1
+        ;;
+      *)
+        echo "usage: cav-host agent-tag" >&2
+        exit 1
+        ;;
+    esac
+  '';
+
   # One session, in the two forms it comes in. Everything an agent's session
   # is -- the pty, the mount namespace, the environment, what it depends on --
   # is here once, and the two instantiations differ only in who runs it.
@@ -1019,6 +1055,7 @@ in
     caveAgent
     caveEnter
     caveEnvCli
+    caveHost
     caveRebuild
     claudeCode
     bash
