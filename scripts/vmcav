@@ -1127,6 +1127,45 @@ do_deploy() {
   NIX_SSHOPTS="-F $SSHCONF" nix copy --to ssh://cave-guest --no-check-sigs \
     --extra-experimental-features 'nix-command flakes' "$toplevel" || return 1
 
+  # Ask what the activation would do before letting it do it.
+  #
+  # This is the same check `cave-redeploy` makes inside the guest, made here
+  # too because this is the other door onto the same operation: both ends run
+  # `switch-to-configuration switch`, so both can stop a live session and kill
+  # the agent in it. That is not hypothetical -- it happened three times from
+  # the in-guest side, each one taking the terminal with it and leaving the
+  # switch dead half-applied. A deploy from the host would have done the same
+  # thing to whoever was working in there, with the additional charm that the
+  # person who lost their agent is not the person who typed the command.
+  #
+  # Cheap here: the closure is already in the guest, so this is a plan against
+  # paths that exist and not another build. Before $BOOT moves, so that a
+  # refusal leaves the host still pointing at the system the guest is running.
+  log "checking the activation plan"
+  local plan risky
+  plan=$(GUEST_SSH_TTY=-T guest_ssh \
+    "$toplevel/bin/switch-to-configuration dry-activate" 2>&1 | tr -d '\r') || {
+    log "could not plan the activation:"
+    printf '%s\n' "$plan" | sed 's/^/  /' >&2
+    return 1
+  }
+  # "would NOT stop the following changed units:" is the line that says a
+  # session is safe; anchoring on the exact prefixes keeps it from reading as
+  # the one that says it is not.
+  risky=$(printf '%s\n' "$plan" \
+    | grep -E '^would (stop|restart) the following' \
+    | grep -oE 'cave-(root-)?session@[^ ,]+' || true)
+  if [ -n "$risky" ]; then
+    log "this deploy would stop or restart a live agent session:"
+    printf '%s\n' "$risky" | sed 's/^/  /' >&2
+    log "  That kills the agent running in it. Nothing has been activated and"
+    log "  the guest still boots what it is running."
+    log "  Usually a unit a session Requires= is being removed, or has become"
+    log "  RemainAfterExit: leave a no-op behind for one generation instead."
+    log "  See the seed-claude-config tombstone in guest/configuration.nix."
+    return 1
+  fi
+
   # Only now is it safe to say this is what the host boots.
   local old_kernel; old_kernel=$(readlink -f "$BOOT/kernel" 2>/dev/null || true)
   build_guest "$BOOT" kernel initrd toplevel || return 1

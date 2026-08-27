@@ -214,7 +214,31 @@ EOF
     fi
     printf '%s\n' "$plan" | ${pkgs.gnugrep}/bin/grep -E '^would ' || true
     echo "cave-redeploy: no live session is touched; switching"
-    exec ${pkgs.nixos-rebuild}/bin/nixos-rebuild switch --flake "$ref" --impure
+    ${pkgs.nixos-rebuild}/bin/nixos-rebuild switch --flake "$ref" --impure
+
+    # What this did and did not do, said every time, because the difference is
+    # invisible from in here and expensive to discover later.
+    #
+    # This guest carries no bootloader: the host injects kernel, initrd and
+    # init= when it starts the VM, which is what lets a switch register and
+    # activate a generation in place at all. The consequence is that in place
+    # is all it is. The running system has moved; what the host boots has not,
+    # and nothing reachable from inside the guest can change that. Stop the VM
+    # and it comes back on whatever the host last deployed, with this
+    # generation still on the disk and not selected.
+    #
+    # So a redeploy from in here is a live test of a configuration, not a
+    # deployment of one. `vmcav deploy` on the host runs the very same
+    # activation -- and now the very same refusal -- but also moves the host's
+    # boot artifacts, which is the half that makes it survive a restart.
+    cat <<EOF
+
+    cave-redeploy: this is in place only.
+      running now: $(readlink /run/current-system)
+      host boots:  $(sed -n 's|.*init=\(/nix/store/[^ ]*\)/init.*|\1|p' /proc/cmdline)
+    If those differ, a stop/start reverts to the second one. Making it stick
+    is \`vmcav deploy\` on the host; a kernel change needs a restart either way.
+EOF
   '';
 
   # Step into an agent's view of the guest: a root shell, or a command, inside

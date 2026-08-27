@@ -275,6 +275,49 @@ activated by hand first -- and that first switch was done with the
 this in CI, because there is no CI that boots a guest and starts a session.
 The check that matters is the one in the script, run every time.
 
+`vmcav deploy` carries the same refusal, because it is the same operation: it
+ends in `switch-to-configuration switch` inside the guest, so a host-side
+deploy could stop a live session exactly as an in-guest one could, with the
+additional charm that whoever loses their agent is not whoever typed the
+command. It plans against the closure it has already copied in, so the check
+costs a round trip rather than a build, and it runs before the host's boot
+artifacts move -- a refusal leaves the host still pointing at what the guest
+is running.
+
+## Self-update and deploy are the same activation, and not the same thing
+
+Worth stating because the difference is invisible from inside the guest.
+
+Identical: the activation. Both `cave-redeploy` in the guest and `vmcav
+deploy` on the host end in `switch-to-configuration switch` against a
+generation registered in `/nix/var/nix/profiles/system`. Everything above
+about stop cascades applies to both.
+
+Different, and it is the half that decides whether the change survives:
+
+- **Where the closure is built.** In the guest, from the agent's own checkout,
+  substituting from the host store over 7100; or on the host, then `nix copy`
+  into the guest. The guest path is what lets an agent test a configuration it
+  just wrote without a human in the loop.
+- **What boots next.** This guest has no bootloader: the host injects kernel,
+  initrd and `init=` when it starts the VM, which is exactly what lets a
+  switch register and activate a generation in place. The consequence is that
+  in place is all it is. A self-update moves the running system and leaves the
+  host's boot artifacts alone, so a stop/start comes back on whatever the host
+  last deployed, with the newer generation still on the disk and unselected.
+  Nothing reachable from inside the guest can change that, and that is the
+  boundary working rather than a gap in it.
+- **`deployed-from`.** `vmcav deploy` records the commit it built from, which
+  is what `vmcav status` and the staleness warning read. A self-update leaves
+  that record untouched, so after one the host believes the guest is older
+  than it is.
+
+So a redeploy from inside is a live test of a configuration, not a deployment
+of one. The durable form is a human running `vmcav deploy`, which is the same
+shape as the git flow: the agent does the work and proves it, a human lands
+it. A kernel change needs a restart either way (`vmcav deploy && vmcav stop &&
+vmcav start`).
+
 ## Uncommitted work does not survive `reformat`, and that is the rule
 
 **Settled, and kept here because it reads like a gap and is not one.** A
