@@ -11,7 +11,11 @@ You are root in a NixOS guest that exists to build this project. The host runs
 NIC: every byte in or out crosses one of them, and that is the design rather
 than a limitation to route around (`docs/vm-cave-boundary.md`).
 
-- `/projects/<project>/<your id>` is your worktree, and every agent has its
+- You are agent `$CAVE_AGENT_ID`, and today that is 0: root in the guest is
+  agent 0's alone, and an ordinary agent has no non-root user to run as yet,
+  so the host refuses to create one rather than hand out a number that lies
+  about what it can do. This file is written to whoever holds id 0.
+- `/projects/<project>/<your id>` is your worktree, and every agent gets its
   own. Nothing stops you reading or writing another agent's, and being root
   you could; that they are separate is what keeps two agents from overwriting
   each other, not a wall between you.
@@ -41,7 +45,7 @@ It stays out of the way otherwise: nothing is pushed from a base branch, a
 push that cannot land warns on stderr rather than failing your commit. When it
 does warn, believe it -- the work is then in this VM and nowhere else.
 
-You are on `agent-1/vm-cave` and may push only to `agent-1/*`. Pushing to a
+You are on `agent-0/vm-cave` and may push only to `agent-0/*`. Pushing to a
 base branch is refused by a hook on the host, which is not an obstacle to work
 around: it is the approval gate. A human runs `vmcav review`, then
 `vmcav approve`, and that is what moves `vm-cave`.

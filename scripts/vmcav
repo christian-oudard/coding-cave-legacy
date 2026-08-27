@@ -576,7 +576,7 @@ do_status() {
   sync_sessions
   echo "console: $CONSOLE"
   warn_if_guest_is_behind
-  [ "${n:-0}" = 0 ] || echo "attach: vmcav agent   (detach: ctrl-\\)"
+  [ "${n:-0}" = 0 ] || echo "attach: vmcav attach   (detach: ctrl-\\)"
   cave_vm pending || true
 }
 
@@ -747,6 +747,12 @@ do_agent() {
     shift
   fi
   local project="${1:-$SLUG}" base="${2:-}"
+  # An option this does not know is not a project. Without this the guest is
+  # the one that objects, having already been told to check out a project
+  # called "--help", and it objects in its own words.
+  case "$project" in -*)
+    log "unknown option '$project'  (vmcav agent --help)"; return 1 ;;
+  esac
   if [ -z "$base" ]; then
     base=$(git -C "$REPO" symbolic-ref --quiet --short HEAD) \
       || { log "detached HEAD; name a base branch:  vmcav agent $project <branch>"; return 1; }
@@ -763,6 +769,22 @@ do_agent() {
   warn_if_guest_is_behind
   local id
   id=$(allocate_agent_id "$want_root") || return 1
+  # Every session in the guest runs as uid 0: cave-session@ has no non-root
+  # user to run as, and none has been built. Root is agent 0's id, so an
+  # ordinary agent today would be root under a number that says it is not --
+  # which is worse than not having the feature, because the id is what
+  # everything else reads to decide what an agent may do, and the guest's own
+  # CLAUDE.md is addressed to whoever holds it.
+  #
+  # So: refused rather than quietly handed out. The id allocator underneath
+  # this is finished and tested; what is missing is a user in the guest to run
+  # an ordinary agent as (docs/vm-cave-todo.md).
+  if [ "$id" != "$ROOT_AGENT_ID" ]; then
+    log "every agent in the guest runs as root, and root is agent $ROOT_AGENT_ID."
+    log "  Until an ordinary agent has a non-root user to run as, there is one"
+    log "  agent:  vmcav agent --root"
+    return 1
+  fi
   if [ "$id" = "$ROOT_AGENT_ID" ]; then
     log "agent $id (vm root): $project @ $base (pushes land on agent-$id/$base)"
   else
@@ -788,35 +810,44 @@ do_agent() {
     return 1
   fi
   [ -n "$out" ] && printf '%s\n' "$out" >&2
-  do_attach
+  do_attach "$id"
 }
 
 # Stop an agent and keep what it wrote. The sync matters more here than
 # anywhere: an agent stopped on purpose is one whose transcript you are most
 # likely to want to resume from, and stopping it is the last moment the guest
 # still has it.
+# The agent a command means when you did not name one. The only one running is
+# not a guess; two of them is, and acting on the wrong agent is not something
+# you find out about until later.
+the_only_running_agent() {
+  local running
+  running=$(guest_rpc agents 2>/dev/null | awk '$2 == "running" {print $1}')
+  case $(printf '%s\n' "$running" | grep -c .) in
+    0) log "no agent is running (vmcav agent starts one)"; return 1 ;;
+    1) printf '%s' "$running" ;;
+    *) log "more than one agent is running; name one:"
+       printf '%s\n' "$running" | sed 's/^/  agent /' >&2
+       return 1 ;;
+  esac
+}
+
 do_agent_stop() {
   is_running || { log "the vm is not running"; return 1; }
   local id="${1:-}"
-  if [ -z "$id" ]; then
-    # The only one running is not a guess; two of them is, and stopping the
-    # wrong agent is not something you find out about until later.
-    local running
-    running=$(guest_rpc agents 2>/dev/null | awk '$2 == "running" {print $1}')
-    case $(printf '%s\n' "$running" | grep -c .) in
-      0) log "no agent is running"; return 1 ;;
-      1) id="$running" ;;
-      *) log "more than one agent is running; name one (vmcav agent stop <id>):"
-         printf '%s\n' "$running" | sed 's/^/  agent /' >&2
-         return 1 ;;
-    esac
-  fi
+  [ -n "$id" ] || id=$(the_only_running_agent) || return 1
   guest_rpc stop "$id" || { log "could not stop agent $id"; return 1; }
   log "agent $id stopped"
   sync_sessions
 }
 
 do_attach() {
+  # Which agent, always. It used to be left off, and cave-guestd's own default
+  # is 1, so `vmcav agent --root` created agent 0 and then attached to an
+  # agent 1 that did not exist -- and attach starts what it cannot find, so it
+  # created a second agent nobody asked for.
+  local id="${1:-}"
+  [ -n "$id" ] || id=$(the_only_running_agent) || return 1
   # The client sends its own size on attach and on every SIGWINCH, and the
   # session replays what the agent printed while nobody was watching, so this
   # is a plain attach with nothing to set up first. An agent that has exited
@@ -825,8 +856,8 @@ do_attach() {
   # Printed before the attach, not by the client, which says nothing ever. The
   # agent paints over the screen immediately, so this is only readable in
   # scrollback afterwards -- which is exactly when you go looking for it.
-  log "attaching; detach with ctrl-\\"
-  guest_ssh "cave-guestd attach" || true
+  log "attaching to agent $id; detach with ctrl-\\"
+  guest_ssh "cave-guestd attach $id" || true
   # Returning here means the agent exited or you detached, and both are a
   # natural place to bank what it has written. It does not cover an agent that
   # exits with nobody attached, which is what the unit-level trigger is for.
@@ -870,6 +901,7 @@ usage: vmcav <command>
                   create an agent for a project and attach (detach: ctrl-\)
                   --root is the agent that is root in the guest, agent 0
   agent stop [id] stop an agent and bank its transcript
+  attach [id]     reattach to an agent already running (detach: ctrl-\)
   shell [cmd...]  a root shell in the guest, or run cmd there
   deploy          build the guest config and activate it in the running VM
   push [branch]   send this checkout's branch to the shared repo the agent
@@ -879,7 +911,21 @@ usage: vmcav <command>
   version         the commit this vmcav was built from
   image create    build the guest and create its disk
   image reformat  destroy that disk and build a new one
+
+  Any command takes --help:  vmcav agent --help
 EOF
+}
+
+# One command's entry out of the table above, so a command is described in one
+# place and `vmcav agent --help` reads that rather than a second copy that
+# drifts out of step with it. An entry is every line whose first word is the
+# command, plus the continuation lines indented under them.
+help_for() {
+  usage | awk -v c="$1" '
+    $1 == c { show = 1; print; next }
+    show && /^ {16}/ { print; next }
+    show { exit }
+  '
 }
 
 # Build the guest and materialize its disk. Everything that needs nix lives
@@ -1241,11 +1287,22 @@ do_stop() {
 # function without a VM, a disk, or a guest. Sourced, the dispatch is skipped.
 return 0 2>/dev/null || true
 
+# `vmcav <command> --help`, which is where you ask: at the command, not at the
+# top. It used to be read as that command's first argument, so `vmcav agent
+# --help` set out to create an agent for a project called --help.
+case "${2:-}" in
+  -h|--help)
+    entry=$(help_for "$1")
+    [ -n "$entry" ] || { usage >&2; exit 2; }
+    printf '%s\n' "$entry"; exit 0 ;;
+esac
+
 case "${1:-help}" in
   start) shift; do_start "$@" ;;
   stop) do_stop ;;
   status) do_status ;;
   agent) shift; do_agent "$@" ;;
+  attach) shift; is_running && do_attach "$@" || { log "the vm is not running (vmcav start)"; exit 1; } ;;
   deploy) do_deploy ;;
   review|approve) cave_vm "$@" ;;
   push) shift; do_push "$@" ;;
@@ -1260,6 +1317,11 @@ case "${1:-help}" in
       *) echo "usage: vmcav image {create|reformat}" >&2; exit 2 ;;
     esac
     ;;
-  -h|--help|help) usage ;;
+  -h|--help|help)
+    shift
+    [ $# -gt 0 ] || { usage; exit 0; }
+    entry=$(help_for "$1")
+    [ -n "$entry" ] || { usage >&2; exit 2; }
+    printf '%s\n' "$entry" ;;
   *) usage >&2; exit 2 ;;
 esac

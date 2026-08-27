@@ -150,6 +150,30 @@ anyone else. The daemon already knows each agent's project -- it reads
 rather than to take it as a flag, and `sessions.Local` has to carry the agent
 rather than being built once.
 
+**And root is agent 0's alone, which is why there is still one agent.**
+`cave-session@` runs every instance as uid 0, because there is no other user
+in the guest to run one as. So a second agent came up root under an id that
+says it is not the root agent, read a `/root/.claude/CLAUDE.md` addressed to
+the agent that rebuilds the system, and was pointed at agent 0's worktree for
+its rebuild command. Nothing was unsafe -- the boundary is the VM either way
+-- but the id is what everything else reads to decide what an agent may do,
+and one that lies is worse than a feature that is missing.
+
+So `vmcav agent` refuses anything but `--root` for now, and says why. The
+allocator underneath it is finished and tested; what is missing is in the
+guest, and it is roughly:
+
+- a user for ordinary agents, and the decision of whether that is one shared
+  `agent` account or one per id. Given that agents are colleagues rather than
+  strangers (above), one account is consistent and one per id buys file
+  ownership nobody has asked for yet.
+- `cave-session@` running as it. `User=` cannot branch on `%i`, so either
+  the session script drops privilege itself when the id is not 0, or the root
+  agent gets its own unit. The pty is the wrinkle: `cave-guestd` owns it, and
+  a non-root agent has to be able to write to its own terminal.
+- everything that assumes `/root`: the seeded claude config, the credentials,
+  the git wrapper's identity, `XDG_RUNTIME_DIR`, and this file's address.
+
 ## Uncommitted work does not survive `reformat`, and that is the rule
 
 **Settled, and kept here because it reads like a gap and is not one.** A

@@ -116,7 +116,8 @@ has "another agent's failure is not borrowed" "" "$(explain_session_failure 3 2>
 # A guest older than the checkout is the likeliest reason a session will not
 # come up, and it is knowable on the host without asking the guest anything.
 is_running() { return 0; }
-do_attach() { :; }
+ATTACHED=""
+do_attach() { ATTACHED="${1:-}"; }
 record_deployed_from
 mkdir -p "$REPO/guest"
 echo changed > "$REPO/guest/configuration.nix"
@@ -125,6 +126,34 @@ git -C "$REPO" -c user.email=t@t -c user.name=t commit -q -m guest
 GUEST_AGENTS=""
 has "a stale guest is called out before the start" "vmcav deploy" \
   "$(do_agent --root proj main 2>&1)"
+
+# An option nobody recognises is not a project. The guest used to be the one
+# to object, having already been told to check out a project called --help.
+has "an unknown option is refused here, not in the guest" "unknown option" \
+  "$(do_agent --nope proj 2>&1)"
+
+# The id that was created is the id that gets attached to. Left off, this
+# attached to cave-guestd's own default of 1 -- and attach starts what it
+# cannot find, so `vmcav agent --root` created a second agent nobody asked
+# for and left the first one unattended.
+do_agent --root proj main >/dev/null 2>&1
+check "the root agent attaches to itself" "0" "$ATTACHED"
+
+# And an ordinary agent is refused for now, because it would be root under a
+# number that says it is not. The allocator above is what this waits on a
+# guest for; it is not what is missing.
+ATTACHED=""
+has "an ordinary agent is refused while every agent is root" "vmcav agent --root" \
+  "$(do_agent proj main 2>&1)"
+check "and nothing is attached to" "" "$ATTACHED"
+
+# With no id, the only one running. Two of them is a guess, and attaching to
+# the wrong agent is how you type into a session you did not mean.
+GUEST_AGENTS=$'2 running 80 24\n'
+check "the only running agent needs no id" "2" "$(the_only_running_agent)"
+GUEST_AGENTS=$'2 running 80 24\n3 running 80 24\n'
+has "two of them is not guessed at" "more than one agent" \
+  "$(the_only_running_agent 2>&1)"
 
 [ "$fail" = 0 ] && echo "PASS" || echo "FAIL"
 exit "$fail"

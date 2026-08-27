@@ -92,45 +92,33 @@
             export CGO_ENABLED=0
             go test ./... && touch $out
           '';
-        # Depends on scripts/ alone, not the flake source, so editing a doc
-        # does not invalidate it.
-        git-hooks = pkgs.runCommand "git-hooks-test"
-          { nativeBuildInputs = with pkgs; [ bash git ]; }
-          ''
-            mkdir -p repo && cp -r ${./scripts} repo/scripts
-            export HOME=$TMPDIR REPO=$PWD/repo
-            bash repo/scripts/test-git-hooks.sh && touch $out
-          '';
-        # The guest's git wrapper, tested on the host: it is a shell script
-        # against local repos, so the VM has nothing to do with whether it is
-        # correct. guest/ is in the inputs because that is where it lives.
-        cave-git = pkgs.runCommand "cave-git-test"
-          { nativeBuildInputs = with pkgs; [ bash git ]; }
-          ''
-            mkdir -p repo && cp -r ${./scripts} repo/scripts
-            cp -r ${./guest} repo/guest
-            export HOME=$TMPDIR REPO=$PWD/repo
-            bash repo/scripts/test-cave-git.sh && touch $out
-          '';
-        # Same shape again: sources vmcav, stubs the one call that needs a
-        # guest, starts nothing.
-        vmcav-agent-id = pkgs.runCommand "vmcav-agent-id-test"
-          { nativeBuildInputs = with pkgs; [ bash git ]; }
-          ''
-            mkdir -p repo && cp -r ${./scripts} repo/scripts
-            export HOME=$TMPDIR
-            bash repo/scripts/test-vmcav-agent-id.sh && touch $out
-          '';
-        # Same shape, and the same reason: it sources vmcav for its functions
-        # and never starts a VM, so scripts/ is the whole input.
-        vmcav-status = pkgs.runCommand "vmcav-status-test"
-          { nativeBuildInputs = with pkgs; [ bash git ]; }
-          ''
-            mkdir -p repo && cp -r ${./scripts} repo/scripts
-            export HOME=$TMPDIR
-            bash repo/scripts/test-vmcav-status.sh && touch $out
-          '';
-      });
+      } // (
+        # The shell suites, which are all one shape: run a script out of
+        # scripts/ against a throwaway repo. None starts a VM, opens a socket
+        # or reaches the network, so scripts/ is the whole input and editing a
+        # doc does not invalidate any of them.
+        let
+          shellTest = name: pkgs.runCommand "${name}-test"
+            { nativeBuildInputs = with pkgs; [ bash git ]; }
+            ''
+              mkdir -p repo && cp -r ${./scripts} repo/scripts
+              # guest/ is here for test-cave-git, which tests the guest's git
+              # wrapper: it is a shell script against local repos, so the VM
+              # has nothing to do with whether it is correct.
+              cp -r ${./guest} repo/guest
+              export HOME=$TMPDIR REPO=$PWD/repo
+              bash repo/scripts/test-${name}.sh && touch $out
+            '';
+        in
+        nixpkgs.lib.genAttrs [
+          "git-hooks"        # the host's receive hooks: what the gate refuses
+          "cave-git"         # the guest's git wrapper: commit publishes
+          "vmcav-agent-id"   # which id a new agent gets, and what a failed
+                             # start tells you
+          "vmcav-status"     # when the guest is called out as stale
+          "vmcav-help"       # `vmcav <command> --help`
+        ] shellTest
+      ));
 
       devShells = forAll (pkgs: {
         default = pkgs.mkShell {
