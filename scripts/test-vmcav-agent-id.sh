@@ -44,7 +44,7 @@ check() { # check <label> <want> <got>
 }
 
 check "the root agent's id is reserved" "0" "$ROOT_AGENT_ID"
-check "--vm-root gets it" "$ROOT_AGENT_ID" "$(allocate_agent_id 1)"
+check "--root gets it" "$ROOT_AGENT_ID" "$(allocate_agent_id 1)"
 
 # Nothing running and nothing pushed: the root id is free, and must still not
 # be handed out. This is the case that made the reserved id worth a line of
@@ -124,7 +124,7 @@ git -C "$REPO" add -A
 git -C "$REPO" -c user.email=t@t -c user.name=t commit -q -m guest
 GUEST_AGENTS=""
 has "a stale guest is called out before the start" "vmcav deploy" \
-  "$(do_agent --vm-root proj main 2>&1)"
+  "$(do_agent --root proj main 2>&1)"
 
 [ "$fail" = 0 ] && echo "PASS" || echo "FAIL"
 exit "$fail"

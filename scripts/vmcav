@@ -737,12 +737,12 @@ do_agent() {
     do_agent_stop "$@"
     return
   fi
-  # --vm-root names the agent that is root in the guest: the one that
+  # --root names the agent that is root in the guest: the one that
   # redeploys the system every other agent runs in. It is not one of the
   # numbered agents, so it holds a reserved id rather than a low one, and
   # asking for it is deliberate rather than a default you can drift into.
   local want_root=""
-  if [ "${1:-}" = "--vm-root" ]; then
+  if [ "${1:-}" = "--root" ]; then
     want_root=1
     shift
   fi
@@ -866,9 +866,9 @@ usage: vmcav <command>
   start           boot the VM detached (idempotent; needs an image)
   stop            ACPI power-down, SIGTERM/SIGKILL fallback
   status          whether it is up, which generation, where the console is
-  agent [--vm-root] [proj] [branch]
+  agent [--root] [proj] [branch]
                   create an agent for a project and attach (detach: ctrl-\)
-                  --vm-root is the agent that is root in the guest, agent 0
+                  --root is the agent that is root in the guest, agent 0
   agent stop [id] stop an agent and bank its transcript
   shell [cmd...]  a root shell in the guest, or run cmd there
   deploy          build the guest config and activate it in the running VM
