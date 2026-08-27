@@ -6,3 +6,14 @@
 # consumes what the guest actually writes, up to this cap. Applies when the
 # disk is first created; `vmcav image reformat` recreates it at the new size.
 disk_size_gb = 100
+
+# Guest RAM in MiB. Commented out means half the host's, which tracks the
+# machine rather than guessing: the guest has no swap, so this ceiling is a
+# wall and not a slope, and a single claude session has been measured peaking
+# at 3.3G. Every agent in the guest shares the one number, so raise it before
+# running several, or before builds that hold a lot at once.
+#
+# Unlike the disk this is not elastic: it is taken from the host for as long as
+# the VM runs. `vmcav start` prints what it used. A running VM keeps the size
+# it booted with, so a change here needs a stop and a start.
+# memory_mb = 16384

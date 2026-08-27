@@ -44,7 +44,15 @@ func vmFlagSet(name string) *vmFlags {
 	v.fs.StringVar(&v.init_, "init", "", "init= target, the guest toplevel's init")
 	v.fs.StringVar(&v.disk, "disk", "", "guest root disk")
 	v.fs.StringVar(&v.seed, "seed", "", "read-only seed disk")
-	v.fs.IntVar(&v.memory, "memory", 4096, "guest memory in MiB")
+	// Only for a direct `cave-vm start`. vmcav always passes --memory, because
+	// sizing this is a question about the host -- half of it, or whatever
+	// `[vm] memory_mb` in config.toml says -- and the host is the side that
+	// knows. What a flag default can do is not be 4096, which was too small to
+	// run one agent, never mind the several this is for: a claude session on
+	// its own peaked at 3.3G, and a guest with no swap answers that by evicting
+	// page cache and reading it straight back -- 376G off the disk in one
+	// 37-minute session, which is not a slow agent but a stalled one.
+	v.fs.IntVar(&v.memory, "memory", 8192, "guest memory in MiB")
 	v.fs.IntVar(&v.cpus, "cpus", 4, "guest vCPUs")
 	v.fs.IntVar(&v.cid, "cid", 3, "guest vsock CID")
 	v.fs.StringVar(&v.crinj, "crinj", "", "host address to relay vsock 7200 to")

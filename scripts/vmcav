@@ -122,6 +122,42 @@ print(int(cfg.get("vm", {}).get("disk_size_gb", 100)) * 1024)
 PY
 }
 
+# Guest RAM in MiB: `[vm] memory_mb` from config.toml, or half the host's.
+#
+# Half, rather than a constant, because the constant was the bug. 4096 was
+# enough for one agent and not much else -- a single claude session has been
+# measured peaking at 3.3G -- and the guest has no swap, so overshooting that
+# ceiling is a wall and not a slope: it evicts page cache and reads it straight
+# back, hundreds of gigabytes off the disk, an agent that looks hung rather
+# than one that looks slow. A fraction tracks the host it is actually on
+# instead of being wrong on both a laptop and a workstation.
+#
+# Half specifically because this memory is not elastic the way the disk is: it
+# is taken from the host for as long as the VM runs, and the host is still
+# running the editor, the browser and the nix builds that the guest substitutes
+# from. Leaving the other half is what keeps raising this from turning a stalled
+# guest into a stalled host.
+#
+# sysconf rather than /proc/meminfo: this runs on the Apple silicon host too,
+# where there is no procfs (docs/vm-cave-cross-platform.md).
+config_memory_mb() {
+  python3 - "$CONFIG" <<'PY'
+import sys, os, tomllib
+p = sys.argv[1]; cfg = {}
+if os.path.exists(p):
+    with open(p, "rb") as f: cfg = tomllib.load(f)
+mb = cfg.get("vm", {}).get("memory_mb")
+if mb is None:
+    host_mb = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") // (1024 * 1024)
+    # The floor is not a preference, it is the smallest guest that has been
+    # seen to run an agent without thrashing. A host too small to give that up
+    # is better off being told the number is too big for it than being handed
+    # a guest that stalls.
+    mb = max(host_mb // 2, 4096)
+print(int(mb))
+PY
+}
+
 vm_pid() { cave-vm running --state "$STATE_DIR" --disk "$DISK" 2>/dev/null || true; }
 is_running() { cave-vm running --state "$STATE_DIR" --disk "$DISK" >/dev/null 2>&1; }
 
@@ -1326,11 +1362,14 @@ do_start() {
   # seed rides on vdb. Everything below this line -- which VMM, how the console
   # is wired, how the vsock plane is built -- is cave-vm's, because that is
   # where it differs between a Linux host and an Apple silicon one.
+  local mem; mem=$(config_memory_mb)
+  log "guest memory: ${mem} MiB"
   cave-vm start \
     --state "$STATE_DIR" \
     --kernel "$kernel" --initrd "$initrd" --init "$toplevel/init" \
     --disk "$DISK" --seed "$SEEDIMG" \
     --cid "$GUEST_CID" \
+    --memory "$mem" \
     --crinj "$CRINJ_ADDR" --git "127.0.0.1:$GIT_PORT" \
     || { log "vm failed to start; see $CONSOLE"; \
          tail -8 "$CONSOLE" 2>/dev/null >&2; stop_gpg_broker; return 1; }

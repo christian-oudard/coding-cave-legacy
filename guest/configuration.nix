@@ -566,6 +566,29 @@ in
     then [ "console=hvc0" ]
     else [ "console=ttyS0" ];
 
+  # How the guest behaves when the host-side memory flag turns out to be too
+  # small, which is the guest's half of the sizing question above.
+  #
+  # Without swap of any kind that ceiling is a wall rather than a slope: the
+  # only page the kernel can reclaim is file-backed, so it evicts the page
+  # cache and reads it straight back. The observed shape is one claude session
+  # peaking at 3.3G in a 4G guest and reading 376G off the disk in 37 minutes
+  # -- an agent that looks hung rather than one that looks slow, which is a
+  # much harder thing to diagnose from outside.
+  #
+  # zram rather than a swap file, because the disk is the thing already under
+  # pressure: this swaps to compressed RAM, so a reclaimed anonymous page
+  # costs CPU (which is idle while a guest thrashes) instead of the disk I/O
+  # that is the problem. It does not raise the ceiling and is not meant to --
+  # `[vm] memory_mb` does that. It makes overshooting it degrade.
+  zramSwap = {
+    enable = true;
+    # Of guest RAM, and it is a compressed-page budget rather than an
+    # allocation: what it actually consumes is this divided by the compression
+    # ratio, and only for pages that have been reclaimed.
+    memoryPercent = 50;
+  };
+
   # Root is the whole device, no partition table (make-disk-image
   # partitionTableType = "none"), so the kernel gets root=/dev/vda directly.
   fileSystems."/" = {
