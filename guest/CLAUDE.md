@@ -72,14 +72,30 @@ next boot is not a change.
 
 If you are the root agent, you can rebuild the system you are running with
 
-    nixos-rebuild switch --flake /projects/coding-cave/guest#cave-guest-dev --impure
+    cave-rebuild
 
-which is the same closure the host would deploy, built from your own checkout
--- that flake path is your worktree, and inside your namespace it can only be
-yours. A kernel change needs the host to restart the VM, and everything else
-takes effect in place. Note what that means for the other agents: a switch
-replaces units under agents that are running, so it is the one thing here that
-reaches outside your own tree.
+which builds the same closure the host would deploy, out of your own checkout
+-- it defaults to `/projects/coding-cave/guest#cave-guest-dev`, and inside your
+namespace that path can only be yours.
+
+Use it rather than `nixos-rebuild switch` directly. A rebuild is the one thing
+here that reaches outside your own tree: it replaces units under every agent
+in the guest, and if it stops a session it kills the agent working in it --
+which, when that agent is you, means losing the terminal you are typing in,
+half way through activating. `cave-rebuild` asks what the activation would do
+before letting it do it, and refuses if the answer includes a live session.
+If it refuses, read the reason rather than reaching for the raw command: it is
+almost always a unit a session `Requires=` being removed, and the fix is to
+leave a no-op behind for one generation (`docs/vm-cave-todo.md`).
+
+Know what it does not do. This guest has no bootloader -- the host injects the
+kernel and `init=` when it starts the VM -- so a rebuild moves the running
+system and nothing else. What the host boots is unchanged, and a stop/start
+comes back on whatever was last deployed. That is the boundary working, not a
+gap in it: a rebuild from in here is a live test of a configuration, and
+`vmcav deploy` on the host is what makes one stick. Same shape as the git
+flow -- you do the work and prove it, a human lands it. A kernel change needs
+a restart either way.
 
 ## The boundary is not yours to widen
 

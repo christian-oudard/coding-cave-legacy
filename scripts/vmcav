@@ -1129,7 +1129,7 @@ do_deploy() {
 
   # Ask what the activation would do before letting it do it.
   #
-  # This is the same check `cave-redeploy` makes inside the guest, made here
+  # This is the same check `cave-rebuild` makes inside the guest, made here
   # too because this is the other door onto the same operation: both ends run
   # `switch-to-configuration switch`, so both can stop a live session and kill
   # the agent in it. That is not hypothetical -- it happened three times from

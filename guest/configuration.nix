@@ -176,20 +176,20 @@ let
   # dead half-applied at status 101 and a generation registered but never
   # activated.
   #
-  # What it deliberately does not do is stop the agent from redeploying while
+  # What it deliberately does not do is stop the agent from rebuilding while
   # other agents are running. Their sessions must survive it, and if they
   # would not, that is the bug -- so it names them and stops rather than
   # negotiating.
-  caveRedeploy = pkgs.writeShellScriptBin "cave-redeploy" ''
+  caveRebuild = pkgs.writeShellScriptBin "cave-rebuild" ''
     set -eu
     ref="''${1:-/projects/coding-cave/guest#cave-guest-dev}"
-    echo "cave-redeploy: planning $ref"
+    echo "cave-rebuild: planning $ref"
     # --impure because the crinj CA and the cave-vm source both arrive that
     # way; every caller of this flake already builds impurely.
     plan=$(${pkgs.nixos-rebuild}/bin/nixos-rebuild dry-activate \
              --flake "$ref" --impure 2>&1) || {
       echo "$plan" >&2
-      echo "cave-redeploy: the build failed; nothing was activated" >&2
+      echo "cave-rebuild: the build failed; nothing was activated" >&2
       exit 1
     }
     # "would NOT stop the following changed units:" is the line that says a
@@ -199,7 +199,7 @@ let
       | ${pkgs.gnugrep}/bin/grep -E '^would (stop|restart) the following' \
       | ${pkgs.gnugrep}/bin/grep -oE 'cave-(root-)?session@[^ ,]+' || true)
     if [ -n "$risky" ]; then
-      echo "cave-redeploy: this deploy would stop or restart a live session:" >&2
+      echo "cave-rebuild: this would stop or restart a live session:" >&2
       printf '  %s\n' $risky >&2
       cat >&2 <<'EOF'
   That kills the agent running in it, and if that is you, it kills this
@@ -213,7 +213,7 @@ EOF
       exit 1
     fi
     printf '%s\n' "$plan" | ${pkgs.gnugrep}/bin/grep -E '^would ' || true
-    echo "cave-redeploy: no live session is touched; switching"
+    echo "cave-rebuild: no live session is touched; switching"
     ${pkgs.nixos-rebuild}/bin/nixos-rebuild switch --flake "$ref" --impure
 
     # What this did and did not do, said every time, because the difference is
@@ -227,13 +227,13 @@ EOF
     # and it comes back on whatever the host last deployed, with this
     # generation still on the disk and not selected.
     #
-    # So a redeploy from in here is a live test of a configuration, not a
+    # So a rebuild from in here is a live test of a configuration, not a
     # deployment of one. `vmcav deploy` on the host runs the very same
     # activation -- and now the very same refusal -- but also moves the host's
     # boot artifacts, which is the half that makes it survive a restart.
     cat <<EOF
 
-    cave-redeploy: this is in place only.
+    cave-rebuild: this is in place only.
       running now: $(readlink /run/current-system)
       host boots:  $(sed -n 's|.*init=\(/nix/store/[^ ]*\)/init.*|\1|p' /proc/cmdline)
     If those differ, a stop/start reverts to the second one. Making it stick
@@ -875,7 +875,7 @@ in
     caveGuestd
     caveAgent
     caveEnter
-    caveRedeploy
+    caveRebuild
     claudeCode
     bash
     nix
@@ -934,12 +934,12 @@ in
       # Load-bearing, and not merely tidiness. A session `Requires=` this
       # unit, and `Requires=` propagates an explicit stop: if this stayed
       # active after running, then removing it -- or anything else that
-      # stopped it, including a later redeploy -- would stop every session
+      # stopped it, including a later rebuild -- would stop every session
       # that named it, killing live agents. Going inactive on success means
       # there is nothing left for a stop to propagate through.
       #
       # The rule, for anything a session depends on: go inactive when you are
-      # done, or be depended on with Wants= rather than Requires=. cave-redeploy
+      # done, or be depended on with Wants= rather than Requires=. cave-rebuild
       # refuses a deploy that would break it, but the refusal is a backstop,
       # not the design.
       RemainAfterExit = false;

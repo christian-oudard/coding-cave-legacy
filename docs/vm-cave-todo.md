@@ -263,7 +263,7 @@ Three rules follow, and the third is the one that makes the others hold:
    `seed-claude-config` is now that tombstone and can go once every session
    has been restarted onto the new dependencies.
 
-`cave-redeploy` enforces this rather than trusting anyone to remember it: it
+`cave-rebuild` enforces this rather than trusting anyone to remember it: it
 runs `nixos-rebuild dry-activate`, which prints exactly which units a switch
 would stop, restart, reload and start while touching nothing, and refuses if
 any `cave-session@*` or `cave-root-session@*` appears under stop or restart.
@@ -288,7 +288,7 @@ is running.
 
 Worth stating because the difference is invisible from inside the guest.
 
-Identical: the activation. Both `cave-redeploy` in the guest and `vmcav
+Identical: the activation. Both `cave-rebuild` in the guest and `vmcav
 deploy` on the host end in `switch-to-configuration switch` against a
 generation registered in `/nix/var/nix/profiles/system`. Everything above
 about stop cascades applies to both.
