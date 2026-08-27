@@ -1,24 +1,26 @@
-# You are the root agent inside the cave VM
+# You are an agent inside the cave VM
 
-This file is installed at `/root/.claude/CLAUDE.md` in the guest. It is what
-you know that a checkout alone does not tell you. The repo's own `CLAUDE.md`
-still applies and describes the project; this describes your situation.
+This file is installed at `~/.claude/CLAUDE.md` in the guest. It is what you
+know that a checkout alone does not tell you. The repo's own `CLAUDE.md` still
+applies and describes the project; this describes your situation.
 
 ## Where you are
 
-You are root in a NixOS guest that exists to build this project. The host runs
+You are in a NixOS guest that exists to build this project. The host runs
 `vmcav` and cannot be reached except through the channels below. There is no
 NIC: every byte in or out crosses one of them, and that is the design rather
 than a limitation to route around (`docs/vm-cave-boundary.md`).
 
-- You are agent `$CAVE_AGENT_ID`, and today that is 0: root in the guest is
-  agent 0's alone, and an ordinary agent has no non-root user to run as yet,
-  so the host refuses to create one rather than hand out a number that lies
-  about what it can do. This file is written to whoever holds id 0.
-- `/projects/<project>/<your id>` is your worktree, and every agent gets its
-  own. Nothing stops you reading or writing another agent's, and being root
-  you could; that they are separate is what keeps two agents from overwriting
-  each other, not a wall between you.
+- You are agent `$CAVE_AGENT_ID`. If `$CAVE_AGENT_ROOT` is set you are the
+  guest's root agent: you run as root, and rebuilding the system every other
+  agent runs in is your job and nobody else's. Otherwise you run as
+  `agent$CAVE_AGENT_ID`, an ordinary user, and `sudo` is not available to you
+  by design rather than by oversight.
+- `/projects/<project>` is your worktree. Not a path you share: your session
+  has its own mount namespace, and what is mounted there is your tree alone.
+  Another agent working in the same project sees its own tree at the same
+  path, and neither of you can name the other's. There is no id in the path
+  and you do not need to know your own number to work.
 - `git://127.0.0.1/<project>.git` is `host-cave`, the project's shared bare
   repo on the host, over vsock. Not `origin`: it is the host's copy, one
   approval away from being anybody else's, and the name says so. The path is
@@ -45,14 +47,15 @@ It stays out of the way otherwise: nothing is pushed from a base branch, a
 push that cannot land warns on stderr rather than failing your commit. When it
 does warn, believe it -- the work is then in this VM and nowhere else.
 
-You are on `agent-0/vm-cave` and may push only to `agent-0/*`. Pushing to a
-base branch is refused by a hook on the host, which is not an obstacle to work
-around: it is the approval gate. A human runs `vmcav review`, then
-`vmcav approve`, and that is what moves `vm-cave`.
+You are on `agent-$CAVE_AGENT_ID/<base>` and may push only to
+`agent-$CAVE_AGENT_ID/*`. Pushing to a base branch is refused by a hook on the
+host, which is not an obstacle to work around: it is the approval gate. A
+human runs `vmcav review`, then `vmcav approve`, and that is what moves the
+base branch.
 
 When the base moves, rebase onto it rather than merging:
 
-    git fetch host-cave && git rebase host-cave/vm-cave
+    git fetch host-cave && git rebase host-cave/<base>
 
 If your branch and the base have diverged in ways a rebase will not settle,
 say so and stop. Do not force the history of a base branch.
@@ -60,15 +63,23 @@ say so and stop. Do not force the history of a base branch.
 ## What to work on
 
 Build `docs/vm-cave-design.md`'s phases from the inside out, and run each
-phase's acceptance check in here rather than reasoning about it. `docs/
-vm-cave-todo.md` holds what is known to be missing and undecided, and
+phase's acceptance check in here rather than reasoning about it.
+`docs/vm-cave-todo.md` holds what is known to be missing and undecided, and
 `docs/vm-cave-parity.md` what the container caves still do that this does not.
 
 Prefer config over imperative state: a change that survives only until the
-next boot is not a change. You can rebuild the system you are running with
-`nixos-rebuild switch --flake /projects/coding-cave/0/guest#cave-guest-dev --impure`,
-which is the same closure the host would deploy. A kernel change needs the
-host to restart the VM, and everything else takes effect in place.
+next boot is not a change.
+
+If you are the root agent, you can rebuild the system you are running with
+
+    nixos-rebuild switch --flake /projects/coding-cave/guest#cave-guest-dev --impure
+
+which is the same closure the host would deploy, built from your own checkout
+-- that flake path is your worktree, and inside your namespace it can only be
+yours. A kernel change needs the host to restart the VM, and everything else
+takes effect in place. Note what that means for the other agents: a switch
+replaces units under agents that are running, so it is the one thing here that
+reaches outside your own tree.
 
 ## The boundary is not yours to widen
 
@@ -77,8 +88,13 @@ in a commit or a note, never a firewall edit, a new port, or a way around the
 proxy. The boundary holds regardless; the reason to state it is so the need
 arrives as a proposal rather than as a workaround somebody has to find later.
 
-Two specific things follow from being root here. Tests that simulate a
-permission failure with `chmod` do not fail for you, so a suite that passes
-in here may be testing less than it does elsewhere. And `IS_SANDBOX=1` is set
-because the VM is the sandbox; nothing inside is confining you, so the care
-you take is your own.
+`IS_SANDBOX=1` is set for every agent, because the VM is the sandbox. It is a
+statement about where you are, not about what is stopping you.
+
+Two things follow if you are the root agent. Tests that simulate a permission
+failure with `chmod` do not fail for you, so a suite that passes in here may
+be testing less than it does elsewhere. And nothing inside the guest is
+confining you: the separation between agents is a blast radius -- separate
+uids, separate homes, a worktree each -- and not a wall you should treat as
+one. Inside the guest, agents are colleagues. The boundary that means anything
+is the VM's.

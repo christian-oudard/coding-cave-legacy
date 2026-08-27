@@ -32,10 +32,50 @@ import (
 )
 
 const (
-	defaultDir  = "/run/cave/sessions"
-	unitPattern = "cave-session@%s.service"
-	startWait   = 10 * time.Second
+	defaultDir = "/run/cave/sessions"
+	// The two templates a session runs under. They differ in one thing, which
+	// is the user: an ordinary agent's session runs as agent<id>, the root
+	// agent's runs as root because rebuilding the system every other agent
+	// runs in is what it is for. A unit cannot choose its own User= from its
+	// instance name, so the choice is a unit name.
+	unitPattern     = "cave-session@%s.service"
+	rootUnitPattern = "cave-root-session@%s.service"
+	startWait       = 10 * time.Second
 )
+
+// unitFor names the template an agent's session runs under.
+//
+// Read back from the session's own environment file rather than worked out
+// from the id, because being the root agent is a property of an agent and not
+// a number it holds: the registry hands out ids without reserving one, so
+// nothing about "3" says whether agent 3 is root. The env file is where that
+// was recorded when the agent was created, and it is the same file the units
+// themselves read, so a session cannot be started under one answer and
+// stopped under the other.
+func unitFor(dir, id string) string {
+	if agentIsRoot(dir, id) {
+		return fmt.Sprintf(rootUnitPattern, id)
+	}
+	return fmt.Sprintf(unitPattern, id)
+}
+
+// agentIsRoot reports whether the agent was created as the guest's root agent.
+// A missing or unreadable file reads as "not root", which is the safe way to
+// be wrong: an ordinary session that should have been root fails visibly at
+// the first thing needing privilege, where the reverse would quietly hand an
+// agent the whole guest.
+func agentIsRoot(dir, id string) bool {
+	b, err := os.ReadFile(filepath.Join(dir, id+".env"))
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if strings.TrimSpace(line) == "CAVE_AGENT_ROOT=1" {
+			return true
+		}
+	}
+	return false
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -75,6 +115,7 @@ func start(args []string) {
 	id := fs.String("id", "1", "agent id")
 	project := fs.String("project", "", "project slug to check out (required)")
 	base := fs.String("base", "", "base branch to work from (required)")
+	root := fs.Bool("root", false, "this agent is the guest's root agent (runs as root)")
 	fs.Parse(args)
 	if *project == "" || *base == "" {
 		die(fmt.Errorf("start needs -project and -base"))
@@ -91,10 +132,18 @@ func start(args []string) {
 		die(err)
 	}
 	env := fmt.Sprintf("CAVE_AGENT_ID=%s\nCAVE_PROJECT=%s\nCAVE_BASE=%s\n", *id, *project, *base)
+	// Which kind of agent this is, written down once, here, at the only
+	// moment anybody says so. Every unit serving this agent reads it back:
+	// which user to run as, which home to seed, and which of the two session
+	// templates to start. Recording it rather than deriving it is what lets
+	// root be a property of an agent instead of a reserved number.
+	if *root {
+		env += "CAVE_AGENT_ROOT=1\n"
+	}
 	if err := os.WriteFile(filepath.Join(*dir, *id+".env"), []byte(env), 0o600); err != nil {
 		die(err)
 	}
-	if err := startUnit(*id); err != nil {
+	if err := startUnit(*dir, *id); err != nil {
 		die(err)
 	}
 }
@@ -164,7 +213,7 @@ func serve(args []string) {
 	}
 	g := control.System{
 		Sessions: *dir,
-		Unit:     unitPattern,
+		Unit:     func(id string) string { return unitFor(*dir, id) },
 		List:     agentd.List,
 	}
 	// The transcript half, wired here rather than inside the control package,
@@ -290,7 +339,7 @@ func attach(args []string) {
 	if fs.NArg() > 0 {
 		id = fs.Arg(0)
 	}
-	sock, err := agentd.EnsureSocket(*dir, id, func() error { return startUnit(id) }, startWait)
+	sock, err := agentd.EnsureSocket(*dir, id, func() error { return startUnit(*dir, id) }, startWait)
 	if err != nil {
 		die(err)
 	}
@@ -363,8 +412,8 @@ func homeDir() string {
 // an agent that has exited comes back under the same name. Deliberately not a
 // fork from here: a session parented by the process that attached would die
 // with the ssh connection that carried it.
-func startUnit(id string) error {
-	cmd := exec.Command("systemctl", "start", fmt.Sprintf(unitPattern, id))
+func startUnit(dir, id string) error {
+	cmd := exec.Command("systemctl", "start", unitFor(dir, id))
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }

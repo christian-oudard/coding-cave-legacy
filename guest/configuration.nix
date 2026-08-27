@@ -3,7 +3,59 @@
 let
   # Where session sockets live, one per agent, named after it. /run, so a
   # reboot cannot leave a stale one behind.
+  #
+  # Not root-only any more: an ordinary agent's session runs as its own user
+  # and binds its own socket in here, so the directory is root:cave 1770.
+  # Sticky, because group-writable without it would let one agent delete
+  # another's socket, and the socket is how a session is reached.
   sessionDir = "/run/cave/sessions";
+
+  # How many ordinary agents this guest can hold at once.
+  #
+  # A declared pool rather than users minted on demand, because a user created
+  # at runtime is exactly the state this guest is supposed not to accumulate:
+  # it would survive in /etc/passwd rather than in this file, and a reformat
+  # would silently produce a guest that differs from its own config. The cap
+  # is honest and cheap to raise; ids are allocated lowest-free-first, so they
+  # stay inside it rather than drifting upward.
+  maxAgents = 8;
+  agentIds = lib.range 1 maxAgents;
+  agentUser = id: "agent${toString id}";
+  # Fixed, so a worktree's ownership still means something after a rebuild.
+  agentUid = id: 3000 + id;
+
+  # Where an agent's worktrees really live, and the only place a number
+  # appears. An agent never sees this path: its session binds
+  # <worktreeRoot>/<id>/projects over /projects, so every agent works in
+  # /projects/<slug> and none of them can name, or collide with, another's.
+  #
+  # This is what `main` gets from bwrap -- one path that means a different
+  # tree per agent -- and it is why putting the id in the path the agent uses
+  # was the wrong fix (docs/vm-cave-todo.md). The id belongs to the bookkeeping
+  # underneath, where a human debugging two agents wants it, not to the
+  # working directory of somebody who has only one tree to work in.
+  worktreeRoot = "/var/lib/coding-cave/agents";
+  # In a unit, where %i is the agent id. The source of the bind below.
+  agentProjects = "${worktreeRoot}/%i/projects";
+
+  # Who an agent is, worked out from the session's own environment file so
+  # that every unit serving one agent agrees about it. The host says which
+  # agent this is and whether it is the root one; what that means -- which
+  # user, which home, which tree -- is the guest's to decide, and deciding it
+  # in one place is what keeps a unit from seeding a home the agent does not
+  # read. That failure is silent: the agent comes up with no credentials.
+  agentIdentity = ''
+    : "''${CAVE_AGENT_ID:?no agent id}"
+    if [ "''${CAVE_AGENT_ROOT:-}" = 1 ]; then
+      agent_user=root
+      agent_home=/root
+    else
+      agent_user="agent$CAVE_AGENT_ID"
+      agent_home="/home/$agent_user"
+    fi
+    # The real tree, which only these units name. The agent sees /projects.
+    agent_tree="${worktreeRoot}/$CAVE_AGENT_ID/projects"
+  '';
 
   # cave-guestd: the process that owns one agent's pty, and the client that
   # attaches to one. It replaced dtach, which held a pty but buffered nothing
@@ -17,15 +69,24 @@ let
   caveVmSrc =
     let
       env = builtins.getEnv "CAVE_VM_SRC";
-      # The root agent's worktree specifically. Worktrees are per-agent now,
-      # and the one that rebuilds the guest is agent 0's by definition: it is
-      # the agent whose job this is.
-      inGuest = "/projects/coding-cave/0/cave-vm";
+      # The rebuilding agent's own worktree, whichever agent that is. Not a
+      # numbered path: this eval runs inside that agent's session, where
+      # /projects/<slug> is a bind of its tree and no other agent's is
+      # reachable, so naming an id here would name the wrong tree as soon as
+      # the root agent was not the one it was written for.
+      #
+      # The consequence to know: a rebuild run from `vmcav shell` rather than
+      # from an agent's session is outside every namespace, so /projects is
+      # empty and this falls through to the throw. That is the right failure
+      # -- from out there, there is no answer to "which agent's checkout" --
+      # and CAVE_VM_SRC is how to say which one you meant.
+      inGuest = "/projects/coding-cave/cave-vm";
     in
     if env != "" then env
     else if builtins.pathExists inGuest then inGuest
-    else throw ("cave-vm source not found: export CAVE_VM_SRC and build with "
-      + "--impure (host), or build --impure in the guest where ${inGuest} exists");
+    else throw ("cave-vm source not found: build from inside an agent's "
+      + "session, where ${inGuest} is that agent's checkout, or export "
+      + "CAVE_VM_SRC and build with --impure");
 
   # Guest-side leg of the service plane, one shape for all four outbound
   # bridges: a localhost port the rest of the guest talks to, carried over
@@ -88,12 +149,110 @@ let
     # Which project, from the session's own environment. No default: an agent
     # started without one has nothing to work on, and landing it in some other
     # project's worktree is worse than failing.
-    : "''${CAVE_PROJECT:?no project}" "''${CAVE_AGENT_ID:?no agent id}"
-    # The agent's own worktree, not the project's: there is one per agent
-    # now, and landing in another agent's is the same class of mistake as
-    # landing in another project's.
-    cd "/projects/$CAVE_PROJECT/$CAVE_AGENT_ID"
+    : "''${CAVE_PROJECT:?no project}"
+    # The agent's own worktree, which is simply the project: the session's
+    # mount namespace has already bound this agent's tree over /projects, so
+    # there is no other agent's checkout here to land in by mistake and no id
+    # to get wrong. Whoever is reading this in a shell sees the same path.
+    cd "/projects/$CAVE_PROJECT"
     exec ${claudeCode}/bin/claude --dangerously-skip-permissions "$@"
+  '';
+
+  # Redeploy the guest from inside it, without killing the agent doing it.
+  #
+  # This is the root agent's core loop (docs/vm-root-agent.md) and the one
+  # operation here that can destroy its own caller. `nixos-rebuild switch` will
+  # stop a live session for reasons that have nothing to do with the session
+  # unit changing, so the rule that matters cannot be expressed as a property
+  # of one unit. It is a property of the *plan*: a deploy from in here must not
+  # stop or restart any session that is currently running.
+  #
+  # switch-to-configuration will tell you that plan if you ask it, so ask it
+  # first and refuse on the answer. dry-activate builds the same closure and
+  # prints exactly which units it would stop, restart, reload and start,
+  # touching nothing. Two builds rather than one, and the second is a cache
+  # hit, which is a small price for the failure it prevents: the alternative
+  # is finding out by losing the terminal you were typing in, with the switch
+  # dead half-applied at status 101 and a generation registered but never
+  # activated.
+  #
+  # What it deliberately does not do is stop the agent from redeploying while
+  # other agents are running. Their sessions must survive it, and if they
+  # would not, that is the bug -- so it names them and stops rather than
+  # negotiating.
+  caveRedeploy = pkgs.writeShellScriptBin "cave-redeploy" ''
+    set -eu
+    ref="''${1:-/projects/coding-cave/guest#cave-guest-dev}"
+    echo "cave-redeploy: planning $ref"
+    # --impure because the crinj CA and the cave-vm source both arrive that
+    # way; every caller of this flake already builds impurely.
+    plan=$(${pkgs.nixos-rebuild}/bin/nixos-rebuild dry-activate \
+             --flake "$ref" --impure 2>&1) || {
+      echo "$plan" >&2
+      echo "cave-redeploy: the build failed; nothing was activated" >&2
+      exit 1
+    }
+    # "would NOT stop the following changed units:" is the line that says a
+    # session is safe, and it must not be mistaken for the one that says it is
+    # not. Anchored on the exact prefixes for that reason.
+    risky=$(printf '%s\n' "$plan" \
+      | ${pkgs.gnugrep}/bin/grep -E '^would (stop|restart) the following' \
+      | ${pkgs.gnugrep}/bin/grep -oE 'cave-(root-)?session@[^ ,]+' || true)
+    if [ -n "$risky" ]; then
+      echo "cave-redeploy: this deploy would stop or restart a live session:" >&2
+      printf '  %s\n' $risky >&2
+      cat >&2 <<'EOF'
+  That kills the agent running in it, and if that is you, it kills this
+  command halfway through activating. It is not something to retry.
+
+  Usually it means a unit a session Requires= is being removed or has become
+  RemainAfterExit: stopping it propagates the stop to the session. Leave a
+  no-op behind for one generation instead of deleting it outright, and see
+  the seed-claude-config tombstone in guest/configuration.nix.
+EOF
+      exit 1
+    fi
+    printf '%s\n' "$plan" | ${pkgs.gnugrep}/bin/grep -E '^would ' || true
+    echo "cave-redeploy: no live session is touched; switching"
+    exec ${pkgs.nixos-rebuild}/bin/nixos-rebuild switch --flake "$ref" --impure
+  '';
+
+  # Step into an agent's view of the guest: a root shell, or a command, inside
+  # the mount namespace where /projects is that agent's worktree.
+  #
+  # This exists because the namespace is the one thing about the guest a plain
+  # root login now gets wrong. An agent works in /projects/<slug> and nobody
+  # else has that directory at all; from outside there are only the real trees
+  # under the worktree root, filed by id. Both facts are worth keeping -- the
+  # agent should not have to know its own number, and a human debugging two
+  # agents should be able to see both -- so what is needed is a way across,
+  # not a compromise between them.
+  #
+  # nsenter against the session's main pid, which systemd knows: the session
+  # leader holds the namespace for exactly as long as the agent runs, so an
+  # agent that has exited fails here with a sentence rather than with an
+  # errno from a mount that is no longer there.
+  caveEnter = pkgs.writeShellScriptBin "cave-enter" ''
+    set -eu
+    id="''${1:?usage: cave-enter <agent id> [command...]}"
+    shift
+    pid=0
+    for unit in "cave-session@$id" "cave-root-session@$id"; do
+      pid=$(${pkgs.systemd}/bin/systemctl show -p MainPID --value "$unit.service" 2>/dev/null || echo 0)
+      [ "''${pid:-0}" != 0 ] && break
+    done
+    if [ "''${pid:-0}" = 0 ]; then
+      echo "cave-enter: agent $id is not running." >&2
+      echo "  Its worktrees, if it has any, are under ${worktreeRoot}/$id/projects" >&2
+      exit 1
+    fi
+    # --wd=/projects, because standing anywhere else in an agent's namespace
+    # is standing in the guest's filesystem with extra steps.
+    if [ "$#" -eq 0 ]; then
+      exec ${pkgs.util-linux}/bin/nsenter -t "$pid" -m --wd=/projects \
+        ${pkgs.bash}/bin/bash -l
+    fi
+    exec ${pkgs.util-linux}/bin/nsenter -t "$pid" -m --wd=/projects "$@"
   '';
 
   # The guest's git, which pushes what it commits (guest/cave-git.sh).
@@ -126,6 +285,130 @@ let
       --replace '@REAL_GPG@' '${pkgs.gnupg}/bin/gpg'
     chmod +x $out/bin/cave-gpg
   '';
+
+  # One session, in the two forms it comes in. Everything an agent's session
+  # is -- the pty, the mount namespace, the environment, what it depends on --
+  # is here once, and the two instantiations differ only in who runs it.
+  #
+  # Two units rather than one, because `User=` is what has to differ and a
+  # unit cannot decide its own user from its instance name. The alternative
+  # was a session that starts as root and drops privilege itself, which the
+  # pty rules out: cave-guestd opens the pty before it could drop, so the
+  # slave would be root's and the agent could not reopen its own terminal.
+  # Letting systemd set the user means the daemon, the pty and the agent are
+  # all the same uid, and nothing has to be handed over.
+  #
+  # Which one an agent gets is recorded in its session env file, so
+  # cave-guestd starts the right one and `cave-vm` stops the right one.
+  mkSession = { root }: {
+    description =
+      if root
+      then "Root agent session %i (claude as root, its pty held by cave-guestd)"
+      else "Agent session %i (claude as agent%i, its pty held by cave-guestd)";
+    after = [ "vsock-crinj.socket" "seed-agent-home@%i.service" "clone-repo@%i.service" ];
+    wants = [ "vsock-crinj.socket" ];
+    requires = [ "seed-agent-home@%i.service" "clone-repo@%i.service" ];
+    # Still false, for the one case the split does not cover: this unit's own
+    # definition changing. A session is exactly what may not be restarted
+    # under a working agent, so a new binary reaches sessions started after
+    # the deploy, and the live ones keep the one they have.
+    restartIfChanged = false;
+    # Deliberately not a list of store paths. This unit is not restarted by a
+    # switch, by design, so anything resolved when it started is frozen for as
+    # long as the daemon lives: an agent that rebuilt its own system would
+    # still be running the git, nix and claude of the generation it started
+    # under. /run/current-system/sw/bin follows the generation instead, so a
+    # session begun after a deploy gets the new tools while live sessions are
+    # left alone.
+    path = [ "/run/current-system/sw" ];
+    # systemd services do not read environment.sessionVariables, so the
+    # agent's egress + TLS trust are set here explicitly. The crinj CA is
+    # already in the system bundle (security.pki above); the two cert vars
+    # are still needed because claude's runtime does not consult the system
+    # bundle path on its own (verified: /login gets a cert-chain error
+    # without SSL_CERT_FILE, and node subprocesses need NODE_EXTRA_CA_CERTS).
+    environment = {
+      HTTP_PROXY = "http://127.0.0.1:10255";
+      HTTPS_PROXY = "http://127.0.0.1:10255";
+      NO_PROXY = "localhost,127.0.0.1,::1";
+      SSL_CERT_FILE = "/etc/ssl/certs/ca-certificates.crt";
+      NODE_EXTRA_CA_CERTS = "/etc/ssl/certs/ca-certificates.crt";
+      # A statement about the VM, not about the uid. claude refuses
+      # --dangerously-skip-permissions as root unless it sees an
+      # already-sandboxed environment, which is why this started as the root
+      # agent's; it is set for every agent because the sentence it asserts --
+      # this process is inside a sandbox -- is equally true of all of them.
+      IS_SANDBOX = "1";
+      # systemd sets HOME only for units with User=, so a root unit gets none
+      # and every tool that resolves config through $HOME misbehaves under the
+      # agent. git is the one that bites: it never reads the seeded
+      # .gitconfig, so `git commit` fails with "Author identity unknown" even
+      # though the seed installed it correctly. Stated for both, because a
+      # home that disagrees with the one seed-agent-home@ wrote is the same
+      # bug wearing a different uid.
+      HOME = if root then "/root" else "/home/agent%i";
+      # A unit has no terminal, so TERM is unset and anything curses-ish
+      # falls back to dumb rendering: no colour, no cursor addressing, and
+      # output that reads like a terminal with no scrollback. The daemon
+      # passes its own environment to the agent, so it has to be stated here.
+      # Only the type: the size comes from whatever terminal attaches.
+      TERM = "xterm-256color";
+      # Where a Wayland display socket goes. Every compositor requires this
+      # and refuses to start without it, and a system unit has none, because
+      # logind sets it only for a login session.
+      #
+      # Deliberately not /run/user/0, which is logind's to create and delete
+      # for a root ssh login: RuntimeDirectory= below would take ownership of
+      # that path and remove it when the session stopped, pulling it out from
+      # under any `vmcav shell` that happened to be open. A path of this
+      # unit's own shares with nothing, and carries the instance id, which is
+      # what several agents in one guest need anyway.
+      XDG_RUNTIME_DIR = "/run/cave-agent-%i";
+    };
+    serviceConfig = {
+      # The session process stays in the foreground and exits with its agent,
+      # so systemd tracks the real process and the unit's state is the
+      # session's state rather than a guess about a pid after a double fork.
+      Type = "simple";
+      # The project and base this session was created for. Same file the
+      # checkout unit reads, so the two cannot disagree about which worktree
+      # the agent lands in.
+      EnvironmentFile = "/run/cave/sessions/%i.env";
+      # The session process's own path is pinned, because nothing can swap a
+      # process that is holding a pty. The agent's is not: naming it through
+      # the current system means a session started after a deploy picks up
+      # whatever that deploy installed. Baking the store path here was a
+      # self-update bug -- the agent could rebuild its own system, activate
+      # it, and still launch the previous claude forever.
+      ExecStart = "${caveGuestd}/bin/cave-guestd session -id %i -dir ${sessionDir} "
+        + "-- /run/current-system/sw/bin/cave-agent";
+      # Creates XDG_RUNTIME_DIR above and removes it when the session stops.
+      # 0700 because the spec has it private to its owner, and compositors
+      # check the mode rather than trusting the variable.
+      RuntimeDirectory = "cave-agent-%i";
+      RuntimeDirectoryMode = "0700";
+      # An agent that exits stays exited. Coming back is someone asking for it
+      # again, which starts this unit afresh.
+      Restart = "no";
+
+      # This is the whole of "its own view of projects". The agent's tree is
+      # bound over /projects for this unit and nothing else, so every agent
+      # works in /projects/<slug>, that path means a different tree for each
+      # of them, and no agent can name -- or collide with -- another's.
+      #
+      # It is also why the id is not in the path any more. The numbered
+      # directory still exists underneath, because a human debugging two
+      # agents needs to tell the trees apart; what changed is that it stopped
+      # being the agent's problem. Same shape `main` gets from bwrap, from
+      # the other side: there a sandbox is built around the agent, here a
+      # namespace is handed to its unit.
+      PrivateMounts = true;
+      BindPaths = "${agentProjects}:/projects";
+    } // lib.optionalAttrs (!root) {
+      User = "agent%i";
+      Group = "cave";
+    };
+  };
 in
 {
   imports = [
@@ -248,6 +531,52 @@ in
     fsType = "ext4";
     options = [ "ro" "nofail" "x-systemd.device-timeout=2" ];
   };
+
+  # --- Who an agent runs as ---
+  # Ordinary agents are not root. The root agent still is, because its job is
+  # to rebuild the system every other agent runs in, and that is the one job
+  # that needs it (docs/vm-root-agent.md). Everyone else gets a user of their
+  # own out of the pool declared here.
+  #
+  # What this is and is not. Separate uids mean an agent's files are its own
+  # and a stray `rm -rf` reaches one tree rather than all of them, and it means
+  # the thing an agent runs -- claude with permissions skipped -- is no longer
+  # running as root over the whole guest. It is not a wall between agents:
+  # homes are 0700 but the root agent can read any of them, and the boundary
+  # that means anything is still the VM's (docs/vm-cave-boundary.md). Inside
+  # the guest agents are colleagues, and this is a blast radius, not a border.
+  users.groups.cave.gid = 3000;
+  users.users = builtins.listToAttrs (map
+    (id: {
+      name = agentUser id;
+      value = {
+        isNormalUser = true;
+        uid = agentUid id;
+        group = "cave";
+        # uinput so an agent can drive a headless compositor, which is the
+        # capability this guest exists to make safe (hardware.uinput below).
+        extraGroups = [ "uinput" ];
+        home = "/home/${agentUser id}";
+        createHome = true;
+        # No password and no key: nothing logs in as an agent. A session is
+        # started by systemd and reached through its socket, and a human who
+        # needs to be one uses the root shell they already have.
+        hashedPassword = "!";
+      };
+    })
+    agentIds);
+
+  # The session socket directory, and the per-agent worktree root beneath it.
+  # Declared here rather than left to whoever gets there first: cave-guestd
+  # would create the socket directory 0700 root-owned, which is correct only
+  # while every session is root's, and an ordinary agent would then fail to
+  # bind its own socket with a permission error that names nothing useful.
+  systemd.tmpfiles.rules = [
+    "d /run/cave 0755 root root -"
+    "d ${sessionDir} 1770 root cave -"
+    "d /var/lib/coding-cave 0755 root root -"
+    "d ${worktreeRoot} 0755 root root -"
+  ];
 
   # --- Access: host comes in over ssh, then attaches to the agent daemon ---
   services.openssh = {
@@ -472,6 +801,26 @@ in
     !include /etc/cave-host/nix.conf
   '';
 
+  # The daemon does the substituting, so the daemon is what needs the proxy.
+  #
+  # This was invisible while every agent was root. A trusted user's client
+  # settings are accepted by the daemon, so root's own proxy env carried the
+  # fetch; an ordinary agent is not trusted, its env is ignored, and the
+  # daemon reached for cache.nixos.org with no NIC and no resolver behind it.
+  # The failure is "Could not resolve host", which reads like a broken network
+  # rather than a missing variable, and it lands on `nix develop` -- the first
+  # thing an agent does in a project it has just checked out.
+  #
+  # Not a widening: this is the same crinj proxy every other byte leaves
+  # through, named for a process that could not otherwise ask. The alternative
+  # -- adding agents to trusted-users -- would let an agent name its own
+  # substituter, which is a boundary decision and not one to make in passing.
+  systemd.services.nix-daemon.environment = {
+    http_proxy = "http://127.0.0.1:10255";
+    https_proxy = "http://127.0.0.1:10255";
+    no_proxy = "localhost,127.0.0.1,::1";
+  };
+
   # --- Synthetic input, for agents working on window managers ---
   # /dev/uinput, which is what lets an agent start a headless compositor and
   # type into it. The module, the `uinput` group and a udev rule at 0660 with
@@ -501,42 +850,106 @@ in
     caveGit
     caveGuestd
     caveAgent
+    caveEnter
+    caveRedeploy
     claudeCode
     bash
     nix
     vim
   ];
 
-  # --- Claude config seeding ---
-  # claude prompts interactively without accepted trust/onboarding flags for
-  # its project dir, and without login state. Seed /root/.claude.json before
-  # the agent starts: preserve any existing guest state, else start from the
-  # host's staged claude.json (login state; crinj injects the real token at
-  # the network layer), then force the trust/onboarding flags for the repo.
+  # A tombstone, and the reason it has to exist for one generation.
+  #
+  # seed-claude-config is gone: its work is per-agent now and seed-agent-home@
+  # does it. But a session that is *already running* was started with
+  # `Requires=seed-claude-config.service`, and that unit is RemainAfterExit,
+  # so it is still active. Delete it from the config and switch-to-configuration
+  # stops it, `Requires=` propagates the stop, and the running agent -- which
+  # may be the very agent performing the deploy -- is killed mid-sentence. That
+  # is not a theory: it happened three times, each one taking the terminal with
+  # it and leaving the switch dead at status 101 with the new generation built
+  # but never activated.
+  #
+  # So the unit stays, doing nothing, until no live session names it. It can be
+  # deleted in any later generation once every session has been restarted onto
+  # the new dependencies. restartIfChanged/stopIfChanged false so that this
+  # deploy does not touch the running instance either.
+  #
+  # The general rule this is an instance of is below, on seed-agent-home@.
   systemd.services.seed-claude-config = {
-    description = "Seed /root/.claude.json (trust + onboarding + login state)";
-    wantedBy = [ "multi-user.target" ];
-    before = [ "vm-root-agent.service" ];
+    description = "Superseded by seed-agent-home@ (kept so live sessions do not stop)";
+    restartIfChanged = false;
+    stopIfChanged = false;
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;
-      ExecStart = "${pkgs.writeShellScript "seed-claude-config" ''
+      ExecStart = "${pkgs.coreutils}/bin/true";
+    };
+  };
+
+  # --- Claude config seeding, per agent ---
+  # claude prompts interactively without accepted trust/onboarding flags for
+  # its project dir, and without login state. Seed the agent's home before its
+  # session starts: preserve any existing state, else start from the host's
+  # staged claude.json (login state; crinj injects the real token at the
+  # network layer), then force the trust/onboarding flags for its worktree.
+  #
+  # Per agent rather than once at boot, because a home is now per agent. The
+  # old unit wrote /root and nothing else, which was right while every agent
+  # was root and becomes the quiet failure the moment one is not: the agent
+  # reads a home nobody seeded, finds no credentials, and stops at /login
+  # having reported nothing. It also seeds the git identity and the standing
+  # instructions, so that everything an agent's home needs is one unit and a
+  # new home cannot be half-populated by a unit somebody forgot to instance.
+  systemd.services."seed-agent-home@" = {
+    description = "Seed agent %i's home: claude config, git identity, instructions";
+    # The trust key is a path, and the path is the project the agent was
+    # given; nothing here waits on the checkout existing.
+    serviceConfig = {
+      Type = "oneshot";
+      # Load-bearing, and not merely tidiness. A session `Requires=` this
+      # unit, and `Requires=` propagates an explicit stop: if this stayed
+      # active after running, then removing it -- or anything else that
+      # stopped it, including a later redeploy -- would stop every session
+      # that named it, killing live agents. Going inactive on success means
+      # there is nothing left for a stop to propagate through.
+      #
+      # The rule, for anything a session depends on: go inactive when you are
+      # done, or be depended on with Wants= rather than Requires=. cave-redeploy
+      # refuses a deploy that would break it, but the refusal is a backstop,
+      # not the design.
+      RemainAfterExit = false;
+      EnvironmentFile = "/run/cave/sessions/%i.env";
+      ExecStart = "${pkgs.writeShellScript "seed-agent-home" ''
         set -eu
+        ${agentIdentity}
+        : "''${CAVE_PROJECT:?no project}"
+        install -d -m 700 -o "$agent_user" "$agent_home"
+        install -d -m 700 -o "$agent_user" "$agent_home/.claude"
+
         # The base is this VM's own previous state, captured before the last
         # reformat, never the host's ~/.claude.json: those flags are keyed to
         # the host's own projects and its own history and MCP config, none of
-        # which has any business in here. Note the path now matches what a
-        # config, which has no business in here. An empty base is fine, the
-        # keys forced below are the ones that matter.
-        seed=/root/.claude.json
+        # which has any business in here. An empty base is fine, the keys
+        # forced below are the ones that matter.
+        seed="$agent_home/.claude.json"
         host=/etc/cave-host/claude.json
         if [ -f "$seed" ]; then base=$(cat "$seed")
         elif [ -f "$host" ]; then base=$(cat "$host")
         else base='{}'; fi
-        # No project trusted here: which projects exist is not known at boot.
-        # clone-repo@ accepts the dialog for the project it checks out.
+
+        # Trust the path the agent will actually be standing in, which is the
+        # bind target and not the tree behind it. Keying this to the real
+        # worktree would leave claude prompting about a directory the agent
+        # cannot see the name of, on every start.
         printf '%s' "$base" > "$seed.tmp"
-        mv "$seed.tmp" "$seed"
+        ${pkgs.jq}/bin/jq --arg p "/projects/$CAVE_PROJECT" \
+          '.projects[$p].hasTrustDialogAccepted = true
+           | .projects[$p].hasCompletedProjectOnboarding = true' \
+          "$seed.tmp" > "$seed.tmp2"
+        mv "$seed.tmp2" "$seed"
+        rm -f "$seed.tmp"
+        chown "$agent_user" "$seed"
         chmod 600 "$seed"
 
         # claude.json is login *state*; the token lives beside it, and without
@@ -544,11 +957,35 @@ in
         # stages is this VM's own placeholder, captured after it logged in
         # once: crinj holds the real token, and a placeholder is worthless
         # anywhere else. Never overwritten, so an in-guest login wins.
-        cred=/root/.claude/.credentials.json
+        cred="$agent_home/.claude/.credentials.json"
         host_cred=/etc/cave-host/credentials.json
         if [ ! -f "$cred" ] && [ -f "$host_cred" ]; then
-          mkdir -p /root/.claude
-          install -m600 "$host_cred" "$cred"
+          install -m 600 -o "$agent_user" "$host_cred" "$cred"
+        fi
+
+        # What the agent knows that a checkout does not tell it: which VM it
+        # is in, which channels exist, and that committing is what publishes.
+        install -m 644 -o "$agent_user" ${./CLAUDE.md} "$agent_home/.claude/CLAUDE.md"
+
+        # git refuses to commit without an identity, and the agent's core loop
+        # ends in a commit. The host stages its own user.name/user.email; the
+        # fallback keeps a boot with no seed able to commit rather than
+        # failing at the last step, and is deliberately not a person.
+        gitseed=/etc/cave-host/gitconfig
+        if [ -f "$gitseed" ]; then
+          install -m 644 -o "$agent_user" "$gitseed" "$agent_home/.gitconfig"
+        elif [ ! -f "$agent_home/.gitconfig" ]; then
+          printf '[user]\n\tname = cave-agent-%s\n\temail = cave-agent-%s@coding-cave.invalid\n' \
+            "$CAVE_AGENT_ID" "$CAVE_AGENT_ID" > "$agent_home/.gitconfig"
+          chown "$agent_user" "$agent_home/.gitconfig"
+        fi
+
+        # Public keyring, so verification resolves locally instead of
+        # round-tripping to the host. Public material only; nothing signs.
+        if [ -f /etc/cave-host/pubring.kbx ]; then
+          install -d -m 700 -o "$agent_user" "$agent_home/.gnupg"
+          install -m 600 -o "$agent_user" /etc/cave-host/pubring.kbx \
+            "$agent_home/.gnupg/pubring.kbx"
         fi
       ''}";
     };
@@ -592,45 +1029,107 @@ in
       EnvironmentFile = "/run/cave/sessions/%i.env";
       ExecStart = "${pkgs.writeShellScript "clone-repo" ''
         set -eu
+        ${agentIdentity}
         # Every one of these is supplied when the agent is created. No
         # defaults: a default here is a guess about what someone is working
         # on, which is the bug this unit used to be.
         : "''${CAVE_PROJECT:?no project}" "''${CAVE_BASE:?no base branch}"
-        : "''${CAVE_AGENT_ID:?no agent id}"
-        # One worktree per agent, at /projects/<slug>/<id>, which is the
-        # layout `main` files them under (worktrees/<slug>/<agent>). It used
-        # to be /projects/<slug> for everyone, and that single tree is what
-        # made two agents impossible: the second one to start would either
-        # take the first's checkout out from under it or be refused.
+
+        # This unit runs outside the session's mount namespace, on purpose:
+        # it is what creates the directory the bind mounts, so it has to name
+        # the real path. It is the last place that does. Everything the agent
+        # itself runs sees /projects/<slug>.
+        repo="$agent_tree/$CAVE_PROJECT"
+
+        # Two older layouts to carry forward, both of which put a checkout
+        # where nothing looks for one any more. Nothing is deleted either way:
+        # a tree here may hold the only copy of work that was never pushed.
         #
-        # The separation stops there, deliberately. Nothing stops one agent
-        # reading or writing another's tree, and with the root agent being
-        # root nothing could without a second mechanism. Inside the guest
-        # agents are colleagues, not strangers; the boundary that means
-        # anything is the VM's (docs/vm-cave-boundary.md).
-        repo="/projects/$CAVE_PROJECT/$CAVE_AGENT_ID"
-        # A guest from before the split has its one checkout sitting exactly
-        # where the per-agent directory now goes, so the clone below would
-        # nest a repo inside a repo and leave the old tree as cruft nobody
-        # ever looks at again. Move it under the id its branch already names
-        # instead: that is whose tree it is, whether or not it is the agent
-        # starting now, and nothing is deleted either way.
+        #   /projects/<slug>          one checkout shared by everyone, from
+        #                             before agents had separate trees
+        #   /projects/<slug>/<id>     a tree per agent, but at a path the
+        #                             agent had to know the number of
+        #
+        # The second is the layout this change replaces, and the id in it is
+        # exactly the information needed to file it correctly, so the move is
+        # mechanical. The first has no id in the path, so its branch is asked
+        # instead: agent-N/<base> says whose tree it is even when the
+        # directory does not.
+        #
+        # This unit moves one tree: the one belonging to the agent it was
+        # started for. Sweeping the whole directory would be quicker and is
+        # wrong, because another agent may be *running* in one of those trees
+        # right now, and moving a live worktree leaves that agent holding a
+        # working directory whose path no longer exists. Every agent migrates
+        # its own on its next start, which is the moment nobody is in it.
         legacy="/projects/$CAVE_PROJECT"
-        if [ -d "$legacy/.git" ]; then
-          on=$(git -C "$legacy" symbolic-ref --quiet --short HEAD || echo "")
+        migrate_to() { # <tree> <owner id>
+          local tree="$1" owner="$2" dest
+          dest="${worktreeRoot}/$owner/projects"
+          install -d -m 755 "${worktreeRoot}/$owner"
+          install -d -m 755 -o "$agent_user" "$dest"
+          if [ -e "$dest/$CAVE_PROJECT" ]; then
+            # Both a new checkout and an old one. Nothing is deleted to
+            # resolve that: the old tree may hold the only copy of work that
+            # was never pushed, and which of the two is wanted is not a
+            # question a unit should answer at boot.
+            echo "clone-repo: $dest/$CAVE_PROJECT already exists; leaving $tree alone" >&2
+            return 0
+          fi
+          echo "clone-repo: moving $tree to $dest/$CAVE_PROJECT"
+          mv "$tree" "$dest/$CAVE_PROJECT"
+        }
+        owner_of() { # <tree> -- whose branch is checked out in it
+          local on
+          on=$(${pkgs.git}/bin/git -C "$1" symbolic-ref --quiet --short HEAD || echo "")
           case "$on" in
-            agent-*/*) owner=''${on#agent-}; owner=''${owner%%/*} ;;
-            *) owner="$CAVE_AGENT_ID" ;;
+            agent-*/*) on=''${on#agent-}; echo "''${on%%/*}" ;;
+            *) echo "" ;;
           esac
-          echo "clone-repo: moving the pre-split checkout to $legacy/$owner (on ''${on:-detached})"
-          tmp=$(mktemp -d /projects/.migrate.XXXXXX)
-          mv "$legacy" "$tmp/tree"
-          install -d -m 755 "$legacy"
-          mv "$tmp/tree" "$legacy/$owner"
-          rmdir "$tmp"
+        }
+        if [ -d "$legacy/.git" ]; then
+          # The shared pre-split checkout. Claim it only if its branch says it
+          # is this agent's, or if it says nothing at all -- an unclaimed tree
+          # is better carried forward by whoever turns up than left for a
+          # `reformat` to delete.
+          owner=$(owner_of "$legacy")
+          if [ -z "$owner" ] || [ "$owner" = "$CAVE_AGENT_ID" ]; then
+            migrate_to "$legacy" "$CAVE_AGENT_ID"
+          else
+            echo "clone-repo: $legacy is on agent $owner's branch; leaving it for them" >&2
+          fi
+        elif [ -d "$legacy/$CAVE_AGENT_ID/.git" ]; then
+          migrate_to "$legacy/$CAVE_AGENT_ID" "$CAVE_AGENT_ID"
         fi
-        # git clone creates the leaf and not the parents.
-        install -d -m 755 "/projects/$CAVE_PROJECT"
+        # Only ever if empty, and never recursively: what is left in here
+        # belongs to agents that have not started since the change, and a
+        # non-empty /projects is not this unit's to remove.
+        rmdir "$legacy" 2>/dev/null || true
+
+        # git clone creates the leaf and not the parents. Owned by the agent,
+        # because everything under it is about to be.
+        install -d -m 755 "${worktreeRoot}/$CAVE_AGENT_ID"
+        install -d -m 755 -o "$agent_user" "$agent_tree"
+
+        # A tree that arrived from an older layout, or from a guest where
+        # every agent was root, is owned by root and this agent cannot write
+        # it. Hand it over once, here, where the agent's identity is known.
+        if [ -e "$repo" ] && [ "$(stat -c %U "$repo")" != "$agent_user" ]; then
+          echo "clone-repo: giving $repo to $agent_user"
+          chown -R "$agent_user" "$repo"
+        fi
+
+        # Run git as the agent, not as root. Ownership is the reason: a tree
+        # cloned by root and handed over by chown trips git's own
+        # dubious-ownership check the next time this unit runs, and the repair
+        # for that is either a safe.directory exception per agent or not
+        # creating the problem. HOME explicitly, because runuser does not set
+        # one and git without a home is git without an identity.
+        git() {
+          ${pkgs.util-linux}/bin/runuser -u "$agent_user" -- \
+            ${pkgs.coreutils}/bin/env HOME="$agent_home" \
+            ${pkgs.git}/bin/git "$@"
+        }
         # The project's shared bare repo on the host. Never the human's
         # working checkout: an agent must not be able to write a branch into
         # the tree someone is standing in.
@@ -689,28 +1188,21 @@ in
         else
           git checkout -q -B "$branch" "host-cave/$CAVE_BASE"
         fi
-        # Accept claude's trust and onboarding dialogs for this worktree. Here
-        # rather than in seed-claude-config, because the key is the project
-        # path and nothing knows that until an agent is given a project.
-        cfg=/root/.claude.json
-        [ -f "$cfg" ] || echo '{}' > "$cfg"
-        ${pkgs.jq}/bin/jq --arg p "$repo" \
-          '.projects[$p].hasTrustDialogAccepted = true
-           | .projects[$p].hasCompletedProjectOnboarding = true' \
-          "$cfg" > "$cfg.tmp"
-        mv "$cfg.tmp" "$cfg"
-        chmod 600 "$cfg"
+        # The trust dialog is accepted in seed-agent-home@, which owns
+        # everything under the agent's home. It has to be keyed to
+        # /projects/<slug> -- what the agent stands in -- and not to $repo,
+        # which is the path this unit uses and the agent never sees.
         echo "clone-repo: $repo on $branch (base $CAVE_BASE)"
       ''}";
     };
   };
 
   # --- The agent runtime ---
-  # claude as root with bypass permissions, its pty held by a cave-guestd of
-  # its own so it survives the ssh connection going away. Deliberately not a
-  # multiplexer: nothing here wants windows, panes, a status bar or a prefix
-  # key, and a multiplexer's scrollback is worse than the terminal's own.
-  # Defined here so the agent redeploys its own unit via nixos-rebuild.
+  # claude with bypass permissions, its pty held by a cave-guestd of its own so
+  # it survives the ssh connection going away. Deliberately not a multiplexer:
+  # nothing here wants windows, panes, a status bar or a prefix key, and a
+  # multiplexer's scrollback is worse than the terminal's own. Defined here so
+  # the agent redeploys its own unit via nixos-rebuild.
   #
   # A template, one instance per agent, because the alternative is one daemon
   # holding every pty, and then its crashes, its OOM kills and its own upgrade
@@ -718,96 +1210,13 @@ in
   # agent: `cave-guestd attach` starts an instance it cannot find rather than
   # forking one, so nothing an agent is doing belongs to the ssh connection
   # that went looking for it.
-  systemd.services."cave-session@" = {
-    description = "Agent session %i (claude as root, its pty held by cave-guestd)";
-    after = [ "vsock-crinj.socket" "seed-claude-config.service" "clone-repo@%i.service" ];
-    wants = [ "vsock-crinj.socket" ];
-    requires = [ "seed-claude-config.service" "clone-repo@%i.service" ];
-    # Still false, for the one case the split does not cover: this unit's own
-    # definition changing. A session is exactly what may not be restarted
-    # under a working agent, so a new binary reaches sessions started after
-    # the deploy, and the live ones keep the one they have.
-    restartIfChanged = false;
-    # The project and base this session was created for. Same file the
-    # checkout unit reads, so the two cannot disagree about which worktree the
-    # agent lands in.
-    serviceConfig.EnvironmentFile = "/run/cave/sessions/%i.env";
-    # Deliberately not a list of store paths. This unit is not restarted by a
-    # switch, by design, so anything resolved when it started is frozen for as
-    # long as the daemon lives: an agent that rebuilt its own system would
-    # still be running the git, nix and claude of the generation it started
-    # under. /run/current-system/sw/bin follows the generation instead, so a
-    # session begun after a deploy gets the new tools while live sessions are
-    # left alone.
-    path = [ "/run/current-system/sw" ];
-    # systemd services do not read environment.sessionVariables, so the
-    # agent's egress + TLS trust are set here explicitly. The crinj CA is
-    # already in the system bundle (security.pki above); the two cert vars
-    # are still needed because claude's runtime does not consult the system
-    # bundle path on its own (verified: /login gets a cert-chain error
-    # without SSL_CERT_FILE, and node subprocesses need NODE_EXTRA_CA_CERTS).
-    environment = {
-      HTTP_PROXY = "http://127.0.0.1:10255";
-      HTTPS_PROXY = "http://127.0.0.1:10255";
-      NO_PROXY = "localhost,127.0.0.1,::1";
-      SSL_CERT_FILE = "/etc/ssl/certs/ca-certificates.crt";
-      NODE_EXTRA_CA_CERTS = "/etc/ssl/certs/ca-certificates.crt";
-      # claude refuses --dangerously-skip-permissions as root ("cannot be
-      # used with root/sudo privileges") unless it sees an already-sandboxed
-      # environment. The VM is that sandbox, so declare it; without this the
-      # agent starts and immediately exits. It is set here rather than by
-      # `vmcav agent`, which only attaches to the session this unit already
-      # started; a claude launched by hand from `vmcav shell` needs its own.
-      IS_SANDBOX = "1";
-      # systemd sets HOME only for units with User=, so a root unit gets none
-      # and every tool that resolves config through $HOME misbehaves under the
-      # agent. git is the one that bites: it never reads /root/.gitconfig, so
-      # the seeded identity is invisible and `git commit` fails with "Author
-      # identity unknown" even though the seed installed it correctly. claude
-      # itself is unaffected (node's os.homedir() falls back to the passwd
-      # entry), which is why this survived bootstrap unnoticed.
-      HOME = "/root";
-      # A unit has no terminal, so TERM is unset and anything curses-ish
-      # falls back to dumb rendering: no colour, no cursor addressing, and
-      # output that reads like a terminal with no scrollback. The daemon
-      # passes its own environment to the agent, so it has to be stated here.
-      # Only the type: the size comes from whatever terminal attaches.
-      TERM = "xterm-256color";
-      # Where a Wayland display socket goes. Every compositor requires this
-      # and refuses to start without it, and a system unit has none, because
-      # logind sets it only for a login session.
-      #
-      # Deliberately not /run/user/0, which is logind's to create and delete
-      # for a root ssh login: RuntimeDirectory= below would take ownership of
-      # that path and remove it when the session stopped, pulling it out from
-      # under any `vmcav shell` that happened to be open. A path of this
-      # unit's own shares with nothing, and carries the instance id, which is
-      # what several agents in one guest need anyway.
-      XDG_RUNTIME_DIR = "/run/cave-agent-%i";
-    };
-    serviceConfig = {
-      # The session process stays in the foreground and exits with its agent,
-      # so systemd tracks the real process and the unit's state is the
-      # session's state rather than a guess about a pid after a double fork.
-      Type = "simple";
-      # The session process's own path is pinned, because nothing can swap a
-      # process that is holding a pty. The agent's is not: naming it through
-      # the current system means a session started after a deploy picks up
-      # whatever that deploy installed. Baking the store path here was a
-      # self-update bug -- the agent could rebuild its own system, activate
-      # it, and still launch the previous claude forever.
-      ExecStart = "${caveGuestd}/bin/cave-guestd session -id %i -dir ${sessionDir} "
-        + "-- /run/current-system/sw/bin/cave-agent";
-      # Creates XDG_RUNTIME_DIR above and removes it when the session stops.
-      # 0700 because the spec has it private to its owner, and compositors
-      # check the mode rather than trusting the variable.
-      RuntimeDirectory = "cave-agent-%i";
-      RuntimeDirectoryMode = "0700";
-      # An agent that exits stays exited. Coming back is someone asking for it
-      # again, which starts this unit afresh.
-      Restart = "no";
-    };
-  };
+  #
+  # Two templates, one shape (mkSession, in the let block above). An ordinary
+  # agent runs as agent<id>; the root agent runs as root because rebuilding
+  # the system every other agent runs in is what it is for. Both get their own
+  # view of /projects, so the only thing the split decides is the uid.
+  systemd.services."cave-session@" = mkSession { root = false; };
+  systemd.services."cave-root-session@" = mkSession { root = true; };
 
   # --- The control plane ---
   # The host's command channel, JSON over HTTP on vsock 7001. Everything

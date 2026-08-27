@@ -118,10 +118,16 @@ namespace guard stops separating anyone. Reserving 0 is worth doing on its own
 distinguishable, and nothing else will until the id arrives with the
 connection rather than with the daemon.
 
-**Decided: agents are not isolated from each other yet.** Each gets its own
-worktree in the guest, kept there and never synced to the host, and that is
-the whole of the separation for now. Namespaces or bubblewrap inside the guest
-are a later question, deliberately deferred rather than skipped.
+**Superseded. Agents are separate users with separate views.** What follows in
+this section is kept because the reasoning is still worth reading, but two of
+its conclusions are now wrong: that the worktree path should carry the agent's
+id, and that `User=` cannot be chosen per instance. See *Non-root agents, and
+a view each* below for what was built instead.
+
+**Decided at the time: agents are not isolated from each other yet.** Each gets
+its own worktree in the guest, kept there and never synced to the host, and
+that is the whole of the separation for now. Namespaces or bubblewrap inside
+the guest are a later question, deliberately deferred rather than skipped.
 
 What that buys and what it does not: two agents stop overwriting each other's
 files, which is what actually prevents them running today. It does not make
@@ -173,6 +179,101 @@ guest, and it is roughly:
   a non-root agent has to be able to write to its own terminal.
 - everything that assumes `/root`: the seeded claude config, the credentials,
   the git wrapper's identity, `XDG_RUNTIME_DIR`, and this file's address.
+
+All three are done, and the middle one was wrong on its facts: `User=agent%i`
+expands the specifier and resolves per instance, verified in the guest. What
+is true is the narrower thing -- a unit cannot decide *whether* to set `User=`
+from its instance name -- so the root agent gets its own template and the
+choice between them is a fact recorded when the agent is created rather than a
+guess about its number.
+
+## Non-root agents, and a view each
+
+**Done.** An ordinary agent runs as `agent<id>` out of a declared pool
+(`maxAgents`, currently 8, in `guest/configuration.nix`); the root agent still
+runs as root, because rebuilding the system the others run in is what it is
+for. Which one an agent is gets written into `/run/cave/sessions/<id>.env`
+when it is created, and every unit serving that agent reads it back: which
+user, which home, which of the two session templates.
+
+The worktree path stopped being the agent's problem. Trees live at
+`/var/lib/coding-cave/agents/<id>/projects/<slug>`, and each session unit
+binds its own over `/projects` in a private mount namespace, so every agent
+works in `/projects/<slug>` and that path means a different tree for each of
+them. The id survives where it is useful -- underneath, where a human
+debugging two agents wants to tell the trees apart -- and disappears from the
+place it was never doing any work, which is the working directory of somebody
+who has exactly one tree. This is what `main` gets from bwrap, approached from
+the other side: there a sandbox is built around the agent, here a namespace is
+handed to its unit. `cave-enter <id>` is the way across from a root shell,
+because outside every namespace `/projects` means nothing at all.
+
+What it buys: two agents cannot overwrite each other's files, cannot name each
+other's trees, and the thing running with permissions skipped is no longer
+root over the whole guest. What it does not buy: any of this is visible to the
+root agent, homes are 0700 rather than sealed, and a VM escape is unaffected.
+It is a blast radius, not a border, exactly as `docs/vm-cave-boundary.md` has
+it.
+
+Two things fell out of doing it that were not obviously part of it:
+
+- **The nix daemon had no proxy.** Substitution worked only for root, because
+  a trusted user's client settings are accepted by the daemon and an ordinary
+  user's are not; a non-root agent got `Could not resolve host: cache.nixos.org`
+  on the first `nix develop` in a fresh checkout. The daemon now carries the
+  crinj proxy in its own environment. The alternative -- adding agents to
+  `trusted-users` -- would let an agent name its own substituter, which is a
+  boundary decision and not one to make in passing.
+- **Redeploying from inside killed the agent doing it**, three times, each
+  taking the terminal with it. Its own entry, next.
+
+## A redeploy from inside must not stop the agent running it
+
+**Done, and worth knowing why it was not automatic.** The root agent
+rebuilding the system it is running in is this VM's core loop
+(`docs/vm-root-agent.md`). It is also the one operation here that can destroy
+its own caller, and it did: three `nixos-rebuild switch` runs in a row, each
+one killing the session it was typed into and dying half-applied at status
+101, leaving a generation registered but never activated.
+
+The cause was not the session unit changing, which is the case everybody
+guards against and which `restartIfChanged = false` already covered. It was a
+dependency:
+
+    cave-session@0.service    Requires=seed-claude-config.service
+    seed-claude-config        RemainAfterExit=yes, so it stays *active*
+
+The change deleted `seed-claude-config`. `switch-to-configuration` stops units
+that are gone from the config, `Requires=` propagates an explicit stop to
+whatever named them, and the session died. `clone-repo@0` was in the same
+`Requires=` list and was harmless only because it is `RemainAfterExit=false`:
+already inactive, so there was nothing to stop.
+
+Three rules follow, and the third is the one that makes the others hold:
+
+1. **A session depends only on units that go inactive on success.**
+   `RemainAfterExit=false`, or `Wants=` instead of `Requires=`. This is stated
+   at `seed-agent-home@` in the config, because adding `RemainAfterExit=true`
+   there later would silently re-arm the trap.
+2. **Session templates are never removed or renamed while instances run**, and
+   carry `restartIfChanged = false`.
+3. **Removing any unit a live session might name is a two-generation
+   operation.** Leave a no-op behind with `restartIfChanged`/`stopIfChanged`
+   false, delete it in a later generation once nothing running references it.
+   `seed-claude-config` is now that tombstone and can go once every session
+   has been restarted onto the new dependencies.
+
+`cave-redeploy` enforces this rather than trusting anyone to remember it: it
+runs `nixos-rebuild dry-activate`, which prints exactly which units a switch
+would stop, restart, reload and start while touching nothing, and refuses if
+any `cave-session@*` or `cave-root-session@*` appears under stop or restart.
+Two builds instead of one, the second a cache hit.
+
+It cannot gate its own introduction -- the generation containing it has to be
+activated by hand first -- and that first switch was done with the
+`dry-activate` output read by eye in its place. Left undone: nothing checks
+this in CI, because there is no CI that boots a guest and starts a session.
+The check that matters is the one in the script, run every time.
 
 ## Uncommitted work does not survive `reformat`, and that is the rule
 
@@ -395,16 +496,13 @@ one, in ways that are cheap to list and not cheap to change:
 - the git daemon injects `CODING_CAVE_AGENT_ID=1` for the whole guest, so
   the pre-receive guard cannot tell co-resident agents apart (the hook says
   as much: it gates by namespace, not by agent)
-- **one worktree per project, shared by every agent.** `/projects/<slug>` has
-  no agent id in it, and every agent is root in one namespace, so a project
-  checked out for one agent is not merely readable by the others, it is the
-  same tree. `main` has the same path and no such problem, because bwrap gives
-  each agent a private mount namespace and therefore its own view of
-  `/projects/<slug>`. So the fix is caves rather than a path scheme, and
-  putting an id in the path now would diverge from `main` for no gain.
-  Meanwhile `clone-repo@` refuses to take a worktree that is on another
-  agent's branch, since sharing is survivable and silent reassignment under a
-  running agent is not.
+- ~~**one worktree per project, shared by every agent.**~~ **Done**, and this
+  entry called it correctly: `main` has the same path and no such problem
+  because bwrap gives each agent a private mount namespace and therefore its
+  own view of `/projects/<slug>`, so the fix was a namespace rather than a
+  path scheme. The id-in-the-path version shipped first and was the wrong
+  answer for exactly the reason predicted here. See *Non-root agents, and a
+  view each* above.
 - one ssh identity and one `/projects/coding-cave` working tree, so two agents
   would share a checkout
 - one home, so one `~/.claude/projects`: every agent can read and rewrite
@@ -417,10 +515,11 @@ one, in ways that are cheap to list and not cheap to change:
   while the agent reads somewhere else, and it fails by the agent quietly
   having no credentials rather than by anything erroring
 
-Open: whether agents are separate unix users or all root with separate
-worktrees; where ids are allocated (the host registry, as in container
-caves, versus the guest); and what `vmcav agent` becomes when there are
-several.
+~~Open: whether agents are separate unix users or all root with separate
+worktrees~~ -- settled: separate users, one per id, from a pool declared in
+the guest's config. Still open: where ids are allocated (the host registry, as
+in container caves, versus the guest); and what `vmcav agent` becomes when
+there are several.
 
 **Not open, and worth deleting before someone builds it: a vsock port and a
 git daemon per agent.**

@@ -14,14 +14,17 @@ Order below is roughly dependency order, not priority.
 
 ## Caves do not exist yet
 
-Design phase 6. The agent is root in the guest with no sandbox at all, so
-every item further down that says "per agent" or "per project" has nothing to
-hang off.
+Design phase 6. Two pieces of what a cave is now exist without one: an
+ordinary agent runs as its own uid with its own home, and its session has a
+private mount namespace binding its worktree over `/projects/<slug>`. That is
+the identity and the filesystem view; what a cave adds on top is the sandbox
+-- bwrap and seccomp -- and nothing of that is built.
 
-- one guest uid per agent, private home, home materialized one-way from the
-  seed tree at cave creation
-- bwrap profile: ro /nix/store, the nix-daemon socket, shared caches, the
-  agent's worktrees at `/projects/<slug>`
+- ~~one guest uid per agent, private home~~ **done**; home is seeded rather
+  than materialized one-way from a seed tree, which is the remaining gap
+- ~~the agent's worktrees at `/projects/<slug>`~~ **done**, by a systemd
+  `BindPaths=` in the session unit rather than by bwrap
+- bwrap profile: ro /nix/store, the nix-daemon socket, shared caches
 - the seccomp policy, lifted from cav-rs's sandbox config rather than
   re-derived. How that config crosses the cleanroom line is still open in
   `vm-cave-design.md`.
@@ -43,9 +46,12 @@ unused `Project` field in the registry.
 ## Multiple agents in one VM
 
 Sessions are already one process and one unit each, which is the durability
-half. The identity half is missing, and `vm-cave-todo.md` holds the open
-questions (uid per agent versus all root, where ids are allocated, one vsock
-port per agent).
+half. The identity half now exists in the guest: an agent is a uid, a home and
+a view of `/projects` of its own. What is still missing is identity as the
+*host* sees it -- every agent's git push arrives on one vsock port with one
+stamped id, so `pre-receive` cannot tell co-resident agents apart. It gates by
+namespace rather than by agent, which is why that is survivable;
+`vm-cave-todo.md` holds the demux design and why a port per agent cannot work.
 
 - the git daemon injects `CODING_CAVE_AGENT_ID=1` for the whole guest, so the
   pre-receive guard cannot tell co-resident agents apart

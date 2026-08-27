@@ -19,8 +19,12 @@ type System struct {
 	// Sessions is where cave-session sockets live; the directory is the
 	// roster, since a session's socket exists exactly while it is running.
 	Sessions string
-	// Unit is the systemd template a session runs under.
-	Unit string
+	// Unit names the systemd unit an agent's session runs under. A function
+	// rather than a template string, because there is more than one template
+	// and which one applies is a fact about the agent rather than about its
+	// id. Injected for the same reason List is: resolving it means reading
+	// the session's environment file, which is the daemon's business.
+	Unit func(id string) string
 	// List reports the running sessions, injected so the daemon can pass
 	// agentd.List without this package importing it.
 	List func(dir string) ([]string, error)
@@ -72,7 +76,7 @@ func (s System) StopAgent(id string) error {
 	if err := validID(id); err != nil {
 		return err
 	}
-	unit := fmt.Sprintf(s.Unit, id)
+	unit := s.Unit(id)
 	out, err := exec.Command("systemctl", "stop", unit).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("stopping %s: %v: %s", unit, err, strings.TrimSpace(string(out)))

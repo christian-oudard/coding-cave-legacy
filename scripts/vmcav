@@ -41,6 +41,10 @@ SLUG="$(basename "$REPO")"
 # branch namespace, where agent-0/<base> is visibly not part of the sequence,
 # and leaves 1..N meaning what it means in `main`.
 ROOT_AGENT_ID=0
+# How many ordinary agents the guest can hold at once, which is the size of
+# the agent<n> user pool declared in guest/configuration.nix. Stated in both
+# places because they are two programs; if you raise one, raise the other.
+MAX_AGENTS="${MAX_AGENTS:-8}"
 CONFIG="${CODING_CAVE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/coding-cave/config.toml}"
 STATE_DIR="${STATE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/coding-cave/vm}"
 CRINJ_PORT="${CRINJ_PORT:-10255}"
@@ -706,6 +710,17 @@ allocate_agent_id() {
   # counting: a root agent that has never run leaves 0 free, and this would
   # otherwise give it to the first ordinary agent.
   [ "$n" = "$ROOT_AGENT_ID" ] && n=$((n + 1))
+  # An ordinary agent runs as agent<n>, and those users are declared in the
+  # guest's config rather than made on demand, so the pool has an end. Said
+  # here, where the number is chosen and the reason is nearby, because the
+  # failure otherwise lands in systemd as an unknown User= on a unit that
+  # started fine yesterday.
+  if [ "$n" -gt "$MAX_AGENTS" ]; then
+    log "no free agent id: this guest holds $MAX_AGENTS agents at once."
+    log "  Stop one (vmcav agent stop <id>), or raise maxAgents in"
+    log "  guest/configuration.nix and redeploy."
+    return 1
+  fi
   echo "$n"
 }
 
@@ -718,7 +733,7 @@ allocate_agent_id() {
 # far more often than at itself. Read-only, and only on the failure path.
 explain_session_failure() {
   local id="$1" unit
-  for unit in "clone-repo@$id" seed-claude-config; do
+  for unit in "clone-repo@$id" "seed-agent-home@$id"; do
     GUEST_SSH_TTY=-T guest_ssh "systemctl is-failed --quiet $unit" \
       >/dev/null 2>&1 || continue
     log "$unit failed:"
@@ -769,22 +784,6 @@ do_agent() {
   warn_if_guest_is_behind
   local id
   id=$(allocate_agent_id "$want_root") || return 1
-  # Every session in the guest runs as uid 0: cave-session@ has no non-root
-  # user to run as, and none has been built. Root is agent 0's id, so an
-  # ordinary agent today would be root under a number that says it is not --
-  # which is worse than not having the feature, because the id is what
-  # everything else reads to decide what an agent may do, and the guest's own
-  # CLAUDE.md is addressed to whoever holds it.
-  #
-  # So: refused rather than quietly handed out. The id allocator underneath
-  # this is finished and tested; what is missing is a user in the guest to run
-  # an ordinary agent as (docs/vm-cave-todo.md).
-  if [ "$id" != "$ROOT_AGENT_ID" ]; then
-    log "every agent in the guest runs as root, and root is agent $ROOT_AGENT_ID."
-    log "  Until an ordinary agent has a non-root user to run as, there is one"
-    log "  agent:  vmcav agent --root"
-    return 1
-  fi
   if [ "$id" = "$ROOT_AGENT_ID" ]; then
     log "agent $id (vm root): $project @ $base (pushes land on agent-$id/$base)"
   else
@@ -794,9 +793,15 @@ do_agent() {
   # command gets diagnosed instead of dumping cave-guestd's usage at you. That
   # is the failure people actually hit, because a host script and the binary
   # inside the guest are two versions that move independently.
-  local out rc=0
+  local out rc=0 root_flag=""
+  # The guest is told which kind of agent this is, once, here. It records the
+  # answer in the session's environment file, and everything downstream --
+  # which user the session runs as, which home gets seeded, which of the two
+  # session templates starts -- reads it back from there rather than
+  # inferring it from the number.
+  [ -n "$want_root" ] && root_flag=" -root"
   out=$(GUEST_SSH_TTY=-T guest_ssh \
-    "cave-guestd start -id $id -project $project -base $base" 2>&1) || rc=$?
+    "cave-guestd start -id $id -project $project -base $base$root_flag" 2>&1) || rc=$?
   if [ "$rc" -ne 0 ]; then
     if printf '%s' "$out" | grep -q 'usage: cave-guestd'; then
       log "the guest's cave-guestd does not know 'start', so it is older than"
@@ -866,7 +871,33 @@ do_attach() {
 
 # A plain root shell in the guest. No args -> interactive shell; extra args run
 # as a command (e.g. `vmcav shell journalctl -u cave-session@1`).
-do_shell() { guest_ssh "$@"; }
+# A root shell in the guest. With an agent named, a root shell inside that
+# agent's mount namespace, which is the only place /projects means anything.
+#
+# Worth saying plainly, because it is the one thing about the guest that a
+# plain ssh login now gets wrong. Every agent sees its own worktree at
+# /projects/<slug>, and it sees it because its session unit binds one there;
+# outside that namespace there is no such directory, only the real trees under
+# /var/lib/coding-cave/agents/<id>. So `vmcav shell` lands somewhere /projects
+# does not exist, and `vmcav shell 3` lands where it is agent 3's.
+#
+# nsenter against the session's own pid: the session leader is the process
+# systemd started, it holds the namespace for as long as the agent is running,
+# and asking systemd for it is more honest than looking for a mount by path.
+do_shell() {
+  local agent=""
+  case "${1:-}" in
+    [0-9]*) agent="$1"; shift ;;
+  esac
+  if [ -z "$agent" ]; then
+    guest_ssh "$@"
+    return
+  fi
+  # cave-enter lives in the guest, because which namespace an agent holds and
+  # where its trees really are is the guest's own layout: a host script that
+  # knew it would be a second copy of the same fact, drifting.
+  guest_ssh "cave-enter $agent" "$@"
+}
 
 # The commit this vmcav was built from. The nix wrapper bakes it in, because
 # an installed copy is a store path that can be older than the checkout it is
