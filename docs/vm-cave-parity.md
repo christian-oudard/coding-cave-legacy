@@ -136,20 +136,48 @@ is the surface around it that is missing, not the bookkeeping underneath.
 
 ## The cave environment
 
-Phase 9. There is no `cave.nix` path in the VM at all: what the guest runs is
-cav's own system config, and a user's environment has nowhere to arrive.
+Phase 9, guest half landed. `guest/env` holds the home-manager layer --
+`mkCaveEnv` plus the `cave-system` and `claude-code` modules, ported from
+`main` -- and `cave-guestd env` builds it and copies it into an agent's home
+from `seed-agent-home@`. A guest with no `cave.nix` still gets the cave
+defaults; one with a `/var/lib/coding-cave/env/cave.nix` gets that merged over
+them. `cave-env build|edit|show` is the in-guest command.
+
+Three things differ from `main` deliberately, each because the guest is a
+machine rather than a mount namespace:
+
+- **The toolbox moved to `environment.systemPackages`.** `main` carries
+  coreutils, jq, ripgrep and the rest in its `cave-system` module because cav
+  cannot configure a system it does not own. The guest owns its system, so
+  every agent has the floor whether or not an environment was ever built.
+- **One environment, many homes.** `main` builds one per cave; there is one
+  spec per guest here, built once and materialized into each home. The cost is
+  that nothing in a `cave.nix` may interpolate `home.homeDirectory`.
+- **Removals are honoured.** A manifest per home records what was written, so
+  deleting a skill from `cave.nix` takes it out of the homes that had it.
+  `main` leaves it behind, which it gets away with because a cave home is
+  discarded and a guest home survives every `reformat`.
+
+What is left is the host half, and it is all of the crossing:
 
 - `cave.nix` plus its siblings synced host to guest, and the hash-based skip
-  that pushes only when it changed
-- `env build`, `env update [input]`, `env metadata`
-- the per-cave profile linked into the cave home, built by the guest daemon
-- the home-manager layer, and the default environment generated for a user
-  who has no `cave.nix`
+  that pushes only when it changed. The guest-side stamp exists and is what
+  the sync would drive; nothing carries the files in yet. The design's answer
+  is a control-plane endpoint, which is the plane that already exists.
+- `cav env build`, `env update [input]`, `env metadata`, and `env pull` to
+  bring an agent's edits back out to the host's `cave.nix`
+- the guest keeping its copy in a git repository of its own, so "has the guest
+  changed" is a question git answers
 - `cav init` offering to create one
 
-`vm-cave-design.md` settles the direction (the build happens in the guest,
-`env pull` brings an agent's changes back out), so this is unbuilt rather than
-undecided.
+Also missing, and not host-side: a `path:` flake input in a `cave.nix` cannot
+resolve, because there is no host filesystem in the guest. `main` supports
+pinning a local dotfiles directory that way and re-pins it on every build.
+Undecided whether those contents ride in the synced set or whether `path:`
+becomes unsupported with git URLs as the answer.
+
+The marketplace registration and the `cave-messages` plugin that `main`'s
+`cave-system` module enables are not here, because the comms plane is not.
 
 ## Sessions, memory, the system prompt
 

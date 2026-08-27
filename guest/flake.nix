@@ -7,9 +7,18 @@
       url = "github:sadjow/claude-code-nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    # Not used by the guest system itself. It is here so that the user
+    # environment an agent gets is built against the same nixpkgs the guest is
+    # running: cave-env's generated wrapper flake pins these three by store
+    # path out of this closure (see caveEnvInputs below), which is what keeps a
+    # second glibc, and a second claude, out of the VM.
+    home-manager = {
+      url = "github:nix-community/home-manager";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
-  outputs = { self, nixpkgs, claude-code }:
+  outputs = { self, nixpkgs, claude-code, home-manager }:
     let
       # The guest is built for the host it will run on: x86_64 under Cloud
       # Hypervisor, aarch64 under vfkit on Apple silicon. Both are Linux; the
@@ -21,6 +30,20 @@
         inherit system;
         specialArgs = {
           claudeCode = claude-code.packages.${system}.default;
+          # The three flake sources the user environment is built from, as
+          # store paths. Passed in rather than re-fetched, so `cave-env build`
+          # needs no network at all: everything it locks is already in the
+          # guest store because the system that installed it depends on it.
+          #
+          # claude-code is the flake here, not the package above: mkCaveEnv
+          # asks it for packages.<system>.default itself, and pinning the flake
+          # rather than the derivation is what lets a cave.nix override the
+          # version without the wrapper flake having to know how.
+          caveEnvInputs = {
+            nixpkgs = nixpkgs.outPath;
+            home-manager = home-manager.outPath;
+            claude-code = claude-code.outPath;
+          };
         };
         modules = [ ./configuration.nix ];
       };

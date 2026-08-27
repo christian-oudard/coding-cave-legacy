@@ -70,6 +70,33 @@ phase's acceptance check in here rather than reasoning about it.
 Prefer config over imperative state: a change that survives only until the
 next boot is not a change.
 
+## Your environment, and how to change it
+
+What claude itself is configured with -- the model, the reasoning effort, the
+statusline, any skills, commands, hooks or packages -- comes from the cave
+environment, not from editing `~/.claude/settings.json` by hand. That file is
+copied into your home from a build, so an edit to it lasts until the next
+session start and no longer.
+
+    cave-env show           # what you have, and where it came from
+    cave-env edit           # the spec: /var/lib/coding-cave/env/cave.nix
+    cave-env build          # apply it
+
+The spec is one home-manager module for the whole guest, so it is every
+agent's environment and not just yours. The cave's own defaults sit underneath
+it at the lowest priority, which means naming a key simply overrides it.
+
+Two things it will not do. It will not take packages every agent needs -- that
+floor is `environment.systemPackages` in the guest config, which needs a
+rebuild and so goes through the approval gate like any other system change.
+And a `path:` flake input pointing at somewhere on the host does not resolve,
+because there is no host filesystem in here; use a git URL, which reaches the
+proxy.
+
+Nothing syncs this to or from the host yet: the host half of phase 9 is
+unbuilt, so a spec written in here lives in here. Committing the *design* of
+an environment belongs in the repo; the spec file itself is guest state.
+
 If you are the root agent, you can rebuild the system you are running with
 
     cave-rebuild

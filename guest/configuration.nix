@@ -1,4 +1,4 @@
-{ config, pkgs, lib, modulesPath, claudeCode, ... }:
+{ config, pkgs, lib, modulesPath, claudeCode, caveEnvInputs, ... }:
 
 let
   # Where session sockets live, one per agent, named after it. /run, so a
@@ -9,6 +9,13 @@ let
   # Sticky, because group-writable without it would let one agent delete
   # another's socket, and the socket is how a session is reached.
   sessionDir = "/run/cave/sessions";
+
+  # Where an agent's cave environment puts its merged package set. Must match
+  # userenv.profileLink in the Go package, which is what creates the link;
+  # this is the end that reads it. Deliberately not .nix-profile, which is
+  # nix's own per-user profile: colliding with it would make `nix profile
+  # list` report an environment nobody installed that way.
+  caveProfileLink = ".cave-profile";
 
   # How many ordinary agents this guest can hold at once.
   #
@@ -142,6 +149,73 @@ let
     subPackages = [ "cmd/cave-guestd" ];
   };
 
+  # --- The cave environment (docs/vm-cave-design.md phase 9) ---
+  # The guest's half of it: the modules mkCaveEnv composes ahead of a user's
+  # cave.nix, as a store path of their own so the wrapper flake in
+  # /var/lib/coding-cave/env can name it as an input.
+  #
+  # Its store path is also the version. `main` needs a caveSourceHash --
+  # a hash it computes over its own cave modules at cav-build time -- to
+  # notice that one of them was edited; here the path changes when the files
+  # do, so the same fact is free.
+  caveEnvSrc = builtins.path { path = ./env; name = "cave-env"; };
+
+  # What an environment is built against, taken from this guest's own flake
+  # inputs rather than fetched. That is what makes `cave-env build` work with
+  # the proxy down and guarantees an agent's claude is the guest's claude: a
+  # second nixpkgs would mean a second glibc in one VM, with PATH order
+  # deciding which an agent got.
+  #
+  # storePath, not plain interpolation, and this is the whole point of the
+  # derivation: a bare string naming /nix/store/... creates no dependency, so
+  # nothing would keep these alive and a garbage collection would leave the
+  # guest unable to build an environment without going back to the network for
+  # a different revision. Linking them into a path the system closure holds is
+  # what roots them. (The eval is always --impure here, which is what
+  # builtins.storePath requires.)
+  caveEnvPins = pkgs.runCommand "cave-env-pins" { } ''
+    mkdir -p $out
+    ln -s ${builtins.storePath caveEnvInputs.nixpkgs} $out/nixpkgs
+    ln -s ${builtins.storePath caveEnvInputs.home-manager} $out/home-manager
+    ln -s ${builtins.storePath caveEnvInputs.claude-code} $out/claude-code
+  '';
+
+  # `cav env` from the inside, for iterating on the environment without
+  # starting anything. The host half of this is phase 9's remaining work: a
+  # control-plane endpoint that pushes cave.nix in and a `cav env build` that
+  # calls it. Until then the spec is edited in here, which is exactly what the
+  # root agent is for.
+  caveEnvCli = pkgs.writeShellScriptBin "cave-env" ''
+    set -eu
+    spec=/var/lib/coding-cave/env/cave.nix
+    case "''${1:-}" in
+      build)
+        shift
+        exec /run/current-system/sw/bin/cave-guestd env build "$@"
+        ;;
+      edit)
+        # The template is not part of the cave-env store path on purpose:
+        # editing it would otherwise change that path, and every agent's
+        # environment would rebuild because a comment moved.
+        install -d -m 755 /var/lib/coding-cave/env
+        [ -f "$spec" ] || install -m 644 ${./default-cave.nix} "$spec"
+        ''${EDITOR:-vim} "$spec"
+        echo "cave-env: run 'cave-env build' to apply it, or start a session."
+        ;;
+      show)
+        echo "spec:   $spec"
+        echo "result: $(readlink -f /var/lib/coding-cave/env/result || echo '(not built)')"
+        echo
+        echo "settings.json as this agent has it:"
+        cat "$HOME/.claude/settings.json" 2>/dev/null || echo "  (none)"
+        ;;
+      *)
+        echo "usage: cave-env build [-force] | edit | show" >&2
+        exit 2
+        ;;
+    esac
+  '';
+
   # One definition of "run the agent", used by the boot unit and by the
   # daemon when it has to restart a dead session, so the two cannot drift
   # into launching claude differently.
@@ -150,11 +224,44 @@ let
     # started without one has nothing to work on, and landing it in some other
     # project's worktree is worse than failing.
     : "''${CAVE_PROJECT:?no project}"
+
+    # The cave environment, if this agent has one materialized. Two things
+    # come out of it, and both have to happen here rather than in the unit:
+    # the unit is written once for every agent and this is per-home.
+    profile="$HOME/${caveProfileLink}"
+    if [ -d "$profile/bin" ]; then
+      # Ahead of the system floor, so a cave.nix can put a newer claude, or a
+      # tool that shadows one of the system's, in front of it. That is the
+      # point of having a user tier at all.
+      PATH="$profile/bin:$PATH"
+      export PATH
+    fi
+    # home.sessionVariables. A systemd unit reads neither hm-session-vars.sh
+    # nor environment.sessionVariables, so the built env.json is where they
+    # come from. `set -a` makes each assignment an export without naming them.
+    vars=/var/lib/coding-cave/env/result/env.json
+    if [ -r "$vars" ]; then
+      set -a
+      # shellcheck disable=SC1090
+      . <(${pkgs.jq}/bin/jq -r 'to_entries[] | "\(.key)=\(.value|@sh)"' "$vars")
+      set +a
+    fi
+
     # The agent's own worktree, which is simply the project: the session's
     # mount namespace has already bound this agent's tree over /projects, so
     # there is no other agent's checkout here to land in by mistake and no id
     # to get wrong. Whoever is reading this in a shell sees the same path.
     cd "/projects/$CAVE_PROJECT"
+
+    # Through PATH, so the environment's claude wins when there is one, and
+    # the system's answers when there is not. Deliberately not the pinned
+    # ${claudeCode} store path this used to name: that made the version an
+    # agent runs a property of the deployed system alone, with no way for a
+    # cave.nix to move it, and it is the same self-update bug the session
+    # unit already avoids one level up.
+    if command -v claude >/dev/null 2>&1; then
+      exec claude --dangerously-skip-permissions "$@"
+    fi
     exec ${claudeCode}/bin/claude --dangerously-skip-permissions "$@"
   '';
 
@@ -875,12 +982,48 @@ in
     caveGuestd
     caveAgent
     caveEnter
+    caveEnvCli
     caveRebuild
     claudeCode
     bash
     nix
     vim
+
+    # The toolbox an agent assumes exists. `main` carries this same list in
+    # its cave-system home-manager module, because cav runs on whatever distro
+    # the host is and cannot configure a system it does not own. The guest
+    # owns its system, so the floor belongs here: every agent gets it whether
+    # or not a cave environment has ever been built, and a cave.nix that adds
+    # nothing still lands somewhere usable.
+    #
+    # It is a floor and not a preference. Anything an agent should merely be
+    # able to have goes in cave.nix, where a person can change it without a
+    # deploy.
+    coreutils gnugrep gnused gawk findutils diffutils
+    gnutar gzip xz bzip2 unzip
+    curl ripgrep jq less which procps patch file tree
+    gnupg
   ];
+
+  # What the deployed system says a cave environment must be built against.
+  # Read by `cave-guestd env`, and written here so that it moves with the
+  # generation: an environment built against the previous system's nixpkgs
+  # rebuilds itself at the next session start, because these paths are half
+  # of the build stamp.
+  environment.etc."cave/env.json".text = builtins.toJSON {
+    caveEnv = "${caveEnvSrc}";
+    inputs = {
+      nixpkgs = caveEnvInputs.nixpkgs;
+      "home-manager" = caveEnvInputs.home-manager;
+      "claude-code" = caveEnvInputs.claude-code;
+    };
+  };
+
+  # The same three paths, as an etc entry whose source is a store path, which
+  # is what makes the system closure depend on them. env.json above is text
+  # and creates no such dependency: without this, a garbage collection would
+  # take the sources out from under the next env build. See caveEnvPins.
+  environment.etc."cave/env-pins".source = caveEnvPins;
 
   # A tombstone, and the reason it has to exist for one generation.
   #
@@ -926,9 +1069,18 @@ in
   # instructions, so that everything an agent's home needs is one unit and a
   # new home cannot be half-populated by a unit somebody forgot to instance.
   systemd.services."seed-agent-home@" = {
-    description = "Seed agent %i's home: claude config, git identity, instructions";
+    description = "Seed agent %i's home: claude config, git identity, environment";
     # The trust key is a path, and the path is the project the agent was
     # given; nothing here waits on the checkout existing.
+    #
+    # The two bridges are for the environment build at the end. Everything it
+    # evaluates is already in the store, but what it *builds* is not: the
+    # first one on a fresh guest substitutes a good deal, from the host's
+    # store over 7100 and from upstream through the proxy. Wants= rather than
+    # Requires=, because a build that cannot substitute is slow, not broken,
+    # and this unit may not take an agent down.
+    after = [ "vsock-nix.socket" "vsock-crinj.socket" ];
+    wants = [ "vsock-nix.socket" "vsock-crinj.socket" ];
     serviceConfig = {
       Type = "oneshot";
       # Load-bearing, and not merely tidiness. A session `Requires=` this
@@ -1011,6 +1163,24 @@ in
           install -m 600 -o "$agent_user" /etc/cave-host/pubring.kbx \
             "$agent_home/.gnupg/pubring.kbx"
         fi
+
+        # The cave environment, built if the spec or the system moved since the
+        # last one, and copied into this home (docs/vm-cave-design.md phase 9).
+        # This is what puts settings.json, the statusline and any skills,
+        # commands or packages a cave.nix declares in front of the agent.
+        #
+        # Last, so that a cave.nix which declares one of the paths written
+        # above wins. That is deliberate and it cuts both ways: a spec that
+        # declares .claude/CLAUDE.md replaces the guest's standing
+        # instructions, which is a thing somebody might mean and should not
+        # discover by accident.
+        #
+        # It does not fail the unit. A session Requires= this, so a spec with
+        # a typo in it would otherwise stop every agent from starting --
+        # including the one whose job is to fix the spec.
+        ${caveGuestd}/bin/cave-guestd env seed \
+          -home "$agent_home" -user "$agent_user" || \
+          echo "seed-agent-home: no cave environment for agent $CAVE_AGENT_ID" >&2
       ''}";
     };
   };

@@ -95,6 +95,8 @@ func main() {
 		serve(args)
 	case "start":
 		start(args)
+	case "env":
+		envCmd(args)
 	default:
 		usage()
 	}
@@ -172,6 +174,8 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "usage: cave-guestd session|list|attach|serve")
 	fmt.Fprintln(os.Stderr, "       cave-guestd start -id N -project SLUG -base BRANCH")
 	fmt.Fprintln(os.Stderr, "       cave-guestd sessions list|read <id>|write <id>")
+	fmt.Fprintln(os.Stderr, "       cave-guestd env build [-force]")
+	fmt.Fprintln(os.Stderr, "       cave-guestd env seed -home DIR -user NAME")
 	os.Exit(2)
 }
 
