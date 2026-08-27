@@ -792,21 +792,11 @@ do_agent() {
   # redeploys the system every other agent runs in. It is not one of the
   # numbered agents, so it holds a reserved id rather than a low one, and
   # asking for it is deliberate rather than a default you can drift into.
-  local want_root="" want_cwd=""
-  while :; do
-    case "${1:-}" in
-      --root) want_root=1; shift ;;
-      # Where in the tree the agent stands. The one thing that needs it is
-      # resuming a session that ran in a git worktree: claude files a
-      # transcript under the directory it ran in and offers it nowhere else,
-      # so without this such a record is on disk and reachable by no route.
-      # A path inside the agent's own /projects/<slug>, which is what the
-      # agent sees; the guest refuses anything outside it.
-      --in) want_cwd="${2:-}"; shift 2 || { log "--in needs a directory"; return 1; }
-            [ -n "$want_cwd" ] || { log "--in needs a directory"; return 1; } ;;
-      *) break ;;
-    esac
-  done
+  local want_root=""
+  if [ "${1:-}" = "--root" ]; then
+    want_root=1
+    shift
+  fi
   local project="${1:-$SLUG}" base="${2:-}"
   # An option this does not know is not a project. Without this the guest is
   # the one that objects, having already been told to check out a project
@@ -846,26 +836,8 @@ do_agent() {
   # session templates starts -- reads it back from there rather than
   # inferring it from the number.
   [ -n "$want_root" ] && root_flag=" -root"
-  # The guest checks this too, and for containment that is the check that
-  # counts -- only the guest knows what /projects means inside a session's
-  # mount namespace. This one is about the trip: the flag is interpolated into
-  # a command string that ssh hands to a shell, so a path is required to look
-  # like a path before it is allowed to become one.
-  local cwd_flag=""
-  if [ -n "$want_cwd" ]; then
-    case "$want_cwd" in
-      /*) ;;
-      *) log "--in wants an absolute path inside the agent's tree, e.g."; \
-         log "  --in /projects/$project/.claude/worktrees/<name>"; return 1 ;;
-    esac
-    case "$want_cwd" in
-      *[!A-Za-z0-9/._-]*) log "--in path has characters a path should not: $want_cwd"; return 1 ;;
-      *..*) log "--in path contains ..: $want_cwd"; return 1 ;;
-    esac
-    cwd_flag=" -cwd $want_cwd"
-  fi
   out=$(GUEST_SSH_TTY=-T guest_ssh \
-    "cave-guestd start -id $id -project $project -base $base$root_flag$cwd_flag" 2>&1) || rc=$?
+    "cave-guestd start -id $id -project $project -base $base$root_flag" 2>&1) || rc=$?
   if [ "$rc" -ne 0 ]; then
     if printf '%s' "$out" | grep -q 'usage: cave-guestd'; then
       log "the guest's cave-guestd does not know 'start', so it is older than"
@@ -992,12 +964,9 @@ usage: vmcav <command>
   start           boot the VM detached (idempotent; needs an image)
   stop            ACPI power-down, SIGTERM/SIGKILL fallback
   status          whether it is up, which generation, where the console is
-  agent [--root] [--in dir] [proj] [branch]
+  agent [--root] [proj] [branch]
                   create an agent for a project and attach (detach: ctrl-\)
                   --root is the agent that is root in the guest, agent 0
-                  --in starts it in a directory inside the project, which is
-                    how a session recorded in a git worktree is resumed:
-                    --in /projects/<proj>/.claude/worktrees/<name>
   agent stop [id] stop an agent and bank its transcript
   attach [id]     reattach to an agent already running (detach: ctrl-\)
   shell [cmd...]  a root shell in the guest, or run cmd there
