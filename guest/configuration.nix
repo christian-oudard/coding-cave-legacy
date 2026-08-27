@@ -59,6 +59,19 @@ let
     else
       agent_user="agent$CAVE_AGENT_ID"
       agent_home="/home/$agent_user"
+      # There is no agent0 user -- 0 is the root agent's number -- and there is
+      # no agentN beyond the ones declared below. Either way the next unit to
+      # reach an `install -o` dies with "install: invalid user 'agent0'", which
+      # names neither the cause nor the fix, and takes the session down with it
+      # as a dependency failure: the observed shape is an agent that never
+      # comes up and a host that reports the guest as not answering. Say what
+      # actually happened, here, where both halves of the answer are in scope.
+      if ! ${pkgs.coreutils}/bin/id -u "$agent_user" >/dev/null 2>&1; then
+        echo "no user $agent_user for agent $CAVE_AGENT_ID:" \
+             "it was started without CAVE_AGENT_ROOT=1 (cave-guestd start --root)," \
+             "or with an id this guest declares no user for" >&2
+        exit 1
+      fi
     fi
     # The real tree, which only these units name. The agent sees /projects.
     agent_tree="${worktreeRoot}/$CAVE_AGENT_ID/projects"
@@ -1322,6 +1335,65 @@ in
         # belongs to agents that have not started since the change, and a
         # non-empty /projects is not this unit's to remove.
         rmdir "$legacy" 2>/dev/null || true
+
+        # The agent's own history, which the tree move above leaves behind.
+        #
+        # claude finds a resumable session by scanning
+        # ~/.claude/projects/<cwd, slashes turned into dashes>/, and every
+        # record inside names the cwd it ran in. Move the tree without them and
+        # the picker still lists the sessions but refuses every one of them:
+        # "working directory no longer exists or is not accessible". The work is
+        # not lost, but it is unreachable by the one route an agent has to it,
+        # which for a session that was never committed is the same thing.
+        #
+        # Source is always root's home. Before agents had users of their own
+        # they all ran as root and wrote there, so that is where an old record
+        # is whichever agent it belongs to; when this agent is the root one the
+        # two are the same home and the move is a rename. Run unconditionally
+        # rather than only when the tree moved, because the tree may have moved
+        # on an earlier boot -- and idempotence is free here: the glob matches
+        # nothing once it has run.
+        enc() { echo "$1" | ${pkgs.gnused}/bin/sed 's|/|-|g'; }
+        migrate_transcripts() { # <old cwd> <new cwd>
+          local old="$1" new="$2" oldenc newenc store src dst name rel f base
+          oldenc=$(enc "$old"); newenc=$(enc "$new")
+          store="$agent_home/.claude/projects"
+          install -d -m 700 -o "$agent_user" "$agent_home/.claude" "$store"
+          for src in /root/.claude/projects/"$oldenc"*; do
+            [ -d "$src" ] || continue
+            name=''${src##*/}
+            rel=''${name#"$oldenc"}
+            # The encoded name is the cwd, so what is left past the old prefix
+            # is wherever the session stood: nothing for the tree itself, or a
+            # dash and a subdirectory -- a worktree under .claude/worktrees is
+            # the common one. Anything else shares a prefix by coincidence
+            # (a project genuinely named <slug>-0) and is not ours to move.
+            case "$rel" in ""|-*) ;; *) continue ;; esac
+            dst="$store/$newenc$rel"
+            install -d -m 700 -o "$agent_user" "$dst"
+            for f in "$src"/*.jsonl; do
+              [ -e "$f" ] || continue
+              base=''${f##*/}
+              # Never clobber. Ids are uuids, so a name already at the
+              # destination is the same session and not a second one -- and it
+              # may be the live one, being appended to as this runs.
+              if [ -e "$dst/$base" ]; then continue; fi
+              # Every string value beginning with the old path names the same
+              # tree at its old location: the cwd claude resumes in, and the
+              # directories a rewind restores a checkpoint to. Rewriting the
+              # prefix and nothing else leaves the rest of the record byte for
+              # byte as claude wrote it. The guarded next character is what
+              # keeps /0 from also matching /01.
+              ${pkgs.gnused}/bin/sed "s|\"$old\\([\"/]\\)|\"$new\\1|g" "$f" > "$dst/$base"
+              chown "$agent_user" "$dst/$base"
+              chmod 600 "$dst/$base"
+              rm -f "$f"
+              echo "clone-repo: carried session ''${base%.jsonl} forward to $new"
+            done
+            rmdir "$src" 2>/dev/null || true
+          done
+        }
+        migrate_transcripts "/projects/$CAVE_PROJECT/$CAVE_AGENT_ID" "/projects/$CAVE_PROJECT"
 
         # git clone creates the leaf and not the parents. Owned by the agent,
         # because everything under it is about to be.

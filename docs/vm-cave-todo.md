@@ -446,6 +446,41 @@ What is left:
   exists rather than a new mechanism, and the reason it does not happen today
   is only that the sync matches `<uuid>.jsonl` and nothing else.
 
+## An agent's identity does not survive a stop/start
+
+`cave-guestd start` writes `/run/cave/sessions/<id>.env` -- the agent's id,
+project, base branch, and whether it is the root agent -- and every unit
+serving that agent reads it back. `/run` is tmpfs, so a VM stop takes all of
+it, while the things it describes (the worktree under
+`/var/lib/coding-cave/agents/<id>`, the home, the branch on the host) all
+survive. The agent is the only part of itself that does not.
+
+Two failures come out of that, both observed:
+
+- **Nothing restarts the agents.** After a restart the guest comes up with
+  worktrees and homes for agents that no longer exist as far as systemd is
+  concerned, and a human has to know to run `vmcav agent` again. A session
+  whose `.env` is gone fails as `Failed to load environment files: No such
+  file or directory`, which reads like a bug in the unit rather than the
+  absence of a fact.
+- **Recreating one can get it wrong.** The env file is where "this is the
+  root agent" is recorded, and it is passed at creation (`--root`). Recreate
+  agent 0 without it and the identity resolves to a user the guest does not
+  declare; `agentIdentity` now says so, but saying so is not the same as not
+  needing to. Observed as a guest that came back, ran nothing, and reported
+  itself over ssh as not answering.
+
+What is undecided is which side owns the record. Persisting it in the guest
+(`/var/lib/coding-cave/agents/<id>/agent.env`) is the small change and keeps
+the guest able to restore itself, but it means the guest deciding what agents
+exist, which is the host's call everywhere else. The host already has the
+registry (`internal/registry`), so the other shape is for `vmcav start` to
+replay it -- recreating each agent it knew about, in the same way it created
+them the first time. That fits the boundary better and is more work: the
+registry would have to record the base branch and the root flag, which today
+it does not. Either way it wants deciding before agent hibernation, which
+assumes an agent can be brought back at all.
+
 ## Starting and stopping agents, and knowing what is running
 
 There is no way to start a second agent, stop one, or ask what is running.
