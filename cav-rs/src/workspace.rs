@@ -64,6 +64,14 @@ pub fn cave_store_root_for(agent_id: &str) -> PathBuf {
 /// they hit it, the next free int continues from here for archives.
 pub const ARCHIVE_INT_BASE: u32 = 1000;
 
+/// Whether an agent counts as archived: its display int was bumped into
+/// the 1000+ range and it isn't running. `cav continue` revives a bumped
+/// agent without renumbering it, so run state wins — a revived archive is
+/// an ordinary active agent that happens to carry a high int.
+pub fn is_archived(agent_id: &str, running: bool) -> bool {
+    !running && agent_id.parse::<u32>().is_ok_and(|n| n >= ARCHIVE_INT_BASE)
+}
+
 /// Default age after which a Paused agent is eligible to be bumped into
 /// the archived range. Matches the default `cav gc --older-than` so the
 /// two operations stay in step: by the time an agent's artifacts can be
@@ -498,6 +506,16 @@ mod tests {
 
         force_remove_dir_all(&tmp);
         assert!(!tmp.exists(), "force_remove_dir_all should clear the tree");
+    }
+
+    #[test]
+    fn a_revived_archive_is_not_archived_while_it_runs() {
+        // `cav continue 1378` restarts a bumped agent under its archived
+        // int. It is an ordinary active agent again, and commands that
+        // auto-pick one must see it.
+        assert!(is_archived("1378", false));
+        assert!(!is_archived("1378", true));
+        assert!(!is_archived("7", false));
     }
 
     #[test]

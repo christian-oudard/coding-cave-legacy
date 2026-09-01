@@ -449,6 +449,28 @@ fn review_takes_agent_id_slash_base_without_a_prompt() {
 }
 
 #[test]
+fn review_no_args_picks_a_running_agent_with_an_archived_id() {
+    // `cav continue` revives a bumped agent under its 1000+ int, so the
+    // auto-pick must judge by run state, not by the number.
+    let p = Project::new("review-revived-archive");
+    p.register_agent_running("1378");
+    p.push_agent_commits("1378", "main", &[("a.txt", "A\n")]);
+    git(&["checkout", "main"], &p.dir);
+
+    let out = p.cav(&["review"]);
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(out.status.code(), Some(0), "review failed: {combined}");
+    assert!(
+        combined.contains("Checked out agent-1378/main"),
+        "should auto-pick the running agent: {combined}"
+    );
+}
+
+#[test]
 fn approve_takes_agent_id_slash_base_without_a_prompt() {
     let p = Project::new("approve-id-slash-base");
     p.register_agent("1");

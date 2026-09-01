@@ -228,9 +228,10 @@ fn agent_state(agent_id: &str, running: bool) -> &'static str {
     if running {
         return "running";
     }
-    match agent_id.parse::<u32>() {
-        Ok(n) if n >= crate::workspace::ARCHIVE_INT_BASE => "archived",
-        _ => "paused",
+    if crate::workspace::is_archived(agent_id, running) {
+        "archived"
+    } else {
+        "paused"
     }
 }
 

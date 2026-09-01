@@ -1026,9 +1026,8 @@ fn auto_pick_agent_id(base: &Path, cmd: &str) -> Result<String> {
     let ids: Vec<String> = registry::all_agent_ids(Some(&slug))?
         .into_iter()
         .filter(|aid| {
-            aid.parse::<u32>()
-                .map(|n| n < workspace::ARCHIVE_INT_BASE)
-                .unwrap_or(true)
+            let running = registry::is_agent_running(aid).unwrap_or(false);
+            !workspace::is_archived(aid, running)
         })
         .collect();
     match ids.len() {
