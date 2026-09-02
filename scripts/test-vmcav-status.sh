@@ -258,5 +258,23 @@ says "and how to find where"           "bash -x" "$out"
   || { echo "FAIL exit was $rc, not 7"; fail=1; }
 unset -f status_report
 
+# --- functions that must not kill their caller ---
+#
+# Not tested here, deliberately, and the reason is worth writing down.
+#
+# `correct_guest_clock` ended with a bare pipeline whose last filter was a
+# grep. grep exits 1 when it matches nothing, matching nothing is the ordinary
+# case, and under this script's `set -euo pipefail` that ends everything --
+# before the `return 0` on the next line, and before status or agent has
+# printed anything. Verified directly against the real binary: a subshell that
+# calls it never reaches the line after.
+#
+# It cannot be reproduced here. The function returns early unless cave-vm is on
+# PATH, and these suites do not have it; a stubbed cave-vm does not trip the
+# same pipeline. Testing it needs the real binary in the suite, which is the
+# question left open in 1a6793c -- whether these suites should stub the binary
+# or have it. Asserting it with a stub would be a test that cannot fail, which
+# is worse than none.
+
 [ "$fail" = 0 ] && echo "test-vmcav-status: ok"
 exit "$fail"

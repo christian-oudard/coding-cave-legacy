@@ -2344,8 +2344,25 @@ carry_base_to_shared() {
 
 correct_guest_clock() {
   command -v cave-vm >/dev/null 2>&1 || return 0
-  cave-vm guest -state "$STATE_DIR" -if-off-by "${CLOCK_SLACK:-2s}" time 2>&1 \
-    | grep '^guest clock was' | while IFS= read -r line; do log "$line"; done
+  # No pipeline, and that is the whole point.
+  #
+  # This was `cave-vm ... | grep '^guest clock was' | while read; do log; done`
+  # followed by `return 0`. grep exits 1 when it matches nothing, which is the
+  # ordinary case -- the clock is usually fine and there is nothing to report
+  # -- and under this script's `set -euo pipefail` a bare pipeline returning
+  # non-zero ends the script. The `return 0` never ran.
+  #
+  # So every command that called this died, silently, before printing
+  # anything: status and agent both call it before their first line of output.
+  # And only where cave-vm is on PATH, because the guard above returns early
+  # otherwise -- which is why it never showed up in a guest and did on a host.
+  local out line
+  out=$(cave-vm guest -state "$STATE_DIR" -if-off-by "${CLOCK_SLACK:-2s}" time 2>&1) || out=""
+  while IFS= read -r line; do
+    case "$line" in 'guest clock was'*) log "$line" ;; esac
+  done <<EOF
+$out
+EOF
   return 0
 }
 
@@ -2355,8 +2372,13 @@ warn_if_hooks_are_foreign() {
   # registration with `readlink -f`, so a moved project gave it an empty path
   # to look under and it reported a missing branch guard -- about a project,
   # not a guard.
-  cave-vm projects --state "$STATE_DIR" --guards 2>/dev/null \
-    | while IFS= read -r line; do log "$line"; done
+  local out line
+  out=$(cave-vm projects --state "$STATE_DIR" --guards 2>/dev/null) || true
+  while IFS= read -r line; do
+    [ -n "$line" ] && log "$line"
+  done <<EOF
+$out
+EOF
   return 0
 }
 
@@ -2492,8 +2514,17 @@ announce_agents() {
   # not answer" and "the guest holds nothing" the same empty string.
   #
   # Exit 3 is "could not ask", which is not a failure of `start`.
-  cave-vm agents --state "$STATE_DIR" --after-start 2>/dev/null \
-    | while IFS= read -r line; do log "$line"; done
+  # Captured rather than piped: `--after-start` exits 3 for "could not ask",
+  # and a bare pipeline returning non-zero under `set -euo pipefail` ends the
+  # script before the `return 0` below -- which is exactly the shape that made
+  # correct_guest_clock kill every command that called it.
+  local out line
+  out=$(cave-vm agents --state "$STATE_DIR" --after-start 2>/dev/null) || true
+  while IFS= read -r line; do
+    [ -n "$line" ] && log "$line"
+  done <<EOF
+$out
+EOF
   return 0
 }
 
