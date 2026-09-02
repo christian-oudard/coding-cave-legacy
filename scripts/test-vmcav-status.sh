@@ -272,5 +272,26 @@ if [ -S "$newsock" ]; then
     || { echo "FAIL diagnosed a healthy socket: $out"; fail=1; }
 fi
 
+
+# --- status must not fail silently ---
+# This runs under `set -e`, and every question status asks touches something
+# that can be missing: a socket, a pidfile, a repo, a guest that stopped
+# answering. One unguarded non-zero ended the script before the first line was
+# printed, so the report on a broken cave was an empty screen and an exit
+# code. Reported from a real host, where it was reproducible and silent.
+status_report() { echo "vm: running (pid 1)"; return 7; }
+# `|| rc=$?`, not `; rc=$?`: sourcing vmcav brought its `set -e` in here, so a
+# plain assignment from a command that returns 7 ends the suite instead of
+# being the thing under test. Which is the same mistake, one level up, as the
+# one being tested for.
+rc=0
+out=$(do_status 2>&1) || rc=$?
+says "what it got to is still printed" "vm: running (pid 1)" "$out"
+says "and it says it stopped early"    "stopped early (exit 7)" "$out"
+says "and how to find where"           "bash -x" "$out"
+[ "$rc" = 7 ] && echo "ok   and the exit code is the real one" \
+  || { echo "FAIL exit was $rc, not 7"; fail=1; }
+unset -f status_report
+
 [ "$fail" = 0 ] && echo "test-vmcav-status: ok"
 exit "$fail"

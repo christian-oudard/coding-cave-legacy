@@ -789,7 +789,30 @@ do_vsock_connect() {
   exec cave-vm vsock-connect --state "$STATE_DIR" "${1:-22}"
 }
 
+# Status is the command you run when something is wrong, so it is the one
+# command that must not fail the way the others may.
+#
+# It did. This script runs under `set -e`, and every question status asks
+# touches something that can be missing -- a socket, a pidfile, a repo, a
+# guest that has stopped answering. One unguarded non-zero anywhere in there
+# ended the whole script before the first line was printed, so the report on
+# a broken cave was an empty screen and an exit code. Reported from a real
+# host, where it was reproducible and silent.
+#
+# The body runs on the left of `||`, which is where errexit does not apply, so
+# a failure part way through leaves whatever was already printed and adds a
+# line saying it stopped early. A partial answer beats none; an empty screen
+# is the one thing that cannot be acted on.
 do_status() {
+  status_report || {
+    local rc=$?
+    log "status stopped early (exit $rc); what is above is what it got to"
+    log "  to see where:  bash -x \$(command -v vmcav) status"
+    return "$rc"
+  }
+}
+
+status_report() {
   # First, and whether or not the VM is up: a broken guard is a host-side fact
   # and the thing most likely to be silently wrong, since it fails by refusing
   # pushes in a way that reads like the guard working.
