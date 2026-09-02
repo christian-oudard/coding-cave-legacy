@@ -1555,82 +1555,6 @@ GUEST_ENV_SPEC=/var/lib/coding-cave/env/cave.nix
 # it is worth an endpoint only for what is asked on every command; this is
 # asked when somebody changes their environment. The host names both paths, so
 # nothing the guest says decides where a byte lands.
-do_env() {
-  local action="${1:-show}" force="${2:-}"
-  case "$action" in
-    pull|push|show) ;;
-    *) log "usage: vmcav env [show|pull|push] [--force]"; return 1 ;;
-  esac
-  is_running || { log "the vm is not running (vmcav start)"; return 1; }
-
-  local guest_spec host_spec="" rc=0
-  guest_spec=$(GUEST_SSH_TTY=-T guest_ssh "cat $GUEST_ENV_SPEC 2>/dev/null") || rc=$?
-  [ -f "$ENV_SPEC" ] && host_spec=$(cat "$ENV_SPEC")
-
-  case "$action" in
-    show)
-      log "host:  $ENV_SPEC${host_spec:+ ($(printf '%s' "$host_spec" | wc -l) lines)}"
-      log "guest: $GUEST_ENV_SPEC${guest_spec:+ ($(printf '%s' "$guest_spec" | wc -l) lines)}"
-      if [ -z "$guest_spec" ] && [ -z "$host_spec" ]; then
-        log "neither side has one; the cave defaults apply"
-      elif [ "$guest_spec" = "$host_spec" ]; then
-        log "they agree"
-      else
-        log "they differ: vmcav env pull (keep the guest's) or push (keep this one)"
-      fi
-      return 0
-      ;;
-    pull)
-      [ -n "$guest_spec" ] || { log "the guest has no $GUEST_ENV_SPEC to pull"; return 1; }
-      if [ "$guest_spec" = "$host_spec" ]; then
-        log "already the same; nothing to pull"
-        return 0
-      fi
-      if [ -n "$host_spec" ] && [ "$force" != "--force" ]; then
-        log "$ENV_SPEC differs from the guest's and would be overwritten"
-        log "  keep it and send it instead:  vmcav env push"
-        log "  take the guest's anyway:      vmcav env pull --force"
-        return 1
-      fi
-      mkdir -p "$(dirname "$ENV_SPEC")"
-      printf '%s\n' "$guest_spec" > "$ENV_SPEC"
-      log "pulled the guest's spec to $ENV_SPEC"
-      log "  it is configuration; commit it wherever your dotfiles live"
-      ;;
-    push)
-      [ -n "$host_spec" ] || { log "there is no $ENV_SPEC to push"; return 1; }
-      if [ "$guest_spec" = "$host_spec" ]; then
-        log "already the same; nothing to push"
-        return 0
-      fi
-      if [ -n "$guest_spec" ] && [ "$force" != "--force" ]; then
-        log "the guest's spec differs from this one and would be overwritten"
-        log "  keep the guest's instead:  vmcav env pull"
-        log "  overwrite it anyway:       vmcav env push --force"
-        return 1
-      fi
-      # The directory first. It is made by `cave-env edit` and by a build, so
-      # a guest where neither has run does not have one -- which is exactly
-      # the guest you would push a spec to, the one with no environment yet.
-      # Without this the redirect fails and the whole report is the shell's:
-      # "No such file or directory", naming a path and nothing else.
-      printf '%s\n' "$host_spec" \
-        | GUEST_SSH_TTY=-T guest_ssh \
-            "install -d -m 755 ${GUEST_ENV_SPEC%/*} && cat > $GUEST_ENV_SPEC" || {
-          log "could not write the spec into the guest"; return 1; }
-      log "pushed $ENV_SPEC into the guest"
-      # Built here rather than left for the next session, because a spec that
-      # does not build is worth finding out about while you are still looking
-      # at the command that sent it.
-      GUEST_SSH_TTY=-T guest_ssh "cave-env build" || {
-        log "the spec is in the guest but did not build; fix it and retry:"
-        log "  vmcav shell, then cave-env edit"
-        return 1; }
-      ;;
-  esac
-  return 0
-}
-
 # The values a completion needs that are not fixed strings: which agents
 # exist and which projects are registered. A hidden subcommand rather than a
 # library, because the completion script is a different language in a
@@ -1737,28 +1661,79 @@ ZSH
   esac
 }
 
-# Copy files in or out of a cave.
-#
-# The transport was already here -- scp rides the same ssh config as `vmcav
-# shell`, over the vsock ProxyCommand -- and what was missing was being able
-# to say where. An agent's files are not at a path a human knows: its worktree
-# is under ${worktreeRoot}/<id>/projects/<slug>, which is a layout nobody
-# should have to hold, and inside its own namespace the same tree is
-# /projects/<slug>, which is not a path the host can name.
-#
-# So `cave:` means "in the agent's tree", and the id is resolved the way every
-# other command resolves it: the only running agent needs no name, and two of
-# them is not guessed at.
-#
-#   vmcav cp cave:notes.md .          out of the agent's worktree
-#   vmcav cp cave:~/.claude/x .       out of its home
-#   vmcav cp data.csv cave:           in, to the worktree
-#   vmcav cp cave@2:log.txt .         when more than one agent is running
-#
-# Overwrites without asking, which scp does and `main` does not: a prompt
-# needs to know whether the far side exists, and that is a second round trip
-# for a question the shell can answer about the near side only. Said here
-# because it is a difference somebody will meet.
+do_env() {
+  local action="${1:-show}" force=""
+  [ "${2:-}" = "--force" ] && force=1
+  case "$action" in
+    pull|push|show) ;;
+    *) log "usage: vmcav env [show|pull|push] [--force]"; return 1 ;;
+  esac
+  is_running || { log "the vm is not running (vmcav start)"; return 1; }
+
+  # Whether the guest answered is kept, not discarded.
+  #
+  # This used to be `guest_spec=$(ssh ... cat ...) || rc=$?` with rc never
+  # read, so an unreachable guest was indistinguishable from a guest with no
+  # spec. An empty capture refuses harmlessly; a capture that is not empty and
+  # is not a spec does not. Observed: `env pull` said the local cave.nix
+  # "differs from the guest's and would be overwritten" with the guest
+  # unreachable, and offered --force to take the guest's anyway.
+  local guest_spec="" host_spec="" reachable=""
+  # `|| true` on the far side, so the exit status is about ssh and not about
+  # the file: `cat` of a missing spec fails, and treating that as "the guest
+  # did not answer" is the same conflation one level down.
+  if guest_spec=$(GUEST_SSH_TTY=-T guest_ssh "cat $GUEST_ENV_SPEC 2>/dev/null || true"); then
+    reachable=1
+  fi
+  [ -f "$ENV_SPEC" ] && host_spec=$(cat "$ENV_SPEC")
+
+  log "host:  $ENV_SPEC${host_spec:+ ($(printf '%s' "$host_spec" | wc -l) lines)}"
+  if [ -n "$reachable" ]; then
+    log "guest: $GUEST_ENV_SPEC${guest_spec:+ ($(printf '%s' "$guest_spec" | wc -l) lines)}"
+  else
+    log "guest: unknown"
+  fi
+
+  local plan rc=0 line do_what=""
+  plan=$(cave-vm env-plan --action "$action" \
+           ${host_spec:+--host-has} ${reachable:+--reachable} \
+           ${guest_spec:+--guest-has} ${force:+--force} \
+           $([ "$guest_spec" = "$host_spec" ] && printf -- --same)) || rc=$?
+  while IFS= read -r line; do
+    case "$line" in
+      do:*) do_what="${line#do:}" ;;
+      "") ;;
+      *) log "$line" ;;
+    esac
+  done <<EOF
+$plan
+EOF
+  [ "$rc" = 0 ] || return 1
+
+  case "$do_what" in
+    write-host)
+      mkdir -p "$(dirname "$ENV_SPEC")"
+      printf '%s\n' "$guest_spec" > "$ENV_SPEC"
+      log "pulled the guest's spec to $ENV_SPEC"
+      ;;
+    write-guest)
+      # The directory first: it is made by `cave-env edit` and by a build, so
+      # a guest where neither has run does not have one -- which is exactly
+      # the guest you would send a first spec to.
+      printf '%s\n' "$host_spec" \
+        | GUEST_SSH_TTY=-T guest_ssh \
+            "install -d -m 755 ${GUEST_ENV_SPEC%/*} && cat > $GUEST_ENV_SPEC" || {
+          log "could not write the spec into the guest"; return 1; }
+      log "pushed $ENV_SPEC into the guest"
+      GUEST_SSH_TTY=-T guest_ssh "cave-env build" || {
+        log "the spec is in the guest but did not build; fix it and retry:"
+        log "  vmcav shell, then cave-env edit"
+        return 1; }
+      ;;
+  esac
+  return 0
+}
+
 WORKTREE_ROOT="${WORKTREE_ROOT:-/var/lib/coding-cave/agents}"
 
 do_cp() {

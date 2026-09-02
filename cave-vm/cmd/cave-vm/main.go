@@ -62,6 +62,8 @@ func main() {
 		guestPathCommand(os.Args[2:])
 	case "staleness":
 		stalenessCommand(os.Args[2:])
+	case "env-plan":
+		envPlanCommand(os.Args[2:])
 	case "sessions":
 		sessionsCommand(os.Args[2:])
 	default:
