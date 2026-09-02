@@ -643,6 +643,21 @@ in
   fileSystems."/" = {
     device = "/dev/vda";
     fsType = "ext4";
+    # Grow the filesystem to fill the disk on every boot.
+    #
+    # Two sizes decide this and they are set in different places, which is how
+    # they drifted. make-disk-image below builds the image at closure size
+    # plus additionalSpace -- about 6G -- while the host allocates the disk at
+    # config.toml's disk_size_gb, 100G by default. Nothing grew the ext4 to
+    # match, so the guest ran in a 6G filesystem inside a 100G disk and simply
+    # filled up: `df` said 84% while the host saw a nearly empty sparse image.
+    #
+    # The failure is worth naming because of how it presents. Nix reports it
+    # as "No space left on device" from inside a build sandbox, halfway
+    # through a store path, which reads like a broken derivation rather than a
+    # full disk; and the disk is not full, the filesystem is. systemd-growfs
+    # runs before local-fs.target, so anything that needs the space has it.
+    options = [ "x-systemd.growfs" ];
   };
 
   # Boot state is host-injected (--kernel/--initramfs/--cmdline) and the disk
@@ -779,6 +794,19 @@ in
     "d ${sessionDir} 1770 root cave -"
     "d /var/lib/coding-cave 0755 root root -"
     "d ${worktreeRoot} 0755 root root -"
+
+    # zsh's TMPPREFIX, which the cave environment sets to /tmp/claude/zsh.
+    # zsh puts heredoc temp files under that prefix and does not create the
+    # directory, so with it missing every heredoc fails -- including the one
+    # `/persist:go` uses to pass its arguments. The error it raises says
+    # "can't create temp file for here document: no such file or directory",
+    # which names neither zsh's setting nor the missing directory and reads
+    # like the tool that ran the heredoc is broken.
+    #
+    # 1777 like /tmp itself: agents are separate uids and share this, so it
+    # has to be writable by all of them and sticky so none can remove
+    # another's. Under /tmp, so it is cleared on boot and recreated here.
+    "d /tmp/claude 1777 root root -"
   ];
 
   # --- Access: host comes in over ssh, then attaches to the agent daemon ---

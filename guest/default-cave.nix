@@ -22,6 +22,23 @@
 #     each one is passed to `config` by name. There is no host filesystem in
 #     the guest, so a `path:` input pointing at somewhere on the host does not
 #     resolve; use a git URL, which reaches the proxy.
+#   - A script you install here and something else executes -- a statusline, a
+#     hook -- needs a shebang that exists. `#!/bin/bash` does not: this guest
+#     has /bin/sh and /usr/bin/env in /bin and nothing else, so execing such a
+#     script fails with "bad interpreter" and exit 127. Rewrite it on the way
+#     in, the way the guest already does for cave-git.sh and cave-gpg.py:
+#
+#       home.file.".claude/statusline.sh".source =
+#         pkgs.runCommand "statusline.sh" { } ''
+#           substitute ${src}/statusline.sh $out \
+#             --replace '#!/bin/bash' '#!${pkgs.bash}/bin/bash'
+#           chmod +x $out
+#         '';
+#
+#     Worth knowing because of how it hides: running the script by hand as
+#     `bash statusline.sh` bypasses the shebang and works, so the thing that
+#     execs it looks broken instead. A statusline that fails this way shows
+#     nothing at all and reports nothing anywhere.
 
 {
   # inputs = {
