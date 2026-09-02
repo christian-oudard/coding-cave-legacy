@@ -52,6 +52,8 @@ func main() {
 		guestCommand(os.Args[2:])
 	case "agents":
 		agentsCommand(os.Args[2:])
+	case "system":
+		systemCommand(os.Args[2:])
 	case "sessions":
 		sessionsCommand(os.Args[2:])
 	default:

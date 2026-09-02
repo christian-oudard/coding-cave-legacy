@@ -65,6 +65,15 @@ func renderAgents(w io.Writer, agents []control.Agent, reachable bool) {
 		}
 	}
 
+	if len(running) > 0 {
+		// Only when there is something to attach to. This line lived in the
+		// shell and was gated on a count the shell computed; when the counting
+		// moved here the gate was left behind reading an unset variable, which
+		// is always zero, so it silently stopped printing. It belongs with the
+		// thing it is about.
+		fmt.Fprintln(w, "attach: vmcav attach   (detach: ctrl-\\)")
+	}
+
 	for _, a := range stopped {
 		fmt.Fprintf(w, "  agent %s: stopped, still holding its worktree and home\n", a.ID)
 		// The session's environment file is on a tmpfs and the agent outlives

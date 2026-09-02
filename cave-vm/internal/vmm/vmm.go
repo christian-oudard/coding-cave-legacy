@@ -629,3 +629,37 @@ func pipe(dst, src net.Conn) {
 		cw.CloseWrite()
 	}
 }
+
+// BootedSystem is the NixOS toplevel the running VM was started with.
+//
+// Recovered from the run script rather than remembered separately, because the
+// run script is what actually launched the VM: a note written beside it could
+// say something the kernel command line does not. The cost is that this parses
+// a file this package writes, which is why it lives here -- the shell was
+// doing it with a sed that had to know the flag spelling, the store prefix and
+// that `init=` points at <toplevel>/init rather than the toplevel.
+//
+// Empty with no error when there is no run script or no init= in it: a VM that
+// was never started has no booted system, which is an answer rather than a
+// failure.
+func BootedSystem(p Paths) (string, error) {
+	b, err := os.ReadFile(p.RunScript())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	for _, f := range strings.Fields(string(b)) {
+		// The command line arrives quoted as one argument, so the field is
+		// the whole cmdline on one VMM and `init=...` alone on another. Trim
+		// what a shell quote leaves either way.
+		f = strings.Trim(f, `"'`)
+		rest, ok := strings.CutPrefix(f, "init=")
+		if !ok {
+			continue
+		}
+		return strings.TrimSuffix(rest, "/init"), nil
+	}
+	return "", nil
+}

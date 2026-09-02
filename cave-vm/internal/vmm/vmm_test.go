@@ -729,3 +729,42 @@ func TestSocketPathIsInsideTheDirectory(t *testing.T) {
 		}
 	}
 }
+
+// The booted system is recovered from the run script, which this package
+// writes. The shell did it with a sed that had to know the flag spelling, the
+// store prefix, and that init= points at <toplevel>/init rather than at the
+// toplevel.
+func TestBootedSystem(t *testing.T) {
+	top := "/nix/store/abc-nixos-system-coding-cave"
+	for _, tc := range []struct {
+		name, script, want string
+	}{
+		{"chv style, cmdline as one quoted argument",
+			`chv --cmdline "console=ttyS0 root=/dev/vda rw init=` + top + `/init" --disk x`, top},
+		{"vfkit style, bare in the argument list",
+			`vfkit --kernel k --initrd i console=hvc0 root=/dev/vda rw init=` + top + `/init`, top},
+		{"no init at all is an answer, not a failure", `chv --disk x`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			p := NewPaths(dir)
+			if err := os.WriteFile(p.RunScript(), []byte(tc.script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			got, err := BootedSystem(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+
+	// A VM that was never started has no booted system. That is an answer, and
+	// making it an error would put a complaint in every status on a fresh host.
+	got, err := BootedSystem(NewPaths(t.TempDir()))
+	if err != nil || got != "" {
+		t.Errorf("no run script: got %q, %v", got, err)
+	}
+}

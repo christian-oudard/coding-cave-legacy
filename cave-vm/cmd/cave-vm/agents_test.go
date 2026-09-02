@@ -144,3 +144,23 @@ func TestAfterStartOnAnEmptyAndAnUnreachableGuest(t *testing.T) {
 		t.Errorf("an unreachable guest was called empty: %q", got)
 	}
 }
+
+// The attach hint is only useful when there is something to attach to. It was
+// a shell line gated on a count the shell computed; when the counting moved
+// here the gate was left reading an unset variable, which is always zero, so
+// it stopped printing without anything failing.
+func TestAttachHintFollowsTheRunningAgents(t *testing.T) {
+	with := render([]control.Agent{{ID: "0", State: "running"}}, true)
+	if !strings.Contains(with, "vmcav attach") {
+		t.Errorf("a running agent should offer attach: %q", with)
+	}
+	for _, empty := range []string{
+		render(nil, true),
+		render([]control.Agent{{ID: "2", State: "stopped"}}, true),
+		render(nil, false),
+	} {
+		if strings.Contains(empty, "vmcav attach ") {
+			t.Errorf("nothing running should not offer attach: %q", empty)
+		}
+	}
+}

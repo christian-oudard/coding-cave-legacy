@@ -862,14 +862,11 @@ status_report() {
   # toplevel and the agent's nixos-rebuild moves the guest off it in place.
   # Equal is the normal case and says nothing twice, so only the divergence
   # gets two lines.
-  local booted current
-  booted=$(sed -n 's|.*init=\(/nix/store/[^ "]*\)/init.*|\1|p' \
-    "$STATE_DIR/run-vm.sh" 2>/dev/null || true)
-  # Over the control plane, not ssh: this is the command a human runs most,
-  # and a cold ssh call costs 85ms against under 2ms here. ssh stays for
-  # `vmcav shell`, which is a person wanting a shell rather than a command
-  # needing an answer.
-  current=$(guest_rpc health 2>/dev/null | sed -n 's/^system //p' || true)
+  # Which generation the guest is on, rendered by cave-vm. Both halves used
+  # to be sed: the booted one out of run-vm.sh, a script that program writes,
+  # and the current one out of `health`, over a struct field formatted into a
+  # line so it could be parsed back.
+  cave-vm system --state "$STATE_DIR" || true
 
   # The roster, rendered by cave-vm rather than re-parsed here.
   #
@@ -885,22 +882,8 @@ status_report() {
   # says so and carries on.
   cave-vm agents --state "$STATE_DIR" || [ "$?" = 3 ] || true
 
-  if [ "$booted" = "$current" ]; then
-    echo "system: $booted"
-  else
-    echo "booted: $booted"
-    echo "current: ${current:-unreachable}"
-  fi
-  # The one place an unattended agent's history gets copied out. Nothing else
-  # asks: `stop` and `reformat` do, but an agent that exits with nobody
-  # watching reaches neither, and its transcript is exactly the one worth
-  # resuming. No timer, because "whenever the host asks about agents at all"
-  # bounds staleness by when you last looked and needs no clock. Affordable
-  # only since this moved off ssh: a control-plane call is about 2ms.
-  sync_sessions
   echo "console: $CONSOLE"
   warn_if_guest_is_behind
-  [ "${n:-0}" = 0 ] || echo "attach: vmcav attach   (detach: ctrl-\\)"
   cave_vm pending || true
 }
 
