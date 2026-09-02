@@ -308,15 +308,29 @@ let
     # are exactly transcripts on disk that this guest has never had a session
     # for, so after a reformat every agent would have refused to start.
     transcripts="$HOME/.claude/projects/$(printf '%s' "/projects/$CAVE_PROJECT" | tr / -)"
-    resume=""
-    if [ -z "''${CAVE_AGENT_FRESH:-}" ] \
-       && [ -n "$(find "$transcripts" -name '*.jsonl' -print -quit 2>/dev/null)" ]; then
-      resume=1
+    # Three cases, not two. `--continue` takes the last conversation, which is
+    # the right default and is not always the one meant: an agent with a
+    # month of sessions has one you want and several you do not, and picking
+    # it was only possible from inside, in claude's own picker. The host can
+    # name one now, and it arrives here as an id in the session's environment.
+    #
+    # Named beats last, and both lose to --fresh: asking for a blank
+    # conversation is the more specific request of the two.
+    resume=()
+    what=""
+    if [ -z "''${CAVE_AGENT_FRESH:-}" ]; then
+      if [ -n "''${CAVE_AGENT_SESSION:-}" ]; then
+        resume=(--resume "''${CAVE_AGENT_SESSION}")
+        what="session ''${CAVE_AGENT_SESSION}"
+      elif [ -n "$(find "$transcripts" -name '*.jsonl' -print -quit 2>/dev/null)" ]; then
+        resume=(--continue)
+        what="the last conversation"
+      fi
     fi
 
-    if [ -n "$resume" ]; then
+    if [ "''${#resume[@]}" -gt 0 ]; then
       began=$(${pkgs.coreutils}/bin/date +%s)
-      "$claude_bin" --continue "$@"
+      "$claude_bin" "''${resume[@]}" "$@"
       rc=$?
       [ "$rc" -eq 0 ] && exit 0
       # A refused resume fails immediately and before there is a session to
@@ -325,7 +339,7 @@ let
       # anything slower is the agent's own exit and stays the agent's own exit
       # -- relaunching that would restart a session the human just left.
       if [ "$(( $(${pkgs.coreutils}/bin/date +%s) - began ))" -lt 10 ]; then
-        echo "cave-agent: could not continue the last conversation; starting a new one" >&2
+        echo "cave-agent: could not resume $what; starting a new one" >&2
         exec "$claude_bin" "$@"
       fi
       exit "$rc"

@@ -198,6 +198,7 @@ func start(args []string) {
 	base := fs.String("base", "", "base branch to work from (required)")
 	root := fs.Bool("root", false, "this agent is the guest's root agent (runs as root)")
 	fresh := fs.Bool("fresh", false, "start a new conversation instead of continuing the agent's last")
+	session := fs.String("session", "", "resume this session rather than the agent's last")
 	worktrees := fs.String("worktrees", defaultWorktrees, "where agents' worktrees live")
 	fs.Parse(args)
 	if *project == "" || *base == "" {
@@ -247,6 +248,16 @@ func start(args []string) {
 	// transcript is still on disk either way.
 	if *fresh {
 		env += "CAVE_AGENT_FRESH=1\n"
+	}
+	// Which conversation, when it is not "the last one". Validated here rather
+	// than trusted, because this becomes a filename inside the agent's home
+	// when claude looks for it, and the host is the only caller but that is
+	// the assumption worth not making where a string reaches a path.
+	if *session != "" {
+		if !sessions.ValidID(*session) {
+			die(fmt.Errorf("session: %q is not a session id", *session))
+		}
+		env += "CAVE_AGENT_SESSION=" + *session + "\n"
 	}
 	if err := os.WriteFile(filepath.Join(*dir, *id+".env"), []byte(env), 0o600); err != nil {
 		die(err)

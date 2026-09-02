@@ -54,6 +54,15 @@ check() { # check <label> <want> <got>
   else printf 'FAIL %s (want %s, got %s)\n' "$1" "$2" "$3"; fail=1; fi
 }
 
+has() { # has <label> <want-substring-or-empty> <got>
+  if [ -z "$2" ]; then
+    [ -z "$3" ] && { printf 'ok   %s\n' "$1"; return 0; }
+    printf 'FAIL %s (want silence, got %s)\n' "$1" "$3"; fail=1; return 0
+  fi
+  case "$3" in *"$2"*) printf 'ok   %s\n' "$1"; return 0 ;; esac
+  printf 'FAIL %s (want %s, got %s)\n' "$1" "$2" "${3:-<silence>}"; fail=1
+}
+
 check "the root agent's id is reserved" "0" "$ROOT_AGENT_ID"
 check "--root gets it" "$ROOT_AGENT_ID" "$(allocate_agent_id 1)"
 
@@ -123,18 +132,46 @@ case "$out" in
   *) printf 'FAIL %s (got %s)\n' "and says what it was protecting against" "$out"; fail=1 ;;
 esac
 
+# --- naming a conversation ---
+# An agent continues its last by default. The archive holds every session this
+# cave has had, and choosing among them used to be possible only from inside,
+# in claude's own picker.
+RESTORED=""
+is_running() { return 0; }
+restore_one_session() { RESTORED="$1"; }
+do_attach() { :; }
+# To a file, not a variable: do_agent calls this inside a command
+# substitution, and a subshell's assignments do not come back.
+guest_ssh() { printf '%s\n' "$*" > "$work/started"; return 0; }
+# Deliberately not stubbing warn_if_guest_is_behind or correct_guest_clock:
+# a later case asserts on what the first of them prints, and a stub left
+# behind here made that case fail for a reason that had nothing to do with it.
+GUEST_AGENTS=""
+OCCUPIED=""
+
+rm -f "$work/started"
+do_agent --root --resume 3f2504e0-4f89-11d3-9a0c-0305e82c3301 proj main >/dev/null 2>&1 || true
+case "$(cat "$work/started" 2>/dev/null)" in
+  *"-session 3f2504e0-4f89-11d3-9a0c-0305e82c3301"*)
+    echo "ok   the session id is passed to the guest" ;;
+  *) echo "FAIL the session id did not reach the guest (got: $(cat "$work/started" 2>/dev/null))"; fail=1 ;;
+esac
+check "and it is restored before the start, not after" \
+  "3f2504e0-4f89-11d3-9a0c-0305e82c3301" "$RESTORED"
+
+# A typo is answered by the command you typed, rather than by claude some
+# seconds later inside a session you then have to leave.
+out=$(do_agent --root --resume not-a-session proj main 2>&1 || true)
+has "a bad session id is refused here" "is not a session id" "$out"
+has "and says where ids come from" "vmcav sessions list" "$out"
+
+# The two flags ask for opposite things.
+out=$(do_agent --root --fresh --resume 3f2504e0-4f89-11d3-9a0c-0305e82c3301 proj main 2>&1 || true)
+has "--fresh and --resume together are refused" "opposite things" "$out"
+
 # --- what a start that fails tells you ---
 # Stubbed at ssh: which units systemd calls failed is the whole input, so a
 # guest would add nothing but minutes.
-has() { # has <label> <want-substring-or-empty> <got>
-  if [ -z "$2" ]; then
-    [ -z "$3" ] && { printf 'ok   %s\n' "$1"; return 0; }
-    printf 'FAIL %s (want silence, got %s)\n' "$1" "$3"; fail=1; return 0
-  fi
-  case "$3" in *"$2"*) printf 'ok   %s\n' "$1"; return 0 ;; esac
-  printf 'FAIL %s (want %s, got %s)\n' "$1" "$2" "${3:-<silence>}"; fail=1
-}
-
 FAILED_UNITS=""
 JOURNAL="clone-repo: /projects/coding-cave/0 is on agent-1/vm-cave"
 guest_ssh() {
