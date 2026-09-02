@@ -90,26 +90,14 @@ check "the kept copy is the hook that was there" "yes" \
 
 # --- and status says when it is not ours ----------------------------------
 #
-# The check that would have caught the four rounds above. A foreign guard
-# refuses pushes in a way that reads like the guard working, so nothing about
-# the symptom points at the cause; status is where a host-side fact that is
-# quietly wrong has to surface.
-
-printf '#!/bin/sh\nexec some-other-tool "$@"\n' > "$hook"
-out=$(warn_if_hooks_are_foreign 2>&1)
-check "status names a foreign guard" "yes" \
-  "$(printf '%s' "$out" | grep -q "installed by another tool" && echo yes || echo no)"
-check "and says how to take it over" "yes" \
-  "$(printf '%s' "$out" | grep -q "vmcav init" && echo yes || echo no)"
-
-register_project "$REPO" >/dev/null
-check "and says nothing once it is ours" "" "$(warn_if_hooks_are_foreign 2>&1)"
-
-rm -f "$hook"
-out=$(warn_if_hooks_are_foreign 2>&1)
-check "a missing guard is reported too" "yes" \
-  "$(printf '%s' "$out" | grep -q "no branch guard" && echo yes || echo no)"
-register_project "$REPO" >/dev/null
+# Read by `cave-vm projects --guards` now, where the four states are a table
+# in internal/projects: ours, another tool's, none at all, and a registration
+# whose project is not there -- which this shell reported as a missing guard,
+# because it resolved the dead link to an empty path and looked for a hook
+# under it.
+#
+# What stays here is that installing puts our own guard in place, which is
+# this side's job and is checked above.
 
 # --- what is not a project ------------------------------------------------
 #

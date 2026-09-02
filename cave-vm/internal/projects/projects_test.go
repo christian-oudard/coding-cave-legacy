@@ -3,6 +3,7 @@ package projects
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -134,5 +135,73 @@ func TestNoRegistryDirectoryIsNotAnError(t *testing.T) {
 	got, err := List(filepath.Join(t.TempDir(), "never-made"))
 	if err != nil || got != nil {
 		t.Errorf("got %+v, %v", got, err)
+	}
+}
+
+func writeHook(t *testing.T, target, body string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(target, "hooks"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "hooks", "pre-receive"), []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGuardTellsOursFromAnotherToolsFromNone(t *testing.T) {
+	dir, repo := world(t)
+
+	ours := repo("ours")
+	writeHook(t, ours, "#!/bin/sh\nexec cave-vm-git-pre-receive \"$@\"\n")
+	register(t, dir, "ours", ours)
+
+	foreign := repo("foreign")
+	writeHook(t, foreign, "#!/bin/sh\nexec some-other-tool \"$@\"\n")
+	register(t, dir, "foreign", foreign)
+
+	none := repo("none")
+	register(t, dir, "none", none)
+
+	all, err := List(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]Guard{}
+	for _, p := range all {
+		got[p.Slug] = p.Guard()
+	}
+	for slug, want := range map[string]Guard{
+		"ours": GuardOurs, "foreign": GuardForeign, "none": GuardMissing,
+	} {
+		if got[slug] != want {
+			t.Errorf("%s: got %v, want %v", slug, got[slug], want)
+		}
+	}
+}
+
+// A registration pointing at nothing has no guard because it has no
+// repository. The shell could not say that: it resolved the dead link to the
+// empty string, looked for a hook under "/hooks/pre-receive", found none, and
+// reported a missing branch guard on a project that had simply moved.
+func TestAMovedProjectIsNotAMissingGuard(t *testing.T) {
+	dir, repo := world(t)
+	gone := repo("gone")
+	writeHook(t, gone, "#!/bin/sh\nexec cave-vm-git-pre-receive \"$@\"\n")
+	register(t, dir, "gone", gone)
+	if err := os.RemoveAll(filepath.Dir(filepath.Dir(gone))); err != nil {
+		t.Fatal(err)
+	}
+
+	all, err := List(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g := all[0].Guard(); g != GuardNoProject {
+		t.Errorf("got %v, want GuardNoProject", g)
+	}
+	// And the hint still names a directory rather than the shared repo inside
+	// it, which is what `vmcav init` takes.
+	if d := all[0].CheckoutDir(); !strings.HasSuffix(d, "gone") {
+		t.Errorf("CheckoutDir = %q, want the project directory", d)
 	}
 }

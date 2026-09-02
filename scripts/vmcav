@@ -2353,21 +2353,14 @@ correct_guest_clock() {
 }
 
 warn_if_hooks_are_foreign() {
-  local slug hook
-  while IFS= read -r slug; do
-    [ -n "$slug" ] || continue
-    hook="$(readlink -f "$REPOS/$slug.git" 2>/dev/null)/hooks/pre-receive"
-    if [ ! -e "$hook" ]; then
-      log "$slug has no branch guard; an agent could push to a base branch"
-      log "  install it:  vmcav init $(readlink -f "$REPOS/$slug.git" | sed 's|/.coding-cave/.*||')"
-      continue
-    fi
-    grep -q cave-vm-git-pre-receive "$hook" && continue
-    log "$slug's branch guard was installed by another tool"
-    log "  it refuses any agent whose id does not match the one this guest"
-    log "  shares, so every agent but one cannot publish at all"
-    log "  take it over:  vmcav init $(readlink -f "$REPOS/$slug.git" | sed 's|/.coding-cave/.*||')"
-  done < <(registered_projects)
+  # Read by cave-vm, which can tell a project whose guard is another tool's
+  # from one whose directory is not there any more. This resolved the
+  # registration with `readlink -f`, so a moved project gave it an empty path
+  # to look under and it reported a missing branch guard -- about a project,
+  # not a guard.
+  cave-vm projects --state "$STATE_DIR" --guards 2>/dev/null \
+    | while IFS= read -r line; do log "$line"; done
+  return 0
 }
 
 warn_if_guest_is_behind() {

@@ -120,3 +120,54 @@ func isDir(path string) bool {
 	st, err := os.Stat(path)
 	return err == nil && st.IsDir()
 }
+
+// Guard is what the branch guard on a project's shared repo is, which decides
+// whether an agent's push can reach a base branch without approval.
+type Guard int
+
+const (
+	// GuardOurs is the hook this tool installs.
+	GuardOurs Guard = iota
+	// GuardForeign is a hook some other tool installed. It is not merely
+	// different: `cav`'s guard requires the pushing agent's id to match the
+	// one the whole guest shares, so it refuses every agent but one, and the
+	// refusal reads exactly like the guard working.
+	GuardForeign
+	// GuardMissing is no hook at all, which means nothing stops an agent
+	// pushing straight to a base branch.
+	GuardMissing
+	// GuardNoProject is the registration pointing at nothing, so there is no
+	// repository to have a guard. Distinct because the shell could not tell:
+	// it resolved the link with `readlink -f`, got the empty string, looked
+	// for a hook under "/hooks/pre-receive", did not find one, and reported a
+	// missing branch guard on a project whose directory had moved.
+	GuardNoProject
+)
+
+// marker is what our own hook execs, and how one is told from another tool's.
+const marker = "cave-vm-git-pre-receive"
+
+// Guard reads the project's pre-receive hook.
+func (p Project) Guard() Guard {
+	if !p.Present {
+		return GuardNoProject
+	}
+	b, err := os.ReadFile(filepath.Join(p.Target, "hooks", "pre-receive"))
+	if err != nil {
+		return GuardMissing
+	}
+	if strings.Contains(string(b), marker) {
+		return GuardOurs
+	}
+	return GuardForeign
+}
+
+// CheckoutDir is the project directory a person would name to `vmcav init`,
+// recovered from where the registration points: the shared repo lives at
+// <checkout>/.coding-cave/cave-shared.git.
+func (p Project) CheckoutDir() string {
+	if i := strings.Index(p.Target, "/.coding-cave/"); i >= 0 {
+		return p.Target[:i]
+	}
+	return p.Target
+}
