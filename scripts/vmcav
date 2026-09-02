@@ -288,6 +288,41 @@ guest_ready() {
     root@cave-guest true >/dev/null 2>&1
 }
 
+# Why the guest cannot be reached, when the answer is not "it is still booting".
+#
+# Every route to a running guest goes through one unix socket, and if that
+# file is not there nothing works and everything says the same thing: the
+# guest is not answering ssh. That sentence sends you to the console log, and
+# the console log shows a guest that is perfectly well.
+#
+# The case that produced it: the socket moved. It used to be a flat name in
+# /tmp and is now a file inside a per-uid directory, so a VM started before
+# that change keeps its socket at the old path while the upgraded tool looks
+# at the new one. The VM is running, the guest is fine, and they cannot find
+# each other. Worth naming, because the fix is two symlinks or a restart and
+# neither is guessable from "not answering ssh".
+explain_unreachable_guest() {
+  local sock; sock=$(cave-vm socket --state "$STATE_DIR" 2>/dev/null || true)
+  [ -n "$sock" ] || return 0
+  [ -S "$sock" ] && return 0
+  log "  the socket every route to the guest uses is not there:"
+  log "    $sock"
+  local old="/tmp/vmcav-$(id -u)-$(basename "$sock")"
+  if [ -S "$old" ] || [ -S "$old.vsock" ]; then
+    log "  but a socket from before it moved is:"
+    log "    $old"
+    log "  this VM was started by a vmcav that kept sockets directly in /tmp."
+    log "  Either link them across:"
+    log "    mkdir -p -m 700 $(dirname "$sock") && ln -s $old $sock"
+    log "  or stop the VM and start it again, which loses running agents but"
+    log "  keeps everything on the guest's disk."
+  else
+    log "  so the VM is running with nothing listening for us. Stopping and"
+    log "  starting it again is the way back."
+  fi
+  return 0
+}
+
 # The agent is up when the daemon answers and reports a running session.
 # Checking the socket file alone would pass on a leftover from a crash.
 agent_ready() {
@@ -443,11 +478,24 @@ install_shared_hooks() {
     log "  the old one is beside it as pre-receive.replaced-by-vmcav"
   fi
   # Written every time rather than only when absent, so a fix to the guard
-  # reaches a repo that already has one.
-  log "installing receive hooks in $shared"
-  printf '#!/bin/sh\nexec cave-vm-git-pre-receive "$@"\n' > "$h/pre-receive"
-  printf '#!/bin/sh\nexec cave-vm-git-post-receive "$@"\n' > "$h/post-receive"
+  # reaches a repo that already has one. Said out loud only when the bytes
+  # change: `vmcav init` registers the project and then starts the daemon,
+  # which registers it again, so this ran twice per invocation and announced
+  # an installation twice -- which reads like something going wrong, or like
+  # the command not being safe to repeat. It is safe to repeat; it was only
+  # noisy about it.
+  local pre post changed=""
+  pre='#!/bin/sh
+exec cave-vm-git-pre-receive "$@"'
+  post='#!/bin/sh
+exec cave-vm-git-post-receive "$@"'
+  [ "$(cat "$h/pre-receive" 2>/dev/null)" = "$pre" ] || changed=1
+  [ "$(cat "$h/post-receive" 2>/dev/null)" = "$post" ] || changed=1
+  [ -n "$changed" ] && log "installing receive hooks in $shared"
+  printf '%s\n' "$pre" > "$h/pre-receive"
+  printf '%s\n' "$post" > "$h/post-receive"
   chmod 755 "$h/pre-receive" "$h/post-receive"
+  return 0
 }
 
 # Carry the human's commits into the shared repo, the agent's host-cave.
@@ -948,6 +996,7 @@ guest_ssh() {
   restore_local_tty
   trap - EXIT INT TERM QUIT
   [ "$rc" = 255 ] && { log "the vm is running but the guest is not answering ssh"; \
+    explain_unreachable_guest; \
     log "  (still booting, or it failed): tail -f $CONSOLE"; }
   return "$rc"
 }
@@ -2135,7 +2184,10 @@ restore_sessions() {
 do_deploy() {
   require_tools
   is_running || { log "the vm is not running; deploy needs a live guest (vmcav start)"; return 1; }
-  guest_ready || { log "the vm is running but the guest is not answering ssh"; return 1; }
+  guest_ready || {
+    log "the vm is running but the guest is not answering ssh"
+    explain_unreachable_guest
+    return 1; }
 
   # Built beside the live out-links, not over them: until the guest has the
   # closure, the host must keep pointing at the system the guest still has.

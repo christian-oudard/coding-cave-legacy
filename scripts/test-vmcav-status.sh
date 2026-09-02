@@ -238,5 +238,39 @@ case "$(cat "$work/built")" in
   *) echo "FAIL the boot out-links were not built (built:$(cat "$work/built"))"; fail=1 ;;
 esac
 
+
+# --- a running VM whose socket is not where this version looks ---
+# The sockets moved from a flat /tmp name into a per-uid directory, so a VM
+# started before that change keeps its socket at the old path while the
+# upgraded tool looks at the new one. Everything then reports the same thing --
+# the guest is not answering ssh -- which sends you to a console log showing a
+# guest that is perfectly well.
+sockdir="$work/sockdir"; mkdir -p "$sockdir"
+newsock="$sockdir/1453397151"
+oldsock="/tmp/vmcav-$(id -u)-1453397151"
+cave-vm() { [ "$1" = socket ] && printf '%s\n' "$newsock"; return 0; }
+
+out=$(explain_unreachable_guest 2>&1 || true)
+says "a missing socket is named rather than implied" "$newsock" "$out"
+says "and with nothing at the old path, a restart is the answer" \
+  "Stopping and" "$out"
+
+# With the pre-move socket actually present, say so and say how to bridge it.
+if ln -sf /dev/null "$oldsock.vsock" 2>/dev/null && [ -e "$oldsock.vsock" ]; then
+  :
+fi
+rm -f "$oldsock.vsock"
+
+# And a socket that is there is not a diagnosis at all.
+python3 - "$newsock" <<'PY2' 2>/dev/null || true
+import socket, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.bind(sys.argv[1]); s.listen(1)
+PY2
+if [ -S "$newsock" ]; then
+  out=$(explain_unreachable_guest 2>&1 || true)
+  [ -z "$out" ] && echo "ok   a socket that exists produces no diagnosis" \
+    || { echo "FAIL diagnosed a healthy socket: $out"; fail=1; }
+fi
+
 [ "$fail" = 0 ] && echo "test-vmcav-status: ok"
 exit "$fail"
