@@ -1292,15 +1292,50 @@ in
         chown "$agent_user" "$seed"
         chmod 600 "$seed"
 
-        # claude.json is login *state*; the token lives beside it, and without
-        # it the agent starts logged out and stops at /login. What the host
-        # stages is this VM's own placeholder, captured after it logged in
-        # once: crinj holds the real token, and a placeholder is worthless
-        # anywhere else. Never overwritten, so an in-guest login wins.
+        # The login token, without which the agent starts logged out and stops
+        # at /login having reported nothing.
+        #
+        # The rule used to be "install the host's copy if the agent has none,
+        # and never overwrite, so an in-guest login wins". The second half is
+        # right and the first half was not enough. What the host stages is a
+        # placeholder captured the one time this VM logged in, and a token
+        # expires: the seed on disk has been expired for weeks. So every agent
+        # created since came up holding a dead token, which is not "no
+        # credentials" -- it is credentials claude checks locally and rejects
+        # before it ever reaches crinj, so the agent could not work at all.
+        #
+        # Expiry is the test, not presence. A live token is left alone, which
+        # keeps an in-guest login winning; a missing or expired one is replaced
+        # by the freshest that exists anywhere in this guest. They are all the
+        # same account -- one VM, one login -- so an agent that refreshed its
+        # token has one every other agent can use, and root's is usually the
+        # freshest because root is the agent that has been running.
         cred="$agent_home/.claude/.credentials.json"
-        host_cred=/etc/cave-host/credentials.json
-        if [ ! -f "$cred" ] && [ -f "$host_cred" ]; then
-          install -m 600 -o "$agent_user" "$host_cred" "$cred"
+        expires_at() {
+          [ -f "$1" ] || { echo 0; return; }
+          ${pkgs.jq}/bin/jq -r '.claudeAiOauth.expiresAt // 0' "$1" 2>/dev/null || echo 0
+        }
+        now=$(${pkgs.coreutils}/bin/date +%s%3N)
+        if [ "$(expires_at "$cred")" -le "$now" ]; then
+          best=""; best_exp=0
+          for c in /root/.claude/.credentials.json \
+                   /home/*/.claude/.credentials.json \
+                   /etc/cave-host/credentials.json; do
+            [ -f "$c" ] || continue
+            exp=$(expires_at "$c")
+            [ "$exp" -gt "$best_exp" ] && { best="$c"; best_exp="$exp"; }
+          done
+          if [ -n "$best" ] && [ "$best_exp" -gt "$now" ]; then
+            echo "seed-agent-home: taking the login from $best"
+            install -m 600 -o "$agent_user" "$best" "$cred"
+          elif [ ! -f "$cred" ] && [ -f /etc/cave-host/credentials.json ]; then
+            # Nothing live anywhere. Seed the host's expired copy regardless,
+            # so the agent has the shape of a login to refresh rather than
+            # none at all, and say so: the agent will stop at /login and the
+            # reason is here rather than in its terminal.
+            echo "seed-agent-home: no live login in this guest; seeding an expired one" >&2
+            install -m 600 -o "$agent_user" /etc/cave-host/credentials.json "$cred"
+          fi
         fi
 
         # What the agent knows that a checkout does not tell it: which VM it
