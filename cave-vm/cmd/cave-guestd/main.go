@@ -23,6 +23,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -63,6 +64,16 @@ func unitFor(dir, id string) string {
 	return fmt.Sprintf(unitPattern, id)
 }
 
+// Where the guest keeps homes. The layout is fixed by the guest's own config,
+// so these are not options; they are variables only so a test can point them
+// at a tree it made, which is the difference between testing this and
+// asserting against whatever homes the machine running the test happens to
+// have.
+var (
+	rootHomeDir  = "/root"
+	agentHomeDir = "/home"
+)
+
 // agentHomes finds every agent's ~/.claude, and whose it is.
 //
 // Derived from the guest's own layout rather than from a registry, because the
@@ -82,8 +93,8 @@ func agentHomes(sessionsDir, claudeName string) []sessions.Local {
 			out = append(out, sessions.Local{ClaudeDir: dir, Agent: agent})
 		}
 	}
-	add(rootAgentID(sessionsDir), "/root")
-	entries, err := os.ReadDir("/home")
+	add(rootAgentID(sessionsDir), rootHomeDir)
+	entries, err := os.ReadDir(agentHomeDir)
 	if err != nil {
 		return out
 	}
@@ -95,7 +106,7 @@ func agentHomes(sessionsDir, claudeName string) []sessions.Local {
 		if !ok || id == "" || strings.ContainsFunc(id, func(r rune) bool { return r < '0' || r > '9' }) {
 			continue
 		}
-		add(id, filepath.Join("/home", e.Name()))
+		add(id, filepath.Join(agentHomeDir, e.Name()))
 	}
 	return out
 }
@@ -161,6 +172,8 @@ func main() {
 		holders(args)
 	case "reclaimable":
 		reclaimable(args)
+	case "occupied":
+		occupied(args)
 	case "remove":
 		remove(args)
 	default:
@@ -372,6 +385,53 @@ func reclaimable(args []string) {
 	}
 }
 
+// occupied lists every agent id that still holds state in this guest: a
+// worktree, or a home claude has written in. Running or not, recent or not --
+// this is "is anything of an agent still here", not "may it be swept".
+//
+// The host allocates ids by finding one nothing collides with, and it could
+// see only two of the three things an id owns: a running session, which it
+// asks the guest for, and a pushed branch, which is in the shared repo. The
+// worktree and the home are on the guest's own disk and outlive both. So an
+// agent that stopped and had its work landed looked free while six megabytes
+// of its transcripts and a checked-out tree sat under its id, and the next
+// agent handed that id inherited them -- including, because continuing is the
+// default, the previous agent's last conversation.
+//
+// Separate from reclaimable, which answers a different question: that one is
+// for sweeping and so excludes the running and the recent, and both of those
+// are exactly what allocation must still count as occupied.
+func occupied(args []string) {
+	fs := flag.NewFlagSet("occupied", flag.ExitOnError)
+	dir := fs.String("dir", defaultDir, "directory of session sockets")
+	root := fs.String("worktrees", defaultWorktrees, "where agents' worktrees live")
+	fs.Parse(args)
+
+	ids := map[string]bool{}
+	// A worktree is a directory named for the id that owns it.
+	if entries, err := os.ReadDir(*root); err == nil {
+		for _, e := range entries {
+			if e.IsDir() {
+				ids[e.Name()] = true
+			}
+		}
+	}
+	// A home counts even with no worktree beside it: the transcripts are
+	// there, and handing them to a new agent is the thing being prevented.
+	for _, h := range agentHomes(*dir, ".claude") {
+		ids[h.Agent] = true
+	}
+
+	out := make([]string, 0, len(ids))
+	for id := range ids {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	for _, id := range out {
+		fmt.Println(id)
+	}
+}
+
 // holders lists the agents holding a worktree of a project, and whether each
 // is running.
 //
@@ -451,6 +511,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "       cave-guestd env seed -home DIR -user NAME")
 	fmt.Fprintln(os.Stderr, "       cave-guestd remove -id N")
 	fmt.Fprintln(os.Stderr, "       cave-guestd reclaimable [-older-than D]")
+	fmt.Fprintln(os.Stderr, "       cave-guestd occupied")
 	fmt.Fprintln(os.Stderr, "       cave-guestd holders -project SLUG")
 	os.Exit(2)
 }

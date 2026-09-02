@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +9,21 @@ import (
 
 	"codingcave.dev/cave-vm/internal/sessions"
 )
+
+// homesUnder points the guest's home layout at a tree the test made, so that
+// what these assert is the code and not the machine the test runs on -- which,
+// for this project, is a guest with real agent homes in exactly these places.
+func homesUnder(t *testing.T, root string) (rootHome, agentHomes string) {
+	t.Helper()
+	rootHome, agentHomes = filepath.Join(root, "root"), filepath.Join(root, "home")
+	if err := os.MkdirAll(agentHomes, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	savedRoot, savedAgents := rootHomeDir, agentHomeDir
+	rootHomeDir, agentHomeDir = rootHome, agentHomes
+	t.Cleanup(func() { rootHomeDir, agentHomeDir = savedRoot, savedAgents })
+	return rootHome, agentHomes
+}
 
 // The guest daemon decides two things nothing else can: which unit an agent's
 // session runs under, and whose home a restored transcript lands in. Both are
@@ -81,6 +97,72 @@ func TestRootAgentID(t *testing.T) {
 	if got, want := rootAgentID(empty), "0"; got != want {
 		t.Errorf("rootAgentID(no agents) = %q, want %q", got, want)
 	}
+}
+
+// An id is occupied while anything of the agent is still on disk, which is
+// what stops the host handing it to somebody else. The two halves are counted
+// separately because they are lost separately: `approve` deletes the branch,
+// a stop ends the session, and neither touches the worktree or the home.
+func TestOccupiedCountsWorktreesAndHomes(t *testing.T) {
+	root := t.TempDir()
+	_, homes := homesUnder(t, root)
+
+	trees := filepath.Join(root, "agents")
+	for _, id := range []string{"1", "4"} {
+		if err := os.MkdirAll(filepath.Join(trees, id), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A file in the worktree root is not an agent.
+	if err := os.WriteFile(filepath.Join(trees, "notes"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Agent 6 has a home and no worktree: the transcripts alone are enough to
+	// make handing its id to somebody else the wrong thing to do.
+	if err := os.MkdirAll(filepath.Join(homes, "agent6", ".claude"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	out := captureStdout(t, func() {
+		occupied([]string{"-worktrees", trees, "-dir", t.TempDir()})
+	})
+	if got, want := out, "1\n4\n6\n"; got != want {
+		t.Errorf("occupied = %q, want %q", got, want)
+	}
+}
+
+// The reverse, and the reason the host can hand an id out again at all: an
+// agent whose state has been removed stops holding its id.
+func TestOccupiedIsEmptyWhenNothingIsHeld(t *testing.T) {
+	root := t.TempDir()
+	homesUnder(t, root)
+	out := captureStdout(t, func() {
+		occupied([]string{"-worktrees", filepath.Join(root, "agents"), "-dir", t.TempDir()})
+	})
+	if out != "" {
+		t.Errorf("occupied = %q, want nothing held", out)
+	}
+}
+
+// captureStdout runs f with os.Stdout replaced, and returns what it printed.
+func captureStdout(t *testing.T, f func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := os.Stdout
+	os.Stdout = w
+	done := make(chan string, 1)
+	go func() {
+		var b strings.Builder
+		io.Copy(&b, r)
+		done <- b.String()
+	}()
+	f()
+	w.Close()
+	os.Stdout = saved
+	return <-done
 }
 
 // homeAt builds one agent's home the way seed-agent-home@ lays it out.

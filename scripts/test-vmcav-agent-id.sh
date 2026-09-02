@@ -32,6 +32,17 @@ git clone -q --bare "$REPO" "$SHARED"
 GUEST_AGENTS=""
 guest_rpc() { [ "$1" = "agents" ] && printf '%s' "$GUEST_AGENTS"; return 0; }
 
+# The third thing an agent is, and the only one the host cannot see for
+# itself: a worktree and a home on the guest's disk, which outlive both the
+# session and the branch. Stubbed like the sessions above.
+OCCUPIED=""
+OCCUPIED_FAILS=""
+occupied_agent_ids() {
+  [ -n "$OCCUPIED_FAILS" ] && return 1
+  printf '%s' "$OCCUPIED"
+  return 0
+}
+
 # pushed <id> -- an agent branch in the shared repo, as a push would leave it
 pushed() {
   git -C "$SHARED" branch -q "agent-$1/main" 2>/dev/null \
@@ -75,6 +86,42 @@ GUEST_AGENTS=$'0 running 80 24\n'
 git -C "$SHARED" branch -qD agent-1/main agent-3/main 2>/dev/null || true
 check "the root agent does not shift the sequence" "1" "$(allocate_agent_id "")"
 check "and can still be asked for by name" "0" "$(allocate_agent_id 1)"
+
+# --- state on the guest's disk holds an id too ---
+# The case this missed for real. An agent stopped, its work landed, its branch
+# deleted by approve: nothing the host can see says the id is taken, and the
+# guest still has six megabytes of that agent's transcripts and a checked-out
+# worktree under it. Handing the id on runs the new agent as the same unix
+# user in the same home -- and since continuing is the default, it resumes a
+# conversation it never had.
+GUEST_AGENTS=""
+OCCUPIED=$'1\n'
+check "a leftover home or worktree takes its id out of play" "2" "$(allocate_agent_id "")"
+
+# Both halves, so the lowest free id is found around them rather than after
+# them.
+OCCUPIED=$'1\n2\n4\n'
+check "occupied ids are skipped, not counted past" "3" "$(allocate_agent_id "")"
+
+# And the id does come back: this is what makes `vmcav agent remove` and
+# `vmcav gc` the way one is released, rather than a number nobody reuses.
+OCCUPIED=""
+check "removing the state releases the id" "1" "$(allocate_agent_id "")"
+
+# A guest that cannot answer must not read as "nothing is held", which is the
+# same empty string a guest holding nothing returns.
+# Tested rather than run bare: sourcing vmcav brought its `set -e` in here,
+# so an unguarded call that returns non-zero ends the suite instead of failing
+# one case.
+OCCUPIED_FAILS=1
+rc=0
+out=$(allocate_agent_id "" 2>&1) || rc=$?
+OCCUPIED_FAILS=""
+check "a guest that cannot answer stops the allocation" "1" "$rc"
+case "$out" in
+  *"already has a home"*) printf 'ok   %s\n' "and says what it was protecting against" ;;
+  *) printf 'FAIL %s (got %s)\n' "and says what it was protecting against" "$out"; fail=1 ;;
+esac
 
 # --- what a start that fails tells you ---
 # Stubbed at ssh: which units systemd calls failed is the whole input, so a

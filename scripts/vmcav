@@ -851,20 +851,61 @@ guest_ssh() {
 # Which id a new agent gets. The root agent's is reserved and asked for by
 # name; everyone else takes the lowest free number from 1 up.
 #
-# In use means either half of what an agent is: a session the guest is running
-# (it can be attached to) or a branch in the shared repo (it has pushed work
-# nobody has landed). An id whose branch approve deleted and whose session is
-# gone has nothing left to collide with, so it comes back around -- there is
-# no registry here to remember that it was ever spent, and inventing one to
-# avoid reuse would be inventing state to protect a number.
+# In use means any of the three things an agent is. Two are visible from here:
+# a session the guest is running (it can be attached to) and a branch in the
+# shared repo (it has pushed work nobody has landed). The third is on the
+# guest's own disk -- its worktree and its home -- and outlives both of the
+# others, so the guest is asked.
+#
+# It used to be only the first two, on the reasoning that an id whose branch
+# approve deleted and whose session is gone had nothing left to collide with.
+# That was wrong, and this guest is what showed it: agents 1 and 2 stopped,
+# their work landed, their branches gone, and six megabytes of transcripts and
+# a checked-out tree still sitting under each id. The next `vmcav agent` would
+# have been handed id 1 and started as agent1 in agent 1's home -- and since
+# continuing is the default, it would have resumed a conversation it had never
+# had.
+#
+# This is not a registry invented to protect a number. It is state the guest
+# already keeps and already reports, asked at the one moment it decides
+# something. An id comes back when that state is gone, which is what
+# `vmcav agent remove` and `vmcav gc` are for.
+# The ids whose worktree or home is still on the guest's disk.
+#
+# Over ssh rather than the control plane because it is asked once, when an
+# agent is created, and 85ms there is not worth an endpoint. A guest with no
+# VM running holds nothing yet, which is the one empty answer that is true.
+#
+# Any other failure is reported, because the empty answer and the unreachable
+# answer look identical here and only one of them means "every id is free".
+# A guest too old to know the subcommand lands in that case too, and says so
+# rather than quietly going back to handing out occupied ids.
+occupied_agent_ids() {
+  is_running || return 0
+  guest_ssh "cave-guestd occupied" 2>/dev/null | tr -d '\r'
+}
+
 allocate_agent_id() {
   local want_root="$1"
   if [ -n "$want_root" ]; then
     echo "$ROOT_AGENT_ID"
     return 0
   fi
+  # Asked before the list is assembled, so that a guest which cannot answer
+  # stops the allocation instead of disappearing into a pipeline whose exit
+  # status belongs to sort.
+  local occupied
+  occupied=$(occupied_agent_ids) || {
+    log "could not ask the guest which agent ids it still holds, so a new"
+    log "  agent might be given one that already has a home and a worktree --"
+    log "  and would resume the last conversation held in it."
+    log "  A guest older than this script does not know the question:"
+    log "    vmcav deploy && vmcav stop && vmcav start"
+    return 1
+  }
   local used
   used=$( { guest_rpc agents 2>/dev/null | awk '{print $1}'
+            printf '%s\n' "$occupied"
             # A prefix, not a glob: for-each-ref's * does not cross a slash,
             # so refs/heads/agent-* matches no branch an agent has ever
             # pushed. Filtering the whole list is what the Go side does too.
@@ -887,8 +928,13 @@ allocate_agent_id() {
   # started fine yesterday.
   if [ "$n" -gt "$MAX_AGENTS" ]; then
     log "no free agent id: this guest holds $MAX_AGENTS agents at once."
-    log "  Stop one (vmcav agent stop <id>), or raise maxAgents in"
-    log "  guest/configuration.nix and redeploy."
+    # Stopping one no longer frees its id, and saying so would send you to a
+    # command that changes nothing: an id is held by the home and worktree on
+    # the guest's disk, which outlive the session. Removing is what releases
+    # it, and it is the one that asks about unlanded work first.
+    log "  Remove one (vmcav agent remove <id>), sweep the idle ones"
+    log "  (vmcav gc), or raise maxAgents in guest/configuration.nix"
+    log "  and redeploy."
     return 1
   fi
   echo "$n"
