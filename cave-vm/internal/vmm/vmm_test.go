@@ -675,3 +675,57 @@ func TestRunScriptIsReproducible(t *testing.T) {
 		t.Error("run script is not executable")
 	}
 }
+
+// The sockets sit in a directory nobody else may enter.
+//
+// They used to sit directly in /tmp under a predictable name, taking whatever
+// permissions their creator chose -- the VMM's API socket, through which a VM
+// can be controlled, and the vsock bridges, through which another local user
+// could reach crinj's egress or push through the git daemon with the agent's
+// injected identity. The mode goes on the directory because the sockets are
+// created by the VMM, and the per-port ones later still, so there is no single
+// moment when they all exist to be chmodded.
+func TestSocketDirectoryIsOwnerOnly(t *testing.T) {
+	p := Paths{Sock: filepath.Join(t.TempDir(), "sockets", "1234")}
+	if err := p.EnsureDir(); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(p.Dir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o700 {
+		t.Fatalf("socket directory is %v, want 0700", fi.Mode().Perm())
+	}
+}
+
+// A directory that already exists is tightened rather than trusted, since it
+// is on a path anybody can create first.
+func TestSocketDirectoryIsTightenedIfItExists(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "sockets")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := Paths{Sock: filepath.Join(dir, "1234")}
+	if err := p.EnsureDir(); err != nil {
+		t.Fatal(err)
+	}
+	fi, _ := os.Stat(dir)
+	if fi.Mode().Perm() != 0o700 {
+		t.Fatalf("an existing directory was left at %v", fi.Mode().Perm())
+	}
+}
+
+// And the socket path is inside it, which is the whole point: a Paths whose
+// socket sat beside the directory would be covered by nothing.
+func TestSocketPathIsInsideTheDirectory(t *testing.T) {
+	p := NewPaths(t.TempDir())
+	if filepath.Dir(p.Sock) != p.Dir() {
+		t.Fatalf("socket %q is not in %q", p.Sock, p.Dir())
+	}
+	for _, s := range []string{p.API(), p.Vsock()} {
+		if filepath.Dir(s) != p.Dir() {
+			t.Fatalf("%q is not in %q", s, p.Dir())
+		}
+	}
+}

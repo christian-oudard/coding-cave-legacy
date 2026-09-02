@@ -118,6 +118,15 @@ type Paths struct {
 	Sock  string
 }
 
+// Dir is the directory the sockets live in, derived rather than stored so that
+// a Paths built by hand cannot disagree with itself about where they are.
+//
+// It exists so there is somewhere to put the mode. The sockets are created by
+// Cloud Hypervisor and vfkit, which choose their own permissions, and the
+// per-port vsock sockets are created later still; a directory nobody else may
+// enter covers all of them at once, including the ones that do not exist yet.
+func (p Paths) Dir() string { return filepath.Dir(p.Sock) }
+
 func NewPaths(state string) Paths {
 	abs, err := filepath.Abs(state)
 	if err != nil {
@@ -126,8 +135,39 @@ func NewPaths(state string) Paths {
 	sum := crc32.ChecksumIEEE([]byte(abs))
 	return Paths{
 		State: abs,
-		Sock:  fmt.Sprintf("/tmp/vmcav-%d-%d", os.Getuid(), sum),
+		Sock: filepath.Join(fmt.Sprintf("/tmp/vmcav-%d", os.Getuid()),
+			strconv.FormatUint(uint64(sum), 10)),
 	}
+}
+
+// EnsureDir creates the socket directory owner-only, and refuses one that is
+// not ours.
+//
+// These sockets used to sit directly in /tmp under a predictable name, taking
+// whatever permissions their creator chose: the VMM's API socket, through
+// which a VM can be controlled, and the vsock bridges, through which another
+// local user could reach crinj's egress or push through the git daemon with
+// the agent's injected identity. The gpg broker was the only one that set its
+// own mode.
+//
+// The ownership check is the part worth having on a path under /tmp. MkdirAll
+// is happy with a directory that already exists, including one somebody else
+// made first with a mode of their choosing, so creating it is not the same as
+// owning it. Chmod alone would be worse than nothing: it would report success
+// on a directory we do not control.
+func (p Paths) EnsureDir() error {
+	dir := p.Dir()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	st, err := os.Stat(dir)
+	if err != nil {
+		return err
+	}
+	if sys, ok := st.Sys().(*syscall.Stat_t); ok && int(sys.Uid) != os.Getuid() {
+		return fmt.Errorf("vmm: %s belongs to uid %d, not to us", dir, sys.Uid)
+	}
+	return os.Chmod(dir, 0o700)
 }
 
 func (p Paths) PidFile() string   { return filepath.Join(p.State, "vm.pid") }
@@ -262,6 +302,12 @@ func Start(b Backend, s Spec, p Paths) (int, error) {
 		return pid, nil
 	}
 	if err := b.Check(); err != nil {
+		return 0, err
+	}
+	// Before the VMM runs, because it is the VMM that creates the sockets and
+	// it chooses their permissions, not us. The directory is the only place
+	// the mode can be set once and cover all of them.
+	if err := p.EnsureDir(); err != nil {
 		return 0, err
 	}
 	// Taken before anything is written, so a refused start changes nothing.

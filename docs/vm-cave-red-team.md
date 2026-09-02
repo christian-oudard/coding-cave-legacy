@@ -214,6 +214,18 @@ directory closes it.
 listens on a localhost TCP port and stamps every connection with that agent's
 identity, so any local process can push as that agent.
 
+**Fixed.** The sockets moved into /tmp/vmcav-<uid>/, created 0700 before the
+VMM runs. The mode goes on the directory because the sockets are not ours to
+chmod: Cloud Hypervisor and vfkit create them and choose their own
+permissions, and the per-port vsock sockets appear later still, so there is no
+single moment when they all exist. A directory nobody else may enter covers
+the ones that do not exist yet.
+
+An existing directory is tightened rather than trusted, and one owned by
+somebody else is refused outright: this is a path under /tmp, so creating it
+is not the same as owning it, and a chmod that succeeded on a directory we do
+not control would be worse than none.
+
 ## What this review did to the host
 
 Recorded for completeness. Cloned the dotfiles and crinj repositories into the
