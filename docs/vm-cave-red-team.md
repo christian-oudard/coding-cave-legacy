@@ -536,6 +536,43 @@ appear running in `status` and take its id out of allocation. That is noise
 and a denial of an id rather than a channel to a person, and it wants the
 same ownership check inside the listing.
 
+## 14. `cave-enter` carried the caller's identity into the agent
+
+Found by running it. Every test of this passed while it was broken, because
+the thing that was wrong was the environment, and a unit test supplies its
+own.
+
+`vmcav shell <id>` enters an agent's mount namespace, and since finding 13's
+neighbouring fix it also drops to the agent's uid. It did not change the
+environment. nsenter alters who you are, not what you are told you are, so
+everything the caller had came through -- and the caller is usually the root
+agent's shell.
+
+Two halves, and the second is the serious one.
+
+`HOME` stayed `/root`, so programs went looking there: git as agent3 reported
+it could not read `/root/.config/git`. That is the harmless shape. A tool that
+had found something readable would have answered about root's configuration
+without saying so.
+
+`CAVE_AGENT_ID` stayed `0`. That variable is how `cave-git` knows which
+namespace it may publish to -- the check `pre-receive` explicitly delegates to,
+because the host cannot tell co-resident agents apart. So inside agent 3, with
+agent 3's worktree, every program believed it was agent 0. Demonstrated: a
+commit made there pushed a branch into `agent-0/*`, and the shared repo
+accepted it, because by that point nothing in the chain disagreed. The branch
+was deleted immediately after.
+
+`CAVE_AGENT_ROOT=1` came through too, so an ordinary agent entered from the
+root agent's shell looked like the root agent to anything that asked.
+
+Fixed by dropping the CAVE_* variables and setting them again from the target
+agent's own record, plus HOME, USER and LOGNAME. Dropped first and then set,
+because a variable the target does not have must not survive from the caller.
+Verified in the running guest: entering agent 3 now reports agent 3 with
+CAVE_AGENT_ROOT unset, and cave-git refuses the same commit with "not pushing
+agent-0/pretend2: this is agent 3".
+
 ## Not findings
 
 Recorded so they are not re-raised.

@@ -476,6 +476,8 @@ EOF
     #
     # The root agent stays root, because that is what it is.
     as=""
+    who=root
+    home=/root
     if [ -z "$root" ]; then
       uid=$(${pkgs.coreutils}/bin/id -u "agent$id" 2>/dev/null || echo "")
       gid=$(${pkgs.coreutils}/bin/id -g "agent$id" 2>/dev/null || echo "")
@@ -485,15 +487,59 @@ EOF
         exit 1
       fi
       as="--setuid=$uid --setgid=$gid"
+      who="agent$id"
+      home="/home/agent$id"
+    fi
+
+    # The environment as well as the uid.
+    #
+    # nsenter changes who you are and not what you are told you are, so
+    # HOME came in from whoever ran this -- root, in the case that matters --
+    # and every program that reads it went looking in /root. Seen the first
+    # time an ordinary agent was entered for real: git as agent3 reported it
+    # could not read /root/.config/git, which is true and is not a question
+    # anybody asked. A tool that had found something readable there would
+    # have answered about root's configuration instead, silently.
+    #
+    # Set rather than cleared, because an empty HOME is its own wrong answer:
+    # programs fall back to the passwd entry, the cwd, or /, and which one is
+    # per program.
+    #
+    # And the agent's own identity, which is the half that bites. CAVE_AGENT_ID
+    # came in from the caller too, so entering agent 3 from the root agent's
+    # shell left every program in there believing it was agent 0 -- including
+    # cave-git, whose one job is to refuse to publish outside the running
+    # agent's namespace. Demonstrated rather than reasoned about: a commit made
+    # in agent 3's worktree while entered this way pushed a branch to
+    # agent-0/*, and the shared repo accepted it, because by then nothing in
+    # the chain disagreed.
+    #
+    # Dropped first and then set from the agent's own record, so a variable
+    # the target does not have cannot survive from the caller -- entering an
+    # ordinary agent from the root agent's shell must not leave
+    # CAVE_AGENT_ROOT=1 behind.
+    env_as="${pkgs.coreutils}/bin/env -u CAVE_AGENT_ID -u CAVE_AGENT_ROOT \
+      -u CAVE_AGENT_FRESH -u CAVE_AGENT_SESSION -u CAVE_PROJECT -u CAVE_BASE \
+      HOME=$home USER=$who LOGNAME=$who"
+    envfile="${sessionDir}/$id.env"
+    if [ -r "$envfile" ]; then
+      while IFS= read -r line; do
+        case "$line" in
+          # Values here are an id, a project slug and a branch name, all
+          # written by cave-guestd from checked input, so none has a space to
+          # split on.
+          [A-Z]*=*) env_as="$env_as $line" ;;
+        esac
+      done < "$envfile"
     fi
 
     # --wd=/projects, because standing anywhere else in an agent's namespace
     # is standing in the guest's filesystem with extra steps.
     if [ "$#" -eq 0 ]; then
       exec ${pkgs.util-linux}/bin/nsenter -t "$pid" -m --wd=/projects $as \
-        ${pkgs.bash}/bin/bash -l
+        $env_as ${pkgs.bash}/bin/bash -l
     fi
-    exec ${pkgs.util-linux}/bin/nsenter -t "$pid" -m --wd=/projects $as "$@"
+    exec ${pkgs.util-linux}/bin/nsenter -t "$pid" -m --wd=/projects $as $env_as "$@"
   '';
 
   # The guest's git, which pushes what it commits (guest/cave-git.sh).
