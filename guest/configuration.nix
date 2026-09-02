@@ -934,6 +934,34 @@ in
     };
   };
 
+  # Stop the guest killing its own services every time the host sleeps.
+  #
+  # A service watchdog restarts something that has stopped responding. Inside a
+  # VM it cannot tell that from the hypervisor freezing the guest: the host
+  # suspends, the deadline passes in wall time the guest never saw, and on
+  # resume systemd finds every watchdog overdue at once and kills them all.
+  #
+  # Observed rather than reasoned. In one boot of this guest, journald, udevd,
+  # logind and oomd were watchdog-killed at fourteen distinct moments, each a
+  # cluster of one to four services within a millisecond of each other -- one
+  # event apiece, not four hangs -- spaced overnight and across a weekend, in
+  # the shape of a laptop lid. journald's start/stop count matches the cluster
+  # count exactly.
+  #
+  # The trade is one-sided. None of these has ever actually hung here, so the
+  # protection has caught nothing; while journald being killed drops whatever
+  # it had buffered, which is precisely the evidence docs/vm-cave-todo.md is
+  # still missing for the `clone-repo` failure that "took its journal with
+  # it". A watchdog that cannot fire correctly in this environment is worth
+  # less than the logs it costs.
+  #
+  # Not a system-wide default: these four are the ones observed, and a unit
+  # that genuinely can hang should keep its watchdog.
+  systemd.services.systemd-journald.serviceConfig.WatchdogSec = lib.mkForce 0;
+  systemd.services.systemd-udevd.serviceConfig.WatchdogSec = lib.mkForce 0;
+  systemd.services.systemd-logind.serviceConfig.WatchdogSec = lib.mkForce 0;
+  systemd.services.systemd-oomd.serviceConfig.WatchdogSec = lib.mkForce 0;
+
   # logrotate's config check rejected the store-owned config, which fails on
   # boot and, worse, makes switch-to-configuration return non-zero. The
   # agent's redeploy loop reads that as a failed deploy and would roll back a

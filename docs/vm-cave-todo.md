@@ -102,7 +102,10 @@ internet, the nix cache), `clone-repo` succeeds, and no unit is in a failed
 state.
 
 Still open, and cheap: the run that failed took its journal with it, so
-whatever the cause, the evidence should survive the next one. Also untouched:
+whatever the cause, the evidence should survive the next one. One mechanism
+for losing it is now closed: journald was being watchdog-killed every time the
+host suspended, fourteen times in a single boot, taking whatever it had
+buffered with it. See the watchdog note in guest/configuration.nix. Also untouched:
 `vsock-ssh` is still a `VSOCK-LISTEN` socat, deliberately left alone because
 it is the channel a deploy needs and a broken one is only recoverable by
 reformat. It should become a socket unit the same way, and `cave-control`
