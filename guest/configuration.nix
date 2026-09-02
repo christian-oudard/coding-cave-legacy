@@ -437,22 +437,49 @@ EOF
     id="''${1:?usage: cave-enter <agent id> [command...]}"
     shift
     pid=0
+    root=""
     for unit in "cave-session@$id" "cave-root-session@$id"; do
       pid=$(${pkgs.systemd}/bin/systemctl show -p MainPID --value "$unit.service" 2>/dev/null || echo 0)
-      [ "''${pid:-0}" != 0 ] && break
+      if [ "''${pid:-0}" != 0 ]; then
+        case "$unit" in cave-root-session@*) root=1 ;; esac
+        break
+      fi
     done
     if [ "''${pid:-0}" = 0 ]; then
       echo "cave-enter: agent $id is not running." >&2
       echo "  Its worktrees, if it has any, are under ${worktreeRoot}/$id/projects" >&2
       exit 1
     fi
+
+    # As the agent, not as root in the agent's namespace.
+    #
+    # The namespace alone answers "where are its files"; it does not answer
+    # "what can it do with them", and root in there can read and write what
+    # the agent cannot. So the question this command exists for -- what is
+    # agent 2 seeing? -- came back answered by something that is not agent 2,
+    # and a permission problem would look like no problem at all. The guest's
+    # own CLAUDE.md warns about exactly this shape for tests run as root.
+    #
+    # The root agent stays root, because that is what it is.
+    as=""
+    if [ -z "$root" ]; then
+      uid=$(${pkgs.coreutils}/bin/id -u "agent$id" 2>/dev/null || echo "")
+      gid=$(${pkgs.coreutils}/bin/id -g "agent$id" 2>/dev/null || echo "")
+      if [ -z "$uid" ] || [ -z "$gid" ]; then
+        echo "cave-enter: agent $id is running but has no agent$id user." >&2
+        echo "  Refusing to enter as root, which would answer a different question." >&2
+        exit 1
+      fi
+      as="--setuid=$uid --setgid=$gid"
+    fi
+
     # --wd=/projects, because standing anywhere else in an agent's namespace
     # is standing in the guest's filesystem with extra steps.
     if [ "$#" -eq 0 ]; then
-      exec ${pkgs.util-linux}/bin/nsenter -t "$pid" -m --wd=/projects \
+      exec ${pkgs.util-linux}/bin/nsenter -t "$pid" -m --wd=/projects $as \
         ${pkgs.bash}/bin/bash -l
     fi
-    exec ${pkgs.util-linux}/bin/nsenter -t "$pid" -m --wd=/projects "$@"
+    exec ${pkgs.util-linux}/bin/nsenter -t "$pid" -m --wd=/projects $as "$@"
   '';
 
   # The guest's git, which pushes what it commits (guest/cave-git.sh).

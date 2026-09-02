@@ -334,9 +334,15 @@ that remains is uncommitted work, not the logs.
 - `--dev` and `--gpu`, to bind host device nodes in. Both of these are
   shaped by the host boundary being a VM with no NIC, so neither ports as
   written.
-- `cav shell` semantics: on `main` it enters a running agent's sandbox at its
-  worktree; `vmcav shell` is a root shell in the guest, which is a different
-  thing wearing the same name
+- ~~`cav shell` semantics~~ **done**: `vmcav shell <id>` enters that agent's
+  mount namespace at `/projects`, and `vmcav shell` with no id is still a
+  root shell in the guest. It now enters as the agent rather than as root in
+  the agent's namespace. The namespace alone answers where an agent's files
+  are and not what it can do with them, so the question the command exists
+  for came back answered by something that was not the agent, and a
+  permission problem looked like no problem -- the same shape the guest's
+  CLAUDE.md warns about for tests run as root. The root agent stays root,
+  because that is what it is.
 - the statusline, the `-v` echo of git commands, and the rest of `main`'s
   output conventions
 
