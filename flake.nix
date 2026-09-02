@@ -106,7 +106,24 @@
               # parse it. A per-suite table would be a second list to keep in
               # step with the first, and the list below is derived precisely
               # so there is no such list to get wrong.
-              nativeBuildInputs = with pkgs; [ bash git python3 socat gnupg zsh ];
+              #
+              # cave-vm is among them, and that is a decision rather than a
+              # convenience. The shell is becoming a caller of it, so the seam
+              # between them is where a port goes wrong -- the shell gathering
+              # the wrong inputs, or reading the answer back wrongly -- and a
+              # suite that stubs the binary cannot see that seam at all.
+              #
+              # It was tried once and backed out, because adding it dropped one
+              # suite from 52 assertions to 30 and that looked like the suites
+              # being fragile. It was not: `correct_guest_clock` ended in a
+              # pipeline whose grep matched nothing, which under `set -euo
+              # pipefail` ended the script, and the function returns early when
+              # cave-vm is absent. So the suites without it could not see a bug
+              # that killed every command on a real host, and the suite with it
+              # reported that bug honestly and was disbelieved.
+              nativeBuildInputs = with pkgs; [
+                bash git python3 socat gnupg zsh (caveVm pkgs)
+              ];
             }
             ''
               mkdir -p repo && cp -r ${./scripts} repo/scripts

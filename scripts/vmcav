@@ -1028,8 +1028,13 @@ allocate_agent_id() {
     log "    vmcav deploy && vmcav stop && vmcav start"
     return 1
   }
-  local used
-  used=$( { guest_rpc agents 2>/dev/null | awk '{print $1}'
+  # The three sources are gathered here, because each is reached differently:
+  # a session the guest is running, a worktree or home on its disk, and a
+  # branch in the shared repo. What they add up to -- the lowest number
+  # nothing is holding, skipping the reserved one -- is cave-vm's, where it is
+  # a table rather than a grep loop over a sorted merge.
+  local n
+  n=$( { guest_rpc agents 2>/dev/null | awk '{print $1}'
             printf '%s\n' "$occupied"
             # A prefix, not a glob: for-each-ref's * does not cross a slash,
             # so refs/heads/agent-* matches no branch an agent has ever
@@ -1037,18 +1042,12 @@ allocate_agent_id() {
             git -C "$SHARED" for-each-ref --format='%(refname:short)' \
               refs/heads/ 2>/dev/null \
               | sed -n 's|^agent-\([0-9][0-9]*\)/.*|\1|p'
-          } | sort -un )
-  local n=1
-  while printf '%s\n' "$used" | grep -qx "$n"; do
-    n=$((n + 1))
-  done
-  # The reserved id is not in the sequence, so it can never be handed out by
-  # counting: a root agent that has never run leaves 0 free, and this would
-  # otherwise give it to the first ordinary agent.
-  [ "$n" = "$ROOT_AGENT_ID" ] && n=$((n + 1))
+          } | cave-vm free-id --root "$ROOT_AGENT_ID" --max "$MAX_AGENTS" ) || n=""
   # An ordinary agent runs as agent<n>, and those users are declared in the
-  # guest's config rather than made on demand, so the pool has an end.
-  if [ "$n" -gt "$MAX_AGENTS" ]; then
+  # guest's config rather than made on demand, so the pool has an end. Empty
+  # means cave-vm found nothing free; the remedy is said here because it is
+  # about this guest's configuration rather than about the rule.
+  if [ -z "$n" ]; then
     log "no free agent id: this guest holds $MAX_AGENTS agents at once."
     # Stopping one no longer frees its id, and saying so would send you to a
     # command that changes nothing: an id is held by the home and worktree on
