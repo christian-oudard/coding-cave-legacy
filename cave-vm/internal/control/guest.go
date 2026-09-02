@@ -29,16 +29,17 @@ type System struct {
 	// List reports the running sessions, injected so the daemon can pass
 	// agentd.List without this package importing it.
 	List func(dir string) ([]string, error)
-	// Held reports every agent id with state still on disk, running or not.
-	// A session ends and a worktree and a home do not, so this is the half of
+	// Held reports every agent with state still on disk, running or not. A
+	// session ends and a worktree and a home do not, so this is the half of
 	// the roster the socket directory cannot see -- and the half that decides
 	// whether an id can be given to somebody else.
 	//
-	// Injected like the two above: it means reading the worktree root and the
-	// homes, which is the daemon's knowledge of the guest's layout rather than
-	// this package's. Optional, because a Guest that only answers about
-	// running sessions is still a working one.
-	Held func() []string
+	// It returns whole agents rather than ids because what a stopped agent was
+	// created for is written beside its worktree and not in /run, and reading
+	// that is the daemon's knowledge of the guest's layout rather than this
+	// package's -- the same reason List and Unit are injected. Optional:
+	// a Guest that only answers about running sessions is still a working one.
+	Held func() []Agent
 }
 
 func (s System) Health() (Health, error) {
@@ -101,18 +102,14 @@ func (s System) stopped(running []Agent) []Agent {
 		live[a.ID] = true
 	}
 	var out []Agent
-	for _, id := range s.Held() {
-		if live[id] {
+	for _, a := range s.Held() {
+		// A running agent holds state too. It is already on the roster as
+		// itself, and must not appear again as its own corpse.
+		if live[a.ID] {
 			continue
 		}
-		env := s.sessionEnv(id)
-		out = append(out, Agent{
-			ID:      id,
-			State:   "stopped",
-			Project: env["CAVE_PROJECT"],
-			Base:    env["CAVE_BASE"],
-			Root:    env["CAVE_AGENT_ROOT"] == "1",
-		})
+		a.State = "stopped"
+		out = append(out, a)
 	}
 	return out
 }

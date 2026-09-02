@@ -272,16 +272,52 @@ func agentRecord(worktrees, id string) string {
 // according to the record it left behind. A missing record means no opinion:
 // a new agent is whatever it is being asked to be.
 func agentWasRoot(worktrees, id string) bool {
-	b, err := os.ReadFile(agentRecord(worktrees, id))
+	return readEnv(agentRecord(worktrees, id))["CAVE_AGENT_ROOT"] == "1"
+}
+
+// readEnv parses one of the KEY=VALUE files an agent is described by. Both
+// copies have the same shape because they are the same bytes: `start` writes
+// the durable one beside the worktree from what it wrote to /run.
+//
+// An unreadable file is no keys rather than an error. Every caller is asking
+// what an agent was, and "nothing recorded" is a real answer to that -- the
+// agents this guest already held when the record was introduced have none.
+func readEnv(path string) map[string]string {
+	out := map[string]string{}
+	b, err := os.ReadFile(path)
 	if err != nil {
-		return false
+		return out
 	}
 	for _, line := range strings.Split(string(b), "\n") {
-		if strings.TrimSpace(line) == "CAVE_AGENT_ROOT=1" {
-			return true
+		if k, v, ok := strings.Cut(strings.TrimSpace(line), "="); ok {
+			out[k] = v
 		}
 	}
-	return false
+	return out
+}
+
+// heldAgents is heldIDs with what each agent was created for attached.
+//
+// The durable record first, because it is the one that survives what holds
+// the id: /run is tmpfs, so after a stop the agent's worktree and home are
+// still here while the file describing them is not. Falling back to /run
+// covers the agents that predate the durable copy, which is why a guest that
+// has been running since before it existed still says something useful.
+func heldAgents(dir, worktrees string) []control.Agent {
+	out := make([]control.Agent, 0)
+	for _, id := range heldIDs(dir, worktrees) {
+		env := readEnv(agentRecord(worktrees, id))
+		if len(env) == 0 {
+			env = readEnv(filepath.Join(dir, id+".env"))
+		}
+		out = append(out, control.Agent{
+			ID:      id,
+			Project: env["CAVE_PROJECT"],
+			Base:    env["CAVE_BASE"],
+			Root:    env["CAVE_AGENT_ROOT"] == "1",
+		})
+	}
+	return out
 }
 
 // remove deletes what an agent leaves behind in the guest: its worktrees and
@@ -565,7 +601,7 @@ func serve(args []string) {
 		Sessions: *dir,
 		Unit:     func(id string) string { return unitFor(*dir, id) },
 		List:     agentd.List,
-		Held:     func() []string { return heldIDs(*dir, *worktrees) },
+		Held:     func() []control.Agent { return heldAgents(*dir, *worktrees) },
 	}
 	// The transcript half, wired here rather than inside the control package,
 	// which must not import sessions: the host's implementation of that

@@ -107,16 +107,28 @@ func TestSystemAgentsSayWhatAnAgentWasCreatedFor(t *testing.T) {
 // agent id" with nothing on screen to account for it.
 func TestSystemAgentsIncludeStoppedOnesThatStillHoldAnID(t *testing.T) {
 	dir := t.TempDir()
+	// Deliberately contradicts what Held says about agent 2. A stopped agent
+	// is described by the record that outlives it, and this one is on a tmpfs
+	// that a stop takes; if it were still being read, this is the value that
+	// would come back.
 	if err := os.WriteFile(filepath.Join(dir, "2.env"),
-		[]byte("CAVE_PROJECT=widgets\nCAVE_BASE=main\n"), 0o600); err != nil {
+		[]byte("CAVE_PROJECT=stale\nCAVE_BASE=stale\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	s := System{
 		Sessions: dir,
 		List:     func(string) ([]string, error) { return []string{"0 running 80 24"}, nil },
 		// Agent 0 is running and also holds state; it must not be listed
-		// twice, once as itself and once as its own corpse.
-		Held: func() []string { return []string{"0", "2", "5"} },
+		// twice, once as itself and once as its own corpse. The held agents
+		// carry what they were created for, because the file that says so
+		// lives beside the worktree rather than in the tmpfs this reads.
+		Held: func() []Agent {
+			return []Agent{
+				{ID: "0"},
+				{ID: "2", Project: "widgets", Base: "main"},
+				{ID: "5"},
+			}
+		},
 	}
 	got, err := s.Agents()
 	if err != nil {
@@ -128,8 +140,6 @@ func TestSystemAgentsIncludeStoppedOnesThatStillHoldAnID(t *testing.T) {
 	if got[0].ID != "0" || got[0].State != "running" {
 		t.Fatalf("running agent: %+v", got[0])
 	}
-	// The env file outlives the session on this guest only until the tmpfs
-	// goes, so a stopped agent says what it can and stays listed either way.
 	if got[1].ID != "2" || got[1].State != "stopped" || got[1].Project != "widgets" {
 		t.Fatalf("stopped agent with a record: %+v", got[1])
 	}

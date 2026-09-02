@@ -519,6 +519,15 @@ deleted with the worktree by `agent remove`. The first failure stands: nothing
 restarts the agents after a stop, and that is the part which is properly the
 host's call.
 
+The record is now also what the host is *told*. A stopped agent stays on the
+roster the control plane serves, described by the durable copy rather than the
+one in `/run`, so `vmcav status` names it and says what it was created for
+after a restart that took the tmpfs. That is worth having on its own -- an
+agent holding an id with nothing on screen about it was how "no free agent id"
+became unexplainable -- and it is also the input either shape of the fix
+needs. The host cannot replay agents it cannot see, and it can see them now,
+with their project and base branch attached.
+
 What is undecided is which side owns the record. Persisting it in the guest
 (`/var/lib/coding-cave/agents/<id>/agent.env`) is the small change and keeps
 the guest able to restore itself, but it means the guest deciding what agents

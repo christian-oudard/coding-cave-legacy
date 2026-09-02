@@ -131,6 +131,65 @@ func TestOccupiedCountsWorktreesAndHomes(t *testing.T) {
 	}
 }
 
+// What a stopped agent was created for comes from the record beside its
+// worktree, not from /run. /run is a tmpfs, so a stop takes the file while
+// leaving everything it describes -- which is the whole reason the durable
+// copy exists, and the reason a restarted guest can still say what agent 2
+// was working on.
+func TestHeldAgentsPreferTheDurableRecord(t *testing.T) {
+	root := t.TempDir()
+	homesUnder(t, root)
+	trees, sessions := filepath.Join(root, "agents"), t.TempDir()
+
+	for _, id := range []string{"2", "3"} {
+		if err := os.MkdirAll(filepath.Join(trees, id), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Agent 2 has both, and they disagree: the durable one wins.
+	if err := os.WriteFile(agentRecord(trees, "2"),
+		[]byte("CAVE_PROJECT=widgets\nCAVE_BASE=main\nCAVE_AGENT_ROOT=1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sessions, "2.env"),
+		[]byte("CAVE_PROJECT=stale\nCAVE_BASE=stale\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Agent 3 predates the durable record and has only the tmpfs copy, which
+	// is still better than nothing while the guest has not restarted.
+	if err := os.WriteFile(filepath.Join(sessions, "3.env"),
+		[]byte("CAVE_PROJECT=older\nCAVE_BASE=vm-cave\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got := heldAgents(sessions, trees)
+	if len(got) != 2 {
+		t.Fatalf("got %+v", got)
+	}
+	if got[0].Project != "widgets" || got[0].Base != "main" || !got[0].Root {
+		t.Errorf("agent 2 should come from its durable record: %+v", got[0])
+	}
+	if got[1].Project != "older" || got[1].Base != "vm-cave" {
+		t.Errorf("agent 3 should fall back to /run: %+v", got[1])
+	}
+}
+
+// An agent with neither record is still held. It has a worktree, so it has an
+// id, and that is what the answer is for -- saying nothing about what it was
+// doing is not the same as leaving it out.
+func TestHeldAgentsWithNoRecordAtAll(t *testing.T) {
+	root := t.TempDir()
+	homesUnder(t, root)
+	trees := filepath.Join(root, "agents")
+	if err := os.MkdirAll(filepath.Join(trees, "4"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	got := heldAgents(t.TempDir(), trees)
+	if len(got) != 1 || got[0].ID != "4" || got[0].Project != "" {
+		t.Fatalf("got %+v", got)
+	}
+}
+
 // The reverse, and the reason the host can hand an id out again at all: an
 // agent whose state has been removed stops holding its id.
 func TestOccupiedIsEmptyWhenNothingIsHeld(t *testing.T) {
