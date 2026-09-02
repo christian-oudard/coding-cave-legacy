@@ -295,13 +295,40 @@ let
     # "what this agent was last doing". Nothing has to record a session id or
     # keep it in step with the registry.
     #
-    # Conditional because --continue with no transcript is an error, which
-    # would stop a brand-new agent from starting at all. The encoding is
-    # sessions.EncodeProject: slashes to dashes, nothing else.
+    # Conditional because --continue with nothing to continue is an error, and
+    # an agent that will not start is worse than one that starts blank. The
+    # encoding is sessions.EncodeProject: slashes to dashes, nothing else.
+    #
+    # And the condition is not sufficient, which is why the retry below
+    # exists. A transcript on disk is not the same question as a conversation
+    # claude will continue: it keeps its own idea of what is resumable, so a
+    # file can be there and `--continue` still answer "No conversation found
+    # to continue" and exit 1. The case that makes this more than theory is a
+    # restore -- records copied back from the host's archive into a fresh home
+    # are exactly transcripts on disk that this guest has never had a session
+    # for, so after a reformat every agent would have refused to start.
     transcripts="$HOME/.claude/projects/$(printf '%s' "/projects/$CAVE_PROJECT" | tr / -)"
+    resume=""
     if [ -z "''${CAVE_AGENT_FRESH:-}" ] \
        && [ -n "$(find "$transcripts" -name '*.jsonl' -print -quit 2>/dev/null)" ]; then
-      set -- --continue "$@"
+      resume=1
+    fi
+
+    if [ -n "$resume" ]; then
+      began=$(${pkgs.coreutils}/bin/date +%s)
+      "$claude_bin" --continue "$@"
+      rc=$?
+      [ "$rc" -eq 0 ] && exit 0
+      # A refused resume fails immediately and before there is a session to
+      # lose; a session somebody actually worked in does not end in under ten
+      # seconds. So a quick non-zero exit is the resume being refused, and
+      # anything slower is the agent's own exit and stays the agent's own exit
+      # -- relaunching that would restart a session the human just left.
+      if [ "$(( $(${pkgs.coreutils}/bin/date +%s) - began ))" -lt 10 ]; then
+        echo "cave-agent: could not continue the last conversation; starting a new one" >&2
+        exec "$claude_bin" "$@"
+      fi
+      exit "$rc"
     fi
 
     exec "$claude_bin" "$@"
