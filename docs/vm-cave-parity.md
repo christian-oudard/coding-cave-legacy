@@ -65,8 +65,16 @@ stamped id, so `pre-receive` cannot tell co-resident agents apart. It gates by
 namespace rather than by agent, which is why that is survivable;
 `vm-cave-todo.md` holds the demux design and why a port per agent cannot work.
 
-- the git daemon injects `CODING_CAVE_AGENT_ID=1` for the whole guest, so the
-  pre-receive guard cannot tell co-resident agents apart
+- the git daemon injects one `CODING_CAVE_AGENT_ID` for the whole guest, so
+  the pre-receive guard cannot tell co-resident agents apart. It no longer
+  pretends to: requiring the branch to match the stamped id rejected every
+  agent but one and stranded their work in the VM, since committing is what
+  publishes. The host now checks what it can know -- a well-formed agent
+  namespace, never a base branch -- and the guest's cave-git refuses to push
+  outside the running agent's own namespace, which stops a mistake rather than
+  an attacker. Making it hold against intent needs cave-guestd to stamp each
+  connection from the peer's uid; agents are separate uids now, so the kernel
+  already knows the answer.
 - one ssh identity and one `/projects/coding-cave` checkout, so two agents would
   share a working tree
 - `vmcav agent` attaches to "the" agent with no way to name one, though

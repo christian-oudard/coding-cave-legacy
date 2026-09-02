@@ -15,6 +15,11 @@ work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t
 export GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
+# Stated, not inherited. cave-git pushes only the running agent's own
+# namespace, and these fixtures work on agent-1/*, so a test run from inside a
+# real agent's session used to pick that agent's id out of the environment and
+# fail for reasons that had nothing to do with what it was testing.
+export CAVE_AGENT_ID=1
 fail=0
 
 # The git underneath the wrapper has to be a plain one. In the guest that is
@@ -95,6 +100,15 @@ echo two > "$d/f.txt"
 "$cavegit" -C "$d" commit -qam second
 check "a worktree-* scratch branch is not pushed" \
   "" "$(remote_tip "$bare" agent-1/worktree-side)"
+
+# Another agent's namespace, which the host can no longer refuse: its injected
+# id describes the guest rather than the pusher, so this is the check that
+# keeps an agent's branches its own. It stops a mistake, not an attacker --
+# anything that runs real git gets past it.
+fresh "agent-2/main"
+echo two > "$d/f.txt"
+"$cavegit" -C "$d" commit -qam second 2>/dev/null
+check "another agent's namespace is not pushed" "" "$(remote_tip "$bare" agent-2/main)"
 
 fresh "agent-1/main"
 "$cavegit" -C "$d" status --porcelain >/dev/null

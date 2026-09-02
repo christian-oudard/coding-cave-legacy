@@ -419,7 +419,21 @@ install_shared_hooks() {
   shared=$(shared_repo_of "${1:-$REPO}")
   h="$shared/hooks"
   mkdir -p "$h"
-  [ -e "$h/pre-receive" ] && return 0
+  # Refresh our own, leave anyone else's alone.
+  #
+  # This used to return the moment a pre-receive existed, which meant the
+  # branch guard was written once and then never again: every later fix to it
+  # reached new projects only, and the repo that needed it most -- the one
+  # that had been in use longest -- kept whatever shim it was created with.
+  #
+  # A foreign hook is not ours to replace. This shared repo is the same one
+  # the container caves on `main` use, and they install their own; overwriting
+  # it would silently move their pushes onto this branch's guard. Say so and
+  # stop instead.
+  if [ -e "$h/pre-receive" ] && ! grep -q cave-vm-git-pre-receive "$h/pre-receive"; then
+    log "$h/pre-receive was installed by something else; leaving it"
+    return 0
+  fi
   log "installing receive hooks in $shared"
   printf '#!/bin/sh\nexec cave-vm-git-pre-receive "$@"\n' > "$h/pre-receive"
   printf '#!/bin/sh\nexec cave-vm-git-post-receive "$@"\n' > "$h/post-receive"

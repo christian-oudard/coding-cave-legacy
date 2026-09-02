@@ -52,7 +52,14 @@ expect 0 "agent create own branch"           0 "$zero" "$B" refs/heads/agent-0/f
 expect 0 "agent delete own branch"           0 "$B" "$zero" refs/heads/agent-0/main
 expect 0 "agent rewrite own pushed history"  0 "$B" "$D" refs/heads/agent-0/main   # tip==old==B
 expect 1 "agent force past user commits"      0 "$C" "$D" refs/heads/agent-0/main   # tip=B != old=C
-expect 1 "agent push other agent namespace"   0 "$zero" "$B" refs/heads/agent-1/main
+# Allowed, and deliberately so. The injected id describes the guest, not the
+# pusher: every agent in a VM pushes through one socket and the id is fixed
+# before any agent exists, so requiring it to match the branch rejected every
+# agent but one and stranded their work. The host checks what it can know --
+# a well-formed agent namespace, and never a base branch -- and cave-git
+# checks the agent's own namespace on the side that knows which agent it is.
+expect 0 "agent push other agent namespace"   0 "$zero" "$B" refs/heads/agent-1/main
+expect 1 "agent push a namespace that is not one" 0 "$zero" "$B" refs/heads/agent-x/main
 expect 1 "agent push base branch"             0 "$A" "$C" refs/heads/main
 expect 1 "agent push tag"                     0 "$zero" "$A" refs/tags/v1
 expect 1 "agent push HEAD branch"             0 "$A" "$B" refs/heads/agent-0/HEAD

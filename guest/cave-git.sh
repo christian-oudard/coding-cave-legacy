@@ -74,6 +74,34 @@ case "/$branch" in
   */worktree-*) exit 0 ;;
 esac
 
+# This agent's own namespace, not merely some agent's.
+#
+# The host cannot check this. Every agent in the guest pushes through one
+# socket, so the id its daemon injects describes the guest rather than the
+# pusher, and it stopped trying: it now accepts any well-formed agent
+# namespace and refuses base branches, which is what it can actually know.
+# The answer is known here, so the check belongs here.
+#
+# Said plainly, because it is weaker than it looks: this stops an agent
+# publishing over another's branch by accident, not on purpose. An agent that
+# edited this file, or ran git itself, would get past it. Making it hold
+# against that needs cave-guestd to stamp each connection from the connecting
+# process's uid -- agents are separate uids now, so the kernel knows the
+# answer even when the process lies (docs/vm-cave-todo.md).
+#
+# Only when the agent id is known: a human running git from `vmcav shell` has
+# no CAVE_AGENT_ID, and is not an agent to be held to an agent's namespace.
+if [ -n "${CAVE_AGENT_ID:-}" ]; then
+  case "$branch" in
+    "agent-$CAVE_AGENT_ID/"*) ;;
+    *)
+      printf 'cave-git: not pushing %s: this is agent %s, so its branches are agent-%s/*\n' \
+        "$branch" "$CAVE_AGENT_ID" "$CAVE_AGENT_ID" >&2
+      exit 0
+      ;;
+  esac
+fi
+
 # By name, never "the only remote there is": host-cave is the host's copy,
 # behind the approval gate, and it is the one place a push from in here may
 # go. A repo with some other remote is a repo this has no business publishing.
