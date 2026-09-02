@@ -191,5 +191,26 @@ case "$roster_out" in
   *) echo "ok   a guest with nothing stopped stays quiet" ;;
 esac
 
+# --- what a start says to do next ---
+# A stop leaves the worktrees and homes behind, so a guest that has run before
+# comes back holding agents. "no agents yet" there is the sentence that makes
+# somebody create a second agent beside the one holding their conversation.
+ROSTER=$'2 stopped widgets main\n5 stopped - -\n'
+start_out=$(announce_agents 2>&1 || true)
+says "the held agents are named"      "agent 2: widgets @ main" "$start_out"
+says "including one with no record"   "agent 5"                 "$start_out"
+says "and how to get back into one"   "vmcav attach <id>"       "$start_out"
+case "$start_out" in
+  *"no agents yet"*) echo "FAIL a guest holding agents does not say it has none"; fail=1 ;;
+  *) echo "ok   a guest holding agents does not say it has none" ;;
+esac
+
+# A guest that really is empty, and an older one that cannot answer: both say
+# what this always said.
+ROSTER=""
+says "an empty guest still says to start one" "no agents yet" "$(announce_agents 2>&1 || true)"
+guest_rpc() { return 1; }
+says "and so does one that cannot answer"     "no agents yet" "$(announce_agents 2>&1 || true)"
+
 [ "$fail" = 0 ] && echo "test-vmcav-status: ok"
 exit "$fail"

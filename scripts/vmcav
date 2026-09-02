@@ -1961,7 +1961,38 @@ do_start() {
   # the host not consulted: a record that is not on disk when claude starts
   # does not exist as far as the agent is concerned.
   restore_sessions
-  log "no agents yet; start one:  vmcav agent [project] [branch]"
+  announce_agents
+}
+
+# What to do next, which is not the same sentence every time.
+#
+# A stop leaves an agent's worktree and its home behind -- they are what hold
+# its id -- so a guest that has run before comes back holding agents. Saying
+# "no agents yet" there was wrong in the way that costs something: it is the
+# sentence that makes a human create a second agent beside the first, and the
+# first is the one with their conversation in it.
+#
+# Degrades rather than checks a version. A guest that does not report stopped
+# agents reports none, and none is what this said unconditionally before.
+announce_agents() {
+  local held
+  held=$(guest_rpc agents 2>/dev/null | awk '$2 == "stopped"' || true)
+  if [ -z "$held" ]; then
+    log "no agents yet; start one:  vmcav agent [project] [branch]"
+    return 0
+  fi
+  log "this guest still holds:"
+  printf '%s\n' "$held" | while read -r id state project base; do
+    [ -n "$id" ] || continue
+    # A dash is how the guest prints a field it has nothing for.
+    if [ -n "$project" ] && [ "$project" != "-" ]; then
+      log "  agent $id: $project @ $base"
+    else
+      log "  agent $id"
+    fi
+  done
+  log "bring one back:  vmcav attach <id>"
+  log "or start another:  vmcav agent [project] [branch]"
 }
 
 do_stop() {
