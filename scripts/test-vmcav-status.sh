@@ -209,8 +209,18 @@ esac
 # what this always said.
 ROSTER=""
 says "an empty guest still says to start one" "no agents yet" "$(announce_agents 2>&1 || true)"
+
+# A guest that cannot answer has not said it is empty. This used to report
+# "no agents yet" to a guest full of them, which is how somebody starts a
+# second agent beside the first -- and it was asserted here, so the test
+# agreed with the bug.
 guest_rpc() { return 1; }
-says "and so does one that cannot answer"     "no agents yet" "$(announce_agents 2>&1 || true)"
+out=$(announce_agents 2>&1 || true)
+says "one that cannot answer says so instead" "not answering" "$out"
+case "$out" in
+  *"no agents yet"*) echo "FAIL an unreachable guest was called empty"; fail=1 ;;
+  *) echo "ok   and does not call it empty" ;;
+esac
 
 # --- deploy when the guest already runs the system ---
 # The ordinary state after `cave-rebuild` in the guest: same source, same
@@ -272,6 +282,18 @@ if [ -S "$newsock" ]; then
     || { echo "FAIL diagnosed a healthy socket: $out"; fail=1; }
 fi
 
+
+# --- a guest that cannot be asked ---
+# "agents: none running" is a statement about the guest. When the guest is not
+# answering, nothing has been learned about it, and saying "none" invites you
+# to start an agent beside the one already in there.
+guest_rpc() { return 1; }
+roster_out=$(do_status 2>&1 || true)
+says "an unreachable guest is not called empty" "agents: unknown" "$roster_out"
+case "$roster_out" in
+  *"none running"*) echo "FAIL said none running to a guest it could not ask"; fail=1 ;;
+  *) echo "ok   and none running is not claimed" ;;
+esac
 
 # --- status must not fail silently ---
 # This runs under `set -e`, and every question status asks touches something

@@ -874,8 +874,16 @@ status_report() {
   # The guest is the register of who is running, so ask it rather than
   # counting sockets or processes: a socket exists exactly as long as the
   # session process holds it, so it knows an agent from its corpse.
-  local roster sessions n held
-  roster=$(guest_rpc agents 2>/dev/null || true)
+  local roster sessions n held asked=1
+  # Whether the guest answered at all, kept apart from what it said.
+  #
+  # `|| true` collapsed those two: a guest that could not be reached returned
+  # the empty string, and the empty string reads as "no agents". So a cave
+  # with a live agent in it reported "agents: none running (vmcav agent starts
+  # one)" -- a confident wrong sentence, and an invitation to start a second
+  # agent beside the one already there. Seen on a real host, where the socket
+  # was missing and the running agent was the one reading the output.
+  roster=$(guest_rpc agents 2>/dev/null) || asked=""
   # By field rather than by substring. The line is "<id> <state> <project>
   # <base>" and callers are meant to read it by position; ' running ' also
   # needs a space on both sides, so an agent printed with nothing after its
@@ -886,7 +894,11 @@ status_report() {
   # hold their id, so leaving them out described a guest as emptier than it is
   # -- and made "no free agent id" arrive with nothing on screen to explain it.
   held=$(printf '%s\n' "$roster" | awk '$2 == "stopped"' || true)
-  if [ "${n:-0}" = 0 ]; then
+  if [ -z "$asked" ]; then
+    # Not "none": nobody asked anything. An agent may well be running in
+    # there, and one of them may be reading this.
+    echo "agents: unknown (the guest is not answering)"
+  elif [ "${n:-0}" = 0 ]; then
     echo "agents: none running (vmcav agent starts one)"
   else
     echo "agents: $n"
@@ -2577,8 +2589,15 @@ do_start() {
 # Degrades rather than checks a version. A guest that does not report stopped
 # agents reports none, and none is what this said unconditionally before.
 announce_agents() {
-  local held
-  held=$(guest_rpc agents 2>/dev/null | awk '$2 == "stopped"' || true)
+  local roster held
+  # Same distinction as `status`: a guest that cannot answer has not told us
+  # it is empty. This said "no agents yet" to a guest full of them, which is
+  # how somebody ends up starting a second agent beside the first.
+  roster=$(guest_rpc agents 2>/dev/null) || {
+    log "cannot tell what this guest holds; it is not answering"
+    return 0
+  }
+  held=$(printf '%s\n' "$roster" | awk '$2 == "stopped"' || true)
   if [ -z "$held" ]; then
     log "no agents yet; start one:  vmcav agent [project] [branch]"
     return 0
