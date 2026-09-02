@@ -371,6 +371,18 @@ It is also a plain bug with no attacker at all. `EncodeProject` builds the
 directory name from the working directory by replacing `/` with `-`, so any
 project whose path contains a space silently loses its history down this path.
 
+**Fixed.** The disk reader walks by inode: `ls -p` already returns one per
+entry and the parser was discarding it, so a name that came out of the image
+never goes back into a debugfs command. `Read` too, which rebuilt a dump path
+out of the same name and broke in the same place. And a usage banner in
+debugfs's output is now an error rather than an empty listing, so "I could not
+read that" stops arriving as "there was nothing there" -- the difference
+between a rescue that failed and one that found nothing to do.
+
+Covered by a test that builds a small ext4 image holding a project directory
+with a space in its name, which is how this was found and the only way to hold
+it fixed.
+
 Ruled out by probing, so the finding is not overstated: this does not reach an
 arbitrary host write. The extra token makes `dump` fail its own usage check
 rather than redirect its output, a filename cannot contain `/` so no absolute

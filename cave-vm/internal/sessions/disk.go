@@ -44,18 +44,47 @@ func (d Disk) projects() string { return path.Join(d.claude(), "projects") }
 // entry is one line of `debugfs ls -p`: /inode/mode/uid/gid/name/size/
 type entry struct {
 	name string
+	ino  string
 	dir  bool
 	size int64
 }
 
-func (d Disk) ls(dir string) ([]entry, error) {
-	cmd := exec.Command("debugfs", "-R", "ls -p "+dir, d.Image)
+// spec is how a directory entry is named back to debugfs: by inode, never by
+// name.
+//
+// debugfs takes a whole command as one string and re-tokenizes it itself, so a
+// name reaching that string is a name debugfs gets to interpret. A filename
+// cannot contain a slash, which is what the parser below relies on, but it can
+// contain a space -- and a space turns `ls -p <dir>` into an `ls` with two
+// arguments, which is a usage error, on which debugfs prints its usage and
+// exits 0. An empty listing and a refused one become the same thing.
+//
+// That is not only reachable on purpose. EncodeProject builds these names from
+// a working directory, so any project whose path contains a space loses its
+// history down this path -- silently, and on the one reader used when the
+// guest is too broken to answer, immediately before a reformat destroys the
+// disk it was reading.
+//
+// An inode has no spelling to get wrong.
+func (e entry) spec() string { return "<" + e.ino + ">" }
+
+func (d Disk) ls(spec string) ([]entry, error) {
+	cmd := exec.Command("debugfs", "-R", "ls -p "+spec, d.Image)
 	var errb bytes.Buffer
 	cmd.Stderr = &errb
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("sessions: reading %s in %s: %w: %s",
-			dir, d.Image, err, strings.TrimSpace(errb.String()))
+			spec, d.Image, err, strings.TrimSpace(errb.String()))
+	}
+	// debugfs answers a command it could not parse by printing its usage and
+	// exiting 0, so success is not enough to know it did anything. Without
+	// this, "I could not read that" arrives as "there was nothing there",
+	// which is the difference between a rescue that failed and a rescue that
+	// found nothing to do.
+	if bytes.Contains(out, []byte("Usage:")) || bytes.Contains(errb.Bytes(), []byte("Usage:")) {
+		return nil, fmt.Errorf("sessions: debugfs could not read %s in %s: %s",
+			spec, d.Image, strings.TrimSpace(errb.String()))
 	}
 	var entries []entry
 	sc := bufio.NewScanner(bytes.NewReader(out))
@@ -74,6 +103,7 @@ func (d Disk) ls(dir string) ([]entry, error) {
 		size, _ := strconv.ParseInt(f[6], 10, 64)
 		entries = append(entries, entry{
 			name: name,
+			ino:  strings.TrimSpace(f[1]),
 			dir:  strings.HasPrefix(f[2], "040"),
 			size: size,
 		})
@@ -93,7 +123,9 @@ func (d Disk) List() ([]Record, error) {
 		if !pd.dir {
 			continue
 		}
-		files, err := d.ls(path.Join(d.projects(), pd.name))
+		// By inode: pd.name came out of the image and must not go back into a
+		// debugfs command.
+		files, err := d.ls(pd.spec())
 		if err != nil {
 			continue
 		}
@@ -108,14 +140,29 @@ func (d Disk) List() ([]Record, error) {
 	return out, nil
 }
 
+// find returns the debugfs spec for a record: its inode, not its path.
+//
+// The path would be rebuilt out of a project name that came from the image,
+// which is the thing that must not be handed back to debugfs -- the same
+// reason ls walks by inode. Rebuilding it also made the dump depend on a name
+// still meaning what it meant during the listing.
 func (d Disk) find(id string) (string, error) {
-	records, err := d.List()
+	dirs, err := d.ls(d.projects())
 	if err != nil {
 		return "", err
 	}
-	for _, r := range records {
-		if r.ID == id {
-			return path.Join(d.projects(), r.Project, id+".jsonl"), nil
+	for _, pd := range dirs {
+		if !pd.dir {
+			continue
+		}
+		files, err := d.ls(pd.spec())
+		if err != nil {
+			continue
+		}
+		for _, f := range files {
+			if rid, ok := recordID(f.name); ok && !f.dir && rid == id {
+				return f.spec(), nil
+			}
 		}
 	}
 	return "", fmt.Errorf("sessions: no transcript for %s in %s", id, d.Image)
