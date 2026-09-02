@@ -61,7 +61,7 @@ func parseList(r io.Reader) ([]Record, error) {
 	sc := bufio.NewScanner(r)
 	for sc.Scan() {
 		fields := strings.Fields(sc.Text())
-		if len(fields) < 2 || len(fields) > 3 || !ValidID(fields[0]) {
+		if len(fields) < 2 || len(fields) > 4 || !ValidID(fields[0]) {
 			continue
 		}
 		size, err := strconv.ParseInt(fields[1], 10, 64)
@@ -69,8 +69,11 @@ func parseList(r io.Reader) ([]Record, error) {
 			continue
 		}
 		rec := Record{ID: fields[0], Size: size}
-		if len(fields) == 3 {
+		if len(fields) >= 3 {
 			rec.Project = fields[2]
+		}
+		if len(fields) == 4 {
+			rec.Agent = fields[3]
 		}
 		out = append(out, rec)
 	}

@@ -26,7 +26,7 @@ func tempDir(t *testing.T) string {
 func guest(t *testing.T, cwd string, files map[string]string) Local {
 	t.Helper()
 	home := tempDir(t)
-	l := Local{ClaudeDir: filepath.Join(home, ".claude"), Cwd: cwd}
+	l := Local{ClaudeDir: filepath.Join(home, ".claude"), Cwd: cwd, Agent: "7"}
 	dir := filepath.Join(l.projects(), EncodeProject(cwd))
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
@@ -126,7 +126,7 @@ func TestSyncCopiesOutWhatTheHostLacks(t *testing.T) {
 	l := guest(t, "/root/coding-cave", map[string]string{sidA + ".jsonl": "hello\n"})
 	a := archive(t, nil)
 
-	changes, err := Sync(l, a, "1")
+	changes, err := Sync(l, a)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +142,7 @@ func TestSyncCopiesARecordThatGrew(t *testing.T) {
 	l := guest(t, "/root/coding-cave", map[string]string{sidA + ".jsonl": "one\ntwo\n"})
 	a := archive(t, map[string]string{sidA: "one\n"})
 
-	changes, err := Sync(l, a, "1")
+	changes, err := Sync(l, a)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +158,7 @@ func TestSyncSkipsARecordOfTheSameLength(t *testing.T) {
 	l := guest(t, "/root/coding-cave", map[string]string{sidA + ".jsonl": "one\n"})
 	a := archive(t, map[string]string{sidA: "one\n"})
 
-	changes, err := Sync(l, a, "1")
+	changes, err := Sync(l, a)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +172,7 @@ func TestAShorterRecordIsKeptAsideNotApplied(t *testing.T) {
 	l := guest(t, "/root/coding-cave", map[string]string{sidA + ".jsonl": "one\n"})
 	a := archive(t, map[string]string{sidA: "one\ntwo\nthree\n"})
 
-	changes, err := Sync(l, a, "1")
+	changes, err := Sync(l, a)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +193,7 @@ func TestARewrittenRecordIsKeptAsideNotApplied(t *testing.T) {
 	l := guest(t, "/root/coding-cave", map[string]string{sidA + ".jsonl": "different!\n"})
 	a := archive(t, map[string]string{sidA: "one\ntwo\n"})
 
-	changes, err := Sync(l, a, "1")
+	changes, err := Sync(l, a)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +210,7 @@ func TestARewrittenRecordIsKeptAsideNotApplied(t *testing.T) {
 func TestDivergedCopiesAreNotRecords(t *testing.T) {
 	l := guest(t, "/root/coding-cave", map[string]string{sidA + ".jsonl": "x\n"})
 	a := archive(t, map[string]string{sidA: "one\ntwo\n"})
-	if _, err := Sync(l, a, "1"); err != nil {
+	if _, err := Sync(l, a); err != nil {
 		t.Fatal(err)
 	}
 	got, err := a.List()
@@ -228,7 +228,7 @@ func TestSyncIgnoresIdsThatAreNotSessionIds(t *testing.T) {
 		sidA + ".jsonl":          "yes\n",
 	})
 	a := archive(t, nil)
-	if _, err := Sync(l, a, "1"); err != nil {
+	if _, err := Sync(l, a); err != nil {
 		t.Fatal(err)
 	}
 	entries, err := os.ReadDir(a.Dir)
@@ -268,7 +268,7 @@ func TestSyncContinuesPastAFailure(t *testing.T) {
 	}
 	a := archive(t, nil)
 
-	changes, err := Sync(l, a, "1")
+	changes, err := Sync(l, a)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -355,7 +355,7 @@ func TestParseListDropsMalformedLines(t *testing.T) {
 func TestSyncRecordsWhoOwnsARecord(t *testing.T) {
 	l := guest(t, "/root/coding-cave", map[string]string{sidA + ".jsonl": "hi\n"})
 	a := archive(t, nil)
-	if _, err := Sync(l, a, "7"); err != nil {
+	if _, err := Sync(l, a); err != nil {
 		t.Fatal(err)
 	}
 	m := a.ReadMeta(sidA)
@@ -371,12 +371,46 @@ func TestSyncRecordsWhoOwnsARecord(t *testing.T) {
 	}
 }
 
+// Each agent's records are its own, and a sync says so without being told.
+//
+// This is the failure it was written for: the host used to pass an agent into
+// Sync and label everything it copied with it, while the guest returned one
+// home's transcripts however many agents it held. So a sync copied the root
+// agent's sessions, filed them under whichever agent had been named, and never
+// copied anyone else's at all.
+func TestSyncAttributesEachHomeToItsOwnAgent(t *testing.T) {
+	one := guest(t, "/projects/p", map[string]string{sidA + ".jsonl": "from one\n"})
+	one.Agent = "1"
+	two := guest(t, "/projects/p", map[string]string{sidB + ".jsonl": "from two\n"})
+	two.Agent = "2"
+	a := archive(t, nil)
+
+	for _, g := range []Local{one, two} {
+		if _, err := Sync(g, a); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if got := a.ReadMeta(sidA).Agent; got != "1" {
+		t.Fatalf("agent 1's record is attributed to %q", got)
+	}
+	if got := a.ReadMeta(sidB).Agent; got != "2" {
+		t.Fatalf("agent 2's record is attributed to %q", got)
+	}
+	for agent, want := range map[string]string{"1": sidA, "2": sidB} {
+		owned, err := a.Owned(agent)
+		if err != nil || len(owned) != 1 || owned[0] != want {
+			t.Fatalf("agent %s owns %v (%v), want %s", agent, owned, err, want)
+		}
+	}
+}
+
 // The archive remembers when a session appeared, not just when it was last
 // touched, so a later sync does not rewrite its history.
 func TestSyncKeepsTheFirstSighting(t *testing.T) {
 	l := guest(t, "/root/coding-cave", map[string]string{sidA + ".jsonl": "one\n"})
 	a := archive(t, nil)
-	if _, err := Sync(l, a, "1"); err != nil {
+	if _, err := Sync(l, a); err != nil {
 		t.Fatal(err)
 	}
 	first := a.ReadMeta(sidA).First
@@ -385,7 +419,7 @@ func TestSyncKeepsTheFirstSighting(t *testing.T) {
 	if err := os.WriteFile(path, []byte("one\ntwo\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Sync(l, a, "1"); err != nil {
+	if _, err := Sync(l, a); err != nil {
 		t.Fatal(err)
 	}
 	if got := a.ReadMeta(sidA).First; !got.Equal(first) {
@@ -397,7 +431,7 @@ func TestSyncKeepsTheFirstSighting(t *testing.T) {
 func TestADivergedRecordDoesNotGetMetadata(t *testing.T) {
 	l := guest(t, "/root/coding-cave", map[string]string{sidA + ".jsonl": "x\n"})
 	a := archive(t, map[string]string{sidA: "one\ntwo\n"})
-	if _, err := Sync(l, a, "1"); err != nil {
+	if _, err := Sync(l, a); err != nil {
 		t.Fatal(err)
 	}
 	if m := a.ReadMeta(sidA); m.Agent != "" {
@@ -409,7 +443,7 @@ func TestADivergedRecordDoesNotGetMetadata(t *testing.T) {
 func TestMetadataFilesAreNotListedAsRecords(t *testing.T) {
 	l := guest(t, "/root/coding-cave", map[string]string{sidA + ".jsonl": "hi\n"})
 	a := archive(t, nil)
-	if _, err := Sync(l, a, "1"); err != nil {
+	if _, err := Sync(l, a); err != nil {
 		t.Fatal(err)
 	}
 	got, err := a.List()

@@ -29,7 +29,14 @@ type Change struct {
 // One failure does not stop the rest. A sync runs at moments that matter (an
 // agent exiting, a reformat about to destroy the disk), so getting eight
 // records out of ten beats getting none.
-func Sync(g Guest, a Archive, agent string) ([]Change, error) {
+// The agent is no longer a parameter. It used to be one, and the host passed
+// the same value for every record it copied, so a sync labelled whatever it
+// found with whichever agent it had been told about -- and since the guest
+// returned one home's transcripts however many agents it held, that label was
+// wrong and the other agents' records were never copied at all. Which agent a
+// record belongs to is a fact about where it lives, and only the guest can see
+// that, so the guest says it.
+func Sync(g Guest, a Archive) ([]Change, error) {
 	guestRecords, err := g.List()
 	if err != nil {
 		return nil, err
@@ -56,7 +63,7 @@ func Sync(g Guest, a Archive, agent string) ([]Change, error) {
 			// Metadata follows the bytes, so a record that failed to copy
 			// does not get an entry claiming it is here.
 			if err := a.WriteMeta(r.ID, Meta{
-				Agent:   agent,
+				Agent:   r.Agent,
 				Project: r.Project,
 				Last:    time.Now(),
 			}); err != nil {

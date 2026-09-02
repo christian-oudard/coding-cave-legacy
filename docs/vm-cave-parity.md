@@ -206,9 +206,15 @@ the data dir, `cave-vm sessions sync|restore|share|list`, checkpoints at stop,
 detach and reformat, recovery straight out of a stopped disk, and the shared
 read-only view that lets an agent read another's session. What is left:
 
-- no `--continue` and no `--resume <agent-id/session-id>` on the host side.
-  Resume is chosen inside the cave by claude's own picker, against whatever
-  `restore` put there, so the host cannot name a session to start
+- ~~no `--continue`~~ **partly done in the guest**: an agent restarted with
+  `vmcav agent` continues its own last conversation, because its worktree path
+  is stable and claude files transcripts by directory. What is still absent is
+  the host naming one: no `--resume <agent-id/session-id>`, so a particular
+  session is still chosen inside the cave by claude's own picker.
+- a restore lands in the root agent's home whichever agent it is meant for.
+  Reading is per agent now -- a record belongs to the home it was found in --
+  but a restore is addressed to the guest rather than to an agent in it, so
+  the request has no id to aim at.
 - nothing syncs for an agent that exits with nobody attached
 - nothing carries `~/.claude/` memory into or out of the guest, and nothing
   shares memory between agents on a project

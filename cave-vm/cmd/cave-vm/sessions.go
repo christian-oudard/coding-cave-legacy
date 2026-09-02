@@ -31,7 +31,10 @@ func sessionsCommand(args []string) {
 	// exactly when a reformat happens.
 	disk := fs.String("disk", "", "read a stopped guest image instead of asking the guest")
 	state := fs.String("state", "", "state directory, to reach the guest over the control plane")
-	agent := fs.String("agent", "1", "which agent these records belong to")
+	// Restore only. A sync no longer takes an agent: which agent a record
+	// belongs to is a fact about the home it was found in, so the guest says
+	// it per record instead of the host asserting one for the whole batch.
+	agent := fs.String("agent", "1", "whose records to restore")
 	fs.Parse(args)
 
 	a := sessions.Archive{Dir: *archive}
@@ -48,7 +51,7 @@ func sessionsCommand(args []string) {
 
 	switch fs.Arg(0) {
 	case "sync":
-		report(sessions.Sync(guest(), a, *agent))
+		report(sessions.Sync(guest(), a))
 	case "restore":
 		ids := fs.Args()[1:]
 		if len(ids) == 0 {

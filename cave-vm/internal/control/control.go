@@ -72,6 +72,10 @@ type SessionRecord struct {
 	ID      string `json:"id"`
 	Size    int64  `json:"size"`
 	Project string `json:"project"`
+	// Agent is whose transcript it is. Only the guest can say: agents have
+	// separate homes and the host cannot see them, so an answer it worked out
+	// for itself would be a guess about which it had asked for.
+	Agent string `json:"agent,omitempty"`
 }
 
 // Sessions is the transcript half of the control plane, and it is the reason

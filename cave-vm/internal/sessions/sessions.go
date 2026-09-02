@@ -21,6 +21,13 @@ type Record struct {
 	ID      string
 	Size    int64
 	Project string
+	// Agent is whose transcript this is. The guest is the only side that can
+	// say: agents have separate homes, so a record's owner is which home it
+	// was found in, and the host cannot see homes at all. Before this the host
+	// passed an agent *in* and labelled everything it copied with it, which
+	// was wrong twice over -- it read one home and called the contents
+	// whichever agent it had been asked about.
+	Agent string
 }
 
 // Dest is which of the guest's two session directories a record goes into.

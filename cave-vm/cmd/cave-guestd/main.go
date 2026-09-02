@@ -59,6 +59,62 @@ func unitFor(dir, id string) string {
 	return fmt.Sprintf(unitPattern, id)
 }
 
+// agentHomes finds every agent's ~/.claude, and whose it is.
+//
+// Derived from the guest's own layout rather than from a registry, because the
+// question outlives any record of it: an agent that has exited still owns the
+// transcripts in its home, and those are exactly the ones worth copying out.
+// The layout is the same one seed-agent-home@ writes -- /home/agent<N> for an
+// ordinary agent, /root for the root one -- so the directory name is the id.
+//
+// The root agent's id is read back from the session env files, which is where
+// it was recorded when it was created. With none of them saying so, the guest
+// has no running root agent and "0" is the reserved id it would hold.
+func agentHomes(sessionsDir, claudeName string) []sessions.Local {
+	var out []sessions.Local
+	add := func(agent, home string) {
+		dir := filepath.Join(home, claudeName)
+		if st, err := os.Stat(dir); err == nil && st.IsDir() {
+			out = append(out, sessions.Local{ClaudeDir: dir, Agent: agent})
+		}
+	}
+	add(rootAgentID(sessionsDir), "/root")
+	entries, err := os.ReadDir("/home")
+	if err != nil {
+		return out
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		id, ok := strings.CutPrefix(e.Name(), "agent")
+		if !ok || id == "" || strings.ContainsFunc(id, func(r rune) bool { return r < '0' || r > '9' }) {
+			continue
+		}
+		add(id, filepath.Join("/home", e.Name()))
+	}
+	return out
+}
+
+// rootAgentID is which id the guest's root agent holds, according to the
+// session env files it was started from.
+func rootAgentID(dir string) string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "0"
+	}
+	for _, e := range entries {
+		name, ok := strings.CutSuffix(e.Name(), ".env")
+		if !ok {
+			continue
+		}
+		if agentIsRoot(dir, name) {
+			return name
+		}
+	}
+	return "0"
+}
+
 // agentIsRoot reports whether the agent was created as the guest's root agent.
 // A missing or unreadable file reads as "not root", which is the safe way to
 // be wrong: an ordinary session that should have been root fails visibly at
@@ -232,7 +288,10 @@ func serve(args []string) {
 	// which must not import sessions: the host's implementation of that
 	// package's Guest interface is built on the control client, so the two
 	// would import each other. Same reason agentd.List is injected above.
-	store := transcripts_{sessions.Local{ClaudeDir: *claude, Cwd: *cwd, SharedDir: *shareDir}}
+	store := transcripts_{
+		homes: agentHomes(*dir, ".claude"),
+		write: sessions.Local{ClaudeDir: *claude, Cwd: *cwd, SharedDir: *shareDir},
+	}
 	srv := &http.Server{
 		Handler: control.Handler(g, store, token),
 		// A control call is a question about local state; anything slower than
@@ -242,31 +301,60 @@ func serve(args []string) {
 	die(srv.Serve(ln))
 }
 
-// transcripts_ adapts sessions.Local to the control plane's Sessions, which is
-// two type conversions and no logic: both sides already agree on what a record
-// is, and the duplication buys the two packages not importing each other.
-type transcripts_ struct{ local sessions.Local }
+// transcripts_ adapts sessions.Local to the control plane's Sessions, and is
+// where the guest's one-home-per-agent layout is turned into a single view of
+// every transcript in the guest.
+//
+// The type conversion is two lines and no logic -- both sides already agree on
+// what a record is, and the duplication buys the two packages not importing
+// each other. What is not incidental is the loop: an agent's transcripts live
+// in that agent's home, so listing one home lists one agent, and the host used
+// to see root's and nobody else's.
+type transcripts_ struct {
+	homes []sessions.Local
+	// write is where a restored record lands. Restore is still addressed to
+	// the guest rather than to an agent in it, so this is the root agent's
+	// home; making it per-agent needs the request to carry an id.
+	write sessions.Local
+}
 
 func (t transcripts_) List() ([]control.SessionRecord, error) {
-	recs, err := t.local.List()
-	if err != nil {
-		return nil, err
-	}
-	out := make([]control.SessionRecord, 0, len(recs))
-	for _, r := range recs {
-		out = append(out, control.SessionRecord{ID: r.ID, Size: r.Size, Project: r.Project})
+	var out []control.SessionRecord
+	for _, h := range t.homes {
+		recs, err := h.List()
+		if err != nil {
+			// One unreadable home does not hide the rest. A home with no
+			// transcripts is the ordinary state of an agent that has not run.
+			continue
+		}
+		for _, r := range recs {
+			out = append(out, control.SessionRecord{
+				ID: r.ID, Size: r.Size, Project: r.Project, Agent: r.Agent,
+			})
+		}
 	}
 	return out, nil
 }
 
-func (t transcripts_) Read(id string) (io.ReadCloser, error) { return t.local.Read(id) }
+// Read finds a record wherever it lives. Ids are uuids, so the first home that
+// has one is the one that owns it.
+func (t transcripts_) Read(id string) (io.ReadCloser, error) {
+	var err error
+	for _, h := range t.homes {
+		var rc io.ReadCloser
+		if rc, err = h.Read(id); err == nil {
+			return rc, nil
+		}
+	}
+	return nil, err
+}
 
 func (t transcripts_) Write(id string, r io.Reader, shared bool) error {
 	dest := sessions.Resumable
 	if shared {
 		dest = sessions.Shared
 	}
-	return t.local.Write(id, r, dest)
+	return t.write.Write(id, r, dest)
 }
 
 func die(err error) {
@@ -382,17 +470,22 @@ func transcripts(args []string) {
 	fs.Parse(args)
 
 	local := sessions.Local{ClaudeDir: *claude, Cwd: *cwd, SharedDir: *shareDir}
+	// Reading covers every agent, writing lands in one. This is the same shape
+	// as the control plane's store and for the same reason: a transcript
+	// belongs to whichever home holds it, so listing one home lists one agent,
+	// while a restore is addressed to the guest and has no agent to aim at.
+	all := transcripts_{homes: agentHomes(defaultDir, ".claude"), write: local}
 	switch fs.Arg(0) {
 	case "list":
-		records, err := local.List()
+		records, err := all.List()
 		if err != nil {
 			die(err)
 		}
 		for _, r := range records {
-			fmt.Printf("%s %d %s\n", r.ID, r.Size, r.Project)
+			fmt.Printf("%s %d %s %s\n", r.ID, r.Size, r.Project, r.Agent)
 		}
 	case "read":
-		rc, err := local.Read(fs.Arg(1))
+		rc, err := all.Read(fs.Arg(1))
 		if err != nil {
 			die(err)
 		}

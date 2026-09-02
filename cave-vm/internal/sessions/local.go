@@ -25,6 +25,11 @@ type Local struct {
 	// agent should be able to read another's session without being offered it
 	// in its own picker.
 	SharedDir string
+	// Agent is whose home this is, stamped onto every record it reports. A
+	// Local is one agent's transcripts, because a home is: the guest holds one
+	// of these per agent, and which agent a record belongs to is answered by
+	// which of them found it.
+	Agent string
 }
 
 func (l Local) projects() string { return filepath.Join(l.ClaudeDir, "projects") }
@@ -58,7 +63,9 @@ func (l Local) List() ([]Record, error) {
 			if err != nil {
 				continue
 			}
-			out = append(out, Record{ID: id, Size: info.Size(), Project: d.Name()})
+			out = append(out, Record{
+				ID: id, Size: info.Size(), Project: d.Name(), Agent: l.Agent,
+			})
 		}
 	}
 	return out, nil
