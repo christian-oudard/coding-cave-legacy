@@ -888,6 +888,19 @@ do_agent() {
     do_agent_stop "$@"
     return
   fi
+  if [ "${1:-}" = "remove" ]; then
+    shift
+    local rid="" rforce=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --force) rforce=1 ;;
+        *) rid="$1" ;;
+      esac
+      shift
+    done
+    do_agent_remove "$rid" "$rforce"
+    return
+  fi
   # --root names the agent that is root in the guest: the one that
   # redeploys the system every other agent runs in. It is not one of the
   # numbered agents, so it holds a reserved id rather than a low one, and
@@ -979,6 +992,67 @@ the_only_running_agent() {
        printf '%s\n' "$running" | sed 's/^/  agent /' >&2
        return 1 ;;
   esac
+}
+
+# Remove an agent: its worktrees and its home, and its branch once nothing is
+# waiting on it.
+#
+# Two checks the guest cannot make, which is why they are here. Whether the
+# agent is running it can answer, and does. Whether it has work nobody has
+# landed is a question about the shared repo, which lives on this side: an
+# agent branch ahead of its base is the only copy of that work outside the
+# guest, and the worktree about to be deleted is the other one.
+#
+# Transcripts are banked first. They live in the home this deletes, and the
+# archive is on this side, so the ordering is this side's to get right.
+do_agent_remove() {
+  local id="${1:-}" force="${2:-}"
+  [ -n "$id" ] || { log "remove needs an agent id (vmcav agent remove <id>)"; return 1; }
+  case "$id" in *[!0-9]*) log "'$id' is not an agent id"; return 1 ;; esac
+  is_running || { log "the vm is not running (vmcav start)"; return 1; }
+
+  # Unlanded work, named rather than counted: "3 commits" is a number, and
+  # what you need to decide is whether you recognise them.
+  local branch ahead
+  branch=$(git -C "$SHARED" for-each-ref --format='%(refname:short)' \
+    "refs/heads/agent-$id/*" 2>/dev/null | head -1 || true)
+  if [ -n "$branch" ]; then
+    local base="${branch#agent-$id/}"
+    # A missing base is not an empty branch. Counting against a ref that is
+    # not there fails, and reading that failure as zero would delete an agent
+    # branch on the grounds that nothing could be measured -- which is the
+    # case where every commit on it is unreachable from anywhere else.
+    if ! git -C "$SHARED" rev-parse --verify --quiet "refs/heads/$base" >/dev/null 2>&1; then
+      if [ -z "$force" ]; then
+        log "agent $id is on $branch, whose base '$base' is not in the shared repo"
+        log "  so there is no way to tell what on it has been landed"
+        log "  remove anyway (--force), or restore $base first"
+        return 1
+      fi
+    else
+    ahead=$(git -C "$SHARED" rev-list --count "$base..$branch" 2>/dev/null || echo 0)
+    if [ "$ahead" -gt 0 ] && [ -z "$force" ]; then
+      log "agent $id has $ahead commit$([ "$ahead" = 1 ] || echo s) on $branch that $base does not:"
+      git -C "$SHARED" --no-pager log --oneline --no-decorate "$base..$branch" 2>/dev/null \
+        | sed 's/^/  /' >&2
+      log "  land them (vmcav approve $id), or remove anyway (--force)"
+      return 1
+    fi
+    fi
+  fi
+
+  # Before the home goes, because that is where they are.
+  sync_sessions
+  GUEST_SSH_TTY=-T guest_ssh "cave-guestd remove -id $id" || {
+    log "could not remove agent $id in the guest"; return 1; }
+  # The branch last: it is the record that the agent existed, and deleting it
+  # is what frees the id, so it goes only once everything it named is gone.
+  if [ -n "$branch" ]; then
+    git -C "$SHARED" branch -D "$branch" >/dev/null 2>&1 \
+      && log "deleted $branch"
+  fi
+  git -C "$REPO" fetch --prune cave >/dev/null 2>&1 || true
+  log "agent $id removed"
 }
 
 do_agent_stop() {
@@ -1108,6 +1182,8 @@ usage: vmcav <command>
                   --root is the agent that is root in the guest, agent 0
                   an agent continues its last conversation; --fresh starts one
   agent stop [id] stop an agent and bank its transcript
+  agent remove id reclaim a stopped agent: its worktrees, home and branch
+                  (--force removes one with work nobody has landed)
   attach [id]     reattach to an agent already running (detach: ctrl-\)
   init [dir]      register a project so agents can be given it (default: cwd)
   projects        list the projects the guest can reach

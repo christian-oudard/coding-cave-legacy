@@ -34,6 +34,9 @@ import (
 
 const (
 	defaultDir = "/run/cave/sessions"
+	// Where agents' worktrees live, which only this side knows: an agent sees
+	// its own bound over /projects and never this path.
+	defaultWorktrees = "/var/lib/coding-cave/agents"
 	// The two templates a session runs under. They differ in one thing, which
 	// is the user: an ordinary agent's session runs as agent<id>, the root
 	// agent's runs as root because rebuilding the system every other agent
@@ -154,6 +157,8 @@ func main() {
 		start(args)
 	case "env":
 		envCmd(args)
+	case "remove":
+		remove(args)
 	default:
 		usage()
 	}
@@ -215,6 +220,74 @@ func start(args []string) {
 	}
 }
 
+// remove deletes what an agent leaves behind in the guest: its worktrees and
+// the contents of its home.
+//
+// Here rather than in the host script because it is the guest's layout that
+// says what an agent has -- a worktree root, a home per user, the same two
+// places seed-agent-home@ and clone-repo@ write to. A host that knew those
+// paths would be a second copy of them, and the copy that drifts is the one
+// that deletes the wrong directory.
+//
+// It refuses a running agent rather than stopping one. Stopping is a decision
+// with a person behind it: an agent has a terminal somebody may be attached
+// to, and taking its worktree out from under it is the one thing a reformat
+// exists to do deliberately.
+//
+// Transcripts are not its problem. They live in the home it deletes, and are
+// copied to the host's archive before this runs -- by the caller, which is the
+// side that has the archive. That ordering is the host's to get right and is
+// why this says nothing about it.
+func remove(args []string) {
+	fs := flag.NewFlagSet("remove", flag.ExitOnError)
+	dir := fs.String("dir", defaultDir, "directory of session sockets")
+	id := fs.String("id", "", "agent to remove (required)")
+	root := fs.String("worktrees", defaultWorktrees, "where agents' worktrees live")
+	fs.Parse(args)
+	if *id == "" {
+		die(fmt.Errorf("remove needs -id"))
+	}
+	if err := validRef(*id); err != nil {
+		die(fmt.Errorf("id: %w", err))
+	}
+	if _, err := os.Stat(agentd.SocketPath(*dir, *id)); err == nil {
+		die(fmt.Errorf("agent %s is running; stop it first", *id))
+	}
+
+	// The worktrees, which is the space worth reclaiming.
+	tree := filepath.Join(*root, *id)
+	if err := os.RemoveAll(tree); err != nil {
+		die(err)
+	}
+	// And the home's contents, not the home: the directory belongs to a
+	// declared user and is not this program's to remove. Emptying it is what
+	// makes the next agent to hold this id start clean rather than inheriting
+	// a stranger's settings and half a conversation.
+	if home := homeOf(*id); home != "" {
+		entries, err := os.ReadDir(home)
+		if err == nil {
+			for _, e := range entries {
+				os.RemoveAll(filepath.Join(home, e.Name()))
+			}
+		}
+	}
+	// The session's record of what it was created for. Without this the next
+	// `start` for this id reads the old project out of a stale file.
+	os.Remove(filepath.Join(*dir, *id+".env"))
+	fmt.Printf("removed agent %s: %s and its home\n", *id, tree)
+}
+
+// homeOf is where an agent's home is, or empty for one that has none. Never
+// /root: the root agent's home is the machine's, holding ssh keys and the
+// gnupg keyring, and emptying it would take the guest apart.
+func homeOf(id string) string {
+	home := "/home/agent" + id
+	if st, err := os.Stat(home); err == nil && st.IsDir() {
+		return home
+	}
+	return ""
+}
+
 // validRef keeps a host-supplied project or branch from being anything but a
 // name. The host is the only caller and would not send anything strange, which
 // is exactly the assumption worth not making where a string becomes a path.
@@ -241,6 +314,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "       cave-guestd sessions list|read <id>|write <id>")
 	fmt.Fprintln(os.Stderr, "       cave-guestd env build [-force]")
 	fmt.Fprintln(os.Stderr, "       cave-guestd env seed -home DIR -user NAME")
+	fmt.Fprintln(os.Stderr, "       cave-guestd remove -id N")
 	os.Exit(2)
 }
 

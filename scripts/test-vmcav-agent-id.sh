@@ -166,5 +166,47 @@ GUEST_AGENTS=$'2 running 80 24\n3 running 80 24\n'
 has "two of them is not guessed at" "more than one agent" \
   "$(the_only_running_agent 2>&1)"
 
+# --- removing an agent ---
+# The check that belongs on this side: whether the agent has work nobody has
+# landed. The guest can say whether an agent is running; only the host can see
+# the shared repo, and an agent branch ahead of its base is the only copy of
+# that work outside the worktree about to be deleted.
+
+REMOVED=""
+sync_sessions() { :; }
+guest_ssh() { case "$1" in *"cave-guestd remove"*) REMOVED="$1" ;; esac; }
+
+# An agent whose work has all landed: nothing to lose, so it goes. Run
+# directly rather than in $(...), which would set REMOVED in a child.
+REMOVED=""
+do_agent_remove 7 >/dev/null 2>&1
+check "a clean agent is removed" "yes" \
+  "$(case "$REMOVED" in *"-id 7"*) echo yes ;; *) echo no ;; esac)"
+
+# An agent with commits its base does not have. A fetch into the bare repo is
+# how a push arrives here, and how approve moves refs.
+git -C "$work/repo" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "unlanded work"
+base=$(git -C "$work/repo" symbolic-ref --short HEAD)
+git -C "$SHARED" fetch -q "$work/repo" "HEAD:refs/heads/agent-9/$base"
+
+REMOVED=""
+# `|| true` because refusing is the expected result and set -e came with vmcav.
+out=$(do_agent_remove 9 2>&1 || true)
+has "unlanded work stops a removal" "vmcav approve 9" "$out"
+has "and the commits are named" "unlanded work" "$out"
+check "and nothing was removed" "" "$REMOVED"
+check "and the branch is still there" "yes" \
+  "$(git -C "$SHARED" rev-parse --verify --quiet refs/heads/agent-9/$base >/dev/null && echo yes || echo no)"
+
+# Said out loud, it goes anyway.
+REMOVED=""
+do_agent_remove 9 1 >/dev/null 2>&1
+check "--force removes it regardless" "yes" \
+  "$(case "$REMOVED" in *"-id 9"*) echo yes ;; *) echo no ;; esac)"
+check "and the branch goes with it" "no" \
+  "$(git -C "$SHARED" rev-parse --verify --quiet refs/heads/agent-9/$base >/dev/null && echo yes || echo no)"
+
+has "a non-id is refused" "not an agent id" "$(do_agent_remove nine 2>&1 || true)"
+
 [ "$fail" = 0 ] && echo "PASS" || echo "FAIL"
 exit "$fail"
