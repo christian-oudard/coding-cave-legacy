@@ -272,10 +272,39 @@ let
     # agent runs a property of the deployed system alone, with no way for a
     # cave.nix to move it, and it is the same self-update bug the session
     # unit already avoids one level up.
+    claude_bin=${claudeCode}/bin/claude
     if command -v claude >/dev/null 2>&1; then
-      exec claude --dangerously-skip-permissions "$@"
+      claude_bin=claude
     fi
-    exec ${claudeCode}/bin/claude --dangerously-skip-permissions "$@"
+
+    set -- --dangerously-skip-permissions "$@"
+
+    # Pick up where this agent left off.
+    #
+    # Stopping an agent and starting it again used to hand you a blank
+    # conversation, with the old one reachable only by opening the picker and
+    # recognising it. That is a poor trade for something the agent already
+    # knows: an agent is a durable thing -- an id, a worktree, a branch -- and
+    # a restart is not a new one.
+    #
+    # No bookkeeping is needed for it, and that is the point. claude files a
+    # transcript under the directory the session ran in, and an agent's
+    # directory is now stable: /projects/<slug>, the same path on every start,
+    # with no id in it since the worktree moved behind the mount namespace. So
+    # "the most recent conversation in this directory" is already exactly
+    # "what this agent was last doing". Nothing has to record a session id or
+    # keep it in step with the registry.
+    #
+    # Conditional because --continue with no transcript is an error, which
+    # would stop a brand-new agent from starting at all. The encoding is
+    # sessions.EncodeProject: slashes to dashes, nothing else.
+    transcripts="$HOME/.claude/projects/$(printf '%s' "/projects/$CAVE_PROJECT" | tr / -)"
+    if [ -z "''${CAVE_AGENT_FRESH:-}" ] \
+       && [ -n "$(find "$transcripts" -name '*.jsonl' -print -quit 2>/dev/null)" ]; then
+      set -- --continue "$@"
+    fi
+
+    exec "$claude_bin" "$@"
   '';
 
   # Redeploy the guest from inside it, without killing the agent doing it.
@@ -1069,6 +1098,23 @@ in
   # project's dependency set and belong in that project's own flake, which the
   # guest can build because it substitutes from the host store over 7100.
   hardware.uinput.enable = true;
+
+  # Put the cave environment on a login shell's PATH.
+  #
+  # An agent's session gets it by sourcing the built env.json, so the tools a
+  # cave.nix installs -- persist, the LSP servers, fd, fzf -- are there for the
+  # agent and nowhere else. A `vmcav shell` login is a plain ssh session that
+  # sources none of that, so the same guest answered `persist` for the agent
+  # and `command not found` for the human looking over its shoulder.
+  #
+  # $HOME rather than a fixed path, so this is one rule for root and for every
+  # agent user; the directory is a symlink into the store that seed-agent-home@
+  # writes, so it is absent until an agent has been seeded and the test skips.
+  environment.extraInit = ''
+    if [ -d "$HOME/.cave-profile/bin" ]; then
+      PATH="$HOME/.cave-profile/bin:$PATH"
+    fi
+  '';
 
   # --- Guest toolchain: the minimal floor, nothing more ---
   # This list is also the agent's PATH: its unit resolves tools through

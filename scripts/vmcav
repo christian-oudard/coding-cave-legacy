@@ -792,11 +792,18 @@ do_agent() {
   # redeploys the system every other agent runs in. It is not one of the
   # numbered agents, so it holds a reserved id rather than a low one, and
   # asking for it is deliberate rather than a default you can drift into.
-  local want_root=""
-  if [ "${1:-}" = "--root" ]; then
-    want_root=1
-    shift
-  fi
+  #
+  # --fresh asks for a blank conversation. An agent otherwise picks up where
+  # it left off, because an agent is a durable thing -- an id, a worktree, a
+  # branch -- and stopping and starting one is not creating another.
+  local want_root="" want_fresh=""
+  while :; do
+    case "${1:-}" in
+      --root)  want_root=1;  shift ;;
+      --fresh) want_fresh=1; shift ;;
+      *) break ;;
+    esac
+  done
   local project="${1:-$SLUG}" base="${2:-}"
   # An option this does not know is not a project. Without this the guest is
   # the one that objects, having already been told to check out a project
@@ -829,7 +836,8 @@ do_agent() {
   # command gets diagnosed instead of dumping cave-guestd's usage at you. That
   # is the failure people actually hit, because a host script and the binary
   # inside the guest are two versions that move independently.
-  local out rc=0 root_flag=""
+  local out rc=0 root_flag="" fresh_flag=""
+  [ -n "$want_fresh" ] && fresh_flag=" -fresh"
   # The guest is told which kind of agent this is, once, here. It records the
   # answer in the session's environment file, and everything downstream --
   # which user the session runs as, which home gets seeded, which of the two
@@ -837,7 +845,7 @@ do_agent() {
   # inferring it from the number.
   [ -n "$want_root" ] && root_flag=" -root"
   out=$(GUEST_SSH_TTY=-T guest_ssh \
-    "cave-guestd start -id $id -project $project -base $base$root_flag" 2>&1) || rc=$?
+    "cave-guestd start -id $id -project $project -base $base$root_flag$fresh_flag" 2>&1) || rc=$?
   if [ "$rc" -ne 0 ]; then
     if printf '%s' "$out" | grep -q 'usage: cave-guestd'; then
       log "the guest's cave-guestd does not know 'start', so it is older than"
@@ -964,9 +972,10 @@ usage: vmcav <command>
   start           boot the VM detached (idempotent; needs an image)
   stop            ACPI power-down, SIGTERM/SIGKILL fallback
   status          whether it is up, which generation, where the console is
-  agent [--root] [proj] [branch]
+  agent [--root] [--fresh] [proj] [branch]
                   create an agent for a project and attach (detach: ctrl-\)
                   --root is the agent that is root in the guest, agent 0
+                  an agent continues its last conversation; --fresh starts one
   agent stop [id] stop an agent and bank its transcript
   attach [id]     reattach to an agent already running (detach: ctrl-\)
   shell [cmd...]  a root shell in the guest, or run cmd there

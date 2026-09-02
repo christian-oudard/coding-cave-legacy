@@ -118,6 +118,7 @@ func start(args []string) {
 	project := fs.String("project", "", "project slug to check out (required)")
 	base := fs.String("base", "", "base branch to work from (required)")
 	root := fs.Bool("root", false, "this agent is the guest's root agent (runs as root)")
+	fresh := fs.Bool("fresh", false, "start a new conversation instead of continuing the agent's last")
 	fs.Parse(args)
 	if *project == "" || *base == "" {
 		die(fmt.Errorf("start needs -project and -base"))
@@ -141,6 +142,13 @@ func start(args []string) {
 	// root be a property of an agent instead of a reserved number.
 	if *root {
 		env += "CAVE_AGENT_ROOT=1\n"
+	}
+	// An agent resumes its own last conversation by default, because a restart
+	// is not a new agent. This is how to say you want a blank one -- a context
+	// that has gone somewhere unhelpful is the usual reason, and the old
+	// transcript is still on disk either way.
+	if *fresh {
+		env += "CAVE_AGENT_FRESH=1\n"
 	}
 	if err := os.WriteFile(filepath.Join(*dir, *id+".env"), []byte(env), 0o600); err != nil {
 		die(err)
