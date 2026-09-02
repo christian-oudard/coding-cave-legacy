@@ -762,6 +762,27 @@ in
   # the guest knows about where it is.
   time.timeZone = "UTC";
 
+  # No NTP client, because there is nothing for one to talk to. NixOS enables
+  # timesyncd by default, so this guest has been running one since the first
+  # boot: a daemon whose whole purpose is reaching the network, in the one
+  # machine here defined by having no NIC.
+  #
+  # It never worked, and could not have. `NTPSynchronized=no` after months of
+  # uptime is the daemon reporting that itself. What it did instead was wake
+  # on a timer, fail to reach a server it has no route to, and take four
+  # watchdog kills across one boot -- SIGABRT, a core dump each, in the same
+  # clusters as the services below, for a service that had nothing to do.
+  #
+  # The clock is right anyway, and not by luck: kvm-clock takes it from the
+  # host, which is why the guest reads within seconds of real time even after
+  # the host has been suspended for a day. The host corrects the rest on every
+  # command that reaches in here (`correct_guest_clock` in scripts/vmcav),
+  # which is the design -- a guest with no trustworthy clock source should not
+  # be guessing, and that comment already says "no timesyncd" as though this
+  # line existed. It did not. Now the running system matches the claim the
+  # host's reasoning rests on.
+  services.timesyncd.enable = false;
+
   networking.hostName = "coding-cave";
   networking.useDHCP = false;
   networking.firewall.enable = false;
