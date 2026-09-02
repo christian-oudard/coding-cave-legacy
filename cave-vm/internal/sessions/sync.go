@@ -145,13 +145,20 @@ func Share(g Guest, a Archive) ([]Change, error) {
 	return changes, nil
 }
 
+// place puts a record back into the guest, into the home of whichever agent
+// the archive says wrote it. The archive is the only thing that still knows:
+// the guest lost the record, which is why it is being restored.
 func place(g Guest, a Archive, id string, dest Dest) Change {
 	f, err := os.Open(a.Path(id))
 	if err != nil {
 		return Change{ID: id, Err: err}
 	}
 	defer f.Close()
-	if err := g.Write(id, f, dest); err != nil {
+	agent := ""
+	if dest == Resumable {
+		agent = a.ReadMeta(id).Agent
+	}
+	if err := g.Write(id, f, dest, agent); err != nil {
 		return Change{ID: id, Err: err}
 	}
 	return Change{ID: id, Outcome: Added}

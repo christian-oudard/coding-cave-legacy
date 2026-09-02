@@ -106,7 +106,10 @@ func (l Local) Read(id string) (io.ReadCloser, error) {
 // does not have and clobbering a live transcript with an older copy of itself
 // would lose whatever the agent has done since. Shared replaces freely: it is
 // a copy of the host's record and the host's record is the truth.
-func (l Local) Write(id string, r io.Reader, dest Dest) error {
+// The agent is ignored: a Local is one agent's home, so writing to this one
+// writes to that agent by construction. Choosing between homes belongs to
+// whoever holds several of them, which in the guest is the daemon.
+func (l Local) Write(id string, r io.Reader, dest Dest, _ string) error {
 	if !ValidID(id) {
 		return fmt.Errorf("sessions: %q is not a session id", id)
 	}

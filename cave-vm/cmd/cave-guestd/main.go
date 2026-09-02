@@ -16,6 +16,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
@@ -349,12 +350,58 @@ func (t transcripts_) Read(id string) (io.ReadCloser, error) {
 	return nil, err
 }
 
-func (t transcripts_) Write(id string, r io.Reader, shared bool) error {
+// Write puts a restored record into the home of the agent it belongs to, so
+// that agent's own picker offers it and nobody else's does.
+//
+// Falling back to the default home when the agent is unknown is deliberate and
+// narrow: a shared record has no owner, and a record whose owner is not an
+// agent this guest has is better placed somewhere a human can find it than
+// dropped. A named agent that does have a home is never diverted.
+//
+// Ownership matters as much as the path. The daemon is root and the agent is
+// not, so a record written here and left alone is one its owner cannot read --
+// a restore that appears to work and yields an empty picker.
+func (t transcripts_) Write(id string, r io.Reader, shared bool, agent string) error {
 	dest := sessions.Resumable
 	if shared {
 		dest = sessions.Shared
 	}
-	return t.write.Write(id, r, dest)
+	home := t.write
+	if agent != "" && !shared {
+		for _, h := range t.homes {
+			if h.Agent == agent {
+				home = h
+				home.Cwd, home.SharedDir = t.write.Cwd, t.write.SharedDir
+				break
+			}
+		}
+	}
+	if err := home.Write(id, r, dest, agent); err != nil {
+		return err
+	}
+	return chownToOwner(home.ClaudeDir)
+}
+
+// chownToOwner hands a home's transcripts back to whoever owns the home. The
+// directories are created on demand by the write above, as root, which is the
+// one thing that makes a restored record invisible to the agent it was
+// restored for.
+func chownToOwner(claudeDir string) error {
+	st, err := os.Stat(filepath.Dir(claudeDir))
+	if err != nil {
+		return err
+	}
+	sys, ok := st.Sys().(*syscall.Stat_t)
+	if !ok {
+		return nil
+	}
+	uid, gid := int(sys.Uid), int(sys.Gid)
+	return filepath.WalkDir(claudeDir, func(p string, _ fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		return os.Lchown(p, uid, gid)
+	})
 }
 
 func die(err error) {
@@ -467,6 +514,7 @@ func transcripts(args []string) {
 	// session out of this agent's picker while still being readable.
 	shareDir := fs.String("shared-dir", "/cave/sessions", "where every agent's records are readable")
 	shared := fs.Bool("shared", false, "write into the shared directory rather than the picker")
+	agent := fs.String("agent", "", "whose home a written record belongs in")
 	fs.Parse(args)
 
 	local := sessions.Local{ClaudeDir: *claude, Cwd: *cwd, SharedDir: *shareDir}
@@ -494,11 +542,7 @@ func transcripts(args []string) {
 			die(err)
 		}
 	case "write":
-		dest := sessions.Resumable
-		if *shared {
-			dest = sessions.Shared
-		}
-		if err := local.Write(fs.Arg(1), os.Stdin, dest); err != nil {
+		if err := all.Write(fs.Arg(1), os.Stdin, *shared, *agent); err != nil {
 			die(err)
 		}
 	default:

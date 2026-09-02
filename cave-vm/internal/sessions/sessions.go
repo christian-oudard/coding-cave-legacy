@@ -48,7 +48,13 @@ const (
 type Guest interface {
 	List() ([]Record, error)
 	Read(id string) (io.ReadCloser, error)
-	Write(id string, r io.Reader, dest Dest) error
+	// Write places a record. The agent is whose home it belongs in: a restore
+	// puts an agent's history back where its own picker will find it, and
+	// putting it in somebody else's is both wrong and confusing -- the records
+	// show up in a picker they do not belong to and are missing from the one
+	// they do. Empty means the guest's default home, which is what a shared
+	// record wants, since the shared view is nobody's in particular.
+	Write(id string, r io.Reader, dest Dest, agent string) error
 }
 
 // ValidID is the whole of the host's trust in what the guest says. Ids become

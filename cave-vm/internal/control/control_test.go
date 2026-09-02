@@ -231,6 +231,7 @@ type fakeSessions struct {
 	records map[string]string
 	wrote   map[string]string
 	shared  map[string]bool
+	agents  map[string]string
 	fail    error
 }
 
@@ -253,7 +254,7 @@ func (f *fakeSessions) Read(id string) (io.ReadCloser, error) {
 	return io.NopCloser(strings.NewReader(body)), nil
 }
 
-func (f *fakeSessions) Write(id string, r io.Reader, shared bool) error {
+func (f *fakeSessions) Write(id string, r io.Reader, shared bool, agent string) error {
 	b, err := io.ReadAll(r)
 	if err != nil {
 		return err
@@ -261,7 +262,10 @@ func (f *fakeSessions) Write(id string, r io.Reader, shared bool) error {
 	if f.wrote == nil {
 		f.wrote, f.shared = map[string]string{}, map[string]bool{}
 	}
-	f.wrote[id], f.shared[id] = string(b), shared
+	if f.agents == nil {
+		f.agents = map[string]string{}
+	}
+	f.wrote[id], f.shared[id], f.agents[id] = string(b), shared, agent
 	return nil
 }
 
@@ -311,13 +315,28 @@ func TestReadSessionThatIsNotThere(t *testing.T) {
 	}
 }
 
+// Whose home a restored record lands in. A restore puts an agent's history
+// back where its own picker will find it, so the agent has to survive the trip
+// across the wire; without it every record lands in one home and shows up in a
+// picker it does not belong to while missing from the one it does.
+func TestWriteSessionCarriesTheAgent(t *testing.T) {
+	f := &fakeSessions{}
+	c := serveSessions(t, f)
+	if err := c.WriteSession(sessionID, strings.NewReader("history\n"), false, "3"); err != nil {
+		t.Fatal(err)
+	}
+	if f.agents[sessionID] != "3" {
+		t.Fatalf("record was restored for agent %q, want 3", f.agents[sessionID])
+	}
+}
+
 // Which directory a restored record lands in is the whole difference between
 // a session an agent can resume and one it can only read.
 func TestWriteSessionCarriesTheDestination(t *testing.T) {
 	for _, shared := range []bool{false, true} {
 		f := &fakeSessions{}
 		c := serveSessions(t, f)
-		if err := c.WriteSession(sessionID, strings.NewReader("history\n"), shared); err != nil {
+		if err := c.WriteSession(sessionID, strings.NewReader("history\n"), shared, ""); err != nil {
 			t.Fatal(err)
 		}
 		if f.wrote[sessionID] != "history\n" {
@@ -352,7 +371,7 @@ func TestSessionsNeedTheTokenToo(t *testing.T) {
 	if _, err := c.ReadSession(sessionID); err == nil {
 		t.Fatal("a transcript was readable without the token")
 	}
-	if err := c.WriteSession(sessionID, strings.NewReader("x"), false); err == nil {
+	if err := c.WriteSession(sessionID, strings.NewReader("x"), false, ""); err == nil {
 		t.Fatal("a transcript was writable without the token")
 	}
 	if len(f.wrote) != 0 {

@@ -99,16 +99,21 @@ func (s SSH) Read(id string) (io.ReadCloser, error) {
 	return &cmdReader{cmd: cmd, out: stdout, errb: &errb}, nil
 }
 
-func (s SSH) Write(id string, r io.Reader, dest Dest) error {
+func (s SSH) Write(id string, r io.Reader, dest Dest, agent string) error {
 	if !ValidID(id) {
 		return fmt.Errorf("sessions: %q is not a session id", id)
 	}
 	// Flags before the verb, which is where the guest-side parser expects
-	// them.
-	args := []string{"write", id}
+	// them. The agent says whose home the record belongs in; only the guest
+	// can turn that into a path, so it travels as an id rather than a
+	// directory.
+	var args []string
 	if dest == Shared {
-		args = []string{"-shared", "write", id}
+		args = append(args, "-shared")
+	} else if agent != "" {
+		args = append(args, "-agent", agent)
 	}
+	args = append(args, "write", id)
 	cmd := s.command(args...)
 	cmd.Stdin = r
 	var errb bytes.Buffer

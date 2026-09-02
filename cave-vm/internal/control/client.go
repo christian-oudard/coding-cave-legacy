@@ -112,10 +112,19 @@ func (c *Client) ReadSession(id string) (io.ReadCloser, error) {
 	return resp.Body, nil
 }
 
-func (c *Client) WriteSession(id string, r io.Reader, shared bool) error {
+func (c *Client) WriteSession(id string, r io.Reader, shared bool, agent string) error {
 	path := "/sessions/" + url.PathEscape(id)
+	q := url.Values{}
 	if shared {
-		path += "?dest=shared"
+		q.Set("dest", "shared")
+	}
+	// Whose home to put it back in. A name rather than a path: only the guest
+	// knows where an agent lives, and the host should not learn.
+	if agent != "" {
+		q.Set("agent", agent)
+	}
+	if len(q) > 0 {
+		path += "?" + q.Encode()
 	}
 	req, err := c.request("POST", path, r)
 	if err != nil {

@@ -34,7 +34,8 @@ func sessionsCommand(args []string) {
 	// Restore only. A sync no longer takes an agent: which agent a record
 	// belongs to is a fact about the home it was found in, so the guest says
 	// it per record instead of the host asserting one for the whole batch.
-	agent := fs.String("agent", "1", "whose records to restore")
+	// Empty means every agent's, each into its own home. A name narrows it.
+	agent := fs.String("agent", "", "whose records to restore (default: everyone)")
 	fs.Parse(args)
 
 	a := sessions.Archive{Dir: *archive}
@@ -55,10 +56,23 @@ func sessionsCommand(args []string) {
 	case "restore":
 		ids := fs.Args()[1:]
 		if len(ids) == 0 {
-			// No ids means the agent's own, which is what a cave start does:
-			// its picker should hold its history and nobody else's.
+			// Everything the archive holds, each record into the home of the
+			// agent that wrote it. That is what a VM start wants: it runs
+			// before any agent exists, so restoring "the agent's own" had to
+			// name one, and naming one meant every other agent's history
+			// stayed on the host while that one's landed in a picker it did
+			// not belong to. Naming an agent still asks for just its records.
 			var err error
-			ids, err = a.Owned(*agent)
+			if *agent == "" {
+				var recs []sessions.Record
+				if recs, err = a.List(); err == nil {
+					for _, r := range recs {
+						ids = append(ids, r.ID)
+					}
+				}
+			} else {
+				ids, err = a.Owned(*agent)
+			}
 			if err != nil {
 				fatal(err)
 			}

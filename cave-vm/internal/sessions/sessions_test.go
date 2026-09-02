@@ -1,6 +1,7 @@
 package sessions
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -403,6 +404,40 @@ func TestSyncAttributesEachHomeToItsOwnAgent(t *testing.T) {
 			t.Fatalf("agent %s owns %v (%v), want %s", agent, owned, err, want)
 		}
 	}
+}
+
+// A restore puts a record back for the agent that wrote it, not for whoever
+// asked. The archive is the only thing that still knows -- the guest lost the
+// record, which is why it is being restored -- so Restore reads the owner off
+// the metadata and hands it to the guest, which is the only side that can turn
+// an agent into a home.
+func TestRestoreAsksForTheOwningAgentsHome(t *testing.T) {
+	src := guest(t, "/projects/p", map[string]string{sidA + ".jsonl": "agent three's\n"})
+	src.Agent = "3"
+	a := archive(t, nil)
+	if _, err := Sync(src, a); err != nil {
+		t.Fatal(err)
+	}
+
+	var askedFor string
+	empty := &recordingGuest{Local: guest(t, "/projects/p", nil), seen: &askedFor}
+	if _, err := Restore(empty, a, []string{sidA}); err != nil {
+		t.Fatal(err)
+	}
+	if askedFor != "3" {
+		t.Fatalf("restored into agent %q's home, want 3", askedFor)
+	}
+}
+
+// recordingGuest is a Local that remembers which agent a write was aimed at.
+type recordingGuest struct {
+	Local
+	seen *string
+}
+
+func (g *recordingGuest) Write(id string, r io.Reader, dest Dest, agent string) error {
+	*g.seen = agent
+	return g.Local.Write(id, r, dest, agent)
 }
 
 // The archive remembers when a session appeared, not just when it was last

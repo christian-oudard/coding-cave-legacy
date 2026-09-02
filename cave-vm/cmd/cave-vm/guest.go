@@ -141,8 +141,8 @@ func (g controlGuest) List() ([]sessions.Record, error) {
 
 func (g controlGuest) Read(id string) (io.ReadCloser, error) { return g.c.ReadSession(id) }
 
-func (g controlGuest) Write(id string, r io.Reader, dest sessions.Dest) error {
-	return g.c.WriteSession(id, r, dest == sessions.Shared)
+func (g controlGuest) Write(id string, r io.Reader, dest sessions.Dest, agent string) error {
+	return g.c.WriteSession(id, r, dest == sessions.Shared, agent)
 }
 
 func emit(v any) {

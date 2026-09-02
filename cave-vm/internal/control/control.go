@@ -98,7 +98,7 @@ type SessionRecord struct {
 type Sessions interface {
 	List() ([]SessionRecord, error)
 	Read(id string) (io.ReadCloser, error)
-	Write(id string, r io.Reader, shared bool) error
+	Write(id string, r io.Reader, shared bool, agent string) error
 }
 
 // Token is the shared secret. It is generated on the host, staged into the
@@ -209,7 +209,8 @@ func registerSessions(mux *http.ServeMux, s Sessions) {
 	mux.HandleFunc("POST /sessions/{id}", func(w http.ResponseWriter, r *http.Request) {
 		// Which directory a restored record lands in: claude's own, where its
 		// picker will find it, or the read-only view of every agent's records.
-		reply(w, nil, s.Write(r.PathValue("id"), r.Body, r.URL.Query().Get("dest") == "shared"))
+		reply(w, nil, s.Write(r.PathValue("id"), r.Body,
+			r.URL.Query().Get("dest") == "shared", r.URL.Query().Get("agent")))
 	})
 }
 

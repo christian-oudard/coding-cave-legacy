@@ -155,7 +155,7 @@ func (d Disk) Read(id string) (io.ReadCloser, error) {
 // Write is not offered. Restoring means putting a record where a *running*
 // claude will look for it, and writing into a filesystem we are about to boot,
 // or about to destroy, buys nothing worth the risk of doing it offline.
-func (d Disk) Write(string, io.Reader, Dest) error {
+func (d Disk) Write(string, io.Reader, Dest, string) error {
 	return fmt.Errorf("sessions: a stopped disk is read-only")
 }
 
