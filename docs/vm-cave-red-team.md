@@ -505,6 +505,37 @@ Demonstrated against a copy with both removed: an oversized length with no
 payload never gets an answer at all, because the broker is still waiting for
 bytes that will never come.
 
+## 13. An agent could plant a session socket under somebody else's id
+
+Reachable by any agent, and what it reaches is not another agent.
+
+`/run/cave/sessions` is `drwxrwx--T root:cave` and every agent is in `cave`,
+because an ordinary session runs as `agent<id>` and has to create its own
+socket there. The sticky bit stops an agent removing an entry somebody else
+made. It does not stop one creating an entry for a name nobody has taken.
+
+`agentd.List` globs `*.sock` and asks each one for its info, so a plain file
+is ignored -- checked -- but a real socket speaking the protocol is listed as
+a running agent. `attach` then connects to it. Attach hands over a terminal,
+so what it would hand over is the human's, to whichever agent bound the
+socket.
+
+That is not the agent-to-agent reach recorded below as a blast radius. Agents
+here are colleagues and can read each other's files; this is a channel to
+somebody who is not an agent at all, and it works on any id that is not
+currently running -- which includes every id an agent has never held.
+
+Ownership settles it without moving anything. The kernel decides who owns a
+socket, an agent cannot create one owned by another uid, and the id already
+says which uid to expect: root for the root agent, `agent<id>` otherwise.
+`attach` refuses a socket owned by anyone else, and a missing socket stays
+fine, since attach starts what it cannot find.
+
+Half done. The roster still believes a planted socket, so a phantom agent can
+appear running in `status` and take its id out of allocation. That is noise
+and a denial of an id rather than a channel to a person, and it wants the
+same ownership check inside the listing.
+
 ## Not findings
 
 Recorded so they are not re-raised.

@@ -2,11 +2,15 @@ package main
 
 import (
 	"io"
+	"net"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
+	"codingcave.dev/cave-vm/internal/agentd"
 	"codingcave.dev/cave-vm/internal/sessions"
 )
 
@@ -418,5 +422,58 @@ func TestWriteWithNoAgentUsesTheFallbackHome(t *testing.T) {
 		sessions.EncodeProject(rootHome.Cwd), testID+".jsonl")
 	if _, err := os.Stat(landed); err != nil {
 		t.Errorf("an unattributed record did not land: %v", err)
+	}
+}
+
+// /run/cave/sessions is group-writable by every agent, because an ordinary
+// session runs as agent<id> and creates its own socket there. The sticky bit
+// stops an agent removing somebody else's entry; it does not stop one
+// creating an entry for a name nobody has taken. A socket planted under
+// another agent's id would be found by `attach`, and attach hands over a
+// terminal -- the human's.
+func TestAttachRefusesASocketOwnedByTheWrongUser(t *testing.T) {
+	dir := t.TempDir()
+	envFile(t, dir, "0", "CAVE_AGENT_ROOT=1\n")
+	envFile(t, dir, "6", "CAVE_AGENT_ID=6\n")
+
+	// A socket this test made: owned by whoever runs the test, which for the
+	// root agent has to be root.
+	sock := agentd.SocketPath(dir, "0")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Skipf("cannot bind a unix socket here: %v", err)
+	}
+	defer ln.Close()
+
+	st, err := os.Stat(sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mine := st.Sys().(*syscall.Stat_t).Uid
+
+	err = sessionIsTheAgents(dir, "0")
+	if mine == 0 {
+		if err != nil {
+			t.Errorf("the root agent's own socket was refused: %v", err)
+		}
+	} else if err == nil {
+		t.Error("a socket not owned by root was accepted for the root agent")
+	}
+
+	// Nothing there at all is not a problem: attach starts what it cannot
+	// find, and the unit makes its own socket.
+	if err := sessionIsTheAgents(dir, "3"); err != nil {
+		t.Errorf("a missing socket should not be refused: %v", err)
+	}
+
+	// An id with no user cannot have a rightful owner, so there is nothing to
+	// compare against and the answer is no rather than a guess.
+	if err := os.Rename(sock, agentd.SocketPath(dir, "6")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := user.Lookup("agent6"); err != nil {
+		if err := sessionIsTheAgents(dir, "6"); err == nil {
+			t.Error("a socket for an id with no user was accepted")
+		}
 	}
 }

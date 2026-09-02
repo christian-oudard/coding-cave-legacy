@@ -22,8 +22,10 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"os/user"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -317,6 +319,61 @@ func ensureRuntimeEnv(dir, worktrees, id string) error {
 		return err
 	}
 	return os.WriteFile(runtime, b, 0o600)
+}
+
+// sessionIsTheAgents refuses to attach to a socket that is not the agent's.
+//
+// /run/cave/sessions is group-writable by `cave`, and every agent is in it,
+// because an ordinary session runs as agent<id> and has to create its own
+// socket there. The sticky bit stops an agent removing somebody else's entry;
+// it does not stop one creating an entry for a name nobody has taken. So an
+// agent could bind a socket called 6.sock, speak agentd's protocol, and be
+// found by `attach 6` -- and attach hands over a terminal, so what it would
+// have handed over is the human's.
+//
+// That is not the agent-to-agent reach the guest treats as a blast radius.
+// Agents in here are colleagues and can read each other's files; this is a
+// channel to somebody who is not an agent at all.
+//
+// Ownership settles it without moving anything: the kernel decides who a
+// socket's owner is, an agent cannot create one owned by another uid, and the
+// id already says which uid to expect. A missing socket is fine -- attach
+// starts what it cannot find, and the unit will make its own.
+func sessionIsTheAgents(dir, id string) error {
+	st, err := os.Stat(agentd.SocketPath(dir, id))
+	if err != nil {
+		return nil
+	}
+	sys, ok := st.Sys().(*syscall.Stat_t)
+	if !ok {
+		return nil
+	}
+	want, err := expectedSessionUID(dir, id)
+	if err != nil {
+		return err
+	}
+	if sys.Uid != want {
+		return fmt.Errorf("the session socket for agent %s belongs to uid %d, not %d; "+
+			"refusing to attach to it", id, sys.Uid, want)
+	}
+	return nil
+}
+
+// expectedSessionUID is who should own agent <id>'s session socket: root for
+// the root agent, and the agent's own user for anybody else.
+func expectedSessionUID(dir, id string) (uint32, error) {
+	if agentIsRoot(dir, id) {
+		return 0, nil
+	}
+	u, err := user.Lookup("agent" + id)
+	if err != nil {
+		return 0, fmt.Errorf("agent %s has no user, so nothing can own its session: %w", id, err)
+	}
+	n, err := strconv.ParseUint(u.Uid, 10, 32)
+	if err != nil {
+		return 0, err
+	}
+	return uint32(n), nil
 }
 
 // readEnv parses one of the KEY=VALUE files an agent is described by. Both
@@ -875,6 +932,9 @@ func attach(args []string) {
 	// Before unitFor is consulted, because that reads the same file and would
 	// otherwise start the wrong one of the two templates.
 	if err := ensureRuntimeEnv(*dir, *worktrees, id); err != nil {
+		die(err)
+	}
+	if err := sessionIsTheAgents(*dir, id); err != nil {
 		die(err)
 	}
 	sock, err := agentd.EnsureSocket(*dir, id, func() error { return startUnit(*dir, id) }, startWait)
