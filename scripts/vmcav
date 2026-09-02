@@ -1759,28 +1759,6 @@ ZSH
 # needs to know whether the far side exists, and that is a second round trip
 # for a question the shell can answer about the near side only. Said here
 # because it is a difference somebody will meet.
-GUEST_HOME_OF() { # <id> -> the agent's home in the guest
-  [ "$1" = "$ROOT_AGENT_ID" ] && { printf '/root'; return; }
-  printf '/home/agent%s' "$1"
-}
-
-# cave_path <spec> <id> <project> -> the guest path a cave: spec names
-#
-# The project is part of it. An agent's trees live under
-# <root>/<id>/projects/, one directory per project, and that directory is what
-# the agent sees as /projects/<slug> -- so a relative path is relative to the
-# worktree, not to the directory holding worktrees. Written without it first,
-# which put every relative copy one level too high, and the test agreed
-# because it was written from the same assumption. The guest settled it.
-cave_path() {
-  local rest="$1" id="$2" project="$3"
-  case "$rest" in
-    "~"|"~/"*) printf '%s%s' "$(GUEST_HOME_OF "$id")" "${rest#\~}" ;;
-    /*)        printf '%s' "$rest" ;;
-    "")        printf '%s/%s/projects/%s' "$WORKTREE_ROOT" "$id" "$project" ;;
-    *)         printf '%s/%s/projects/%s/%s' "$WORKTREE_ROOT" "$id" "$project" "$rest" ;;
-  esac
-}
 WORKTREE_ROOT="${WORKTREE_ROOT:-/var/lib/coding-cave/agents}"
 
 do_cp() {
@@ -1826,17 +1804,20 @@ do_cp() {
       cave:*)   rest="${spec#cave:}" ;;
       *)        args+=("$spec"); continue ;;
     esac
-    # A relative path needs a project to be relative to. Absolute paths and ~
-    # do not, so an agent whose project the guest cannot name is still
-    # reachable rather than refused outright.
-    case "$rest" in
-      "~"|"~/"*|/*) ;;
-      *) [ -n "$project" ] || {
-           log "the guest does not say which project agent $id has, so '$rest'"
-           log "  has nothing to be relative to; name a path from / instead"
-           return 1; } ;;
-    esac
-    args+=("cave-guest:$(cave_path "$rest" "$id" "$project")")
+    # Where that lands is the guest's layout, which cave-vm holds: an agent's
+    # worktree is <root>/<id>/projects/<slug>, and leaving the slug out of it
+    # put every relative copy one directory too high.
+    #
+    # A relative address needs a project to be relative to, and a failure here
+    # is that and only that: absolute paths and ~ need none, so an agent whose
+    # project the guest cannot name is still reachable by them.
+    local guest
+    guest=$(cave-vm guest-path --id "$id" --project "$project" \
+              --root "$ROOT_AGENT_ID" --worktrees "$WORKTREE_ROOT" -- "$rest") || {
+      log "the guest does not say which project agent $id has, so '$rest'"
+      log "  has nothing to be relative to; name a path from / instead"
+      return 1; }
+    args+=("cave-guest:$guest")
   done
   scp -q -r -F "$SSHCONF" "${args[@]}"
 }

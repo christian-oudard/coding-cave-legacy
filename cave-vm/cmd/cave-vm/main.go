@@ -58,6 +58,8 @@ func main() {
 		projectsCommand(os.Args[2:])
 	case "free-id":
 		freeIDCommand(os.Args[2:])
+	case "guest-path":
+		guestPathCommand(os.Args[2:])
 	case "sessions":
 		sessionsCommand(os.Args[2:])
 	default:
