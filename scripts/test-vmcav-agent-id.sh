@@ -174,6 +174,32 @@ GUEST_AGENTS=""
 has "a stale guest is called out before the start" "vmcav deploy" \
   "$(do_agent --root proj main 2>&1)"
 
+# --- a vm that is not running ---
+# Refusing here was telling somebody to type the command they would have typed
+# anyway: nothing about creating an agent is ambiguous with the VM down.
+STARTED=0
+STARTED_ARG=""
+do_start() { STARTED=$((STARTED + 1)); STARTED_ARG="${1:-}"; is_running() { return 0; }; }
+is_running() { return 1; }
+# Not `out=$(do_agent ...)`: a command substitution is a subshell, and the
+# whole point here is the side effect it has on this one.
+do_agent --root proj main >"$work/agent.out" 2>&1 || true
+out=$(cat "$work/agent.out")
+check "a stopped vm is started rather than refused" "1" "$STARTED"
+has "and it says so, because booting was not what was asked for" \
+  "starting it first" "$out"
+check "start is told it is on the way to an agent" "--for-agent" "${STARTED_ARG:-}"
+
+# A start that fails stops the agent, rather than pressing on into a guest
+# that is not there.
+STARTED=0
+is_running() { return 1; }
+do_start() { STARTED=$((STARTED + 1)); return 1; }
+rc=0
+do_agent --root proj main >/dev/null 2>&1 || rc=$?
+check "an agent is not created when the start failed" "1" "$rc"
+is_running() { return 0; }
+
 # An option nobody recognises is not a project. The guest used to be the one
 # to object, having already been told to check out a project called --help.
 has "an unknown option is refused here, not in the guest" "unknown option" \

@@ -7,8 +7,12 @@ What the container caves on `main` do that the VM does not do yet, read off
 This is a gap list, not a plan. Where the design already covers a gap, the
 phase is named and the design is the authority on how it lands;
 `vm-cave-todo.md` owns the gaps that are not phases. Parity is also not the
-finish line: the nix package cache and pkgdd have no counterpart on `main` at
-all, since store sharing there was removed.
+finish line: the nix package cache has no counterpart on `main` at all, since
+store sharing there was removed, and neither does pkgdd -- though pkgdd does
+not exist here either. Design phase 8 is unstarted: the guest ships no
+`pkgdd` binary and nothing in `cave-vm/` or `guest/` refers to one, so the
+language caches are shared by nothing and `docs/package-dedupe-spec.md`
+describes a tool still to be written.
 
 Order below is roughly dependency order, not priority.
 

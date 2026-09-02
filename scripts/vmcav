@@ -1064,7 +1064,19 @@ do_agent() {
     log "'$base' is an agent branch, not a base; naming one is what approve is for"
     return 1 ;;
   esac
-  is_running || { log "the vm is not running (vmcav start)"; return 1; }
+  # Start it rather than refusing (docs/vm-cave-design.md phase 10). Being
+  # told "the vm is not running (vmcav start)" is being told to type the
+  # command that would have been typed anyway: nothing about creating an
+  # agent is ambiguous when the VM is down, and there is no other thing the
+  # person could have meant.
+  #
+  # Not silent, because booting a VM is not what was asked for and takes long
+  # enough to wonder about, and not the whole of `start` either -- its closing
+  # advice is to create an agent, which is what this is already doing.
+  if ! is_running; then
+    log "the vm is not running; starting it first"
+    do_start --for-agent || return 1
+  fi
   # Said before the attempt, not after it. A guest older than the checkout
   # fails here as a systemd dependency job, which names neither the version
   # nor the reason; by the time you have read that, the useful sentence is
@@ -1558,6 +1570,7 @@ usage: vmcav <command>
                   create an agent for a project and attach (detach: ctrl-\)
                   --root is the agent that is root in the guest, agent 0
                   an agent continues its last conversation; --fresh starts one
+                  starts the vm first if it is not running
   agent stop [id] stop an agent and bank its transcript
   agent remove id reclaim a stopped agent: its worktrees, home and branch
                   (--force removes one with work nobody has landed)
@@ -2058,6 +2071,10 @@ guest_boot_file() {
 }
 
 do_start() {
+  # --for-agent is `vmcav agent` booting the VM on its way to something else.
+  # It suppresses only the closing advice, which is advice to create an agent.
+  local for_agent=""
+  [ "${1:-}" = "--for-agent" ] && { for_agent=1; shift; }
   if is_running; then log "already running (pid $(vm_pid))"; do_status; return 0; fi
   mkdir -p "$STATE_DIR"
   require_tools
@@ -2108,7 +2125,7 @@ do_start() {
   # the host not consulted: a record that is not on disk when claude starts
   # does not exist as far as the agent is concerned.
   restore_sessions
-  announce_agents
+  [ -n "$for_agent" ] || announce_agents
 }
 
 # What to do next, which is not the same sentence every time.
