@@ -67,6 +67,14 @@ phase's acceptance check in here rather than reasoning about it.
 `docs/vm-cave-todo.md` holds what is known to be missing and undecided, and
 `docs/vm-cave-parity.md` what the container caves still do that this does not.
 
+Run the tests with `nix flake check`, not by looping over `scripts/test-*.sh`.
+Both work, and they do not run the same thing: the shell suites need tools
+this guest does not carry on its PATH, so run loose they skip. The gpg
+broker's suite skipped entirely for months that way, reporting nothing at
+all while looking like it had passed. `nix flake check` gives every suite the
+tools it needs and finds them from the directory, so a suite you add is one
+it runs.
+
 Prefer config over imperative state: a change that survives only until the
 next boot is not a change.
 

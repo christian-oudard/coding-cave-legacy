@@ -99,7 +99,15 @@
         # doc does not invalidate any of them.
         let
           shellTest = name: pkgs.runCommand "${name}-test"
-            { nativeBuildInputs = with pkgs; [ bash git ]; }
+            {
+              # One set for every suite rather than a table of which needs
+              # what. python3, socat and gnupg are the gpg broker's; zsh is
+              # for the completion script, which is checked by asking zsh to
+              # parse it. A per-suite table would be a second list to keep in
+              # step with the first, and the list below is derived precisely
+              # so there is no such list to get wrong.
+              nativeBuildInputs = with pkgs; [ bash git python3 socat gnupg zsh ];
+            }
             ''
               mkdir -p repo && cp -r ${./scripts} repo/scripts
               # guest/ is here for test-cave-git, which tests the guest's git
@@ -109,15 +117,23 @@
               export HOME=$TMPDIR REPO=$PWD/repo
               bash repo/scripts/test-${name}.sh && touch $out
             '';
+
+          # Every suite in scripts/, read off the directory rather than
+          # listed here.
+          #
+          # It was a hand-written list of five, and there are ten. The four
+          # newest and the gpg broker's were all absent, so `nix flake check`
+          # -- the one command that says whether this tree is good -- ran half
+          # the tests and said yes. A list of tests is exactly the thing that
+          # goes stale, because adding a test is the moment you are thinking
+          # about something else.
+          suites = map (n: nixpkgs.lib.removeSuffix ".sh"
+                            (nixpkgs.lib.removePrefix "test-" n))
+            (builtins.filter
+              (n: nixpkgs.lib.hasPrefix "test-" n && nixpkgs.lib.hasSuffix ".sh" n)
+              (builtins.attrNames (builtins.readDir ./scripts)));
         in
-        nixpkgs.lib.genAttrs [
-          "git-hooks"        # the host's receive hooks: what the gate refuses
-          "cave-git"         # the guest's git wrapper: commit publishes
-          "vmcav-agent-id"   # which id a new agent gets, and what a failed
-                             # start tells you
-          "vmcav-status"     # when the guest is called out as stale
-          "vmcav-help"       # `vmcav <command> --help`
-        ] shellTest
+        nixpkgs.lib.genAttrs suites shellTest
       ));
 
       devShells = forAll (pkgs: {
