@@ -419,21 +419,31 @@ install_shared_hooks() {
   shared=$(shared_repo_of "${1:-$REPO}")
   h="$shared/hooks"
   mkdir -p "$h"
-  # Refresh our own, leave anyone else's alone.
+  # Always ours, and keep whatever was there before.
   #
-  # This used to return the moment a pre-receive existed, which meant the
-  # branch guard was written once and then never again: every later fix to it
-  # reached new projects only, and the repo that needed it most -- the one
-  # that had been in use longest -- kept whatever shim it was created with.
+  # Two failures produced this, in order. First it returned the moment a
+  # pre-receive existed, so the guard was written once and never again and
+  # every later fix reached new projects only. Then it refused to touch a hook
+  # it had not written, on the reasoning that this shared repo is the one the
+  # container caves on `main` use and their guard is not ours to replace --
+  # which is true, and which left the only repo in use running `cav`'s hook
+  # and rejecting every agent but one, for four rounds of "fixed" that never
+  # reached it.
   #
-  # A foreign hook is not ours to replace. This shared repo is the same one
-  # the container caves on `main` use, and they install their own; overwriting
-  # it would silently move their pushes onto this branch's guard. Say so and
-  # stop instead.
+  # So: this owns the hook. Two tools cannot both own one, and the one that
+  # runs the VM is the one whose rules have to apply -- `cav`'s guard does not
+  # know that a whole guest shares an injected id, which is the thing that
+  # broke. The old hook is kept beside it rather than deleted, so the change
+  # is visible and reversible, and it is said out loud rather than done
+  # quietly: if you run both tools against this repo, this is the moment the
+  # rules changed.
   if [ -e "$h/pre-receive" ] && ! grep -q cave-vm-git-pre-receive "$h/pre-receive"; then
-    log "$h/pre-receive was installed by something else; leaving it"
-    return 0
+    mv "$h/pre-receive" "$h/pre-receive.replaced-by-vmcav"
+    log "replaced a pre-receive hook this did not install, in $shared"
+    log "  the old one is beside it as pre-receive.replaced-by-vmcav"
   fi
+  # Written every time rather than only when absent, so a fix to the guard
+  # reaches a repo that already has one.
   log "installing receive hooks in $shared"
   printf '#!/bin/sh\nexec cave-vm-git-pre-receive "$@"\n' > "$h/pre-receive"
   printf '#!/bin/sh\nexec cave-vm-git-post-receive "$@"\n' > "$h/post-receive"

@@ -66,6 +66,28 @@ register_project "$work/beta" >/dev/null
 check "re-registering does not duplicate" "alpha beta" \
   "$(registered_projects | sort | tr '\n' ' ' | sed 's/ $//')"
 
+# --- the branch guard is kept current -------------------------------------
+#
+# Both halves have been wrong in turn. Installing only when absent meant a fix
+# to the guard never reached a repo that already had one; refusing to touch a
+# hook this did not install meant the one repo in use kept `cav`'s guard, which
+# rejects every agent but one, and no amount of fixing the guard reached it.
+
+hook="$work/alpha/.coding-cave/cave-shared.git/hooks/pre-receive"
+printf '#!/bin/sh\n# stale shim\nexec cave-vm-git-pre-receive "$@"\n' > "$hook"
+register_project "$REPO" >/dev/null
+check "our own hook is rewritten, not skipped" "gone" \
+  "$(grep -q 'stale shim' "$hook" && echo "still there" || echo gone)"
+
+printf '#!/bin/sh\nexec some-other-tool "$@"\n' > "$hook"
+register_project "$REPO" >/dev/null
+check "a foreign hook is replaced" "yes" \
+  "$(grep -q cave-vm-git-pre-receive "$hook" && echo yes || echo no)"
+check "and the old one is kept beside it" "yes" \
+  "$([ -e "$hook.replaced-by-vmcav" ] && echo yes || echo no)"
+check "the kept copy is the hook that was there" "yes" \
+  "$(grep -q some-other-tool "$hook.replaced-by-vmcav" && echo yes || echo no)"
+
 # --- what is not a project ------------------------------------------------
 #
 # Refused rather than registered empty. A link to a directory with no shared
