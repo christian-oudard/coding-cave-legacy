@@ -287,6 +287,19 @@ bridge in front of it would make the daemon unreachable by address from
 anywhere, rather than merely unreachable by the addresses crinj happens to
 deny-list.
 
+**Fixed, for the LAN half.** `start_git_daemon` passes `--listen=127.0.0.1`.
+Measured rather than assumed: without it the daemon binds `0.0.0.0:9418` and
+`[::]:9418`, every interface in both families; with it, `127.0.0.1:9418` and
+nothing else. The sanctioned route is untouched, since the relay behind vsock
+7300 is started as `--git 127.0.0.1:9418` and dials loopback.
+
+Still open, and it is the half this does not reach: the guest can still ask
+for the daemon by address, and is refused only because crinj deny-lists
+loopback. Taking it off TCP entirely -- a unix socket with the bridge in front
+-- would make it unreachable by any address rather than by the ones the guard
+happens to name. That is a change to the service plane and wants doing on its
+own.
+
 ## 8. crinj's destination guard is by spelling, not by address
 
 Severity: medium on its own; it is 7 that turned it into a demonstrated

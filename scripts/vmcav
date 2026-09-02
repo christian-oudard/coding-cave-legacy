@@ -581,8 +581,34 @@ start_git_daemon() {
     target=$(readlink -f "$REPOS/$slug.git") && serve+=("$target")
   done < <(registered_projects)
 
+  # Loopback only. Without --listen, git daemon binds every address the host
+  # has, and this daemon has receive-pack enabled.
+  #
+  # What that opened, demonstrated rather than reasoned (docs/vm-cave-red-team.md
+  # finding 7): every container on the host's bridge and every host on its LANs
+  # could read the project and push into the shared bare repo. Such a client
+  # inherits CODING_CAVE_AGENT_ID from this environment exactly as the guest
+  # does, so its pushes are stamped as the root agent and land in agent-0/* --
+  # the precise namespace a human reads with `vmcav review` and lands with
+  # `vmcav approve`. pre-receive still refuses base branches, so it could not
+  # move one directly; it could put commits where somebody was about to.
+  #
+  # It also gave the guest a second way in. crinj refuses CONNECT to loopback,
+  # which is the guard against the guest reaching back into the host, but the
+  # host owns non-loopback addresses too: CONNECT to the docker bridge address
+  # on this port returned this daemon's real ref advertisement, through the one
+  # channel whose job is to prevent that.
+  #
+  # The sanctioned route is unaffected: `cave-vm start --git 127.0.0.1:$GIT_PORT`
+  # is the relay behind vsock 7300, and it dials loopback.
+  #
+  # This closes the LAN half completely. The other half -- a guest reaching it
+  # by address at all -- wants the daemon off TCP entirely, behind a unix
+  # socket, so that it is unreachable by any address rather than by the ones
+  # crinj happens to deny.
   CODING_CAVE_AGENT_ID="${AGENT_ID:-$ROOT_AGENT_ID}" \
-  git daemon --reuseaddr --export-all --enable=upload-pack --enable=receive-pack \
+  git daemon --reuseaddr --listen=127.0.0.1 \
+    --export-all --enable=upload-pack --enable=receive-pack \
     --base-path="$dir" --port="$GIT_PORT" --detach --pid-file="$GITPID" \
     "${serve[@]}"
   # Deliberately silent about the agent id. At start there is no agent, so
