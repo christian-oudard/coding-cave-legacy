@@ -1366,6 +1366,25 @@ help_for() {
 # Build guest artifacts into out-links under $dir. Out-links are gc roots, so
 # whatever the host is prepared to boot cannot be collected out from under it.
 # $1 is where they go, the rest are the flake outputs to build.
+# Which of the guest flake's systems to build, from the machine this runs on.
+#
+# The guest is Linux either way; what changes is the architecture, because a VM
+# runs the host's. x86_64 under Cloud Hypervisor, aarch64 under vfkit on Apple
+# silicon -- and `uname -m` says arm64 there and aarch64 on Linux, which is the
+# same machine by two names.
+#
+# It was `packages.x86_64-linux` written out, which is right on the only host
+# this has ever run on and silently wrong on the other: an Apple silicon host
+# would build an x86_64 guest and hand it to a VMM that cannot boot it. The
+# flake has offered both systems for a while; only the caller was pinned.
+guest_system() {
+  case "$(uname -m)" in
+    arm64|aarch64) echo aarch64-linux ;;
+    x86_64|amd64)  echo x86_64-linux ;;
+    *) log "no guest is built for a $(uname -m) host"; return 1 ;;
+  esac
+}
+
 build_guest() {
   local dir="$1"; shift
   mkdir -p "$SEED"
@@ -1375,10 +1394,11 @@ build_guest() {
   export CODING_CAVE_CRINJ_CA; CODING_CAVE_CRINJ_CA=$(cat "$SEED/ca.pem")
   export CAVE_VM_SRC
   log "building guest from $GUEST_FLAKE"
-  local a
+  local a system
+  system=$(guest_system) || return 1
   for a in "$@"; do
     nix build --impure --extra-experimental-features 'nix-command flakes' \
-      --out-link "$dir/$a" "$GUEST_FLAKE#packages.x86_64-linux.$a" || return 1
+      --out-link "$dir/$a" "$GUEST_FLAKE#packages.$system.$a" || return 1
   done
 }
 

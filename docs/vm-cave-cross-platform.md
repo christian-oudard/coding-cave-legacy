@@ -191,7 +191,7 @@ the VM lifecycle into `cave-vm` closed five of them:
 | hardcoded `--memory size=4096M --cpus boot=4` | half of an 8 GB machine | `--memory/--cpus` flags |
 | `readlink -f`, `cp --sparse=always`, `truncate -s` | BSD variants differ | still in the script |
 | `mke2fs`, `gpg` in `require_tools` | neither present | still in the script |
-| `$BOOT/kernel/bzImage`, `packages.x86_64-linux.$a` | aarch64 | still in the script |
+| `$BOOT/kernel/bzImage`, `packages.x86_64-linux.$a` | aarch64 | the flake output is derived from `uname -m` now; the bzImage path is still in the script |
 
 What remains in the script is image creation and seed building, which is also
 where the guest-architecture problem lives, so the two should be solved

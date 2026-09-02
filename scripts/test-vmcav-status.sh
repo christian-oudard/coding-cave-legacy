@@ -119,5 +119,26 @@ out="$(do_status 2>&1)"
 check "stopped and stale" "vmcav deploy to catch it up" "$out"
 check "stopped says stopped" "vm: stopped" "$out"
 
+# --- which guest gets built ---
+#
+# The guest is Linux either way; what changes is the architecture, because a VM
+# runs the host's. This was written out as x86_64-linux, which is right on the
+# only host it has ever run on and silently wrong on the other: an Apple
+# silicon host would build an x86_64 guest and hand it to a VMM that cannot
+# boot it. `uname -m` says arm64 on macOS and aarch64 on Linux for the same
+# machine, so both have to map to the same guest.
+arch_gives() { # <label> <uname -m> <want>
+  # The arch in a local, not $2: inside the uname override $2 would be that
+  # function's own argument list, which is empty.
+  local machine="$2" got
+  got=$(uname() { echo "$machine"; }; guest_system 2>/dev/null || echo refused)
+  [ "$got" = "$3" ] && echo "ok   $1" || { echo "FAIL $1 (want $3, got $got)"; fail=1; }
+}
+
+arch_gives "an x86_64 host builds the x86_64 guest" x86_64  x86_64-linux
+arch_gives "arm64, which is what macOS says"        arm64   aarch64-linux
+arch_gives "aarch64, which is what Linux says"      aarch64 aarch64-linux
+arch_gives "and nothing else is guessed at"         riscv64 refused
+
 [ "$fail" = 0 ] && echo "test-vmcav-status: ok"
 exit "$fail"
