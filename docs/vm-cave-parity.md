@@ -60,9 +60,15 @@ can be inferred; any other has to be named.
   there: `vmcav agent remove` already asks it, unlanded work and all.
 - `rename-project`, and the re-registration of a project directory that moved
   on disk.
-- a project added while the VM is up is served only after `vmcav stop &&
-  vmcav start`, since restarting the daemon under a live guest would drop
-  whatever push is in flight
+- ~~a project added while the VM is up is served only after `vmcav stop &&
+  vmcav start`~~ **done**: `init` restarts the git daemon and the guest can
+  reach the project immediately. The reason it did not -- a restart drops
+  whatever push is in flight -- was true and was an argument for the wrong
+  conclusion, since `stop` drops those pushes too and takes every agent's
+  session with them. A push crossing at that moment fails, cave-git warns,
+  and the commit is still in the guest. A daemon that will not stop is
+  reported rather than restarted over, because the old whitelist would
+  otherwise go on serving and the new project stay invisible.
 
 ## Multiple agents in one VM
 

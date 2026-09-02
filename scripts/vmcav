@@ -643,6 +643,35 @@ start_git_daemon() {
 }
 stop_git_daemon() { [ -f "$GITPID" ] && { kill "$(cat "$GITPID")" 2>/dev/null || true; rm -f "$GITPID"; }; }
 
+# Serve a project registered since the daemon started.
+#
+# The whitelist is an argument list, fixed when the process began, so a new
+# registration is invisible to a running daemon. The advice used to be `vmcav
+# stop && vmcav start`, which reaches the daemon by taking down the VM and
+# every agent session in it -- an enormous instrument for a process that
+# restarts in milliseconds.
+#
+# What it costs is a push crossing at that moment, which fails and is retried
+# by the agent that made it: cave-git warns on a push it could not land, and
+# the commit is still in the guest. That is a smaller thing to lose than every
+# agent's terminal, and it is the same risk `stop` takes anyway.
+restart_git_daemon() {
+  stop_git_daemon
+  # Wait for it to go rather than assume: start_git_daemon returns early when
+  # it still sees one running, which would leave the old whitelist serving and
+  # the new project just as invisible, with nothing saying so.
+  # Polled rather than slept through: it is gone in milliseconds and the cap
+  # is only there so a daemon that will not die reports it instead of hanging.
+  local waited=0
+  while pgrep -f "git daemon.*--base-path=$REPOS" >/dev/null 2>&1; do
+    [ "$waited" -ge "${GIT_DAEMON_STOP_TRIES:-50}" ] && {
+      log "the old git daemon did not stop"; return 1; }
+    waited=$((waited + 1))
+    sleep 0.1
+  done
+  start_git_daemon
+}
+
 # crinj is not always on loopback: inside a cave it lives at the gateway
 # address. `cave-vm start` relays vsock 7200 here.
 CRINJ_ADDR="${CRINJ_ADDR:-127.0.0.1:$CRINJ_PORT}"
@@ -1344,9 +1373,14 @@ do_init() {
   local dir="${1:-$PWD}" slug
   [ -d "$dir" ] || { log "no such directory: $dir"; return 1; }
   slug=$(register_project "$dir") || return 1
-  log "project '$slug' registered ($(readlink -f "$REPOS/$slug.git"))"
+  log "project '$slug' registered ($(project_target "$slug"))"
   if is_running; then
-    log "  the guest sees it after a restart: vmcav stop && vmcav start"
+    if restart_git_daemon; then
+      log "  the guest can reach it now"
+    else
+      log "  the guest cannot reach it until the daemon is restarted:"
+      log "    vmcav stop && vmcav start"
+    fi
   fi
   log "  give it to an agent with: vmcav agent $slug <branch>"
 }

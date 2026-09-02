@@ -177,6 +177,42 @@ check "and it is no longer served" "alpha" \
 check "but its repo is untouched" "true" \
   "$(git -C "$betarepo" rev-parse --is-bare-repository 2>/dev/null)"
 
+# --- registering a project while the vm is up ---
+# The daemon's whitelist is an argument list fixed when it started, so a new
+# registration is invisible to it. The advice used to be to stop and start the
+# VM, which reaches the daemon by taking down every agent session with it.
+DAEMON_STOPS=0
+DAEMON_STARTS=0
+stop_git_daemon() { DAEMON_STOPS=$((DAEMON_STOPS + 1)); }
+start_git_daemon() { DAEMON_STARTS=$((DAEMON_STARTS + 1)); }
+pgrep() { return 1; }   # nothing left running once it has been stopped
+is_running() { return 0; }
+
+git init -q "$work/gamma"
+git -C "$work/gamma" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base
+# Not $( ): the assertions are about side effects on this shell.
+do_init "$work/gamma" >"$work/init.out" 2>&1 || true
+out=$(cat "$work/init.out")
+has "registering says the guest can reach it" "the guest can reach it now" "$out"
+check "and the daemon was restarted" "1" "$DAEMON_STARTS"
+check "after being stopped" "1" "$DAEMON_STOPS"
+case "$out" in
+  *"vmcav stop"*) echo "FAIL registering no longer asks for a vm restart"; fail=1 ;;
+  *) echo "ok   registering no longer asks for a vm restart" ;;
+esac
+
+# A daemon that will not stop is not quietly assumed to have: the old
+# whitelist would still be serving, and the new project just as invisible.
+DAEMON_STARTS=0
+pgrep() { return 0; }   # it never goes away
+# The production cap is five seconds of polling, which is patience this test
+# has no reason to buy.
+GIT_DAEMON_STOP_TRIES=2
+do_init "$work/gamma" >"$work/init2.out" 2>&1 || true
+check "a daemon that will not stop is not restarted over" "0" "$DAEMON_STARTS"
+has "and the fallback is named" "vmcav stop && vmcav start" "$(cat "$work/init2.out")"
+unset -f pgrep is_running stop_git_daemon start_git_daemon
+
 # --- a project whose directory moved ---
 # The registration is a symlink into the project's own checkout, so moving or
 # deleting that checkout leaves the link pointing at nothing. What made this
