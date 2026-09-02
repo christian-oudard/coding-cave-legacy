@@ -307,7 +307,8 @@ explain_unreachable_guest() {
   [ -S "$sock" ] && return 0
   log "  the socket every route to the guest uses is not there:"
   log "    $sock"
-  local old="/tmp/vmcav-$(id -u)-$(basename "$sock")"
+  local old
+  old="/tmp/vmcav-$(id -u)-$(basename "$sock")"
   if [ -S "$old" ] || [ -S "$old.vsock" ]; then
     log "  but a socket from before it moved is:"
     log "    $old"
@@ -1727,11 +1728,13 @@ do_env() {
     log "guest: unknown"
   fi
 
+  local same=""
+  [ "$guest_spec" = "$host_spec" ] && same=1
   local plan rc=0 line do_what=""
   plan=$(cave-vm env-plan --action "$action" \
            ${host_spec:+--host-has} ${reachable:+--reachable} \
            ${guest_spec:+--guest-has} ${force:+--force} \
-           $([ "$guest_spec" = "$host_spec" ] && printf -- --same)) || rc=$?
+           ${same:+--same}) || rc=$?
   while IFS= read -r line; do
     case "$line" in
       do:*) do_what="${line#do:}" ;;

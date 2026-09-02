@@ -7,6 +7,11 @@ set -uo pipefail
 [ -n "${CODING_CAVE_AGENT_ID:-}" ] || exit 0
 zero=0000000000000000000000000000000000000000
 
+# The name is kept rather than dropped: git's format is "<old> <new> <ref>",
+# and reading it back as three named fields is what makes the next line
+# obviously about the right one. This hook only records where the branch
+# ended up, so the old value has nothing to say to it.
+# shellcheck disable=SC2034  # `old` documents git's format; only `new` is used
 while read -r old new ref; do
   case "$ref" in
     refs/heads/*) ;;

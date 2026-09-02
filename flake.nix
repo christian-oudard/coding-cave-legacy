@@ -92,6 +92,25 @@
             export CGO_ENABLED=0
             go test ./... && touch $out
           '';
+        # Shellcheck over every shell file, at warning and above.
+        #
+        # Added after running it for the first time on a 2500-line script and
+        # finding two warnings, both minor. That is the useful result: the
+        # remaining shell is not sloppy by any mechanical standard, and the
+        # nine real bugs this migration turned up were semantic -- an empty
+        # string standing for both "nothing" and "could not tell" -- which no
+        # linter can see. So this is not here to find those. It is here so the
+        # shell that is left does not acquire the kind a linter *can* see while
+        # attention is on the Go.
+        shellcheck = pkgs.runCommand "shellcheck"
+          { nativeBuildInputs = [ pkgs.shellcheck ]; }
+          ''
+            cp -r ${./scripts} scripts && cp -r ${./guest} guest
+            chmod -R u+w scripts guest
+            shellcheck -S warning scripts/vmcav scripts/test-*.sh \
+              scripts/git-hooks/* guest/cave-git.sh
+            touch $out
+          '';
       } // (
         # The shell suites, which are all one shape: run a script out of
         # scripts/ against a throwaway repo. None starts a VM, opens a socket

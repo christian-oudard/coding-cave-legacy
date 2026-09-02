@@ -18,13 +18,13 @@ zero=0000000000000000000000000000000000000000
 fail=0
 
 # Build commits: A -> B -> C linear, plus D branching off A (diverges from B).
-git init -q "$work/src"; cd "$work/src"
+git init -q "$work/src"; cd "$work/src" || exit 1
 git -c user.email=t@t -c user.name=t commit --allow-empty -q -m A; A=$(git rev-parse HEAD)
 git -c user.email=t@t -c user.name=t commit --allow-empty -q -m B; B=$(git rev-parse HEAD)
 git -c user.email=t@t -c user.name=t commit --allow-empty -q -m C; C=$(git rev-parse HEAD)
 git checkout -q -b side "$A"
 git -c user.email=t@t -c user.name=t commit --allow-empty -q -m D; D=$(git rev-parse HEAD)
-cd "$work"; git clone -q --bare src bare.git; cd bare.git
+cd "$work" || exit 1; git clone -q --bare src bare.git; cd bare.git || exit 1
 git update-ref refs/heads/main "$A"
 git update-ref refs/heads/agent-0/main "$B"
 git update-ref refs/cav/agent-tip/agent-0/main "$B"

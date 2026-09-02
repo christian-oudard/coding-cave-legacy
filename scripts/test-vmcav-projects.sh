@@ -249,6 +249,7 @@ DAEMON_STARTS=0
 pgrep() { return 0; }   # it never goes away
 # The production cap is five seconds of polling, which is patience this test
 # has no reason to buy.
+# shellcheck disable=SC2034  # read by vmcav, which is sourced above
 GIT_DAEMON_STOP_TRIES=2
 do_init "$work/gamma" >"$work/init2.out" 2>&1 || true
 check "a daemon that will not stop is not restarted over" "0" "$DAEMON_STARTS"
