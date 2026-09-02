@@ -50,6 +50,8 @@ func main() {
 		vmVsockConnect(os.Args[2:])
 	case "guest":
 		guestCommand(os.Args[2:])
+	case "agents":
+		agentsCommand(os.Args[2:])
 	case "sessions":
 		sessionsCommand(os.Args[2:])
 	default:

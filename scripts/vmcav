@@ -871,66 +871,20 @@ status_report() {
   # needing an answer.
   current=$(guest_rpc health 2>/dev/null | sed -n 's/^system //p' || true)
 
-  # The guest is the register of who is running, so ask it rather than
-  # counting sockets or processes: a socket exists exactly as long as the
-  # session process holds it, so it knows an agent from its corpse.
-  local roster sessions n held asked=1
-  # Whether the guest answered at all, kept apart from what it said.
+  # The roster, rendered by cave-vm rather than re-parsed here.
   #
-  # `|| true` collapsed those two: a guest that could not be reached returned
-  # the empty string, and the empty string reads as "no agents". So a cave
-  # with a live agent in it reported "agents: none running (vmcav agent starts
-  # one)" -- a confident wrong sentence, and an invitation to start a second
-  # agent beside the one already there. Seen on a real host, where the socket
-  # was missing and the running agent was the one reading the output.
-  roster=$(guest_rpc agents 2>/dev/null) || asked=""
-  # By field rather than by substring. The line is "<id> <state> <project>
-  # <base>" and callers are meant to read it by position; ' running ' also
-  # needs a space on both sides, so an agent printed with nothing after its
-  # state would be dropped from the list of agents that are running.
-  sessions=$(printf '%s\n' "$roster" | awk '$2 == "running"' || true)
-  n=$(printf '%s\n' "$sessions" | grep -c . || true)
-  # Agents that are not running but are still here. Their worktree and home
-  # hold their id, so leaving them out described a guest as emptier than it is
-  # -- and made "no free agent id" arrive with nothing on screen to explain it.
-  held=$(printf '%s\n' "$roster" | awk '$2 == "stopped"' || true)
-  if [ -z "$asked" ]; then
-    # Not "none": nobody asked anything. An agent may well be running in
-    # there, and one of them may be reading this.
-    echo "agents: unknown (the guest is not answering)"
-  elif [ "${n:-0}" = 0 ]; then
-    echo "agents: none running (vmcav agent starts one)"
-  else
-    echo "agents: $n"
-    # What each one is working on, rather than its id and the shape of its
-    # terminal. With one agent the number was enough to identify it; with
-    # several it says nothing, and which project and branch an agent was given
-    # is the question a human is actually asking.
-    printf '%s\n' "$sessions" | while read -r id state project base; do
-      [ -n "$id" ] || continue
-      printf '  agent %s: %s @ %s (pushes land on agent-%s/%s)\n' \
-        "$id" "$project" "$base" "$id" "$base"
-      [ "$state" = "running" ] || printf '    state: %s\n' "$state"
-    done
-  fi
-  if [ -n "$held" ]; then
-    # Named, not counted, because the next thing you do with one is remove it
-    # and that takes an id. The project is often blank here: the session's
-    # environment file is on a tmpfs and the agent outlives it, which is why
-    # what is said about a stopped agent is what it still holds.
-    printf '%s\n' "$held" | while read -r id state project base; do
-      [ -n "$id" ] || continue
-      printf '  agent %s: stopped, still holding its worktree and home\n' "$id"
-      # if rather than &&, which would leave the loop body non-zero on the
-      # common case and end the run under this script's own `set -e`. A dash
-      # is how the guest prints a field it has nothing for, so it is absence
-      # rather than a project named "-".
-      if [ -n "$project" ] && [ "$project" != "-" ]; then
-        printf '    was working on: %s @ %s\n' "$project" "$base"
-      fi
-    done
-    echo "  these hold their ids (vmcav agent remove <id>, or vmcav gc)"
-  fi
+  # This was thirty lines of awk over the machine-readable form cave-vm had
+  # just printed, and both bugs it grew came from that round trip: ' running '
+  # needs a space on each side, so an agent with no project fell out of the
+  # count, and `|| true` made "the guest did not answer" and "the guest has
+  # nothing" the same empty string. Neither is expressible on the other side
+  # of this line, where an agent is a struct and reachability is its own
+  # argument.
+  #
+  # Exit 3 is "could not ask", which is not a failure of the command: status
+  # says so and carries on.
+  cave-vm agents --state "$STATE_DIR" || [ "$?" = 3 ] || true
+
   if [ "$booted" = "$current" ]; then
     echo "system: $booted"
   else

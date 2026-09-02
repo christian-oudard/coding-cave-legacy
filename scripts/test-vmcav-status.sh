@@ -141,13 +141,13 @@ arch_gives "aarch64, which is what Linux says"      aarch64 aarch64-linux
 arch_gives "and nothing else is guessed at"         riscv64 refused
 
 # --- the agent roster ---
-# An agent that stopped still holds its id: its worktree and its home are on
-# the guest's disk and outlive the session. Listing only what was running
-# described the guest as emptier than it is, and left `vmcav agent`'s "no free
-# agent id" with nothing on screen to account for it.
+# Rendered by `cave-vm agents` now, and its cases -- an unreachable guest, an
+# agent with nothing recorded, running versus held -- are a table in
+# cmd/cave-vm/agents_test.go. They were assertions here against thirty lines
+# of awk over text this program had just printed; the awk is gone, and prose
+# this suite would have to stub a binary to produce proves nothing.
 #
-# Everything a status touches is stubbed, because none of it is the subject:
-# what is under test is which agents get printed and what is said about them.
+# What stays is that status reports the VM itself, which is this side's job.
 ROSTER=""
 is_running() { return 0; }
 vm_pid() { echo 4242; }
@@ -169,27 +169,7 @@ says() { # says <label> <want-substring> <text>
   echo "FAIL $1 (wanted '$2')"; fail=1
 }
 
-# A dash is how the guest prints a field it has nothing for, which is what an
-# agent whose environment file went with the tmpfs looks like.
-ROSTER=$'0 running coding-cave vm-cave\n2 stopped widgets main\n5 stopped - -\n'
-roster_out=$(do_status 2>&1 || true)
-says "the running agent is listed"        "agent 0: coding-cave @ vm-cave"    "$roster_out"
-says "a stopped agent is listed too"      "agent 2: stopped, still holding"   "$roster_out"
-says "with what it was working on"        "was working on: widgets @ main"    "$roster_out"
-# The session's environment file is on a tmpfs and the agent outlives it, so a
-# stopped agent with nothing left to say still has to appear -- it is holding
-# an id either way, which is the whole reason for the line.
-says "one with no record still appears"   "agent 5: stopped, still holding"   "$roster_out"
-says "and how to release the id is named" "vmcav agent remove <id>"           "$roster_out"
-
-# Nothing stopped: no paragraph about ids nobody is holding.
-ROSTER=$'0 running coding-cave vm-cave\n'
-roster_out=$(do_status 2>&1 || true)
-says "the running agent is still listed" "agent 0: coding-cave" "$roster_out"
-case "$roster_out" in
-  *"still holding"*) echo "FAIL a guest with nothing stopped stays quiet"; fail=1 ;;
-  *) echo "ok   a guest with nothing stopped stays quiet" ;;
-esac
+says "status reports the vm itself" "vm: running (pid 4242" "$(do_status 2>&1 || true)"
 
 # --- what a start says to do next ---
 # A stop leaves the worktrees and homes behind, so a guest that has run before
@@ -282,18 +262,6 @@ if [ -S "$newsock" ]; then
     || { echo "FAIL diagnosed a healthy socket: $out"; fail=1; }
 fi
 
-
-# --- a guest that cannot be asked ---
-# "agents: none running" is a statement about the guest. When the guest is not
-# answering, nothing has been learned about it, and saying "none" invites you
-# to start an agent beside the one already in there.
-guest_rpc() { return 1; }
-roster_out=$(do_status 2>&1 || true)
-says "an unreachable guest is not called empty" "agents: unknown" "$roster_out"
-case "$roster_out" in
-  *"none running"*) echo "FAIL said none running to a guest it could not ask"; fail=1 ;;
-  *) echo "ok   and none running is not claimed" ;;
-esac
 
 # --- status must not fail silently ---
 # This runs under `set -e`, and every question status asks touches something
