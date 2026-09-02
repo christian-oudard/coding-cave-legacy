@@ -529,6 +529,32 @@ registered_projects() {
   done
 }
 
+# Which paths the git daemon is allowed to serve, one per line: each
+# registration and what its link resolves to. Both, because git daemon
+# compares the resolved path against what it was given -- list only the link
+# and every request is refused, list only the target and the guest cannot ask
+# for it by project name.
+#
+# A registration whose target has moved is left out rather than handed over
+# dead, and said out loud. A dead path here answers the guest with "repository
+# not found", which is indistinguishable from never having registered the
+# project, and the host said nothing either way.
+#
+# Its own function so it can be checked without starting a daemon.
+git_daemon_serve_args() {
+  local slug target
+  while IFS= read -r slug; do
+    [ -n "$slug" ] || continue
+    target=$(project_target "$slug")
+    if [ ! -d "$target" ]; then
+      log "not serving '$slug': ${target:-its target} is not there any more"
+      log "  (vmcav init <dir> to re-register it, vmcav projects to see them all)"
+      continue
+    fi
+    printf '%s\n%s\n' "$REPOS/$slug.git" "$target"
+  done < <(registered_projects)
+}
+
 start_git_daemon() {
   # The project vmcav was run from is registered on the way past, so the
   # common case -- one project, never having heard of `vmcav init` -- needs no
@@ -574,12 +600,11 @@ start_git_daemon() {
   # what it was given: list only the link and every request is refused, list
   # only the target and the guest cannot ask for it by project name.
   local -a serve=()
-  local slug target
-  while IFS= read -r slug; do
-    [ -n "$slug" ] || continue
-    serve+=("$REPOS/$slug.git")
-    target=$(readlink -f "$REPOS/$slug.git") && serve+=("$target")
-  done < <(registered_projects)
+  local path
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    serve+=("$path")
+  done < <(git_daemon_serve_args)
 
   # Loopback only. Without --listen, git daemon binds every address the host
   # has, and this daemon has receive-pack enabled.
@@ -1359,11 +1384,34 @@ do_remove_project() {
 
 # What the guest can reach, and where each one really is.
 do_projects() {
-  local slug
+  local slug target missing=0
   while IFS= read -r slug; do
     [ -n "$slug" ] || continue
-    printf '%-24s %s\n' "$slug" "$(readlink -f "$REPOS/$slug.git")"
+    # readlink, not readlink -f: a registration whose target has moved still
+    # records where it pointed, and that path is the useful half of the
+    # report. `-f` resolves to nothing there, which is how this used to print
+    # a project with an empty second column and leave it at that.
+    target=$(project_target "$slug")
+    if [ -d "$target" ]; then
+      printf '%-24s %s\n' "$slug" "$target"
+    else
+      printf '%-24s %s (missing)\n' "$slug" "${target:-?}"
+      missing=1
+    fi
   done < <(registered_projects)
+  if [ "$missing" = 1 ]; then
+    log "a project marked (missing) has moved or been deleted. The guest cannot"
+    log "  clone it and says only that the repository does not exist:"
+    log "    register it where it is now:  vmcav init <dir>"
+    log "    or forget it:                 vmcav remove-project <slug>"
+  fi
+}
+
+# Where a registration points, whether or not anything is there. Separate
+# because two callers need the same answer and one of them is deciding what to
+# serve, where a path that resolves to nothing is worse than no path at all.
+project_target() {
+  readlink "$REPOS/$1.git" 2>/dev/null || true
 }
 
 do_shell() {

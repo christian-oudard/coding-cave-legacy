@@ -166,9 +166,16 @@ the console is, and whether work is waiting. `main`'s `cav status` is a
 different command.
 
 - project and agent selectors, `--all`, an agent shown under each project it
-  can reach, unreadable projects reported rather than skipped
-- running versus stopped, ahead/behind against the cave remote, unmerged
-  commits by subject
+  can reach. ~~Unreadable projects reported rather than skipped~~ **done** for
+  the case that happens: a registration is a symlink into the project's own
+  checkout, so moving or deleting that checkout leaves it pointing at nothing.
+  `vmcav projects` marks it `(missing)` and still names where it pointed,
+  which is what you need to re-register it, and the git daemon is not given
+  the dead path -- it answered the guest with "repository not found", which
+  reads exactly like never having registered the project at all.
+- ~~running versus stopped~~ **done**; ahead/behind against the cave remote,
+  and unmerged commits by subject, are still missing. `status` prints the
+  count of pending commits per agent branch and `review` prints the subjects.
 - the maintenance it does as a side effect: mark dead agents stopped, archive
   stopped agents after 24 hours, drop already-merged shared dev branches
 - ~~`remove-agent`~~ **done** as `vmcav agent remove <id>`: it refuses a running

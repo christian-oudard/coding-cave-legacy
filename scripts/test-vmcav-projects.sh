@@ -177,4 +177,26 @@ check "and it is no longer served" "alpha" \
 check "but its repo is untouched" "true" \
   "$(git -C "$betarepo" rev-parse --is-bare-repository 2>/dev/null)"
 
+# --- a project whose directory moved ---
+# The registration is a symlink into the project's own checkout, so moving or
+# deleting that checkout leaves the link pointing at nothing. What made this
+# worth reporting is how it failed: the slug still listed, with an empty
+# second column, and the guest told only that the repository does not exist.
+moved=$(readlink "$REPOS/alpha.git")
+mv "${moved%/.coding-cave/*}" "$work/alpha-moved"
+
+out=$(do_projects 2>&1 || true)
+has "a moved project is marked missing" "(missing)" "$out"
+has "and where it used to be is still named" "$moved" "$out"
+has "and re-registering it is offered" "vmcav init <dir>" "$out"
+
+# And it is kept out of what the daemon is told to serve. A dead path there
+# answers the guest with "repository not found", which reads exactly like
+# never having registered it at all.
+served=$(git_daemon_serve_args 2>/dev/null || true)
+case "$served" in
+  *alpha*) echo "FAIL a moved project is still handed to the daemon"; fail=1 ;;
+  *) echo "ok   a moved project is not handed to the daemon" ;;
+esac
+
 exit "$fail"
