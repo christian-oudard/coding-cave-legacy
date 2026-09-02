@@ -2363,24 +2363,24 @@ EOF
 }
 
 warn_if_guest_is_behind() {
-  local was now
+  # The two revisions are read here, because both are this side's state: the
+  # record in the state directory, and what git says about the checkout. What
+  # they mean together is cave-vm's.
+  #
+  # It used to be a string comparison, and a revision carries two facts -- a
+  # commit, and whether the build's inputs were dirty. When only the dirtiness
+  # differed the strings differed, the message stripped "-dirty" from both, and
+  # it printed the same short sha twice while saying to catch up.
+  local was now out line
   was=$(cat "$STATE_DIR/deployed-from" 2>/dev/null || true)
-  now=$(guest_source_rev) || return 0
-  # Silent with no record. A guest built before anything recorded one is a
-  # one-off state that the next deploy ends, and a permanent warning about a
-  # transient condition is worse than the condition.
-  [ -n "$was" ] || return 0
-  # Dirty first, and regardless of whether the commit still matches: what was
-  # built is not in any commit, so nothing here can tell you whether the tree
-  # has moved since. Saying "up to date" would be a guess presented as a fact.
-  if [ "${was%-dirty}" != "$was" ]; then
-    log "the guest was built from uncommitted changes on $(shortrev "${was%-dirty}")"
-    log "  nothing records what those were; vmcav deploy to be sure"
-    return 0
-  fi
-  [ "$was" = "$now" ] && return 0
-  log "the guest was built from $(shortrev "$was")"
-  log "  your checkout is at $(shortrev "${now%-dirty}"); vmcav deploy to catch it up"
+  now=$(guest_source_rev) || now=""
+  out=$(cave-vm staleness --was "$was" --now "$now" 2>/dev/null) || true
+  while IFS= read -r line; do
+    [ -n "$line" ] && log "$line"
+  done <<EOF
+$out
+EOF
+  return 0
 }
 
 # What a guest boots is recorded on its own disk, in the system profile it

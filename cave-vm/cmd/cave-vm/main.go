@@ -60,6 +60,8 @@ func main() {
 		freeIDCommand(os.Args[2:])
 	case "guest-path":
 		guestPathCommand(os.Args[2:])
+	case "staleness":
+		stalenessCommand(os.Args[2:])
 	case "sessions":
 		sessionsCommand(os.Args[2:])
 	default:
