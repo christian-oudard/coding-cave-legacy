@@ -1221,6 +1221,49 @@ do_init() {
   log "  give it to an agent with: vmcav agent $slug <branch>"
 }
 
+# Stop serving a project to the guest.
+#
+# Unregistering, not deleting: the link goes and the project's own shared repo,
+# which lives inside the project and holds every agent branch pushed to it,
+# stays exactly where it was. Removing a project must not be a way to lose
+# work, and the cheapest way to guarantee that is not to touch anything that
+# holds any.
+#
+# Refused while an agent still has a worktree of it, because unregistering one
+# out from under an agent leaves that agent holding a checkout it can no longer
+# clone or fetch -- a worse state than either having the project or not. The
+# question of whether that agent is safe to remove is not re-decided here:
+# `vmcav agent remove` already asks it, unlanded work and all, so this points
+# at that rather than growing a second opinion.
+do_remove_project() {
+  local slug="${1:-}"
+  [ -n "$slug" ] || { log "remove-project needs a project name (vmcav projects)"; return 1; }
+  [ -L "$REPOS/$slug.git" ] || { log "'$slug' is not registered (vmcav projects)"; return 1; }
+
+  if is_running; then
+    local held
+    held=$(GUEST_SSH_TTY=-T guest_ssh "cave-guestd holders -project $slug" 2>/dev/null \
+      | tr -d '\r') || true
+    if [ -n "$held" ]; then
+      log "agents still have a worktree of '$slug':"
+      printf '%s\n' "$held" | while read -r id state; do
+        [ -n "$id" ] || continue
+        printf '  agent %s (%s)\n' "$id" "$state" >&2
+      done
+      log "  remove them first (vmcav agent remove <id>), which checks their work"
+      return 1
+    fi
+  else
+    log "the vm is not running, so nothing can be asked about agent worktrees"
+    log "  unregistering anyway; an agent holding one finds it gone at next start"
+  fi
+
+  rm -f "$REPOS/$slug.git"
+  log "'$slug' unregistered; its repo and history are untouched at $REPO"
+  is_running && log "  the guest stops seeing it after a restart: vmcav stop && vmcav start"
+  return 0
+}
+
 # What the guest can reach, and where each one really is.
 do_projects() {
   local slug
@@ -1284,6 +1327,8 @@ usage: vmcav <command>
   attach [id]     reattach to an agent already running (detach: ctrl-\)
   init [dir]      register a project so agents can be given it (default: cwd)
   projects        list the projects the guest can reach
+  remove-project slug
+                  stop serving a project (its repo and history are untouched)
   gc [-y]         remove agents stopped and untouched for over 24h
   shell [cmd...]  a root shell in the guest, or run cmd there
   deploy          build the guest config and activate it in the running VM
@@ -1832,6 +1877,7 @@ case "${1:-help}" in
   push) shift; do_push "$@" ;;
   init) shift; do_init "$@" ;;
   projects) shift; do_projects "$@" ;;
+  remove-project) shift; do_remove_project "$@" ;;
   gc) shift; case "${1:-}" in -y|--yes) do_gc 1 ;; *) do_gc ;; esac ;;
   shell) shift; do_shell "$@" ;;
   vsock-connect) shift; do_vsock_connect "$@" ;;

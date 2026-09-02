@@ -47,10 +47,15 @@ can be inferred; any other has to be named.
 - `-p/--project`: more than one project per agent, one dev branch and one
   worktree each. An agent is still given exactly one project when it is
   created, and the guest binds exactly that one over `/projects`.
-- `remove-project`, `rename-project`, and the re-registration of a project
-  directory that moved on disk. Removing means deleting a link, which is why
-  it is cheap; the reason it is not done is that nothing yet decides what
-  happens to agents still holding worktrees of it.
+- ~~`remove-project`~~ **done** as `vmcav remove-project <slug>`: it deletes
+  the link and nothing else, so the project's own shared repo and every agent
+  branch in it survive -- removing a project must not be a way to lose work.
+  Refused while an agent still holds a worktree of it, since unregistering one
+  out from under an agent leaves a checkout it can no longer clone or fetch.
+  What decides whether such an agent is safe to remove is not re-answered
+  there: `vmcav agent remove` already asks it, unlanded work and all.
+- `rename-project`, and the re-registration of a project directory that moved
+  on disk.
 - a project added while the VM is up is served only after `vmcav stop &&
   vmcav start`, since restarting the daemon under a live guest would drop
   whatever push is in flight

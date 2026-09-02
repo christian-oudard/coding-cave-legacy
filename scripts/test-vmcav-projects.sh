@@ -135,4 +135,46 @@ mkdir -p "$work/alpha/sub/deeper"
 check "a subdirectory resolves to its project" "alpha" \
   "$(register_project "$work/alpha/sub/deeper")"
 
+# --- unregistering a project ---
+#
+# Unregistering, not deleting. The link goes; the project's own shared repo,
+# which holds every agent branch pushed to it, stays. Removing a project must
+# not be a way to lose work.
+
+HELD=""
+is_running() { return 0; }
+guest_ssh() { case "$1" in *"cave-guestd holders"*) printf '%s' "$HELD" ;; esac; }
+
+has() { # <label> <want-substring> <got>
+  case "$3" in *"$2"*) printf 'ok   %s\n' "$1"; return 0 ;; esac
+  printf 'FAIL %s (want %s, got %s)\n' "$1" "$2" "${3:-<silence>}"; fail=1
+}
+
+has "an unregistered project is refused" "not registered" \
+  "$(do_remove_project never-registered 2>&1 || true)"
+has "and a missing name is refused" "needs a project name" \
+  "$(do_remove_project 2>&1 || true)"
+
+# An agent still holding a worktree of it. Refused, and the agents are named,
+# because the next step is removing them one at a time.
+HELD=$'2 stopped\n5 running\n'
+out=$(do_remove_project beta 2>&1 || true)
+has "a held project is refused" "agents still have a worktree" "$out"
+has "and the holders are named" "agent 5 (running)" "$out"
+has "and it points at the check that decides" "vmcav agent remove" "$out"
+check "and it is still registered" "yes" \
+  "$([ -L "$REPOS/beta.git" ] && echo yes || echo no)"
+
+# Nobody holding it: the link goes and nothing else does.
+HELD=""
+betarepo=$(readlink -f "$REPOS/beta.git")
+out=$(do_remove_project beta 2>&1 || true)
+has "an unheld project is unregistered" "unregistered" "$out"
+check "the link is gone" "no" \
+  "$([ -L "$REPOS/beta.git" ] && echo yes || echo no)"
+check "and it is no longer served" "alpha" \
+  "$(registered_projects | sort | tr '\n' ' ' | sed 's/ $//')"
+check "but its repo is untouched" "true" \
+  "$(git -C "$betarepo" rev-parse --is-bare-repository 2>/dev/null)"
+
 exit "$fail"

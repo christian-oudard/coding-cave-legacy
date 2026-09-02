@@ -157,6 +157,8 @@ func main() {
 		start(args)
 	case "env":
 		envCmd(args)
+	case "holders":
+		holders(args)
 	case "reclaimable":
 		reclaimable(args)
 	case "remove":
@@ -370,6 +372,46 @@ func reclaimable(args []string) {
 	}
 }
 
+// holders lists the agents holding a worktree of a project, and whether each
+// is running.
+//
+// Only the guest can answer it: a worktree is a directory under the worktree
+// root, which the host never sees. Unregistering a project the host is still
+// serving to an agent would leave that agent with a checkout it can no longer
+// clone or fetch, which is a worse state than either having the project or
+// not.
+func holders(args []string) {
+	fs := flag.NewFlagSet("holders", flag.ExitOnError)
+	dir := fs.String("dir", defaultDir, "directory of session sockets")
+	root := fs.String("worktrees", defaultWorktrees, "where agents' worktrees live")
+	project := fs.String("project", "", "project slug to look for (required)")
+	fs.Parse(args)
+	if *project == "" {
+		die(fmt.Errorf("holders needs -project"))
+	}
+	if err := validRef(*project); err != nil {
+		die(fmt.Errorf("project: %w", err))
+	}
+	entries, err := os.ReadDir(*root)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		id := e.Name()
+		if _, err := os.Stat(filepath.Join(*root, id, "projects", *project)); err != nil {
+			continue
+		}
+		state := "stopped"
+		if _, err := os.Stat(agentd.SocketPath(*dir, id)); err == nil {
+			state = "running"
+		}
+		fmt.Printf("%s %s\n", id, state)
+	}
+}
+
 // homeOf is where an agent's home is, or empty for one that has none. Never
 // /root: the root agent's home is the machine's, holding ssh keys and the
 // gnupg keyring, and emptying it would take the guest apart.
@@ -409,6 +451,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "       cave-guestd env seed -home DIR -user NAME")
 	fmt.Fprintln(os.Stderr, "       cave-guestd remove -id N")
 	fmt.Fprintln(os.Stderr, "       cave-guestd reclaimable [-older-than D]")
+	fmt.Fprintln(os.Stderr, "       cave-guestd holders -project SLUG")
 	os.Exit(2)
 }
 
