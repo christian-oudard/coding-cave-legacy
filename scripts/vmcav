@@ -2146,8 +2146,21 @@ do_deploy() {
   current=$( (GUEST_SSH_TTY=-T guest_ssh readlink -f /run/current-system) 2>/dev/null \
     | tr -d '\r' || true)
   if [ "$toplevel" = "$current" ]; then
-    log "the guest is already running this system"
+    # Already running it is not already deployed.
+    #
+    # This is the ordinary state after `cave-rebuild` in the guest: same
+    # source, same closure, so the running system is exactly what this would
+    # build. What is not the same is what the host boots -- an in-guest
+    # rebuild moves the running system and nothing else, which the guest's own
+    # CLAUDE.md says and which is the entire reason this command exists.
+    #
+    # Returning here left the boot pointer on the generation before, so the
+    # next `vmcav stop && vmcav start` reverted work that had been deployed,
+    # tested and reported as live. Nothing said so: the message was about the
+    # thing that was already true.
+    build_guest "$BOOT" kernel initrd toplevel || return 1
     rm -rf "$staging"
+    log "the guest was already running this system; the host now boots it too"
     return 0
   fi
 

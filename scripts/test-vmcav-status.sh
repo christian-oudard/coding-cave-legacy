@@ -212,5 +212,31 @@ says "an empty guest still says to start one" "no agents yet" "$(announce_agents
 guest_rpc() { return 1; }
 says "and so does one that cannot answer"     "no agents yet" "$(announce_agents 2>&1 || true)"
 
+# --- deploy when the guest already runs the system ---
+# The ordinary state after `cave-rebuild` in the guest: same source, same
+# closure, so the running system is what a deploy would build. What is not the
+# same is what the host boots, and an in-guest rebuild moves only the former.
+# Returning early there left the boot pointer on the generation before, so the
+# next stop/start reverted work that had been deployed and reported as live.
+BOOT="$work/boot"; mkdir -p "$BOOT"
+# To a file: do_deploy runs in a command substitution below, and a subshell's
+# assignments do not come back. This is the fifth time that has caught me in
+# this repo, which is why it is written down here rather than remembered.
+: > "$work/built"
+require_tools() { :; }
+is_running() { return 0; }
+guest_ready() { return 0; }
+build_guest() { printf '%s\n' "$1" >> "$work/built"; mkdir -p "$1"; ln -sfn /nix/store/same-toplevel "$1/toplevel"; return 0; }
+guest_ssh() { echo /nix/store/same-toplevel; return 0; }
+STATE_DIR="$work/state2"; mkdir -p "$STATE_DIR"
+
+out=$(do_deploy 2>&1 || true)
+says "an already-running system still updates the boot pointer" \
+  "the host now boots it too" "$out"
+case "$(cat "$work/built")" in
+  *"$BOOT"*) echo "ok   and the boot out-links were actually built" ;;
+  *) echo "FAIL the boot out-links were not built (built:$(cat "$work/built"))"; fail=1 ;;
+esac
+
 [ "$fail" = 0 ] && echo "test-vmcav-status: ok"
 exit "$fail"
