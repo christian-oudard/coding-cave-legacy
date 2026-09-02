@@ -1028,7 +1028,27 @@ do_agent() {
     return 1
   fi
   [ -n "$out" ] && printf '%s\n' "$out" >&2
+  restore_agent_sessions "$id"
   do_attach "$id"
+}
+
+# Put an agent's own records into its home, now that there is one.
+#
+# `start` restores the whole archive, but it runs before any agent has been
+# created -- it says so itself, on the next line -- so on a fresh or
+# reformatted guest an ordinary agent's records arrive with no home to land in.
+# The guest refuses them there rather than filing them in whichever home it has,
+# because a record in another agent's picker is labelled as that agent's work.
+#
+# This is the moment that is fixed. `cave-guestd start` has returned, so the
+# session is running, so seed-agent-home@ has run and ~/.claude exists. Only
+# this agent's records, because only this agent's home is known to be there.
+restore_agent_sessions() {
+  local id="$1" out
+  command -v cave-vm >/dev/null 2>&1 || return 0
+  out=$(cave-vm sessions -state "$STATE_DIR" -agent "$id" restore 2>&1) \
+    || log "warning: some of agent $id's records did not restore: $out"
+  return 0
 }
 
 # Stop an agent and keep what it wrote. The sync matters more here than
@@ -1507,8 +1527,12 @@ restore_sessions() {
   command -v cave-vm >/dev/null 2>&1 || return 0
   is_running || return 0
   local out
+  # A refusal here is expected rather than a fault on a guest whose homes do
+  # not exist yet: those records are placed when their agent is created, by
+  # restore_agent_sessions. Said plainly, because "did not restore" on its own
+  # reads as lost work.
   out=$(cave-vm sessions -state "$STATE_DIR" restore 2>&1) \
-    || log "warning: some session records did not restore: $out"
+    || log "records belonging to agents that do not exist yet are held back; each lands when its agent is created"
   out=$(cave-vm sessions -state "$STATE_DIR" share 2>&1) \
     || log "warning: the shared session view is incomplete: $out"
   return 0

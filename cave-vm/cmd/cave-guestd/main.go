@@ -524,9 +524,13 @@ func serve(args []string) {
 // to see root's and nobody else's.
 type transcripts_ struct {
 	homes []sessions.Local
-	// write is where a restored record lands. Restore is still addressed to
-	// the guest rather than to an agent in it, so this is the root agent's
-	// home; making it per-agent needs the request to carry an id.
+	// write is the fallback home, and the cwd and shared directory every
+	// write borrows: a home found by scanning knows whose it is and nothing
+	// else, while these two are properties of the guest's layout.
+	//
+	// Only a record that claims no agent lands here. One that names an agent
+	// goes to that agent's home or is refused, because a home that is not the
+	// writer's is the wrong answer rather than a near one.
 	write sessions.Local
 }
 
@@ -579,12 +583,28 @@ func (t transcripts_) Write(id string, r io.Reader, shared bool, agent string) e
 	}
 	home := t.write
 	if agent != "" && !shared {
+		found := false
 		for _, h := range t.homes {
 			if h.Agent == agent {
-				home = h
+				home, found = h, true
 				home.Cwd, home.SharedDir = t.write.Cwd, t.write.SharedDir
 				break
 			}
+		}
+		// Refused rather than filed somewhere else. Landing it in the default
+		// home puts one agent's history in another agent's picker, labelled as
+		// though that agent had written it -- the same misattribution the sync
+		// side was fixed for, arriving from the other direction. It is also
+		// self-concealing: Restore skips any id the guest already has, so the
+		// wrong copy is what stops the right one ever being placed.
+		//
+		// Reachable on the ordinary path. A start restores the whole archive
+		// before any agent has been created, so on a fresh or reformatted
+		// guest every ordinary agent's records arrive here with no home to go
+		// to. They are placed when the agent is created and its home exists,
+		// which is where `vmcav agent` asks for them.
+		if !found {
+			return fmt.Errorf("agent %s has no home in this guest yet, so its records have nowhere to land", agent)
 		}
 	}
 	if err := home.Write(id, r, dest, agent); err != nil {

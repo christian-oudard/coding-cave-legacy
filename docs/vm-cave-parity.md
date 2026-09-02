@@ -80,8 +80,11 @@ namespace rather than by agent, which is why that is survivable;
   an attacker. Making it hold against intent needs cave-guestd to stamp each
   connection from the peer's uid; agents are separate uids now, so the kernel
   already knows the answer.
-- one ssh identity and one `/projects/coding-cave` checkout, so two agents would
-  share a working tree
+- one ssh identity into the guest, which is a host-side fact: the session an
+  agent gets is chosen by the id passed over it, not by the key. The working
+  tree half of this is no longer true -- each agent has its own, bound over
+  `/projects` in a mount namespace of its own -- so what remains is that the
+  host authenticates to the guest rather than to an agent in it
 - `vmcav agent` attaches to "the" agent with no way to name one, though
   `cave-guestd attach <id>` underneath it already takes an id
 
@@ -231,10 +234,17 @@ read-only view that lets an agent read another's session. What is left:
   is stable and claude files transcripts by directory. What is still absent is
   the host naming one: no `--resume <agent-id/session-id>`, so a particular
   session is still chosen inside the cave by claude's own picker.
-- a restore lands in the root agent's home whichever agent it is meant for.
-  Reading is per agent now -- a record belongs to the home it was found in --
-  but a restore is addressed to the guest rather than to an agent in it, so
-  the request has no id to aim at.
+- ~~a restore lands in the root agent's home whichever agent it is meant for~~
+  **done**. The id rides in from the archive's metadata and the guest writes
+  into that agent's home. What was left after that was the ordering: `start`
+  restores the whole archive before any agent has been created, so on a fresh
+  or reformatted guest every ordinary agent's records arrived with no home to
+  land in and were filed in whichever home there was. The guest refuses them
+  there instead -- a record in another agent's picker is labelled as that
+  agent's work, and because a restore skips any id the guest already has, the
+  wrong copy was what stopped the right one ever being placed. `vmcav agent`
+  asks for that agent's records once its session is up, which is the first
+  moment its home exists.
 - nothing syncs for an agent that exits with nobody attached
 - nothing carries `~/.claude/` memory into or out of the guest, and nothing
   shares memory between agents on a project
