@@ -150,6 +150,14 @@ func pending(dir string) {
 	}
 	for _, c := range all {
 		fmt.Printf("pending: %s, %d commit%s for %s\n", c.Branch, c.Ahead, plural(c.Ahead), c.Base)
+		// Said here rather than left for approve to refuse. The branch is
+		// pending either way, so this is not a reason to leave it out; it is
+		// the extra step between wanting to land it and being able to.
+		if c.Behind > 0 {
+			fmt.Printf("  %s has moved on by %d commit%s since this forked; the agent has to rebase first\n",
+				c.Base, c.Behind, plural(c.Behind))
+			fmt.Printf("  in the guest:  git fetch host-cave && git rebase host-cave/%s\n", c.Base)
+		}
 		// What the commits are, not just how many. A count says something is
 		// waiting; the subjects are what decide whether to go and look, and
 		// they cost one `git log` against a repo already fetched.

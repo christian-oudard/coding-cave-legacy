@@ -38,6 +38,16 @@ type Candidate struct {
 	Base   string // vm-cave
 	Agent  string // 1
 	Ahead  int    // commits the base does not have
+	// Behind is commits the base has that the branch does not, which is what
+	// makes a landing something other than a fast-forward. Non-zero alongside
+	// Ahead means the two have diverged: the work is still pending, and
+	// `approve` will refuse it until the agent rebases.
+	//
+	// Worth counting rather than discovering. It becomes non-zero the moment
+	// somebody lands another agent's work, so the agent that was not landed
+	// finds out by being refused -- after deciding to approve, which is the
+	// wrong end of the operation to learn it at.
+	Behind int
 }
 
 // Ref is the branch as the checkout knows it: a remote-tracking ref, since
@@ -167,6 +177,13 @@ func Pending(dir string) ([]Candidate, error) {
 			continue
 		}
 		c.Ahead = n
+		// The same question the other way round. An error here leaves it at
+		// zero rather than dropping the candidate: being unsure whether a
+		// rebase is needed is not a reason to stop reporting work that is
+		// certainly pending.
+		if b, err := countAhead(dir, c.Ref(), c.BaseRef()); err == nil {
+			c.Behind = b
+		}
 		found = append(found, c)
 	}
 	return found, nil

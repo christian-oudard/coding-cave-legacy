@@ -182,8 +182,11 @@ different command.
   what is waiting is legible without running `review`. A count answers "is
   there anything", which is not the question you have when you come back --
   six commits called "wip" and six that rewrote the approval flow were the
-  same line. Behind-ness against the cave remote is still missing; ahead-ness
-  is the count already there.
+  same line. ~~Behind-ness against the cave remote~~ **done** too: an agent
+  branch whose base has moved on says so, with the rebase the agent needs.
+  That state arrives the moment one agent's work is landed and another's is
+  not, and it used to be discovered by deciding to approve and being refused
+  -- the wrong end of the operation to learn it at.
 - the maintenance it does as a side effect: mark dead agents stopped, archive
   stopped agents after 24 hours, drop already-merged shared dev branches
 - ~~`remove-agent`~~ **done** as `vmcav agent remove <id>`: it refuses a running

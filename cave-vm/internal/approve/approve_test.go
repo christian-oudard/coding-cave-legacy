@@ -719,3 +719,69 @@ func TestSubjectsWithNothingAhead(t *testing.T) {
 		t.Errorf("got %q, want nothing", got)
 	}
 }
+
+// A branch can be pending and unlandable at the same time. That happens the
+// moment somebody lands another agent's work: the base moves, and the agent
+// that was not landed is now behind it. Before this was counted, the only way
+// to find out was to decide to approve and be refused, which is the wrong end
+// of the operation to learn it at.
+func TestPendingCountsBehindWhenTheBaseHasMovedOn(t *testing.T) {
+	w := newWorld(t)
+	w.agentPushes(t, "2", "main", "two\n", "agent 2 work")
+
+	// Agent 1's work lands, which moves the base out from under agent 2.
+	c1 := w.resolve(t, "1")
+	if _, err := Land(w.repo, c1, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	w.fetch(t)
+	all, err := Pending(w.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got *Candidate
+	for i := range all {
+		if all[i].Agent == "2" {
+			got = &all[i]
+		}
+	}
+	if got == nil {
+		t.Fatal("agent 2's work stopped being pending because the base moved")
+	}
+	if got.Ahead == 0 {
+		t.Errorf("agent 2 is still ahead of the base: %+v", got)
+	}
+	if got.Behind == 0 {
+		t.Errorf("agent 2 should be behind the base agent 1 just moved: %+v", got)
+	}
+
+	// And the count is the reason approve refuses, so the two must agree.
+	if _, err := Land(w.repo, *got, ""); err == nil {
+		t.Error("landing a diverged branch should have been refused")
+	} else {
+		var nff *NotFastForwardError
+		if !errors.As(err, &nff) {
+			t.Errorf("refused for the wrong reason: %v", err)
+		}
+	}
+}
+
+// The ordinary case says zero rather than leaving it unset-looking: a branch
+// that forked from the current base and has not been overtaken needs nothing.
+func TestPendingIsNotBehindWhenTheBaseHasNotMoved(t *testing.T) {
+	w := newWorld(t)
+	w.fetch(t)
+	all, err := Pending(w.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) == 0 {
+		t.Fatal("expected the world's agent branch to be pending")
+	}
+	for _, c := range all {
+		if c.Behind != 0 {
+			t.Errorf("%s should not be behind: %+v", c.Branch, c)
+		}
+	}
+}
