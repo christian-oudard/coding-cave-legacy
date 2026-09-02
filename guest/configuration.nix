@@ -836,6 +836,23 @@ in
     # has to be writable by all of them and sticky so none can remove
     # another's. Under /tmp, so it is cleared on boot and recreated here.
     "d /tmp/claude 1777 root root -"
+
+    # /bin/bash, because scripts written anywhere else expect it.
+    #
+    # NixOS ships /bin/sh and /usr/bin/env and nothing more, which is correct
+    # for a machine whose software it builds. This guest is not that: it runs
+    # scripts from checkouts and from a user's own dotfiles, and `#!/bin/bash`
+    # is what most of the world writes. Such a script fails here with "bad
+    # interpreter" and exit 127 -- and hides, because running it by hand as
+    # `bash script.sh` bypasses the shebang and works, so the caller looks
+    # like the fault. The user's statusline failed exactly this way, showing
+    # nothing and logging nothing.
+    #
+    # The alternative was rewriting each script's shebang on the way in, which
+    # is what this replaces. That fights the user's own config -- it is theirs,
+    # not the cave's -- and has to be redone every time upstream changes. One
+    # symlink fixes every script from every repo instead.
+    "L+ /bin/bash - - - - ${pkgs.bash}/bin/bash"
   ];
 
   # --- Access: host comes in over ssh, then attaches to the agent daemon ---
