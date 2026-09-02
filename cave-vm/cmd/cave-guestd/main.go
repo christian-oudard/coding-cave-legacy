@@ -406,10 +406,18 @@ func occupied(args []string) {
 	dir := fs.String("dir", defaultDir, "directory of session sockets")
 	root := fs.String("worktrees", defaultWorktrees, "where agents' worktrees live")
 	fs.Parse(args)
+	for _, id := range heldIDs(*dir, *root) {
+		fmt.Println(id)
+	}
+}
 
+// heldIDs is the answer itself, shared by the subcommand above and the control
+// plane's agent listing, so that "which ids are taken" and "what is here" can
+// never disagree about the same guest.
+func heldIDs(dir, worktrees string) []string {
 	ids := map[string]bool{}
 	// A worktree is a directory named for the id that owns it.
-	if entries, err := os.ReadDir(*root); err == nil {
+	if entries, err := os.ReadDir(worktrees); err == nil {
 		for _, e := range entries {
 			if e.IsDir() {
 				ids[e.Name()] = true
@@ -418,7 +426,7 @@ func occupied(args []string) {
 	}
 	// A home counts even with no worktree beside it: the transcripts are
 	// there, and handing them to a new agent is the thing being prevented.
-	for _, h := range agentHomes(*dir, ".claude") {
+	for _, h := range agentHomes(dir, ".claude") {
 		ids[h.Agent] = true
 	}
 
@@ -427,9 +435,7 @@ func occupied(args []string) {
 		out = append(out, id)
 	}
 	sort.Strings(out)
-	for _, id := range out {
-		fmt.Println(id)
-	}
+	return out
 }
 
 // holders lists the agents holding a worktree of a project, and whether each
@@ -534,6 +540,9 @@ func serve(args []string) {
 	claude := fs.String("claude", filepath.Join(homeDir(), ".claude"), "the agent's ~/.claude")
 	cwd := fs.String("cwd", "/projects/coding-cave", "the cwd a restored session resumes in")
 	shareDir := fs.String("shared-dir", "/cave/sessions", "where every agent's records are readable")
+	// Named here too, because the roster the host reads includes the agents
+	// that are not running, and a stopped agent is a directory under this.
+	worktrees := fs.String("worktrees", defaultWorktrees, "where agents' worktrees live")
 	fs.Parse(args)
 
 	token, err := control.ReadToken(*tokenPath)
@@ -556,6 +565,7 @@ func serve(args []string) {
 		Sessions: *dir,
 		Unit:     func(id string) string { return unitFor(*dir, id) },
 		List:     agentd.List,
+		Held:     func() []string { return heldIDs(*dir, *worktrees) },
 	}
 	// The transcript half, wired here rather than inside the control package,
 	// which must not import sessions: the host's implementation of that

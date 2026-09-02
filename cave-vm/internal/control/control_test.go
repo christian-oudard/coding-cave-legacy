@@ -101,6 +101,57 @@ func TestSystemAgentsSayWhatAnAgentWasCreatedFor(t *testing.T) {
 	}
 }
 
+// An agent that stopped is still on the roster, because its worktree and its
+// home are still here and those are what hold its id. Reporting only the
+// running ones described the guest as emptier than it is, and left "no free
+// agent id" with nothing on screen to account for it.
+func TestSystemAgentsIncludeStoppedOnesThatStillHoldAnID(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "2.env"),
+		[]byte("CAVE_PROJECT=widgets\nCAVE_BASE=main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := System{
+		Sessions: dir,
+		List:     func(string) ([]string, error) { return []string{"0 running 80 24"}, nil },
+		// Agent 0 is running and also holds state; it must not be listed
+		// twice, once as itself and once as its own corpse.
+		Held: func() []string { return []string{"0", "2", "5"} },
+	}
+	got, err := s.Agents()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("want the running one and the two stopped, got %+v", got)
+	}
+	if got[0].ID != "0" || got[0].State != "running" {
+		t.Fatalf("running agent: %+v", got[0])
+	}
+	// The env file outlives the session on this guest only until the tmpfs
+	// goes, so a stopped agent says what it can and stays listed either way.
+	if got[1].ID != "2" || got[1].State != "stopped" || got[1].Project != "widgets" {
+		t.Fatalf("stopped agent with a record: %+v", got[1])
+	}
+	if got[2].ID != "5" || got[2].State != "stopped" || got[2].Project != "" {
+		t.Fatalf("stopped agent with no record: %+v", got[2])
+	}
+}
+
+// A Guest that cannot answer the question still works. Held is optional, so
+// nothing that builds a System without it starts reporting an empty roster of
+// stopped agents as though it had checked.
+func TestSystemAgentsWithoutHeld(t *testing.T) {
+	s := System{
+		Sessions: t.TempDir(),
+		List:     func(string) ([]string, error) { return []string{"0 running 80 24"}, nil },
+	}
+	got, err := s.Agents()
+	if err != nil || len(got) != 1 || got[0].State != "running" {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+}
+
 // No agents must decode as an empty list, not a null: a caller ranging over
 // the result should see nothing rather than crash, and the wire shape should
 // not change with the number of agents.

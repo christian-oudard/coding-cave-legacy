@@ -85,8 +85,12 @@ namespace rather than by agent, which is why that is survivable;
   tree half of this is no longer true -- each agent has its own, bound over
   `/projects` in a mount namespace of its own -- so what remains is that the
   host authenticates to the guest rather than to an agent in it
-- `vmcav agent` attaches to "the" agent with no way to name one, though
-  `cave-guestd attach <id>` underneath it already takes an id
+- ~~`vmcav agent` attaches to "the" agent with no way to name one~~ **done**:
+  `vmcav attach [id]` takes one, and falls back to the only running agent
+  rather than guessing when there are several. `status` now lists the stopped
+  agents too, since a stopped agent still holds its id -- its worktree and
+  home are what hold it -- and "no free agent id" was otherwise arriving with
+  an apparently empty guest on screen.
 
 ## Git flow
 
@@ -245,7 +249,11 @@ read-only view that lets an agent read another's session. What is left:
   wrong copy was what stopped the right one ever being placed. `vmcav agent`
   asks for that agent's records once its session is up, which is the first
   moment its home exists.
-- nothing syncs for an agent that exits with nobody attached
+- ~~nothing syncs for an agent that exits with nobody attached~~ **done**:
+  `status` copies transcripts out, so an unattended exit is banked whenever
+  the host is next asked anything. No timer -- "whenever you last looked"
+  bounds the staleness and needs no clock -- and it is affordable only
+  because that path is the control plane rather than ssh.
 - nothing carries `~/.claude/` memory into or out of the guest, and nothing
   shares memory between agents on a project
 - no baseline system prompt rebuilt per launch from the flags actually in

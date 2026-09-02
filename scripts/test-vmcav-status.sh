@@ -140,5 +140,56 @@ arch_gives "arm64, which is what macOS says"        arm64   aarch64-linux
 arch_gives "aarch64, which is what Linux says"      aarch64 aarch64-linux
 arch_gives "and nothing else is guessed at"         riscv64 refused
 
+# --- the agent roster ---
+# An agent that stopped still holds its id: its worktree and its home are on
+# the guest's disk and outlive the session. Listing only what was running
+# described the guest as emptier than it is, and left `vmcav agent`'s "no free
+# agent id" with nothing on screen to account for it.
+#
+# Everything a status touches is stubbed, because none of it is the subject:
+# what is under test is which agents get printed and what is said about them.
+ROSTER=""
+is_running() { return 0; }
+vm_pid() { echo 4242; }
+cave_vm() { :; }
+carry_base_to_shared() { :; }
+correct_guest_clock() { :; }
+warn_if_guest_is_behind() { :; }
+warn_if_hooks_are_foreign() { :; }
+guest_rpc() {
+  case "$1" in
+    agents) printf '%s\n' "$ROSTER" ;;
+    health) echo "system /nix/store/x" ;;
+  esac
+  return 0
+}
+
+says() { # says <label> <want-substring> <text>
+  case "$3" in *"$2"*) echo "ok   $1"; return 0 ;; esac
+  echo "FAIL $1 (wanted '$2')"; fail=1
+}
+
+# A dash is how the guest prints a field it has nothing for, which is what an
+# agent whose environment file went with the tmpfs looks like.
+ROSTER=$'0 running coding-cave vm-cave\n2 stopped widgets main\n5 stopped - -\n'
+roster_out=$(do_status 2>&1 || true)
+says "the running agent is listed"        "agent 0: coding-cave @ vm-cave"    "$roster_out"
+says "a stopped agent is listed too"      "agent 2: stopped, still holding"   "$roster_out"
+says "with what it was working on"        "was working on: widgets @ main"    "$roster_out"
+# The session's environment file is on a tmpfs and the agent outlives it, so a
+# stopped agent with nothing left to say still has to appear -- it is holding
+# an id either way, which is the whole reason for the line.
+says "one with no record still appears"   "agent 5: stopped, still holding"   "$roster_out"
+says "and how to release the id is named" "vmcav agent remove <id>"           "$roster_out"
+
+# Nothing stopped: no paragraph about ids nobody is holding.
+ROSTER=$'0 running coding-cave vm-cave\n'
+roster_out=$(do_status 2>&1 || true)
+says "the running agent is still listed" "agent 0: coding-cave" "$roster_out"
+case "$roster_out" in
+  *"still holding"*) echo "FAIL a guest with nothing stopped stays quiet"; fail=1 ;;
+  *) echo "ok   a guest with nothing stopped stays quiet" ;;
+esac
+
 [ "$fail" = 0 ] && echo "test-vmcav-status: ok"
 exit "$fail"

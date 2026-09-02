@@ -716,9 +716,18 @@ do_status() {
   # The guest is the register of who is running, so ask it rather than
   # counting sockets or processes: a socket exists exactly as long as the
   # session process holds it, so it knows an agent from its corpse.
-  local sessions n
-  sessions=$(guest_rpc agents 2>/dev/null | grep ' running ' || true)
+  local roster sessions n held
+  roster=$(guest_rpc agents 2>/dev/null || true)
+  # By field rather than by substring. The line is "<id> <state> <project>
+  # <base>" and callers are meant to read it by position; ' running ' also
+  # needs a space on both sides, so an agent printed with nothing after its
+  # state would be dropped from the list of agents that are running.
+  sessions=$(printf '%s\n' "$roster" | awk '$2 == "running"' || true)
   n=$(printf '%s\n' "$sessions" | grep -c . || true)
+  # Agents that are not running but are still here. Their worktree and home
+  # hold their id, so leaving them out described a guest as emptier than it is
+  # -- and made "no free agent id" arrive with nothing on screen to explain it.
+  held=$(printf '%s\n' "$roster" | awk '$2 == "stopped"' || true)
   if [ "${n:-0}" = 0 ]; then
     echo "agents: none running (vmcav agent starts one)"
   else
@@ -733,6 +742,24 @@ do_status() {
         "$id" "$project" "$base" "$id" "$base"
       [ "$state" = "running" ] || printf '    state: %s\n' "$state"
     done
+  fi
+  if [ -n "$held" ]; then
+    # Named, not counted, because the next thing you do with one is remove it
+    # and that takes an id. The project is often blank here: the session's
+    # environment file is on a tmpfs and the agent outlives it, which is why
+    # what is said about a stopped agent is what it still holds.
+    printf '%s\n' "$held" | while read -r id state project base; do
+      [ -n "$id" ] || continue
+      printf '  agent %s: stopped, still holding its worktree and home\n' "$id"
+      # if rather than &&, which would leave the loop body non-zero on the
+      # common case and end the run under this script's own `set -e`. A dash
+      # is how the guest prints a field it has nothing for, so it is absence
+      # rather than a project named "-".
+      if [ -n "$project" ] && [ "$project" != "-" ]; then
+        printf '    was working on: %s @ %s\n' "$project" "$base"
+      fi
+    done
+    echo "  these hold their ids (vmcav agent remove <id>, or vmcav gc)"
   fi
   if [ "$booted" = "$current" ]; then
     echo "system: $booted"
