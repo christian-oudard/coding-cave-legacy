@@ -131,7 +131,14 @@ check "a subdirectory resolves to its project" "alpha" \
 
 HELD=""
 is_running() { return 0; }
-guest_ssh() { case "$1" in *"cave-guestd holders"*) printf '%s' "$HELD" ;; esac; }
+UNREACHABLE=""
+guest_ssh() {
+  # A guest that does not answer is not a guest that answered "nobody": those
+  # were the same empty string, and empty meant nobody held the project.
+  [ -n "$UNREACHABLE" ] && return 255
+  case "$1" in *"cave-guestd holders"*) printf '%s' "$HELD" ;; esac
+  return 0
+}
 
 has() { # <label> <want-substring> <got>
   case "$3" in *"$2"*) printf 'ok   %s\n' "$1"; return 0 ;; esac
@@ -152,6 +159,17 @@ has "and the holders are named" "agent 5 (running)" "$out"
 has "and it points at the check that decides" "vmcav agent remove" "$out"
 check "and it is still registered" "yes" \
   "$([ -L "$REPOS/beta.git" ] && echo yes || echo no)"
+
+# A guest that is running and will not answer. Unregistering then could take a
+# worktree out from under an agent that has one, so it is refused -- and the
+# project stays registered, which is the half that matters.
+UNREACHABLE=1
+out=$(do_remove_project beta 2>&1 || true)
+has "an unreachable guest stops the unregister" "did not answer" "$out"
+has "and says how to proceed deliberately" "stop the vm first" "$out"
+check "and the project is still registered" "yes" \
+  "$([ -L "$REPOS/beta.git" ] && echo yes || echo no)"
+UNREACHABLE=""
 
 # Nobody holding it: the link goes and nothing else does.
 HELD=""

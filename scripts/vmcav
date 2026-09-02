@@ -1283,8 +1283,15 @@ restore_agent_sessions() {
 # not a guess; two of them is, and acting on the wrong agent is not something
 # you find out about until later.
 the_only_running_agent() {
-  local running
-  running=$(guest_rpc agents 2>/dev/null | awk '$2 == "running" {print $1}')
+  # Asked, then read. A guest that did not answer has not said it is empty,
+  # and "no agent is running (vmcav agent starts one)" is an invitation to
+  # start one beside whatever is already in there.
+  local running roster
+  roster=$(guest_rpc agents 2>/dev/null) || {
+    log "the guest is not answering, so which agents are running is unknown"
+    return 1
+  }
+  running=$(printf '%s\n' "$roster" | awk '$2 == "running" {print $1}')
   case $(printf '%s\n' "$running" | grep -c .) in
     0) log "no agent is running (vmcav agent starts one)"; return 1 ;;
     1) printf '%s' "$running" ;;
@@ -1505,9 +1512,25 @@ do_remove_project() {
   [ -L "$REPOS/$slug.git" ] || { log "'$slug' is not registered (vmcav projects)"; return 1; }
 
   if is_running; then
-    local held
+    # Whether the guest answered, kept apart from what it said.
+    #
+    # `|| true` made those the same empty string, and empty reads as "nobody
+    # holds it" -- so a guest that was running and unreachable took the path
+    # meant for a guest that had answered "nobody", and unregistered a project
+    # an agent may have had a worktree of. The branch below already gets this
+    # right for a stopped VM, where it says nothing can be asked and proceeds
+    # deliberately; a running one that will not answer is the case that had no
+    # sentence of its own.
+    local held rc=0
     held=$(GUEST_SSH_TTY=-T guest_ssh "cave-guestd holders -project $slug" 2>/dev/null \
-      | tr -d '\r') || true
+      | tr -d '\r') || rc=$?
+    if [ "$rc" != 0 ]; then
+      log "the guest is running but did not answer, so whether an agent holds"
+      log "  '$slug' is unknown. Unregistering now could take a worktree out"
+      log "  from under an agent that has one."
+      log "  to unregister it regardless, stop the vm first:  vmcav stop"
+      return 1
+    fi
     if [ -n "$held" ]; then
       log "agents still have a worktree of '$slug':"
       printf '%s\n' "$held" | while read -r id state; do
