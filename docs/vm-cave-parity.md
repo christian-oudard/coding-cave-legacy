@@ -212,14 +212,26 @@ machine rather than a mount namespace:
   `main` leaves it behind, which it gets away with because a cave home is
   discarded and a guest home survives every `reformat`.
 
-What is left is the host half, and it is all of the crossing:
+What is left is the host half. The crossing itself now exists:
 
-- `cave.nix` plus its siblings synced host to guest, and the hash-based skip
-  that pushes only when it changed. The guest-side stamp exists and is what
-  the sync would drive; nothing carries the files in yet. The design's answer
-  is a control-plane endpoint, which is the plane that already exists.
-- `cav env build`, `env update [input]`, `env metadata`, and `env pull` to
-  bring an agent's edits back out to the host's `cave.nix`
+- ~~`cave.nix` synced host to guest~~ and back, as `vmcav env show|pull|push`.
+  The host's copy sits beside `config.toml`, which is where `main` keeps it,
+  so a dotfiles repo that already manages one manages this. Both directions,
+  because neither side is the author -- a person edits it on the host with
+  the rest of their configuration, an agent edits it in the guest because
+  that is where it can be built -- so each direction refuses to overwrite a
+  spec that differs unless told twice, and a push builds rather than leaving
+  a broken spec for the next session start to find.
+- its **siblings** do not cross yet: one file does. A `cave.nix` that imports
+  a second file beside it pushes as a spec that cannot build.
+- the hash-based skip that pushes only when it changed. Comparing the two
+  files covers the same ground for one file and needs no stamp; the guest's
+  stamp still decides whether a *build* is needed, which is the expensive
+  half.
+- over ssh rather than the control-plane endpoint the design names. That is
+  the right plane for what is asked on every command; this is asked when
+  somebody changes their environment.
+- `cav env update [input]` and `env metadata`
 - the guest keeping its copy in a git repository of its own, so "has the guest
   changed" is a question git answers
 - `cav init` offering to create one

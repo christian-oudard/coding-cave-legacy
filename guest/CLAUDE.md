@@ -93,9 +93,17 @@ And a `path:` flake input pointing at somewhere on the host does not resolve,
 because there is no host filesystem in here; use a git URL, which reaches the
 proxy.
 
-Nothing syncs this to or from the host yet: the host half of phase 9 is
-unbuilt, so a spec written in here lives in here. Committing the *design* of
-an environment belongs in the repo; the spec file itself is guest state.
+A spec written in here no longer lives only in here. On the host,
+`vmcav env pull` takes this guest's `cave.nix` out to `~/.config/coding-cave/`
+and `vmcav env push` sends that one in; each refuses to overwrite a spec that
+differs unless told twice, because neither side is the author. So an
+environment you work out in here is worth pulling out and committing wherever
+the dotfiles live -- otherwise it is one `reformat` from never having existed.
+
+One file crosses, not a directory. A `cave.nix` that imports a second file
+beside it will arrive on the host without it, and push back as a spec that
+cannot build. Committing the *design* of an environment belongs in the repo;
+the spec file itself is configuration.
 
 If you are the root agent, you can rebuild the system you are running with
 

@@ -1383,6 +1383,102 @@ do_remove_project() {
 }
 
 # What the guest can reach, and where each one really is.
+# The cave environment's spec, on this side. Beside config.toml, which is
+# where `main` keeps it too, so a dotfiles repo that already manages one
+# manages this without being told anything new.
+ENV_SPEC="${CODING_CAVE_ENV:-$(dirname "$CONFIG")/cave.nix}"
+# And on the guest's side, where cave-env builds it from.
+GUEST_ENV_SPEC=/var/lib/coding-cave/env/cave.nix
+
+# Carry the environment spec across the boundary, in whichever direction is
+# asked for.
+#
+# Until now it could not cross at all. The guest half of phase 9 builds an
+# environment from `/var/lib/coding-cave/env/cave.nix` and `cave-env edit`
+# writes it, so a spec written in a cave lived in that cave and nowhere else
+# -- one `reformat` from never having existed, and impossible to commit to the
+# dotfiles repo that manages every other machine's configuration.
+#
+# Two directions rather than one, because neither side is the author. A person
+# edits this on the host with the rest of their configuration; an agent edits
+# it in the guest because that is where it can be built and tried. So `pull`
+# takes what the guest has and `push` sends what the host has, and each
+# refuses to overwrite a file that differs unless told twice.
+#
+# Over ssh rather than the control plane. The plane exists and is cheaper, but
+# it is worth an endpoint only for what is asked on every command; this is
+# asked when somebody changes their environment. The host names both paths, so
+# nothing the guest says decides where a byte lands.
+do_env() {
+  local action="${1:-show}" force="${2:-}"
+  case "$action" in
+    pull|push|show) ;;
+    *) log "usage: vmcav env [show|pull|push] [--force]"; return 1 ;;
+  esac
+  is_running || { log "the vm is not running (vmcav start)"; return 1; }
+
+  local guest_spec host_spec="" rc=0
+  guest_spec=$(GUEST_SSH_TTY=-T guest_ssh "cat $GUEST_ENV_SPEC 2>/dev/null") || rc=$?
+  [ -f "$ENV_SPEC" ] && host_spec=$(cat "$ENV_SPEC")
+
+  case "$action" in
+    show)
+      log "host:  $ENV_SPEC${host_spec:+ ($(printf '%s' "$host_spec" | wc -l) lines)}"
+      log "guest: $GUEST_ENV_SPEC${guest_spec:+ ($(printf '%s' "$guest_spec" | wc -l) lines)}"
+      if [ -z "$guest_spec" ] && [ -z "$host_spec" ]; then
+        log "neither side has one; the cave defaults apply"
+      elif [ "$guest_spec" = "$host_spec" ]; then
+        log "they agree"
+      else
+        log "they differ: vmcav env pull (keep the guest's) or push (keep this one)"
+      fi
+      return 0
+      ;;
+    pull)
+      [ -n "$guest_spec" ] || { log "the guest has no $GUEST_ENV_SPEC to pull"; return 1; }
+      if [ "$guest_spec" = "$host_spec" ]; then
+        log "already the same; nothing to pull"
+        return 0
+      fi
+      if [ -n "$host_spec" ] && [ "$force" != "--force" ]; then
+        log "$ENV_SPEC differs from the guest's and would be overwritten"
+        log "  keep it and send it instead:  vmcav env push"
+        log "  take the guest's anyway:      vmcav env pull --force"
+        return 1
+      fi
+      mkdir -p "$(dirname "$ENV_SPEC")"
+      printf '%s\n' "$guest_spec" > "$ENV_SPEC"
+      log "pulled the guest's spec to $ENV_SPEC"
+      log "  it is configuration; commit it wherever your dotfiles live"
+      ;;
+    push)
+      [ -n "$host_spec" ] || { log "there is no $ENV_SPEC to push"; return 1; }
+      if [ "$guest_spec" = "$host_spec" ]; then
+        log "already the same; nothing to push"
+        return 0
+      fi
+      if [ -n "$guest_spec" ] && [ "$force" != "--force" ]; then
+        log "the guest's spec differs from this one and would be overwritten"
+        log "  keep the guest's instead:  vmcav env pull"
+        log "  overwrite it anyway:       vmcav env push --force"
+        return 1
+      fi
+      printf '%s\n' "$host_spec" \
+        | GUEST_SSH_TTY=-T guest_ssh "cat > $GUEST_ENV_SPEC" || {
+          log "could not write the spec into the guest"; return 1; }
+      log "pushed $ENV_SPEC into the guest"
+      # Built here rather than left for the next session, because a spec that
+      # does not build is worth finding out about while you are still looking
+      # at the command that sent it.
+      GUEST_SSH_TTY=-T guest_ssh "cave-env build" || {
+        log "the spec is in the guest but did not build; fix it and retry:"
+        log "  vmcav shell, then cave-env edit"
+        return 1; }
+      ;;
+  esac
+  return 0
+}
+
 do_projects() {
   local slug target missing=0
   while IFS= read -r slug; do
@@ -1471,6 +1567,9 @@ usage: vmcav <command>
   remove-project slug
                   stop serving a project (its repo and history are untouched)
   gc [-y]         remove agents stopped and untouched for over 24h
+  env [show|pull|push]
+                  the cave environment's spec (cave.nix): what each side has,
+                  or carry it across (--force to overwrite one that differs)
   shell [cmd...]  a root shell in the guest, or run cmd there
   deploy          build the guest config and activate it in the running VM
   push [branch]   send this checkout's branch to the shared repo the agent
@@ -2081,6 +2180,7 @@ case "${1:-help}" in
   projects) shift; do_projects "$@" ;;
   remove-project) shift; do_remove_project "$@" ;;
   gc) shift; case "${1:-}" in -y|--yes) do_gc 1 ;; *) do_gc ;; esac ;;
+  env) shift; do_env "$@" ;;
   shell) shift; do_shell "$@" ;;
   vsock-connect) shift; do_vsock_connect "$@" ;;
   version|--version|-V) do_version ;;
