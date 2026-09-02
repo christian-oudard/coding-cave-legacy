@@ -85,3 +85,62 @@ func TestNothingHeldSaysNothingAboutIds(t *testing.T) {
 		t.Errorf("a guest holding nothing talked about ids: %q", got)
 	}
 }
+
+func renderStart(agents []control.Agent, reachable bool) string {
+	var b strings.Builder
+	renderAfterStart(&b, agents, reachable)
+	return b.String()
+}
+
+// A stop leaves an agent's worktree and home behind, so a guest that has run
+// before comes back holding agents. "no agents yet" there is the sentence that
+// makes somebody create a second agent beside the one holding their
+// conversation.
+func TestAfterStartNamesWhatTheGuestHolds(t *testing.T) {
+	got := renderStart([]control.Agent{
+		{ID: "0", State: "running", Project: "coding-cave", Base: "vm-cave"},
+		{ID: "2", State: "stopped", Project: "widgets", Base: "main"},
+		{ID: "5", State: "stopped", Project: "-", Base: "-"},
+	}, true)
+
+	for _, want := range []string{
+		"this guest still holds:",
+		"agent 2: widgets @ main",
+		"agent 5",
+		"vmcav attach <id>",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	// The running agent is not something to bring back.
+	if strings.Contains(got, "agent 0") {
+		t.Errorf("a running agent was listed as held:\n%s", got)
+	}
+	if strings.Contains(got, "no agents yet") {
+		t.Errorf("a guest holding agents was called empty:\n%s", got)
+	}
+	// And a dash is absence, not a project called "-".
+	if strings.Contains(got, "agent 5: - @ -") {
+		t.Errorf("a dash was printed as a project:\n%s", got)
+	}
+}
+
+func TestAfterStartOnAnEmptyAndAnUnreachableGuest(t *testing.T) {
+	if got := renderStart(nil, true); !strings.Contains(got, "no agents yet") {
+		t.Errorf("an empty guest should say to start one: %q", got)
+	}
+	// Only running agents is still "nothing held": there is nothing to bring
+	// back, because it is already here.
+	running := []control.Agent{{ID: "0", State: "running"}}
+	if got := renderStart(running, true); !strings.Contains(got, "no agents yet") {
+		t.Errorf("a guest with only running agents holds nothing: %q", got)
+	}
+	got := renderStart(nil, false)
+	if !strings.Contains(got, "not answering") {
+		t.Errorf("an unreachable guest should say so: %q", got)
+	}
+	if strings.Contains(got, "no agents yet") {
+		t.Errorf("an unreachable guest was called empty: %q", got)
+	}
+}

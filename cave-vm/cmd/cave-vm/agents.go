@@ -88,13 +88,59 @@ func orUnknown(s string) string {
 	return s
 }
 
+
+// renderAfterStart is what `vmcav start` says once the guest is up: not the
+// roster, but what to do next, which is a different sentence depending on
+// whether the guest is holding anything.
+//
+// A stop leaves an agent's worktree and home behind -- they are what hold its
+// id -- so a guest that has run before comes back holding agents. Saying "no
+// agents yet" there is the sentence that makes somebody create a second agent
+// beside the one that has their conversation in it.
+func renderAfterStart(w io.Writer, agents []control.Agent, reachable bool) {
+	if !reachable {
+		// The same distinction the roster makes. A guest that cannot answer
+		// has not told us it is empty.
+		fmt.Fprintln(w, "cannot tell what this guest holds; it is not answering")
+		return
+	}
+	var held []control.Agent
+	for _, a := range agents {
+		if a.State != "running" {
+			held = append(held, a)
+		}
+	}
+	if len(held) == 0 {
+		fmt.Fprintln(w, "no agents yet; start one:  vmcav agent [project] [branch]")
+		return
+	}
+	fmt.Fprintln(w, "this guest still holds:")
+	for _, a := range held {
+		if p := orUnknown(a.Project); p != "?" {
+			fmt.Fprintf(w, "  agent %s: %s @ %s\n", a.ID, p, orUnknown(a.Base))
+		} else {
+			fmt.Fprintf(w, "  agent %s\n", a.ID)
+		}
+	}
+	fmt.Fprintln(w, "bring one back:  vmcav attach <id>")
+	fmt.Fprintln(w, "or start another:  vmcav agent [project] [branch]")
+}
+
 // agentsCommand is `cave-vm agents`, the roster section on stdout.
 //
 // Exit status says whether the guest answered, so the shell can still tell the
 // two apart without parsing the prose back.
 func agentsCommand(args []string) {
 	v := vmFlagSet("agents")
+	// What `start` says when it has finished, which is about what to do next
+	// rather than about what is running.
+	afterStart := v.fs.Bool("after-start", false, "say what to do next, as `start` does")
 	v.parse(args)
+
+	render := renderAgents
+	if *afterStart {
+		render = renderAfterStart
+	}
 
 	tok, err := control.EnsureToken(controlToken(v.state))
 	if err != nil {
@@ -103,8 +149,8 @@ func agentsCommand(args []string) {
 	c := control.NewClient(guestDialer(v.paths()), tok)
 	agents, err := c.Agents()
 	if err != nil {
-		renderAgents(os.Stdout, nil, false)
+		render(os.Stdout, nil, false)
 		os.Exit(3)
 	}
-	renderAgents(os.Stdout, agents, true)
+	render(os.Stdout, agents, true)
 }

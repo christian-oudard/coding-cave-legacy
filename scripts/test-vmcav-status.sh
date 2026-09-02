@@ -172,35 +172,10 @@ says() { # says <label> <want-substring> <text>
 says "status reports the vm itself" "vm: running (pid 4242" "$(do_status 2>&1 || true)"
 
 # --- what a start says to do next ---
-# A stop leaves the worktrees and homes behind, so a guest that has run before
-# comes back holding agents. "no agents yet" there is the sentence that makes
-# somebody create a second agent beside the one holding their conversation.
-ROSTER=$'2 stopped widgets main\n5 stopped - -\n'
-start_out=$(announce_agents 2>&1 || true)
-says "the held agents are named"      "agent 2: widgets @ main" "$start_out"
-says "including one with no record"   "agent 5"                 "$start_out"
-says "and how to get back into one"   "vmcav attach <id>"       "$start_out"
-case "$start_out" in
-  *"no agents yet"*) echo "FAIL a guest holding agents does not say it has none"; fail=1 ;;
-  *) echo "ok   a guest holding agents does not say it has none" ;;
-esac
-
-# A guest that really is empty, and an older one that cannot answer: both say
-# what this always said.
-ROSTER=""
-says "an empty guest still says to start one" "no agents yet" "$(announce_agents 2>&1 || true)"
-
-# A guest that cannot answer has not said it is empty. This used to report
-# "no agents yet" to a guest full of them, which is how somebody starts a
-# second agent beside the first -- and it was asserted here, so the test
-# agreed with the bug.
-guest_rpc() { return 1; }
-out=$(announce_agents 2>&1 || true)
-says "one that cannot answer says so instead" "not answering" "$out"
-case "$out" in
-  *"no agents yet"*) echo "FAIL an unreachable guest was called empty"; fail=1 ;;
-  *) echo "ok   and does not call it empty" ;;
-esac
+# Rendered by `cave-vm agents --after-start` now. Its cases -- a guest holding
+# agents, an empty one, one that cannot answer, one with only running agents --
+# are a table in cmd/cave-vm/agents_test.go, where they are a slice rather
+# than a stubbed guest_rpc and a shell function reading its own output back.
 
 # --- deploy when the guest already runs the system ---
 # The ordinary state after `cave-rebuild` in the guest: same source, same
