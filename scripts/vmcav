@@ -34,6 +34,13 @@ SHARED="$REPO/.coding-cave/cave-shared.git"
 # guest clones git://127.0.0.1/<slug>.git, so the daemon serves the shared repo
 # under that name too: a project is a name an agent is given, not a constant.
 SLUG="$(basename "$REPO")"
+
+# Where each project's shared repo is, given its checkout, and what it is
+# called. Two rules that were spelled out inline in half a dozen places and
+# are now said once, because a second project makes them functions of a path
+# rather than facts about the one repo vmcav was run from.
+shared_repo_of() { printf '%s/.coding-cave/cave-shared.git' "$1"; }
+slug_of() { basename "$1"; }
 # The agent that is root in the guest holds a reserved id rather than a low
 # one. It is not one of the agents a human created: it exists before any
 # project is assigned, it redeploys the system the others run in, and being
@@ -77,6 +84,14 @@ GUESTCRED="$STATE_DIR/guest-credentials.json"
 GUESTCFG="$STATE_DIR/guest-claude.json"
 GITPID="$STATE_DIR/git-daemon.pid"
 GPGPID="$STATE_DIR/gpg-broker.pid"
+# The projects the guest can reach, as a directory of <slug>.git symlinks into
+# each project's own shared repo. This is the git daemon's base-path, and it
+# is also the registry: a project is registered exactly when a link to it is
+# here, so there is no list to keep in step with the filesystem and no way for
+# the two to disagree. It cannot live inside a project, which is where the
+# shared repo sits, because a directory inside one project cannot serve
+# another.
+REPOS="$STATE_DIR/repos"
 # The VMM and the whole vsock service plane belong to `cave-vm`, which is where
 # the difference between a Linux host (Cloud Hypervisor) and an Apple silicon
 # host (vfkit) lives. Socket paths are its business too, so ask rather than
@@ -375,17 +390,19 @@ stage_pubring() {
 # the same one the container caves use, so one project has one place agent
 # work lands and one set of branches to review.
 ensure_shared_repo() {
-  if [ ! -d "$SHARED" ]; then
-    log "creating the shared repo at $SHARED"
-    mkdir -p "$(dirname "$SHARED")"
-    git clone --bare --quiet "$REPO" "$SHARED"
+  local repo="${1:-$REPO}" shared
+  shared=$(shared_repo_of "$repo")
+  if [ ! -d "$shared" ]; then
+    log "creating the shared repo at $shared"
+    mkdir -p "$(dirname "$shared")"
+    git clone --bare --quiet "$repo" "$shared"
     # Bare clones inherit origin; the shared repo is nobody's client.
-    git -C "$SHARED" remote remove origin 2>/dev/null || true
+    git -C "$shared" remote remove origin 2>/dev/null || true
   fi
   # The other direction: review and approve read the agent's branches through
   # this checkout's remote-tracking refs, so the repo that has them needs a
   # name here.
-  ensure_cave_remote
+  ensure_cave_remote "$repo"
 }
 
 # Hooks are shims that exec a helper by name from PATH, so nothing here bakes
@@ -398,10 +415,12 @@ ensure_shared_repo() {
 # every push it takes. Replacing them with ours would swap a live guard for an
 # equivalent-by-design one that has never seen those push paths.
 install_shared_hooks() {
-  local h="$SHARED/hooks"
+  local shared h
+  shared=$(shared_repo_of "${1:-$REPO}")
+  h="$shared/hooks"
   mkdir -p "$h"
   [ -e "$h/pre-receive" ] && return 0
-  log "installing receive hooks in $SHARED"
+  log "installing receive hooks in $shared"
   printf '#!/bin/sh\nexec cave-vm-git-pre-receive "$@"\n' > "$h/pre-receive"
   printf '#!/bin/sh\nexec cave-vm-git-post-receive "$@"\n' > "$h/post-receive"
   chmod 755 "$h/pre-receive" "$h/post-receive"
@@ -454,14 +473,45 @@ do_push() {
   log "$branch -> shared repo ($(git -C "$SHARED" rev-parse --short "$branch"))"
 }
 
+# Make a project reachable from the guest, and say so by linking it into the
+# served directory. Idempotent: run it on a project already registered and it
+# refreshes the link and returns.
+#
+# <slug>.git rather than the shared repo's own name, because the guest asks
+# for a project by name -- git://127.0.0.1/<slug>.git -- and a project is a
+# name an agent is given rather than a path it has to know. A symlink rather
+# than a move: the shared repo is the same one the container caves use, and
+# they know it by its own path inside the project.
+register_project() {
+  local repo="${1:-$REPO}" slug
+  git -C "$repo" rev-parse --show-toplevel >/dev/null 2>&1 || {
+    log "$repo is not a git checkout"; return 1; }
+  repo=$(git -C "$repo" rev-parse --show-toplevel)
+  slug=$(slug_of "$repo")
+  ensure_shared_repo "$repo" || return 1
+  install_shared_hooks "$repo" || return 1
+  mkdir -p "$REPOS"
+  ln -sfn "$(shared_repo_of "$repo")" "$REPOS/$slug.git"
+  printf '%s' "$slug"
+}
+
+# Every project the guest can reach, by slug.
+registered_projects() {
+  [ -d "$REPOS" ] || return 0
+  local link
+  for link in "$REPOS"/*.git; do
+    [ -L "$link" ] || continue
+    basename "$link" .git
+  done
+}
+
 start_git_daemon() {
-  ensure_shared_repo
-  install_shared_hooks
-  local dir; dir=$(dirname "$SHARED")
-  # <slug>.git beside the shared repo, so the guest asks for the project by
-  # name. A symlink rather than a rename: the shared repo is the same one the
-  # container caves use, and they know it by its own path.
-  [ -e "$dir/$SLUG.git" ] || ln -s "$(basename "$SHARED")" "$dir/$SLUG.git"
+  # The project vmcav was run from is registered on the way past, so the
+  # common case -- one project, never having heard of `vmcav init` -- needs no
+  # ceremony. Others are added by `vmcav init` and persist in the served
+  # directory, so a restart keeps serving them.
+  register_project "$REPO" >/dev/null || return 1
+  local dir="$REPOS"
   pgrep -f "git daemon.*--base-path=$dir" >/dev/null 2>&1 && return
   # Who the daemon attributes a push to. Not the daemon's own identity: it is
   # what the daemon asserts about whoever connected, injected as env so
@@ -495,14 +545,26 @@ start_git_daemon() {
   # exists before anybody creates another and the only one that has ever
   # pushed through here. That is a statement about today, not a design: the
   # moment a second agent pushes, this stamp is wrong for one of them.
+  # The whitelist, one entry per registered project and one for what its link
+  # resolves to. Both, because git daemon compares the resolved path against
+  # what it was given: list only the link and every request is refused, list
+  # only the target and the guest cannot ask for it by project name.
+  local -a serve=()
+  local slug target
+  while IFS= read -r slug; do
+    [ -n "$slug" ] || continue
+    serve+=("$REPOS/$slug.git")
+    target=$(readlink -f "$REPOS/$slug.git") && serve+=("$target")
+  done < <(registered_projects)
+
   CODING_CAVE_AGENT_ID="${AGENT_ID:-$ROOT_AGENT_ID}" \
   git daemon --reuseaddr --export-all --enable=upload-pack --enable=receive-pack \
     --base-path="$dir" --port="$GIT_PORT" --detach --pid-file="$GITPID" \
-    "$SHARED" "$dir/$SLUG.git"
+    "${serve[@]}"
   # Deliberately silent about the agent id. At start there is no agent, so
   # announcing who pushes get attributed to describes nobody; it is said when
   # an agent is created, which is when it becomes true.
-  log "git daemon serving $SHARED on :$GIT_PORT"
+  log "git daemon serving $(registered_projects | tr '\n' ' ')on :$GIT_PORT"
 }
 stop_git_daemon() { [ -f "$GITPID" ] && { kill "$(cat "$GITPID")" 2>/dev/null || true; rm -f "$GITPID"; }; }
 
@@ -653,11 +715,12 @@ cave_vm() {
 # so is the whole of this function's business. vmcav is what knows where the
 # shared repo lives, so the remote is added here rather than in the binary.
 ensure_cave_remote() {
-  local url
-  url=$(git -C "$REPO" remote get-url cave 2>/dev/null || true)
+  local repo="${1:-$REPO}" shared url
+  shared=$(shared_repo_of "$repo")
+  url=$(git -C "$repo" remote get-url cave 2>/dev/null || true)
   [ -n "$url" ] && return 0
-  git -C "$REPO" remote add cave "$SHARED" || return 1
-  log "added the 'cave' remote -> $SHARED"
+  git -C "$repo" remote add cave "$shared" || return 1
+  log "added the 'cave' remote -> $shared"
 }
 
 # The control plane: everything routine the host asks a running guest. Separate
@@ -928,6 +991,37 @@ do_attach() {
 # nsenter against the session's own pid: the session leader is the process
 # systemd started, it holds the namespace for as long as the agent is running,
 # and asking systemd for it is more honest than looking for a mount by path.
+# Register a project so agents can be given it.
+#
+# Only the project vmcav is run from is registered automatically, because that
+# is the one it can infer. Any other has to be named, and naming it is all
+# this does: create its shared repo, install the branch-protection hooks, and
+# link it into the served directory.
+#
+# The guest is told about it the next time the daemon starts, so a project
+# added while the VM is up needs `vmcav stop && vmcav start` before an agent
+# can clone it. Said rather than worked around: restarting the daemon under a
+# running guest would drop whatever push was in flight.
+do_init() {
+  local dir="${1:-$PWD}" slug
+  [ -d "$dir" ] || { log "no such directory: $dir"; return 1; }
+  slug=$(register_project "$dir") || return 1
+  log "project '$slug' registered ($(readlink -f "$REPOS/$slug.git"))"
+  if is_running; then
+    log "  the guest sees it after a restart: vmcav stop && vmcav start"
+  fi
+  log "  give it to an agent with: vmcav agent $slug <branch>"
+}
+
+# What the guest can reach, and where each one really is.
+do_projects() {
+  local slug
+  while IFS= read -r slug; do
+    [ -n "$slug" ] || continue
+    printf '%-24s %s\n' "$slug" "$(readlink -f "$REPOS/$slug.git")"
+  done < <(registered_projects)
+}
+
 do_shell() {
   local agent=""
   case "${1:-}" in
@@ -978,6 +1072,8 @@ usage: vmcav <command>
                   an agent continues its last conversation; --fresh starts one
   agent stop [id] stop an agent and bank its transcript
   attach [id]     reattach to an agent already running (detach: ctrl-\)
+  init [dir]      register a project so agents can be given it (default: cwd)
+  projects        list the projects the guest can reach
   shell [cmd...]  a root shell in the guest, or run cmd there
   deploy          build the guest config and activate it in the running VM
   push [branch]   send this checkout's branch to the shared repo the agent
@@ -1424,6 +1520,8 @@ case "${1:-help}" in
   deploy) do_deploy ;;
   review|approve) cave_vm "$@" ;;
   push) shift; do_push "$@" ;;
+  init) shift; do_init "$@" ;;
+  projects) shift; do_projects "$@" ;;
   shell) shift; do_shell "$@" ;;
   vsock-connect) shift; do_vsock_connect "$@" ;;
   version|--version|-V) do_version ;;

@@ -139,13 +139,24 @@ has "an unknown option is refused here, not in the guest" "unknown option" \
 do_agent --root proj main >/dev/null 2>&1
 check "the root agent attaches to itself" "0" "$ATTACHED"
 
-# And an ordinary agent is refused for now, because it would be root under a
-# number that says it is not. The allocator above is what this waits on a
-# guest for; it is not what is missing.
+# An ordinary agent is created rather than refused. It used to be refused,
+# because it would have come up root under a number saying it was not; it now
+# has a user of its own and a view of /projects of its own, so the number
+# means what it says.
 ATTACHED=""
-has "an ordinary agent is refused while every agent is root" "vmcav agent --root" \
+has "an ordinary agent gets a low id" "agent 1: proj @ main" \
   "$(do_agent proj main 2>&1)"
-check "and nothing is attached to" "" "$ATTACHED"
+# Again, and not in a subshell: do_attach records into ATTACHED, which a
+# $(...) would set in the child and lose.
+do_agent proj main >/dev/null 2>&1
+check "and it is the one attached to" "1" "$ATTACHED"
+
+# The root agent keeps its reserved id, which is what stops counting from
+# handing it out: an ordinary agent takes the lowest free number from 1 up,
+# and 0 is not in that sequence.
+ATTACHED=""
+has "the root agent is still asked for by name" "agent 0 (vm root)" \
+  "$(do_agent --root proj main 2>&1)"
 
 # With no id, the only one running. Two of them is a guess, and attaching to
 # the wrong agent is how you type into a session you did not mean.

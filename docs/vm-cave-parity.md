@@ -31,17 +31,29 @@ the identity and the filesystem view; what a cave adds on top is the sandbox
 
 ## Projects
 
-`vmcav` serves exactly one bare repo, the coding-cave repo itself, at a path
-it computes. There is no notion of a project anywhere host-side except an
-unused `Project` field in the registry.
+`vmcav init [dir]` registers a project, `vmcav projects` lists what the guest
+can reach, and the git daemon serves every registered one. A project is a
+checkout with a shared bare repo inside it, reached by slug -- the guest still
+clones `git://127.0.0.1/<slug>.git` and nothing about that changed.
 
-- `cav init`: register a project, create its shared bare repo, install the
-  branch-protection hooks
-- the project registry itself, and slugs derived from directory names
+The registry is the served directory itself: `<state>/repos/<slug>.git` is a
+symlink into that project's own shared repo, so registering is creating a link
+and listing is reading them back. There is no second list to fall out of step
+with the filesystem, which is the failure a registry file invites. The project
+`vmcav` was run from is registered on the way past, because it is the one that
+can be inferred; any other has to be named.
+
+- ~~`cav init`, the registry, slugs from directory names~~ **done**
 - `-p/--project`: more than one project per agent, one dev branch and one
-  worktree each
+  worktree each. An agent is still given exactly one project when it is
+  created, and the guest binds exactly that one over `/projects`.
 - `remove-project`, `rename-project`, and the re-registration of a project
-  directory that moved on disk
+  directory that moved on disk. Removing means deleting a link, which is why
+  it is cheap; the reason it is not done is that nothing yet decides what
+  happens to agents still holding worktrees of it.
+- a project added while the VM is up is served only after `vmcav stop &&
+  vmcav start`, since restarting the daemon under a live guest would drop
+  whatever push is in flight
 
 ## Multiple agents in one VM
 
