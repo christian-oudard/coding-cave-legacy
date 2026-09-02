@@ -190,6 +190,77 @@ func TestHeldAgentsWithNoRecordAtAll(t *testing.T) {
 	}
 }
 
+// After a restart the agent is still here and its description of itself is
+// not, because /run is a tmpfs. Putting it back is what lets the unit load its
+// EnvironmentFile at all -- and, before that, what lets unitFor tell the root
+// agent from an ordinary one, since it decides by reading the same file.
+func TestEnsureRuntimeEnvRestoresFromTheDurableRecord(t *testing.T) {
+	run, trees := t.TempDir(), t.TempDir()
+	if err := os.MkdirAll(filepath.Join(trees, "0"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "CAVE_AGENT_ID=0\nCAVE_PROJECT=coding-cave\nCAVE_BASE=vm-cave\nCAVE_AGENT_ROOT=1\n"
+	if err := os.WriteFile(agentRecord(trees, "0"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// The state a restart leaves: nothing in /run at all.
+	if agentIsRoot(run, "0") {
+		t.Fatal("the runtime file should be missing to begin with")
+	}
+	if err := ensureRuntimeEnv(run, trees, "0"); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := unitFor(run, "0"), "cave-root-session@0.service"; got != want {
+		t.Errorf("after restoring the record, unitFor = %q, want %q", got, want)
+	}
+	// Owner-only: it is the same file `start` writes, and it names what an
+	// agent is.
+	st, err := os.Stat(filepath.Join(run, "0.env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode().Perm() != 0o600 {
+		t.Errorf("restored env file is %v, want 0600", st.Mode().Perm())
+	}
+}
+
+// An existing runtime file is left alone. It is the live one, and a restart is
+// the only thing this is for.
+func TestEnsureRuntimeEnvLeavesALiveFileAlone(t *testing.T) {
+	run, trees := t.TempDir(), t.TempDir()
+	if err := os.MkdirAll(filepath.Join(trees, "3"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(agentRecord(trees, "3"), []byte("CAVE_PROJECT=old\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(run, "3.env"), []byte("CAVE_PROJECT=live\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureRuntimeEnv(run, trees, "3"); err != nil {
+		t.Fatal(err)
+	}
+	if got := readEnv(filepath.Join(run, "3.env"))["CAVE_PROJECT"]; got != "live" {
+		t.Errorf("the live file was overwritten with %q", got)
+	}
+}
+
+// With no record at all there is nothing to put back, and saying so is the
+// point: systemd's version of this is a sentence about a unit failing to load
+// a file, which reads like a broken unit rather than a missing fact.
+func TestEnsureRuntimeEnvWithNothingToRestore(t *testing.T) {
+	err := ensureRuntimeEnv(t.TempDir(), t.TempDir(), "5")
+	if err == nil {
+		t.Fatal("starting an agent with no record should not be attempted")
+	}
+	for _, want := range []string{"agent 5", "vmcav agent"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal should mention %q: %v", want, err)
+		}
+	}
+}
+
 // The reverse, and the reason the host can hand an id out again at all: an
 // agent whose state has been removed stops holding its id.
 func TestOccupiedIsEmptyWhenNothingIsHeld(t *testing.T) {

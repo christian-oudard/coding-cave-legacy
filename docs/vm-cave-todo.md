@@ -496,10 +496,16 @@ Two failures come out of that, both observed:
 
 - **Nothing restarts the agents.** After a restart the guest comes up with
   worktrees and homes for agents that no longer exist as far as systemd is
-  concerned, and a human has to know to run `vmcav agent` again. A session
+  concerned, and a human has to know to run `vmcav agent` again. ~~A session
   whose `.env` is gone fails as `Failed to load environment files: No such
   file or directory`, which reads like a bug in the unit rather than the
-  absence of a fact.
+  absence of a fact.~~ That part is fixed: `attach` puts the runtime file
+  back from the durable record before starting anything, so an agent that is
+  still here comes back by being asked for. It has to happen there rather
+  than in the unit, because `unitFor` picks between the two session templates
+  by reading that same file -- without it the root agent restarts as an
+  ordinary one, resolving to a user the guest does not declare. An agent with
+  no durable record is refused in those words instead of systemd's.
 - **Recreating one can get it wrong.** The env file is where "this is the
   root agent" is recorded, and it is passed at creation (`--root`). Recreate
   agent 0 without it and the identity resolves to a user the guest does not

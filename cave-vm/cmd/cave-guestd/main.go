@@ -275,6 +275,39 @@ func agentWasRoot(worktrees, id string) bool {
 	return readEnv(agentRecord(worktrees, id))["CAVE_AGENT_ROOT"] == "1"
 }
 
+// ensureRuntimeEnv puts back the file every unit serving an agent reads, from
+// the copy that survives a stop.
+//
+// /run is a tmpfs. The worktree, the home and the branch all outlive a restart
+// and the agent's own description of itself does not, so after one, starting
+// an agent that still exists fails twice over. The unit cannot load its
+// EnvironmentFile, which systemd reports as "Failed to load environment files:
+// No such file or directory" -- a sentence about a unit, for what is really an
+// absent fact. And unitFor decides which of the two session templates to start
+// by reading that same file, so the root agent comes back as an ordinary one,
+// resolving to a user the guest does not declare.
+//
+// Restoring it is not the guest deciding what agents exist: the agent already
+// exists, and this is only the guest not having forgotten what it was told.
+// Nothing is invented -- with no durable record there is nothing to put back,
+// and the caller is told that rather than being left to systemd's version of
+// it.
+func ensureRuntimeEnv(dir, worktrees, id string) error {
+	runtime := filepath.Join(dir, id+".env")
+	if _, err := os.Stat(runtime); err == nil {
+		return nil
+	}
+	b, err := os.ReadFile(agentRecord(worktrees, id))
+	if err != nil {
+		return fmt.Errorf("agent %s has no record of what it was created for, "+
+			"so it cannot be started; make it again with `vmcav agent`", id)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(runtime, b, 0o600)
+}
+
 // readEnv parses one of the KEY=VALUE files an agent is described by. Both
 // copies have the same shape because they are the same bytes: `start` writes
 // the durable one beside the worktree from what it wrote to /run.
@@ -819,10 +852,19 @@ func list(args []string) {
 func attach(args []string) {
 	fs := flag.NewFlagSet("attach", flag.ExitOnError)
 	dir := fs.String("dir", defaultDir, "directory of session sockets")
+	// Attach starts what it cannot find, so it is one of the two places a unit
+	// begins, and after a restart it is the likely one: the agent is still
+	// here and a human is reaching for it by name.
+	worktrees := fs.String("worktrees", defaultWorktrees, "where agents' worktrees live")
 	fs.Parse(args)
 	id := "1"
 	if fs.NArg() > 0 {
 		id = fs.Arg(0)
+	}
+	// Before unitFor is consulted, because that reads the same file and would
+	// otherwise start the wrong one of the two templates.
+	if err := ensureRuntimeEnv(*dir, *worktrees, id); err != nil {
+		die(err)
 	}
 	sock, err := agentd.EnsureSocket(*dir, id, func() error { return startUnit(*dir, id) }, startWait)
 	if err != nil {
