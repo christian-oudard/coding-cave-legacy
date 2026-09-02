@@ -664,6 +664,10 @@ do_status() {
     cave_vm pending || true
     return 0
   fi
+  # The human's own commits, before anything asks what is pending: an agent
+  # rebases onto the shared repo, and a base that has not caught up makes its
+  # next rebase a conflict against work it cannot see.
+  carry_base_to_shared
   # The clock, before anything reads it: every question below is about a
   # running guest, and a guest whose clock is wrong answers them all while
   # failing everything an agent tries.
@@ -1595,6 +1599,40 @@ record_deployed_from() {
 # of the command is about to report properly. Only a correction is worth a
 # line, because a correction means the guest was wrong about the time and an
 # agent may have been failing because of it.
+# Carry the human's commits on the current base into the shared repo, which is
+# what an agent clones and rebases onto.
+#
+# `start` already does this once, which covers a human who commits between
+# sessions. It does not cover the case that actually happens: a person and an
+# agent working on the same project at the same time. The person commits in
+# their own checkout and leads; the shared repo does not follow, so the agent
+# rebases onto a base stale by everything they did, and the first symptom is a
+# conflict against work it cannot see. Observed once as a guest running the
+# test suite 34 commits behind and reporting a failure already fixed.
+#
+# A fetch into the bare repo, the same as `vmcav push`: fetch does not run
+# pre-receive at all, and refuses a non-fast-forward without a leading `+`. So
+# the safe case needs no flag and the unsafe one -- a rewritten base -- cannot
+# happen here by accident. That refusal is silent, because a base the human
+# rewrote is theirs to resolve with `vmcav push --force` and not something for
+# status to nag about on every run.
+#
+# Only the base. An agent branch in the shared repo is the copy the agent
+# pushed, and the checkout's idea of it is at best a stale mirror.
+carry_base_to_shared() {
+  local branch before after
+  branch=$(git -C "$REPO" symbolic-ref --quiet --short HEAD 2>/dev/null) || return 0
+  [ -n "$branch" ] || return 0
+  case "$branch" in agent-*/*) return 0 ;; esac
+  [ -d "$SHARED" ] || return 0
+  before=$(git -C "$SHARED" rev-parse --verify --quiet "refs/heads/$branch" 2>/dev/null || true)
+  git -C "$SHARED" fetch --quiet "$REPO" \
+    "refs/heads/$branch:refs/heads/$branch" 2>/dev/null || return 0
+  after=$(git -C "$SHARED" rev-parse --verify --quiet "refs/heads/$branch" 2>/dev/null || true)
+  [ "$before" = "$after" ] && return 0
+  log "$branch -> shared repo ($(shortrev "$after")), where agents clone it"
+}
+
 correct_guest_clock() {
   command -v cave-vm >/dev/null 2>&1 || return 0
   cave-vm guest -state "$STATE_DIR" -if-off-by "${CLOCK_SLACK:-2s}" time 2>&1 \

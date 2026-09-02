@@ -401,7 +401,19 @@ one-liner that unblocks it is a fetch into the bare repo
 (`git -C <shared> fetch <checkout> <base>:<base>`), which needs no hook and no
 push, since fetch does not run `pre-receive`.
 
-**Fixed for the common case.** `start` fetches the checkout's current base
+**Fixed.** `start` fetches the checkout's current base branch into the shared
+repo, `vmcav status` does it on every run, and `vmcav push [branch]
+[--force]` does it on demand. Status is what closes the case `start` alone
+cannot: a person and an agent working at the same time, where the person
+commits between one start and the next and the agent is rebasing onto a base
+frozen at boot. Staleness is then bounded by when you last looked, which is
+the rule the session sync and the clock correction already follow.
+
+Quiet unless it moves something, and quiet when it refuses: a base the human
+rewrote is not a fast-forward, and that is theirs to resolve with `push
+--force` rather than something to report on every run.
+
+The original note, kept for the mechanism: `start` fetches the checkout's current base
 branch into the shared repo, and `vmcav push [branch] [--force]` does it on
 demand. A fetch into the bare repo rather than a push out of the checkout,
 because fetch does not run `pre-receive` at all and refuses a
