@@ -24,7 +24,10 @@ source "$SRC"
 # Both sides are files here. The guest's is a file the stub reads and writes,
 # which is what it is on the other side of the ssh too.
 ENV_SPEC="$work/host-cave.nix"
-GUEST_FILE="$work/guest-cave.nix"
+# Under a directory that does not exist yet, which is the state of a guest
+# where neither `cave-env edit` nor a build has ever run -- the guest you
+# would be pushing a first spec to.
+GUEST_FILE="$work/guest-env/cave-nix"
 BUILD_FAILS=""
 BUILT=0
 
@@ -34,7 +37,11 @@ guest_ssh() {
     "cat $GUEST_ENV_SPEC"*)
       [ -s "$GUEST_FILE" ] || return 1
       cat "$GUEST_FILE" ;;
-    "cat > $GUEST_ENV_SPEC"*)
+    *"cat > $GUEST_ENV_SPEC"*)
+      # Faithful to what a shell does with the redirect: it fails unless the
+      # parent directory is there, and the command is what has to create it.
+      case "$1" in *"install -d"*) mkdir -p "$(dirname "$GUEST_FILE")" ;; esac
+      [ -d "$(dirname "$GUEST_FILE")" ] || return 1
       cat > "$GUEST_FILE" ;;
     "cave-env build"*)
       BUILT=$((BUILT + 1))
@@ -54,8 +61,10 @@ check() { # check <label> <want> <got>
 }
 
 host_has() { printf '%s\n' "$1" > "$ENV_SPEC"; }
-guest_has() { printf '%s\n' "$1" > "$GUEST_FILE"; }
-nobody_has() { rm -f "$ENV_SPEC" "$GUEST_FILE"; }
+guest_has() { mkdir -p "$(dirname "$GUEST_FILE")"; printf '%s\n' "$1" > "$GUEST_FILE"; }
+# Both gone, and the guest's directory with it: a guest that has never built
+# an environment does not have one.
+nobody_has() { rm -rf "$ENV_SPEC" "$(dirname "$GUEST_FILE")"; }
 
 # --- show ---
 nobody_has
