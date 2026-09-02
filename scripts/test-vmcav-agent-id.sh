@@ -208,5 +208,23 @@ check "and the branch goes with it" "no" \
 
 has "a non-id is refused" "not an agent id" "$(do_agent_remove nine 2>&1 || true)"
 
+# --- an agent that could not publish is not started ---
+# A guard belonging to another tool refuses every agent but the one the guest
+# is stamped as. Committing is what publishes, so such an agent would work and
+# then find out at its first push, with the work in a VM a reformat deletes.
+
+install -d "$SHARED/hooks"
+printf '#!/bin/sh\nexec some-other-tool "$@"\n' > "$SHARED/hooks/pre-receive"
+GUEST_AGENTS=""
+has "an ordinary agent is refused under a foreign guard" "vmcav init" \
+  "$(do_agent proj main 2>&1 || true)"
+# The root agent holds the id the guard was stamped with, so it still works.
+has "the root agent is not" "" \
+  "$(do_agent --root proj main 2>&1 | grep 'vmcav init' || true)"
+
+printf '#!/bin/sh\nexec cave-vm-git-pre-receive "$@"\n' > "$SHARED/hooks/pre-receive"
+has "and it is started once the guard is ours" "agent 1: proj @ main" \
+  "$(do_agent proj main 2>&1 || true)"
+
 [ "$fail" = 0 ] && echo "PASS" || echo "FAIL"
 exit "$fail"

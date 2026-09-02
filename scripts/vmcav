@@ -940,6 +940,25 @@ do_agent() {
   warn_if_guest_is_behind
   local id
   id=$(allocate_agent_id "$want_root") || return 1
+  # An agent that cannot publish is not worth starting.
+  #
+  # A guard installed by another tool refuses any push whose namespace does
+  # not match the id it was handed, and a whole guest shares one id -- so
+  # every agent but the one that matches is refused. Committing is what
+  # publishes here, so that agent would work for hours and discover it at the
+  # first push, with its work in a VM a reformat deletes.
+  #
+  # Checked at creation, which is the last moment it costs nothing. Only for
+  # an ordinary agent: the root agent holds the id the guard was stamped with,
+  # so it is the one that still works.
+  if [ "$id" != "$ROOT_AGENT_ID" ] && [ -e "$SHARED/hooks/pre-receive" ] \
+     && ! grep -q cave-vm-git-pre-receive "$SHARED/hooks/pre-receive"; then
+    log "not starting agent $id: $SLUG's branch guard belongs to another tool,"
+    log "  which refuses any agent but the one the guest is stamped as. This"
+    log "  agent could commit but never publish, and a reformat would take it."
+    log "  take the guard over:  vmcav init"
+    return 1
+  fi
   if [ "$id" = "$ROOT_AGENT_ID" ]; then
     log "agent $id (vm root): $project @ $base (pushes land on agent-$id/$base)"
   else
