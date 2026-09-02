@@ -173,9 +173,13 @@ different command.
   which is what you need to re-register it, and the git daemon is not given
   the dead path -- it answered the guest with "repository not found", which
   reads exactly like never having registered the project at all.
-- ~~running versus stopped~~ **done**; ahead/behind against the cave remote,
-  and unmerged commits by subject, are still missing. `status` prints the
-  count of pending commits per agent branch and `review` prints the subjects.
+- ~~running versus stopped~~ **done**. ~~Unmerged commits by subject~~ **done**
+  too: `status` prints the five newest and says how many more there are, so
+  what is waiting is legible without running `review`. A count answers "is
+  there anything", which is not the question you have when you come back --
+  six commits called "wip" and six that rewrote the approval flow were the
+  same line. Behind-ness against the cave remote is still missing; ahead-ness
+  is the count already there.
 - the maintenance it does as a side effect: mark dead agents stopped, archive
   stopped agents after 24 hours, drop already-merged shared dev branches
 - ~~`remove-agent`~~ **done** as `vmcav agent remove <id>`: it refuses a running

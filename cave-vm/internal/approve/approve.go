@@ -210,6 +210,30 @@ func Log(dir string, c Candidate) (string, error) {
 	return git(dir, "--no-pager", "log", "--oneline", "--no-decorate", c.BaseRef()+".."+c.Ref())
 }
 
+// Subjects is the subject line of each unlanded commit, newest first, and at
+// most limit of them.
+//
+// Separate from Log, which is for a person who has decided to look: it prints
+// abbreviated shas because the next thing they do is name one. This is for
+// `status`, where nobody asked -- the question there is whether to look at
+// all, and a count does not answer it. Six commits called "wip" and six that
+// rewrote the approval flow are the same line otherwise.
+//
+// Capped, because status is a summary and an agent left running overnight can
+// have a hundred. The caller says how many it has room for and is told what it
+// did not see.
+func Subjects(dir string, c Candidate, limit int) ([]string, error) {
+	out, err := git(dir, "--no-pager", "log", "--format=%s",
+		fmt.Sprintf("--max-count=%d", limit), c.BaseRef()+".."+c.Ref())
+	if err != nil {
+		return nil, err
+	}
+	if out == "" {
+		return nil, nil
+	}
+	return strings.Split(out, "\n"), nil
+}
+
 // Stat is which files those commits touched and by how much.
 func Stat(dir string, c Candidate) (string, error) {
 	return git(dir, "--no-pager", "diff", "--stat", c.BaseRef()+"..."+c.Ref())

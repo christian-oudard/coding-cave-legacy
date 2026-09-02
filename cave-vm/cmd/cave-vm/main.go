@@ -18,6 +18,11 @@ import (
 
 const version = "dev"
 
+// How many commit subjects `status` prints per agent branch. Enough to see
+// what an afternoon produced; past that the answer is `vmcav review`, and
+// status stops being a summary.
+const pendingSubjects = 5
+
 func main() {
 	if len(os.Args) < 2 {
 		usage()
@@ -145,6 +150,19 @@ func pending(dir string) {
 	}
 	for _, c := range all {
 		fmt.Printf("pending: %s, %d commit%s for %s\n", c.Branch, c.Ahead, plural(c.Ahead), c.Base)
+		// What the commits are, not just how many. A count says something is
+		// waiting; the subjects are what decide whether to go and look, and
+		// they cost one `git log` against a repo already fetched.
+		subjects, err := approve.Subjects(dir, c, pendingSubjects)
+		if err != nil {
+			continue // the count is still true, which is most of the answer
+		}
+		for _, s := range subjects {
+			fmt.Printf("  %s\n", s)
+		}
+		if rest := c.Ahead - len(subjects); rest > 0 {
+			fmt.Printf("  ... and %d more\n", rest)
+		}
 	}
 	if len(all) > 0 {
 		fmt.Println("review: vmcav review   (land it: vmcav approve)")

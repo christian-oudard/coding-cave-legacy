@@ -665,3 +665,57 @@ func TestRejectAfterAPartialLanding(t *testing.T) {
 		t.Fatalf("main is %s, want %s", got, before)
 	}
 }
+
+// A count says something is waiting; it does not say whether to go and look.
+// Six commits called "wip" and six that rewrote the approval flow are the same
+// line otherwise, which is what `status` printed before.
+func TestSubjectsAreNewestFirstAndCapped(t *testing.T) {
+	w := newWorld(t)
+	for _, msg := range []string{"first", "second", "third"} {
+		w.agentPushes(t, "1", "main", msg+" body", msg)
+	}
+	c := w.resolve(t, "1")
+
+	got, err := Subjects(w.repo, c, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Newest first, and the two the world starts with are still pending too.
+	want := []string{"third", "second", "first", "agent commit two", "agent commit one"}
+	if len(got) != len(want) {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("subject %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	// The cap is what keeps status a summary. The caller works out how many
+	// it did not see from Ahead, so the limit must be obeyed exactly.
+	capped, err := Subjects(w.repo, c, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(capped) != 2 || capped[0] != "third" {
+		t.Errorf("capped = %q, want the two newest", capped)
+	}
+}
+
+// Nothing pending is no subjects rather than one empty string, which is what
+// splitting empty output would give and what would print a blank bullet.
+func TestSubjectsWithNothingAhead(t *testing.T) {
+	w := newWorld(t)
+	w.fetch(t)
+	// A range with nothing in it, which is what a branch level with its base
+	// is. Named directly rather than reached by landing, because a full
+	// landing deletes the agent branch and the range would then be a bad
+	// revision instead of an empty one.
+	got, err := Subjects(w.repo, Candidate{Branch: "main", Base: "main"}, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Errorf("got %q, want nothing", got)
+	}
+}
