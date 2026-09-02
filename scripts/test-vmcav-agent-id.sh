@@ -343,14 +343,30 @@ has "and it is started once the guard is ours" "agent 1: proj @ main" \
 
 RECLAIMABLE=""
 REMOVED=""
+GC_UNREACHABLE=""
 guest_ssh() {
+  # A guest that does not answer is not a guest with nothing to reclaim.
+  [ -n "$GC_UNREACHABLE" ] && return 255
   case "$1" in
     *"cave-guestd reclaimable"*) printf '%s' "$RECLAIMABLE" ;;
     *"cave-guestd remove"*) REMOVED="$REMOVED ${1##*-id }" ;;
   esac
+  return 0
 }
 
 has "nothing to reclaim says so" "nothing to reclaim" "$(do_gc 1 2>&1 || true)"
+
+# "nothing to reclaim" is a statement about the guest. A guest that did not
+# answer has not made it, and saying it anyway is what sends somebody looking
+# somewhere else for the disk they expected back.
+GC_UNREACHABLE=1
+out=$(do_gc 1 2>&1 || true)
+has "an unreachable guest is not an empty one" "not answering" "$out"
+case "$out" in
+  *"nothing to reclaim"*) echo "FAIL a silent guest was called empty"; fail=1 ;;
+  *) echo "ok   and is not called empty" ;;
+esac
+GC_UNREACHABLE=""
 
 RECLAIMABLE=$'4 100 /var/lib/coding-cave/agents/4\n5 200 /var/lib/coding-cave/agents/5\n'
 REMOVED=""

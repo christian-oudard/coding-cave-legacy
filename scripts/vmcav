@@ -1377,9 +1377,19 @@ do_agent_remove() {
 do_gc() {
   local yes="${1:-}"
   is_running || { log "the vm is not running (vmcav start)"; return 1; }
-  local candidates
+  # Asked, then read. The last of the captures where `|| true` made a guest
+  # that did not answer indistinguishable from one that answered "nothing",
+  # and "nothing to reclaim" is a statement about the guest rather than about
+  # whether it was reachable. This one destroys nothing either way -- a sweep
+  # that finds no candidates removes none -- but it reports an empty guest as
+  # a fact, and that is what sends somebody looking somewhere else.
+  local candidates rc=0
   candidates=$(GUEST_SSH_TTY=-T guest_ssh \
-    "cave-guestd reclaimable -older-than ${GC_AGE:-24h}" 2>/dev/null | tr -d '\r') || true
+    "cave-guestd reclaimable -older-than ${GC_AGE:-24h}" 2>/dev/null | tr -d '\r') || rc=$?
+  if [ "$rc" != 0 ]; then
+    log "the guest is not answering, so what could be reclaimed is unknown"
+    return 1
+  fi
   [ -n "$candidates" ] || { log "nothing to reclaim"; return 0; }
 
   log "agents stopped and untouched for over ${GC_AGE:-24h}:"
