@@ -205,6 +205,18 @@ fresh "agent-1/main"
 check "an amend reusing a message is pushed" \
   "$("$real" -C "$d" rev-parse HEAD)" "$(remote_tip "$bare" agent-1/main)"
 
+# --git-dir and --work-tree name a repository the same way -C does, and did
+# not used to be carried into the wrapper's own questions -- so a commit made
+# through them was made and never pushed, for the same reason and just as
+# quietly. Run from outside the repository, which is the situation those
+# options are for.
+fresh "agent-1/main"
+echo seven > "$d/f.txt"
+"$real" -C "$d" add -A
+( cd "$work" && "$cavegit" --git-dir="$d/.git" --work-tree="$d" commit -q -m "through git-dir" )
+check "a commit through --git-dir is pushed" \
+  "$("$real" -C "$d" rev-parse HEAD)" "$(remote_tip "$bare" agent-1/main)"
+
 # And git's own -C still decides which repository is meant: without it the
 # wrapper would ask about the directory the test is standing in.
 fresh "agent-1/main"

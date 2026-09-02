@@ -41,37 +41,44 @@ if [ -n "${CAVE_GIT_NO_SYNC:-}" ]; then
   exec "$real" "$@"
 fi
 
-# -C decides which repository the command is about, so every question below
-# has to be asked about the same one. Only the first is honoured, which is
-# also all git itself documents for the repeated form.
+# git's own options, the ones before the subcommand. They decide which
+# repository the command is about, so every question below has to be asked
+# with the same ones or it is asking about a different repository -- and a
+# wrapper that cannot see the tip move concludes nothing happened and pushes
+# nothing, silently, which is the one failure it exists to prevent.
 #
-# Only git's own -C, which is the one before the subcommand. A subcommand's
-# -C is a different option that happens to share the letter, and `git commit
-# -C <commit>` -- reuse that commit's message -- is the common one. Scanning
-# the whole argument list took its value for a directory, so every question
-# below asked about a path that does not exist: the tip read empty before and
-# after, compared equal, and the commit was never pushed. Silently, which is
-# the one failure this wrapper exists to prevent. `git commit --amend -C HEAD`
-# is the same shape and is more common still.
-chdir=()
+# All of them are carried rather than the few that obviously name a
+# repository. -C, --git-dir and --work-tree each select one, and there is no
+# reason for this to hold its own list of which options matter when passing
+# them all asks exactly the question the command answered.
+#
+# The scan stops at the subcommand, and that is the other half. After it the
+# same spellings belong to the subcommand and usually mean something else:
+# `git commit -C <commit>` reuses that commit's message, and `git commit
+# --amend -C HEAD` is more common still. Reading the whole argument list took
+# those for a directory.
+#
+# Both halves were bugs, and both were found by running them rather than
+# reasoned about: a commit reusing a message, and a commit made through
+# --git-dir, each stayed in the VM.
+globals=()
 args=("$@")
 i=0
 while [ "$i" -lt "${#args[@]}" ]; do
   case "${args[$i]}" in
-    -C) chdir=(-C "${args[$((i + 1))]:-}"); break ;;
-    # -c takes a value of its own, so skip both and stay aligned.
-    -c) i=$((i + 2)) ;;
-    # Any other global option. One that takes a separate value
-    # (`--git-dir <path>`) ends the scan at that value, which is read as the
-    # subcommand and leaves chdir unset -- the safe way to be wrong, since
-    # everything below then asks about the working directory.
-    -*) i=$((i + 1)) ;;
-    # The subcommand. Everything after it belongs to it, not to git.
+    # The two that take a separate value. Carried whole, so the scan stays
+    # aligned and the value is never read as the subcommand.
+    -C|-c) globals+=("${args[$i]}" "${args[$((i + 1))]:-}"); i=$((i + 2)) ;;
+    # Everything else git accepts before a subcommand, including the
+    # --option=value spellings of the two above.
+    -*) globals+=("${args[$i]}"); i=$((i + 1)) ;;
+    # The subcommand. Globals end here: after it the same spellings belong to
+    # the subcommand and usually mean something else entirely.
     *) break ;;
   esac
 done
 
-ask() { "$real" "${chdir[@]}" "$@" 2>/dev/null; }
+ask() { "$real" "${globals[@]}" "$@" 2>/dev/null; }
 tip() { ask rev-parse --verify --quiet HEAD; }
 
 before=$(tip)
@@ -131,7 +138,7 @@ ask remote get-url host-cave >/dev/null || exit 0
 # advances and it is not a fast-forward. It is not a licence to overwrite
 # anyone: the host's pre-receive allows a non-fast-forward only over history
 # this agent itself pushed, and refuses it otherwise.
-if ! out=$("$real" "${chdir[@]}" push --force --quiet host-cave \
+if ! out=$("$real" "${globals[@]}" push --force --quiet host-cave \
             "HEAD:refs/heads/$branch" 2>&1); then
   # All of it on stderr. git's stdout is something callers parse, and a
   # wrapper that mixes its own remarks into it breaks them in ways that look
