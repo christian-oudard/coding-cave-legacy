@@ -177,7 +177,7 @@ func TestPendingSeesAPushItHasNotFetchedYet(t *testing.T) {
 func TestPendingIgnoresABranchThatIsNotAhead(t *testing.T) {
 	w := newWorld(t)
 	c := w.resolve(t, "")
-	if _, err := Land(w.repo, c); err != nil {
+	if _, err := Land(w.repo, c, ""); err != nil {
 		t.Fatal(err)
 	}
 	w.fetch(t)
@@ -307,7 +307,7 @@ func TestLandLeavesYouOnTheBaseWithTheWork(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	n, err := Land(w.repo, c)
+	n, err := Land(w.repo, c, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -334,7 +334,7 @@ func TestLandMovesTheBaseInTheSharedRepo(t *testing.T) {
 	w := newWorld(t)
 	c := w.resolve(t, "")
 	want := tip(t, w.repo, c.Ref())
-	if _, err := Land(w.repo, c); err != nil {
+	if _, err := Land(w.repo, c, ""); err != nil {
 		t.Fatal(err)
 	}
 	if got := tip(t, w.shared, "refs/heads/main"); got != want {
@@ -350,7 +350,7 @@ func TestLandCleansUpTheAgentBranch(t *testing.T) {
 	if err := Checkout(w.repo, c); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Land(w.repo, c); err != nil {
+	if _, err := Land(w.repo, c, ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := tryRun(w.shared, "rev-parse", "--verify", "--quiet", "refs/heads/"+c.Branch); err == nil {
@@ -371,7 +371,7 @@ func TestLandFromTheBaseBranch(t *testing.T) {
 	if got := head(t, w.repo); got != "main" {
 		t.Fatalf("this test means to start on the base, not %s", got)
 	}
-	if _, err := Land(w.repo, c); err != nil {
+	if _, err := Land(w.repo, c, ""); err != nil {
 		t.Fatal(err)
 	}
 	if got := tip(t, w.repo, "refs/heads/main"); got != want {
@@ -392,7 +392,7 @@ func TestLandRefusesWhenTheBaseHasMovedOn(t *testing.T) {
 		t.Fatal(err)
 	}
 	var nff *NotFastForwardError
-	if _, err := Land(w.repo, c); !errors.As(err, &nff) {
+	if _, err := Land(w.repo, c, ""); !errors.As(err, &nff) {
 		t.Fatalf("got %v, want a non-fast-forward", err)
 	}
 	if got := tip(t, w.shared, "refs/heads/main"); got != before {
@@ -409,7 +409,7 @@ func TestLandRefusesOverUncommittedWork(t *testing.T) {
 	write(t, w.repo, "agent.txt", "mine\n")
 	before := tip(t, w.shared, "refs/heads/main")
 
-	if _, err := Land(w.repo, c); err == nil {
+	if _, err := Land(w.repo, c, ""); err == nil {
 		t.Fatal("landed over uncommitted work")
 	}
 	if got := tip(t, w.shared, "refs/heads/main"); got != before {
@@ -443,5 +443,111 @@ func TestNoRemoteIsItsOwnAnswer(t *testing.T) {
 	}
 	if err := Fetch(dir); !errors.Is(err, ErrNoRemote) {
 		t.Fatalf("got %v, want ErrNoRemote", err)
+	}
+}
+
+// Reviewing is reading, and reading often ends in "the first of these is
+// right and the second is not". Without partial approval the answer is all or
+// nothing, and the way out is asking an agent to rewrite commits it has
+// already pushed.
+func TestLandUpToACommitLeavesTheRestPending(t *testing.T) {
+	w := newWorld(t)
+	if err := Fetch(w.repo); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Resolve(w.repo, "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Ahead != 2 {
+		t.Fatalf("expected two pending commits, got %d", c.Ahead)
+	}
+	first := run(t, w.repo, "rev-parse", c.Ref()+"~1")
+
+	n, err := Land(w.repo, c, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("landed %d commits, want 1", n)
+	}
+	if got := run(t, w.repo, "rev-parse", "main"); got != first {
+		t.Fatalf("main is at %s, want %s", got, first)
+	}
+	// The branch is the work that was held back, so deleting it would throw
+	// away exactly what was not approved.
+	if _, err := tryRun(w.shared, "rev-parse", "--verify", "--quiet",
+		"refs/heads/"+c.Branch); err != nil {
+		t.Fatal("the agent branch was deleted with work still on it")
+	}
+	if err := Fetch(w.repo); err != nil {
+		t.Fatal(err)
+	}
+	rest, err := Pending(w.repo)
+	if err != nil || len(rest) != 1 || rest[0].Ahead != 1 {
+		t.Fatalf("what is left is %+v (%v), want one commit still pending", rest, err)
+	}
+}
+
+// A commit off the branch would land work that was never under review, which
+// is the one thing approving must not do.
+func TestLandRefusesACommitThatIsNotOnTheBranch(t *testing.T) {
+	w := newWorld(t)
+	if err := Fetch(w.repo); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Resolve(w.repo, "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A commit that exists but is on nobody's agent branch.
+	run(t, w.repo, "checkout", "-q", "-B", "elsewhere", "main")
+	write(t, w.repo, "sneaky.txt", "not reviewed\n")
+	commit(t, w.repo, "unreviewed work")
+	off := run(t, w.repo, "rev-parse", "HEAD")
+
+	if _, err := Land(w.repo, c, off); err == nil {
+		t.Fatal("landed a commit that was not on the agent's branch")
+	}
+	if got := run(t, w.repo, "rev-parse", "main"); got == off {
+		t.Fatal("the base moved to unreviewed work")
+	}
+}
+
+// Already on the base means the landing would move nothing, which is a typo
+// rather than a request.
+func TestLandRefusesACommitAlreadyOnTheBase(t *testing.T) {
+	w := newWorld(t)
+	if err := Fetch(w.repo); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Resolve(w.repo, "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Land(w.repo, c, run(t, w.repo, "rev-parse", c.BaseRef())); err == nil {
+		t.Fatal("accepted a commit the base already has")
+	}
+}
+
+// The confirmation has to name the number actually at stake: asking about the
+// whole branch when one commit is being landed is how a yes means something
+// nobody intended.
+func TestWouldLandCountsOnlyWhatIsBeingLanded(t *testing.T) {
+	w := newWorld(t)
+	if err := Fetch(w.repo); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Resolve(w.repo, "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	whole, err := WouldLand(w.repo, c, "")
+	if err != nil || whole != 2 {
+		t.Fatalf("whole branch counts %d (%v), want 2", whole, err)
+	}
+	part, err := WouldLand(w.repo, c, run(t, w.repo, "rev-parse", c.Ref()+"~1"))
+	if err != nil || part != 1 {
+		t.Fatalf("partial counts %d (%v), want 1", part, err)
 	}
 }

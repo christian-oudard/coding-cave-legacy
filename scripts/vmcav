@@ -1117,6 +1117,7 @@ usage: vmcav <command>
                   clones from (--force to move it non-fast-forward)
   review [agent]  check out what the agent has pushed and not had landed
   approve [agent] land it on the base branch, here and in the shared repo
+                  --commit SHA lands only that far, leaving the rest pending
   version         the commit this vmcav was built from
   image create    build the guest and create its disk
   image reformat  destroy that disk and build a new one

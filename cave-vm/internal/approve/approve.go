@@ -239,7 +239,48 @@ func Checkout(dir string, c Candidate) error {
 // Fast-forward only, so the base's history stays what the agent actually
 // built on. A merge here would land work that was never tested against what
 // the base has since grown, and hide that it wasn't.
-func Land(dir string, c Candidate) (int, error) {
+// WouldLand is how many commits Land would move, and whether it would refuse.
+// Asked before the confirmation, so a bad commit is reported instead of being
+// prompted about, and so the question names the number actually at stake
+// rather than the whole branch.
+func WouldLand(dir string, c Candidate, upTo string) (int, error) {
+	target, err := resolveTarget(dir, c, upTo)
+	if err != nil {
+		return 0, err
+	}
+	return countAhead(dir, c.BaseRef(), target)
+}
+
+// resolveTarget is which commit a landing moves the base to, and the whole of
+// the checking that a partial one needs.
+func resolveTarget(dir string, c Candidate, upTo string) (string, error) {
+	if upTo == "" {
+		return git(dir, "rev-parse", c.Ref())
+	}
+	target, err := git(dir, "rev-parse", upTo+"^{commit}")
+	if err != nil {
+		return "", fmt.Errorf("%s is not a commit in this checkout", upTo)
+	}
+	if !quiet(dir, "merge-base", "--is-ancestor", target, c.Ref()) {
+		return "", fmt.Errorf("%s is not on %s, so approving it would land work nobody reviewed",
+			upTo, c.Branch)
+	}
+	if quiet(dir, "merge-base", "--is-ancestor", target, c.BaseRef()) {
+		return "", fmt.Errorf("%s is already on %s", upTo, c.Base)
+	}
+	return target, nil
+}
+
+// upTo, when set, lands the branch only as far as that commit and leaves the
+// rest of it pending. Reviewing is reading, and reading often ends in "the
+// first three of these are right and the fourth needs work" -- without this
+// the answer is all or nothing, and the way out is asking the agent to move
+// commits it has already pushed.
+//
+// The commit has to be one of the pending ones. Anything already in the base
+// would move it nowhere, and anything off the branch would land work that was
+// never under review, which is the one thing approving must not do.
+func Land(dir string, c Candidate, upTo string) (int, error) {
 	shared, err := Shared(dir)
 	if err != nil {
 		return 0, err
@@ -251,7 +292,11 @@ func Land(dir string, c Candidate) (int, error) {
 	if !quiet(dir, "merge-base", "--is-ancestor", c.BaseRef(), c.Ref()) {
 		return 0, &NotFastForwardError{Branch: c.Branch, Base: c.Base}
 	}
-	n, err := countAhead(dir, c.BaseRef(), c.Ref())
+	target, err := resolveTarget(dir, c, upTo)
+	if err != nil {
+		return 0, err
+	}
+	n, err := countAhead(dir, c.BaseRef(), target)
 	if err != nil {
 		return 0, err
 	}
@@ -265,18 +310,18 @@ func Land(dir string, c Candidate) (int, error) {
 	// holding it, leaving every landed file staged as a deletion.
 	switch on := current(dir); {
 	case !exists(dir, "refs/heads/"+c.Base):
-		if _, err := git(dir, "checkout", "-B", c.Base, tip); err != nil {
+		if _, err := git(dir, "checkout", "-B", c.Base, target); err != nil {
 			return 0, err
 		}
 	case on == c.Base:
-		if _, err := git(dir, "merge", "--ff-only", tip); err != nil {
+		if _, err := git(dir, "merge", "--ff-only", target); err != nil {
 			return 0, err
 		}
 	default:
 		// Standing on the agent branch is the ordinary case: review put you
 		// there. Move the base, then follow it, so approving is also how you
 		// leave the branch you were reading.
-		if _, err := git(dir, "branch", "-f", c.Base, tip); err != nil {
+		if _, err := git(dir, "branch", "-f", c.Base, target); err != nil {
 			return 0, err
 		}
 		if _, err := git(dir, "checkout", c.Base); err != nil {
@@ -296,12 +341,19 @@ func Land(dir string, c Candidate) (int, error) {
 		return 0, err
 	}
 
-	// The branch has served its purpose. Left behind it is a phantom with no
-	// pending commits: invisible in status, confusing in review. The agent's
-	// next push recreates it. Best-effort, all of it -- the work has landed,
-	// and tidying that fails is not a failed approve.
-	quiet(shared, "branch", "-D", c.Branch)
-	quiet(dir, "branch", "-D", c.Branch)
+	// The branch has served its purpose, unless part of it is still pending.
+	// Left behind after a full landing it is a phantom with no commits:
+	// invisible in status, confusing in review. The agent's next push
+	// recreates it. Best-effort, all of it -- the work has landed, and tidying
+	// that fails is not a failed approve.
+	//
+	// After a partial landing the branch is the work that was not approved,
+	// so deleting it would throw away exactly what was held back. It stays,
+	// and status keeps offering the rest.
+	if target == tip {
+		quiet(shared, "branch", "-D", c.Branch)
+		quiet(dir, "branch", "-D", c.Branch)
+	}
 	quiet(dir, "fetch", "--prune", Remote)
 	return n, nil
 }

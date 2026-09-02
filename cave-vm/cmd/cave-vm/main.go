@@ -57,6 +57,9 @@ func gitCommand(cmd string, args []string) {
 	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
 	dir := fs.String("C", ".", "repository to work in")
 	yes := fs.Bool("y", false, "skip the confirmation (approve)")
+	// Partial approval: land the branch only this far and leave the rest
+	// pending, for when the first commits are right and the last is not.
+	upTo := fs.String("commit", "", "land only up to this commit (approve)")
 	fs.Parse(args)
 	agent := fs.Arg(0)
 
@@ -66,7 +69,7 @@ func gitCommand(cmd string, args []string) {
 	case "review":
 		review(*dir, agent)
 	case "approve":
-		land(*dir, agent, *yes)
+		land(*dir, agent, *yes, *upTo)
 	}
 }
 
@@ -166,23 +169,38 @@ func review(dir, agent string) {
 	fmt.Fprintf(os.Stderr, "land it: vmcav approve   (leave it: git checkout %s)\n", c.Base)
 }
 
-func land(dir, agent string, yes bool) {
+func land(dir, agent string, yes bool, upTo string) {
 	c := resolve(dir, agent)
 	out, err := approve.Log(dir, c)
 	if err != nil {
 		die(err)
 	}
 	fmt.Println(out)
-	if !yes && !confirm(fmt.Sprintf("Land %d commit%s on %s?", c.Ahead, plural(c.Ahead), c.Base)) {
+	// How many are actually being landed, which is not c.Ahead when only part
+	// of the branch is approved. Asking about the wrong number is how you get
+	// a yes to a question nobody meant.
+	count, err := approve.WouldLand(dir, c, upTo)
+	if err != nil {
+		die(err)
+	}
+	question := fmt.Sprintf("Land %d commit%s on %s?", count, plural(count), c.Base)
+	if upTo != "" {
+		question = fmt.Sprintf("Land %d of %d commit%s on %s, leaving the rest on %s?",
+			count, c.Ahead, plural(c.Ahead), c.Base, c.Branch)
+	}
+	if !yes && !confirm(question) {
 		fmt.Fprintln(os.Stderr, "not landed")
 		os.Exit(1)
 	}
-	n, err := approve.Land(dir, c)
+	n, err := approve.Land(dir, c, upTo)
 	if err != nil {
 		die(err)
 	}
 	fmt.Fprintf(os.Stderr, "landed %d commit%s on %s, here and in the shared repo\n",
 		n, plural(n), c.Base)
+	if upTo != "" {
+		fmt.Fprintf(os.Stderr, "%d left on %s\n", c.Ahead-n, c.Branch)
+	}
 }
 
 // Default no, like every other destructive-ish prompt in the cave: an empty

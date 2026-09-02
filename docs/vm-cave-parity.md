@@ -129,8 +129,11 @@ below is ergonomics, and each item has a plain-git equivalent a human can run.
   work onto it
 - `reject`: roll a base branch back and delete the approval record, with the
   divergence check that blocks it
-- `approve --commit <sha>`: partial approval, dev branch preserved with the
-  remainder
+- ~~`approve --commit <sha>`: partial approval, dev branch preserved with the
+  remainder~~ **done**. The commit has to be one of the pending ones: anything
+  already on the base would move nothing, and anything off the branch would
+  land work that was never reviewed. The branch survives a partial landing,
+  because it is then exactly the work that was held back.
 - automatic rebase of every agent branch when a base branch moves
 - the host-side checkout of an agent branch that `pull` maintains as its own
   thing. `review` checks one out in the checkout you are standing in, which
