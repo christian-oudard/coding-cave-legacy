@@ -449,6 +449,34 @@ push carries neither and is unaffected.
 Demonstrated against a copy of the hook with the check removed: a guest push
 with no id moved `main`.
 
+## 11. The force-push guard read "no record" as permission
+
+Reachable, and by an ordinary sequence rather than a contrived one.
+
+`pre-receive` lets an agent rewrite its own branch but not overwrite the
+human's commits, and it tells the two apart with `refs/cav/agent-tip/<branch>`
+-- the high-water mark `post-receive` writes on each agent push. Its own
+comment states the rule: a non-fast-forward is "allowed only over history it
+itself pushed (agent-tip == old)".
+
+The code did not implement that. It refused when a tip existed and disagreed,
+and allowed the push when there was no tip at all. So the case with no
+evidence the agent had ever touched the branch was the permissive one.
+
+A branch can be here with no tip without anything going wrong. `post-receive`
+writes the ref on an agent push and nothing else does, so a branch that
+arrived any other way has none -- and the ordinary way is `ensure_shared_repo`
+cloning the human's checkout, which carries whatever `agent-*` branches they
+are standing on. Those commits are the human's, and they were exactly the ones
+the guard was meant to protect.
+
+Now a missing tip refuses, which is what the comment always said. A first push
+is unaffected (`old` is zero and the check is skipped), and an agent that has
+genuinely lost its tip can delete the branch and push it again.
+
+Demonstrated by flipping the condition back on a copy: the test that force-
+pushes over a branch with no tip is the only one that changes answer.
+
 ## Not findings
 
 Recorded so they are not re-raised.

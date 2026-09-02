@@ -52,6 +52,16 @@ expect 0 "agent create own branch"           0 "$zero" "$B" refs/heads/agent-0/f
 expect 0 "agent delete own branch"           0 "$B" "$zero" refs/heads/agent-0/main
 expect 0 "agent rewrite own pushed history"  0 "$B" "$D" refs/heads/agent-0/main   # tip==old==B
 expect 1 "agent force past user commits"      0 "$C" "$D" refs/heads/agent-0/main   # tip=B != old=C
+# A branch with no agent-tip at all. That is not exotic: the shared repo is
+# cloned from the human's checkout, so any agent-* branch they happen to have
+# arrives here with no record of an agent ever having pushed it -- and those
+# commits are the human's. No record is not a record that says yes.
+git update-ref refs/heads/agent-0/untracked "$C"
+expect 1 "agent force over a branch with no tip" 0 "$C" "$D" refs/heads/agent-0/untracked
+# Creating it is still fine: old is zero, so there is nothing to overwrite.
+expect 0 "agent creating a branch is unaffected" 0 "$zero" "$D" refs/heads/agent-0/brandnew
+# And a fast-forward over an untracked branch is not an overwrite either.
+expect 0 "agent fast-forwarding one is fine"     0 "$A" "$C" refs/heads/agent-0/untracked
 # Allowed, and deliberately so. The injected id describes the guest, not the
 # pusher: every agent in a VM pushes through one socket and the id is fixed
 # before any agent exists, so requiring it to match the branch rejected every
