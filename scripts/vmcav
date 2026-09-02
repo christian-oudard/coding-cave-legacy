@@ -1637,7 +1637,7 @@ do_complete() {
     commands)
       printf '%s\n' start stop status agent attach deploy review approve \
         reject push init projects remove-project gc env shell version image \
-        completion
+        completion cp
       ;;
     agents)
       # Both kinds. A stopped agent is exactly what `attach` is for, and
@@ -1728,6 +1728,110 @@ ZSH
       return 1
       ;;
   esac
+}
+
+# Copy files in or out of a cave.
+#
+# The transport was already here -- scp rides the same ssh config as `vmcav
+# shell`, over the vsock ProxyCommand -- and what was missing was being able
+# to say where. An agent's files are not at a path a human knows: its worktree
+# is under ${worktreeRoot}/<id>/projects/<slug>, which is a layout nobody
+# should have to hold, and inside its own namespace the same tree is
+# /projects/<slug>, which is not a path the host can name.
+#
+# So `cave:` means "in the agent's tree", and the id is resolved the way every
+# other command resolves it: the only running agent needs no name, and two of
+# them is not guessed at.
+#
+#   vmcav cp cave:notes.md .          out of the agent's worktree
+#   vmcav cp cave:~/.claude/x .       out of its home
+#   vmcav cp data.csv cave:           in, to the worktree
+#   vmcav cp cave@2:log.txt .         when more than one agent is running
+#
+# Overwrites without asking, which scp does and `main` does not: a prompt
+# needs to know whether the far side exists, and that is a second round trip
+# for a question the shell can answer about the near side only. Said here
+# because it is a difference somebody will meet.
+GUEST_HOME_OF() { # <id> -> the agent's home in the guest
+  [ "$1" = "$ROOT_AGENT_ID" ] && { printf '/root'; return; }
+  printf '/home/agent%s' "$1"
+}
+
+# cave_path <spec> <id> <project> -> the guest path a cave: spec names
+#
+# The project is part of it. An agent's trees live under
+# <root>/<id>/projects/, one directory per project, and that directory is what
+# the agent sees as /projects/<slug> -- so a relative path is relative to the
+# worktree, not to the directory holding worktrees. Written without it first,
+# which put every relative copy one level too high, and the test agreed
+# because it was written from the same assumption. The guest settled it.
+cave_path() {
+  local rest="$1" id="$2" project="$3"
+  case "$rest" in
+    "~"|"~/"*) printf '%s%s' "$(GUEST_HOME_OF "$id")" "${rest#\~}" ;;
+    /*)        printf '%s' "$rest" ;;
+    "")        printf '%s/%s/projects/%s' "$WORKTREE_ROOT" "$id" "$project" ;;
+    *)         printf '%s/%s/projects/%s/%s' "$WORKTREE_ROOT" "$id" "$project" "$rest" ;;
+  esac
+}
+WORKTREE_ROOT="${WORKTREE_ROOT:-/var/lib/coding-cave/agents}"
+
+do_cp() {
+  [ $# -ge 2 ] || { log "usage: vmcav cp <src>... <dst>   (cave:PATH for the agent's side)"; return 1; }
+  is_running || { log "the vm is not running (vmcav start)"; return 1; }
+
+  # One id for the whole command. Copying between two agents is a different
+  # operation and naming two would make every argument ambiguous.
+  local id="" spec seen=""
+  for spec in "$@"; do
+    case "$spec" in
+      cave@*:*) seen="${spec#cave@}"; seen="${seen%%:*}" ;;
+      cave:*)   seen="${seen:-any}" ;;
+      *) continue ;;
+    esac
+    case "$seen" in
+      any) ;;
+      *[!0-9]*|"") log "'$spec' does not name an agent  (cave@<id>:path)"; return 1 ;;
+      *) [ -n "$id" ] && [ "$id" != "$seen" ] && {
+           log "one command, one agent: '$id' and '$seen' both named"; return 1; }
+         id="$seen" ;;
+    esac
+  done
+  [ -n "$seen" ] || { log "neither side is in the cave; this is just cp"; return 1; }
+  [ -n "$id" ] || id=$(the_only_running_agent) || return 1
+
+  # Which project's worktree a relative path is relative to. The guest is the
+  # register of what an agent was created for, and it is the same answer
+  # `status` prints.
+  local project
+  project=$(guest_rpc agents 2>/dev/null | awk -v i="$id" '$1 == i {print $3}' | head -1)
+  case "$project" in
+    ""|"-") project="" ;;
+  esac
+
+  # Rewritten here rather than by scp, so the guest layout stays on this side
+  # of the boundary and the agent never has to be told where it lives.
+  local -a args=()
+  local rest
+  for spec in "$@"; do
+    case "$spec" in
+      cave@*:*) rest="${spec#*:}" ;;
+      cave:*)   rest="${spec#cave:}" ;;
+      *)        args+=("$spec"); continue ;;
+    esac
+    # A relative path needs a project to be relative to. Absolute paths and ~
+    # do not, so an agent whose project the guest cannot name is still
+    # reachable rather than refused outright.
+    case "$rest" in
+      "~"|"~/"*|/*) ;;
+      *) [ -n "$project" ] || {
+           log "the guest does not say which project agent $id has, so '$rest'"
+           log "  has nothing to be relative to; name a path from / instead"
+           return 1; } ;;
+    esac
+    args+=("cave-guest:$(cave_path "$rest" "$id" "$project")")
+  done
+  scp -q -r -F "$SSHCONF" "${args[@]}"
 }
 
 do_projects() {
@@ -1824,6 +1928,8 @@ usage: vmcav <command>
   gc [-y]         remove agents stopped and untouched for over 24h
   completion bash|zsh
                   a completion script for that shell, on stdout
+  cp src... dst   copy files in or out; cave:PATH is the agent's side
+                  (cave:~/... its home, cave@2:... a particular agent)
   env [show|pull|push]
                   the cave environment's spec (cave.nix): what each side has,
                   or carry it across (--force to overwrite one that differs)
@@ -2442,6 +2548,7 @@ case "${1:-help}" in
   remove-project) shift; do_remove_project "$@" ;;
   gc) shift; case "${1:-}" in -y|--yes) do_gc 1 ;; *) do_gc ;; esac ;;
   env) shift; do_env "$@" ;;
+  cp) shift; do_cp "$@" ;;
   completion) shift; do_completion "$@" ;;
   # Hidden: the completion scripts' way of asking what exists. Not in the help
   # table, because it is not a thing to run.

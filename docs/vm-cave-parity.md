@@ -313,12 +313,14 @@ that remains is uncommitted work, not the logs.
 
 ## No counterpart at all
 
-- `cav cp`: the transport is already there and the ergonomics are not. `scp`
-  over the ssh config's vsock ProxyCommand copies both directions and
-  recursively, verified against the running guest, so what is missing is the
-  addressing (`cave:<path>` against the agent's worktree, `~/` for its home,
-  `@<n>` when there is more than one agent), the overwrite prompts and the
-  completion. The refusal to copy symlinks out does not carry over: it guards
+- ~~`cav cp`~~ **done** as `vmcav cp`, over the same ssh config as `vmcav
+  shell`. `cave:<path>` is the agent's worktree, `cave:~/...` its home,
+  `cave@<n>:` a particular agent, and an absolute `cave:/...` the guest as
+  written; the id resolves the way every other command's does, so one running
+  agent needs no name and two are not guessed at. Completion offers it.
+  **It overwrites without asking**, which `scp` does and `main` does not: a
+  prompt has to know whether the far side exists, and that is a round trip
+  for a question the shell can answer about the near side only. The refusal to copy symlinks out does not carry over: it guards
   against a symlink naming a host path through a shared namespace, and a guest
   symlink can name only guest paths (checked: one pointing at `/etc/shadow`
   yields the guest's).
