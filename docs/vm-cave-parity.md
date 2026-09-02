@@ -154,8 +154,10 @@ different command.
   stopped agents after 24 hours, drop already-merged shared dev branches
 - ~~`remove-agent`~~ **done** as `vmcav agent remove <id>`: it refuses a running
   agent, and refuses one holding commits its base does not have, naming them
-  rather than counting them. `gc` -- sweeping agents nobody has removed by
-  hand -- is still missing.
+  rather than counting them. `vmcav gc` sweeps the ones nobody removed by hand:
+  stopped, not the root agent, and untouched for over 24h, each still put
+  through the unlanded-work check so a sweep can only do what naming them one
+  at a time would have.
 
 The registry already has id reclamation with the same 24 hour window, so this
 is the surface around it that is missing, not the bookkeeping underneath.

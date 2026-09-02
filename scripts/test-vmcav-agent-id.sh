@@ -226,5 +226,40 @@ printf '#!/bin/sh\nexec cave-vm-git-pre-receive "$@"\n' > "$SHARED/hooks/pre-rec
 has "and it is started once the guard is ours" "agent 1: proj @ main" \
   "$(do_agent proj main 2>&1 || true)"
 
+# --- gc ---
+# A sweep can only do what naming each agent would have done, so the unlanded
+# work check has to hold here too: the reason to reclaim disk is never a
+# reason to drop the only copy of somebody's commits.
+
+RECLAIMABLE=""
+REMOVED=""
+guest_ssh() {
+  case "$1" in
+    *"cave-guestd reclaimable"*) printf '%s' "$RECLAIMABLE" ;;
+    *"cave-guestd remove"*) REMOVED="$REMOVED ${1##*-id }" ;;
+  esac
+}
+
+has "nothing to reclaim says so" "nothing to reclaim" "$(do_gc 1 2>&1 || true)"
+
+RECLAIMABLE=$'4 100 /var/lib/coding-cave/agents/4\n5 200 /var/lib/coding-cave/agents/5\n'
+REMOVED=""
+out=$(do_gc 1 2>&1 || true)
+has "candidates are listed with their age" "last touched 100 hours ago" "$out"
+# Directly, not in $(...), which would set REMOVED in a child and lose it.
+REMOVED=""
+do_gc 1 >/dev/null 2>&1 || true
+check "and both are removed" " 4 5" "$REMOVED"
+
+# One of them is holding work its base does not have.
+git -C "$work/repo" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "gc unlanded"
+gcbase=$(git -C "$work/repo" symbolic-ref --short HEAD)
+git -C "$SHARED" fetch -q "$work/repo" "HEAD:refs/heads/agent-5/$gcbase"
+out=$(do_gc 1 2>&1 || true)
+has "and says which" "agent 5 kept" "$out"
+REMOVED=""
+do_gc 1 >/dev/null 2>&1 || true
+check "the one with work is kept" " 4" "$REMOVED"
+
 [ "$fail" = 0 ] && echo "PASS" || echo "FAIL"
 exit "$fail"

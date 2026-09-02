@@ -157,6 +157,8 @@ func main() {
 		start(args)
 	case "env":
 		envCmd(args)
+	case "reclaimable":
+		reclaimable(args)
 	case "remove":
 		remove(args)
 	default:
@@ -277,6 +279,50 @@ func remove(args []string) {
 	fmt.Printf("removed agent %s: %s and its home\n", *id, tree)
 }
 
+// reclaimable lists agents holding disk that nothing is using: stopped, not
+// the root agent, and untouched for long enough that somebody is unlikely to
+// be coming back to them.
+//
+// It only reports. What an agent has left behind is visible from here, but
+// whether it is safe to delete is not: an agent branch with commits its base
+// does not have lives in the shared repo on the host, and that is the copy
+// that makes a worktree worth keeping. So the host asks this what exists and
+// decides for itself.
+//
+// Age is the worktree's mtime, which is when the agent last wrote code. A
+// session that is merely idle keeps its worktree fresh only if it is working,
+// which is the distinction wanted: an agent stopped an hour ago mid-task is
+// not the same as one abandoned last week.
+func reclaimable(args []string) {
+	fs := flag.NewFlagSet("reclaimable", flag.ExitOnError)
+	dir := fs.String("dir", defaultDir, "directory of session sockets")
+	root := fs.String("worktrees", defaultWorktrees, "where agents' worktrees live")
+	olderThan := fs.Duration("older-than", 24*time.Hour, "ignore agents touched more recently")
+	fs.Parse(args)
+
+	entries, err := os.ReadDir(*root)
+	if err != nil {
+		return // no worktree root is no agents, not a failure
+	}
+	rootID := rootAgentID(*dir)
+	cutoff := time.Now().Add(-*olderThan)
+	for _, e := range entries {
+		id := e.Name()
+		if !e.IsDir() || id == rootID {
+			continue
+		}
+		if _, err := os.Stat(agentd.SocketPath(*dir, id)); err == nil {
+			continue // running
+		}
+		tree := filepath.Join(*root, id)
+		st, err := os.Stat(tree)
+		if err != nil || st.ModTime().After(cutoff) {
+			continue
+		}
+		fmt.Printf("%s %d %s\n", id, int64(time.Since(st.ModTime()).Hours()), tree)
+	}
+}
+
 // homeOf is where an agent's home is, or empty for one that has none. Never
 // /root: the root agent's home is the machine's, holding ssh keys and the
 // gnupg keyring, and emptying it would take the guest apart.
@@ -315,6 +361,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "       cave-guestd env build [-force]")
 	fmt.Fprintln(os.Stderr, "       cave-guestd env seed -home DIR -user NAME")
 	fmt.Fprintln(os.Stderr, "       cave-guestd remove -id N")
+	fmt.Fprintln(os.Stderr, "       cave-guestd reclaimable [-older-than D]")
 	os.Exit(2)
 }
 

@@ -1074,6 +1074,47 @@ do_agent_remove() {
   log "agent $id removed"
 }
 
+# Reclaim the agents nobody removed by hand.
+#
+# An id frees itself: `allocate_agent_id` counts running sessions and pushed
+# branches, so an agent that stopped and had its work landed stops occupying a
+# number. Its disk does not free itself, and a worktree is a whole checkout --
+# so what accumulates is not slots but gigabytes, quietly, in a VM whose disk
+# is the one thing here with a hard ceiling.
+#
+# Every candidate goes through the same checks a named removal does, unlanded
+# work included, so this can only do what you could have done one at a time.
+# It lists before it acts, because a sweep that is right nine times out of ten
+# is still one you want to read first.
+do_gc() {
+  local yes="${1:-}"
+  is_running || { log "the vm is not running (vmcav start)"; return 1; }
+  local candidates
+  candidates=$(GUEST_SSH_TTY=-T guest_ssh \
+    "cave-guestd reclaimable -older-than ${GC_AGE:-24h}" 2>/dev/null | tr -d '\r') || true
+  [ -n "$candidates" ] || { log "nothing to reclaim"; return 0; }
+
+  log "agents stopped and untouched for over ${GC_AGE:-24h}:"
+  printf '%s\n' "$candidates" | while read -r id hours _; do
+    [ -n "$id" ] || continue
+    printf '  agent %s, last touched %s hours ago\n' "$id" "$hours" >&2
+  done
+  if [ -z "$yes" ]; then
+    printf 'Remove them? [y/N] ' >&2
+    local answer; read -r answer || answer=""
+    case "$answer" in y|Y|yes|YES) ;; *) log "nothing removed"; return 1 ;; esac
+  fi
+  # One at a time and through the ordinary path, so an agent holding work
+  # nobody landed refuses here exactly as it would if you had named it.
+  local id
+  while read -r id _; do
+    [ -n "$id" ] || continue
+    do_agent_remove "$id" || log "  agent $id kept"
+  done <<EOF
+$candidates
+EOF
+}
+
 do_agent_stop() {
   is_running || { log "the vm is not running"; return 1; }
   local id="${1:-}"
@@ -1206,6 +1247,7 @@ usage: vmcav <command>
   attach [id]     reattach to an agent already running (detach: ctrl-\)
   init [dir]      register a project so agents can be given it (default: cwd)
   projects        list the projects the guest can reach
+  gc [-y]         remove agents stopped and untouched for over 24h
   shell [cmd...]  a root shell in the guest, or run cmd there
   deploy          build the guest config and activate it in the running VM
   push [branch]   send this checkout's branch to the shared repo the agent
@@ -1685,6 +1727,7 @@ case "${1:-help}" in
   push) shift; do_push "$@" ;;
   init) shift; do_init "$@" ;;
   projects) shift; do_projects "$@" ;;
+  gc) shift; case "${1:-}" in -y|--yes) do_gc 1 ;; *) do_gc ;; esac ;;
   shell) shift; do_shell "$@" ;;
   vsock-connect) shift; do_vsock_connect "$@" ;;
   version|--version|-V) do_version ;;
