@@ -744,6 +744,24 @@ in
   # services reach the guest over virtio-vsock and are re-exposed on
   # localhost by the forwarders below, so nothing in this config, in the
   # agent's git remotes, or in its proxy env has to know vsock exists.
+  # UTC, said rather than inherited.
+  #
+  # `main` pins a cave's clock to UTC so the host's geographic region stays
+  # outside the sandbox, with `coding-cave.timeZone` as the only lever. The
+  # guest owns its own /etc/localtime, so the mechanism differs and the
+  # contract must not.
+  #
+  # It was already UTC, but only because that is what NixOS defaults to --
+  # the right answer for a reason that has nothing to do with the contract,
+  # and one that would stop holding the first time somebody set this to make a
+  # journal easier to read. Written down, changing it is a decision somebody
+  # made; left out, it was a decision nobody knew they were making.
+  #
+  # The lever is this line, which is a system change and goes through the
+  # approval gate like any other. That is the right weight for widening what
+  # the guest knows about where it is.
+  time.timeZone = "UTC";
+
   networking.hostName = "coding-cave";
   networking.useDHCP = false;
   networking.firewall.enable = false;
@@ -1304,6 +1322,31 @@ in
         if [ -f "$seed" ]; then base=$(cat "$seed")
         elif [ -f "$host" ]; then base=$(cat "$host")
         else base='{}'; fi
+
+        # The host's own business, taken out of whichever copy this came from.
+        #
+        # The file was being seeded whole, which put the host user's entire
+        # project list into every agent's home: their username, their
+        # directory layout, and the names of projects that have nothing to do
+        # with this VM. The paragraph above already said that was not meant to
+        # happen, and the three things it names -- projects, history, MCP
+        # config -- are exactly the three taken out here. This is the code
+        # catching up with its own comment.
+        #
+        # Applied to an existing home too, not only a fresh seed, because the
+        # homes that already exist were seeded before this and are the ones
+        # holding the paths. Projects are filtered rather than dropped so an
+        # agent keeps its own: a key under /projects is this guest's, and
+        # anything else belongs to a filesystem that is not in here. An agent
+        # whose own entry is filtered out sees one trust dialog and the seed
+        # puts the entry back below.
+        #
+        # What is kept is login and onboarding state, which is why this file
+        # is staged at all: without it an agent starts logged out.
+        base=$(printf '%s' "$base" | ${pkgs.jq}/bin/jq -c '
+          del(.mcpServers, .history)
+          | .projects //= {}
+          | .projects |= with_entries(select(.key | startswith("/projects/")))')
 
         # Trust the path the agent will actually be standing in, which is the
         # bind target and not the tree behind it. Keying this to the real

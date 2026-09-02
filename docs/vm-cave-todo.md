@@ -43,7 +43,19 @@ and this can run on every command. A correction is worth a line, because it
 means the guest was wrong about the time and an agent may have been failing
 for it.
 
-Still open: the timezone half above, which is a different problem.
+**The timezone half is done too**, and doing it turned up a larger leak of the
+same kind. The guest is pinned to UTC in its own config rather than left on
+NixOS's default, so the contract `main` states -- the host's geographic region
+stays outside the sandbox -- is something somebody decided rather than
+something that happened to be true.
+
+The larger one: the host's `~/.claude.json` is staged on the seed disk and was
+copied into every agent's home whole, carrying the host user's entire project
+list -- 75 paths under their home directory, naming projects with nothing to
+do with this VM. seed-agent-home@ already said that must not happen; it now
+does what it said, keeping only project entries under /projects and dropping
+history and MCP config with them. Applied to existing homes as well as fresh
+seeds, since the homes that already existed are the ones holding the paths.
 
 ## `clone-repo` failed once and has not reproduced
 
