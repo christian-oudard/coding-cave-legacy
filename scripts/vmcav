@@ -629,6 +629,10 @@ do_vsock_connect() {
 }
 
 do_status() {
+  # First, and whether or not the VM is up: a broken guard is a host-side fact
+  # and the thing most likely to be silently wrong, since it fails by refusing
+  # pushes in a way that reads like the guard working.
+  warn_if_hooks_are_foreign
   # Nothing announces a push: the agent commits, the daemon accepts it, and
   # the ref moves in silence. Status is where you find out one arrived, and it
   # says so with the VM stopped too, because the work arrived either way.
@@ -1407,6 +1411,36 @@ record_deployed_from() {
 # than a verdict: the comparison is by commit, so a commit touching only docs
 # lands here too, and erring toward "deploy" costs a rebuild that is mostly
 # cached.
+# Say when the branch guard on a project's shared repo is not the one this
+# tool installs.
+#
+# Written because the alternative is what happened: the guard was corrected,
+# the correction never reached the repo in use, and nothing anywhere said so.
+# Every push kept being refused by a hook belonging to a different tool, which
+# looks exactly like the guard working, and it took four rounds of fixing the
+# wrong file to notice. A misconfiguration that produces a plausible refusal is
+# the kind worth spending a check on.
+#
+# Only warns. Status must not change what it is reporting on, and the repair is
+# one command, named here so it does not have to be looked up.
+warn_if_hooks_are_foreign() {
+  local slug hook
+  while IFS= read -r slug; do
+    [ -n "$slug" ] || continue
+    hook="$(readlink -f "$REPOS/$slug.git" 2>/dev/null)/hooks/pre-receive"
+    if [ ! -e "$hook" ]; then
+      log "$slug has no branch guard; an agent could push to a base branch"
+      log "  install it:  vmcav init $(readlink -f "$REPOS/$slug.git" | sed 's|/.coding-cave/.*||')"
+      continue
+    fi
+    grep -q cave-vm-git-pre-receive "$hook" && continue
+    log "$slug's branch guard was installed by another tool"
+    log "  it refuses any agent whose id does not match the one this guest"
+    log "  shares, so every agent but one cannot publish at all"
+    log "  take it over:  vmcav init $(readlink -f "$REPOS/$slug.git" | sed 's|/.coding-cave/.*||')"
+  done < <(registered_projects)
+}
+
 warn_if_guest_is_behind() {
   local was now
   was=$(cat "$STATE_DIR/deployed-from" 2>/dev/null || true)
