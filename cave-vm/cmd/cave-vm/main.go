@@ -54,6 +54,8 @@ func main() {
 		agentsCommand(os.Args[2:])
 	case "system":
 		systemCommand(os.Args[2:])
+	case "projects":
+		projectsCommand(os.Args[2:])
 	case "sessions":
 		sessionsCommand(os.Args[2:])
 	default:
