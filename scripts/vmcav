@@ -1408,8 +1408,12 @@ do_image_create() {
   build_guest "$BOOT" kernel initrd disk toplevel || return 1
   local disk_mb; disk_mb=$(config_disk_mb)
   log "creating guest disk (cap $((disk_mb / 1024)) GB, sparse)"
-  cp --sparse=always "$BOOT/disk/nixos.img" "$DISK"; chmod u+w "$DISK"
-  truncate -s "${disk_mb}M" "$DISK"
+  # In cave-vm, because this was `cp --sparse=always` and `truncate -s`: two
+  # GNU coreutils, neither of them on a Mac. Sparseness is not a nicety here.
+  # The built image is a few hundred megabytes and the cap is a hundred
+  # gigabytes, so a dense copy would cost the whole cap on disk the day the
+  # guest is made.
+  cave-vm disk -from "$BOOT/disk/nixos.img" -to "$DISK" -size-mb "$disk_mb" || return 1
   record_deployed_from
   log "image ready; vmcav start"
 }

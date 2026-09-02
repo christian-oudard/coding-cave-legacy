@@ -39,6 +39,8 @@ func main() {
 		vmSocket(os.Args[2:])
 	case "cache-key":
 		vmCacheKey(os.Args[2:])
+	case "disk":
+		vmDisk(os.Args[2:])
 	case "vsock-connect":
 		vmVsockConnect(os.Args[2:])
 	case "guest":

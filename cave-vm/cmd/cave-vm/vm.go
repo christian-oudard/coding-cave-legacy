@@ -324,3 +324,25 @@ func mustPort(s string) uint32 {
 	}
 	return uint32(n)
 }
+
+// vmDisk materializes the guest disk: the built image copied out and grown to
+// its cap, holes intact.
+//
+// In Go because the shell did it with `cp --sparse=always` and `truncate -s`,
+// which are two GNU coreutils and neither is on a Mac. Sparseness is not an
+// optimization here: the built image is a few hundred megabytes and the cap is
+// a hundred gigabytes, so a dense copy would cost the whole cap on disk the
+// day the guest is made.
+func vmDisk(args []string) {
+	fs := flag.NewFlagSet("disk", flag.ExitOnError)
+	from := fs.String("from", "", "the built guest image (required)")
+	to := fs.String("to", "", "where the VM's own disk goes (required)")
+	sizeMB := fs.Int64("size-mb", 0, "cap the disk grows to, in MiB (required)")
+	fs.Parse(args)
+	if *from == "" || *to == "" || *sizeMB <= 0 {
+		fail(fmt.Errorf("disk needs -from, -to and a positive -size-mb"))
+	}
+	if err := vmm.MaterializeDisk(*from, *to, *sizeMB<<20); err != nil {
+		fail(err)
+	}
+}
