@@ -49,6 +49,52 @@ ALLOWED = {
 KEYISH = re.compile(r"\A[0-9A-Fa-f]{8,40}\Z|\A[^\s<>|;&$`]+@[^\s<>|;&$`]+\Z")
 
 
+# What a git commit object looks like on its way to a signer: the headers git
+# writes, in the order it writes them, before the blank line that starts the
+# message. Sha lengths cover sha1 and sha256 repositories.
+COMMIT_OBJECT = re.compile(
+    rb"\Atree [0-9a-f]{40,64}\n"
+    rb"(?:parent [0-9a-f]{40,64}\n)*"
+    rb"author [^<>\n]*<[^<>\n]*> \d+ [+-]\d{4}\n"
+    rb"committer [^<>\n]*<[^<>\n]*> \d+ [+-]\d{4}\n"
+)
+
+
+def validate_payload(payload):
+    """Reject anything that is not a git commit object.
+
+    The argv checks above stop the guest signing *as* somebody else or
+    exporting key material. They say nothing about what gets signed, and the
+    payload was handed to gpg unexamined -- so the guest could obtain a valid
+    detached signature from the user's key over any bytes at all: a signed
+    tag, a release artifact, a mail message.
+
+    Part of this is inherent and stays: an agent that signs its own commits
+    has to be trusted with its own commits, and nothing here can tell a
+    commit worth making from one that is not. What is not inherent is that it
+    could sign things which are not commits, and that is what this closes.
+
+    Deliberately structural, and not the check the red-team note proposed.
+    That note suggested requiring the commit's tree and parents to exist in
+    the served repository, which cannot work: git signs a commit object before
+    it writes it, and pushes only afterwards, so at signing time the tree
+    exists in the guest's repository and nowhere else. Requiring it here would
+    reject every legitimate commit. Verified by capturing what git hands a
+    signer.
+
+    Tags are refused along with everything else, which costs nothing: the
+    pre-receive guard refuses to accept a tag from an agent anyway, so a
+    signed one could never be published.
+    """
+    if not payload:
+        return "nothing to sign"
+    if not COMMIT_OBJECT.match(payload):
+        return "payload is not a git commit object"
+    if b"\n\n" not in payload:
+        return "commit object has no message"
+    return None
+
+
 def validate(argv):
     """Reject anything that is not a recognised signing invocation."""
     for a in argv:
@@ -84,6 +130,10 @@ def handle(conn, gpg, keyid):
         # client to half-close, and that does not survive the socat/vsock hop:
         # the shutdown propagates as a full close and the reply is lost.
         payload = f.read(length) if length else b""
+        bad = validate_payload(payload)
+        if bad:
+            sys.stderr.write(f"[gpg-broker] rejected: {bad}\n")
+            return respond(conn, 2, b"", f"gpg-broker: {bad}\n".encode())
 
         # Rebuild the invocation host-side. The guest's argv is used only as a
         # validated hint; the key is pinned here so a guest cannot sign as

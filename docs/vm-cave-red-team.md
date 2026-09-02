@@ -181,7 +181,23 @@ allowlist. Verification never reaches the broker: the guest runs it locally
 against the seeded public keyring, which is also now possible at all, since
 `cave-gpg` was exec'ing a gpg that was not on the guest's PATH.
 
-The main finding stands: the payload is still guest-chosen and unexamined.
+**Fixed as far as it goes.** The broker now refuses a payload that is not a
+git commit object, so the part the note calls not-inherent is closed: the
+guest can no longer obtain the user's signature over a release artifact, a
+mail message or a tag. Tags cost nothing to refuse, since `pre-receive`
+refuses to accept one from an agent anyway.
+
+The check this note proposed -- requiring the commit's tree and parents to
+exist in the served repository -- does not work, and it is worth writing down
+why. git signs a commit object before it writes it and pushes only afterwards,
+so at signing time the tree exists in the guest's repository and nowhere else.
+Verified by capturing what git hands a signer: the payload is a bare commit
+object naming a tree the host has never seen. Requiring it would reject every
+legitimate commit.
+
+What stands is the inherent half, unchanged: an agent that signs its own
+commits must be trusted with its own commits, and nothing host-side can tell a
+commit worth making from one that is not.
 
 ## 6. Host-side channels are reachable by any local uid
 

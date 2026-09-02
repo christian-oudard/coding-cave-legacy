@@ -29,9 +29,49 @@ trap cleanup EXIT
 ok()   { echo "ok   $*"; }
 bad()  { echo "FAIL $*"; fail=1; }
 
+# What the broker will and will not put the user's key over. Ahead of the key
+# check, because it needs no key: the payload rules are the half of this that
+# can be exercised anywhere, including in a guest, which is where the key
+# deliberately is not.
+#
+# The argv rules stop the guest signing *as* somebody else. These stop it
+# signing *anything* else -- the payload used to reach gpg unexamined, so a
+# valid signature from the user's key could be had over a release artifact, a
+# mail message, a tag.
+have_python=1
+command -v python3 >/dev/null 2>&1 || {
+  have_python=""
+  echo "SKIP: python3 is not on PATH, so the payload rules cannot be read back"
+}
+
+payload_says() { # <label> <want: sign|refuse> <python bytes expr>
+  [ -n "$have_python" ] || return 0
+  local got
+  got=$(python3 - "$BROKER" <<PY 2>/dev/null
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("b", sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+print("refuse" if m.validate_payload($3) else "sign")
+PY
+)
+  [ "$got" = "$2" ] && ok "$1" || bad "$1 (want $2, got ${got:-<error>})"
+}
+
+commit='b"tree "+b"a"*40+b"\nauthor t <t@t> 1 +0000\ncommitter t <t@t> 1 +0000\n\nmsg\n"'
+merge='b"tree "+b"a"*40+b"\nparent "+b"b"*40+b"\nparent "+b"c"*40+b"\nauthor t <t@t> 1 +0000\ncommitter t <t@t> 1 +0000\n\nmsg\n"'
+tag='b"object "+b"c"*40+b"\ntype commit\ntag v1\ntagger t <t@t> 1 +0000\n\nrelease\n"'
+
+payload_says "a commit is signed"                sign   "$commit"
+payload_says "a merge commit is signed"          sign   "$merge"
+payload_says "a tag is not"                      refuse "$tag"
+payload_says "a mail message is not"             refuse 'b"From: a@b\nSubject: pay this\n\nregards\n"'
+payload_says "an arbitrary artifact is not"      refuse 'bytes(range(256))'
+payload_says "an empty payload is not"           refuse 'b""'
+payload_says "a commit with no message is not"   refuse 'b"tree "+b"a"*40+b"\nauthor t <t@t> 1 +0000\ncommitter t <t@t> 1 +0000\n"'
+
 if ! echo probe | gpg --batch --no-tty --armor --detach-sign >/dev/null 2>&1; then
-  echo "SKIP: no usable signing key in this environment"
-  exit 0
+  echo "SKIP: the rest needs a signing key, which is not in this environment"
+  exit "$fail"
 fi
 
 python3 "$BROKER" "$sock" >"$work/broker.log" 2>&1 &
