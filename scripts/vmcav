@@ -1047,10 +1047,7 @@ allocate_agent_id() {
   # otherwise give it to the first ordinary agent.
   [ "$n" = "$ROOT_AGENT_ID" ] && n=$((n + 1))
   # An ordinary agent runs as agent<n>, and those users are declared in the
-  # guest's config rather than made on demand, so the pool has an end. Said
-  # here, where the number is chosen and the reason is nearby, because the
-  # failure otherwise lands in systemd as an unknown User= on a unit that
-  # started fine yesterday.
+  # guest's config rather than made on demand, so the pool has an end.
   if [ "$n" -gt "$MAX_AGENTS" ]; then
     log "no free agent id: this guest holds $MAX_AGENTS agents at once."
     # Stopping one no longer frees its id, and saying so would send you to a

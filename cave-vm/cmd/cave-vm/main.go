@@ -56,6 +56,8 @@ func main() {
 		systemCommand(os.Args[2:])
 	case "projects":
 		projectsCommand(os.Args[2:])
+	case "free-id":
+		freeIDCommand(os.Args[2:])
 	case "sessions":
 		sessionsCommand(os.Args[2:])
 	default:

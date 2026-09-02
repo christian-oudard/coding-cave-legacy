@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -369,4 +370,39 @@ func newUUID() string {
 	b[6] = (b[6] & 0x0f) | 0x40
 	b[8] = (b[8] & 0x3f) | 0x80
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+// FreeID is the id a new ordinary agent gets: the lowest number from 1 up that
+// nothing is using, skipping the one reserved for the root agent.
+//
+// "Using" is three separate facts, and the caller gathers them because they
+// come from three places -- a session the guest is running, a branch in the
+// shared repo, and a worktree or home on the guest's disk. What they mean
+// together is this rule, and the rule is worth stating once: an id is free
+// when nothing anywhere is holding it.
+//
+// The reserved id is skipped rather than counted from, because a root agent
+// that has never run leaves it unused, and counting would hand it to the first
+// ordinary agent. That is not a collision the other two sources would catch:
+// the root agent is the one that can rebuild the system every other agent runs
+// in.
+//
+// Returns 0 and false when the pool is exhausted. Ordinary agents run as
+// declared users, so the pool has an end, and a number past it is a unit that
+// fails at start with an unknown User= rather than an id.
+func FreeID(used []string, rootID string, max int) (int, bool) {
+	taken := make(map[string]bool, len(used))
+	for _, u := range used {
+		if u = strings.TrimSpace(u); u != "" {
+			taken[u] = true
+		}
+	}
+	for n := 1; n <= max; n++ {
+		id := strconv.Itoa(n)
+		if id == rootID || taken[id] {
+			continue
+		}
+		return n, true
+	}
+	return 0, false
 }

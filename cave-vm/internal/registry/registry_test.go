@@ -218,3 +218,42 @@ func TestPersistsAcrossInstances(t *testing.T) {
 		t.Fatalf("id = %q, want 2 across instances", id)
 	}
 }
+
+// The rule the shell expressed as a grep loop over a sorted, deduplicated
+// merge of three lists. Stating it as a table is the point: an id is free when
+// nothing anywhere is holding it, and the reserved one is skipped rather than
+// counted from.
+func TestFreeID(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		used []string
+		want int
+		ok   bool
+	}{
+		{"nothing used starts at one, not zero", nil, 1, true},
+		{"the reserved id is skipped even when free", []string{"1"}, 2, true},
+		{"the lowest gap wins, not the next one up", []string{"1", "3"}, 2, true},
+		{"a run is counted past", []string{"1", "2", "3"}, 4, true},
+		// The bug this had. An agent's worktree and home outlive its session
+		// and its branch, so an id can be held by something the host cannot
+		// see -- and handing it on gave the next agent a stranger's home.
+		{"an id held only by leftovers is still used", []string{"1", "2"}, 3, true},
+		{"blank entries are not ids", []string{"", "  ", "1"}, 2, true},
+		{"duplicates across the three sources are one id", []string{"1", "1", "1"}, 2, true},
+		{"a full pool has no answer", []string{"1", "2", "3", "4", "5", "6", "7", "8"}, 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := FreeID(tc.used, "0", 8)
+			if got != tc.want || ok != tc.ok {
+				t.Errorf("FreeID(%q) = %d,%v; want %d,%v", tc.used, got, ok, tc.want, tc.ok)
+			}
+		})
+	}
+
+	// The reserved id is whichever one is reserved, not the number zero: the
+	// registry hands out ids without reserving one, so nothing about "3" says
+	// it is the root agent's.
+	if got, _ := FreeID(nil, "1", 8); got != 2 {
+		t.Errorf("with 1 reserved, the first ordinary id is %d, want 2", got)
+	}
+}
