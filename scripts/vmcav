@@ -507,15 +507,43 @@ do_push() {
 # than a move: the shared repo is the same one the container caves use, and
 # they know it by its own path inside the project.
 register_project() {
-  local repo="${1:-$REPO}" slug
+  local repo="${1:-$REPO}" want="${2:-}" slug target held
   git -C "$repo" rev-parse --show-toplevel >/dev/null 2>&1 || {
     log "$repo is not a git checkout"; return 1; }
   repo=$(git -C "$repo" rev-parse --show-toplevel)
-  slug=$(slug_of "$repo")
+  slug="${want:-$(slug_of "$repo")}"
+  target=$(shared_repo_of "$repo")
+
+  # A slug is a directory's basename, and two checkouts can have the same one:
+  # ~/work/docs and ~/other/docs are both `docs`. The link was written with
+  # `ln -sfn`, so the second registration took the name from the first without
+  # a word -- and what it took is what the guest resolves `git://127.0.0.1/
+  # docs.git` to, so an agent given "docs" would go on working against a
+  # repository nobody had told it about. `vmcav projects` showed one entry
+  # either way.
+  #
+  # Checked before anything is created, so a refused registration leaves no
+  # shared repo and no hooks behind in a project that is not registered.
+  #
+  # A dangling link is replaced rather than defended: its project has moved or
+  # gone, re-registering is the documented repair, and there is nothing left
+  # for the name to be taken from.
+  if [ -L "$REPOS/$slug.git" ]; then
+    held=$(project_target "$slug")
+    if [ "$held" != "$target" ] && [ -d "$held" ]; then
+      log "'$slug' is already registered, and to a different project:"
+      log "  registered: $held"
+      log "  asked for:  $target"
+      log "the guest resolves a project by this name, so one of them has to"
+      log "have another:  vmcav init $repo --as <name>"
+      return 1
+    fi
+  fi
+
   ensure_shared_repo "$repo" || return 1
   install_shared_hooks "$repo" || return 1
   mkdir -p "$REPOS"
-  ln -sfn "$(shared_repo_of "$repo")" "$REPOS/$slug.git"
+  ln -sfn "$target" "$REPOS/$slug.git"
   printf '%s' "$slug"
 }
 
@@ -1370,9 +1398,24 @@ do_attach() {
 # can clone it. Said rather than worked around: restarting the daemon under a
 # running guest would drop whatever push was in flight.
 do_init() {
-  local dir="${1:-$PWD}" slug
+  local dir="" as="" slug
+  # --as names the project, for when its directory's basename is taken or is
+  # not what you want the guest to call it.
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --as) as="${2:-}"; shift 2 || true ;;
+      --as=*) as="${1#--as=}"; shift ;;
+      -*) log "unknown option '$1'  (vmcav init [dir] [--as name])"; return 1 ;;
+      *) dir="$1"; shift ;;
+    esac
+  done
+  dir="${dir:-$PWD}"
   [ -d "$dir" ] || { log "no such directory: $dir"; return 1; }
-  slug=$(register_project "$dir") || return 1
+  case "$as" in
+    "") ;;
+    */*|.|..) log "'$as' cannot be a project name: it is one path element"; return 1 ;;
+  esac
+  slug=$(register_project "$dir" "$as") || return 1
   log "project '$slug' registered ($(project_target "$slug"))"
   if is_running; then
     if restart_git_daemon; then
@@ -1721,7 +1764,9 @@ usage: vmcav <command>
   agent remove id reclaim a stopped agent: its worktrees, home and branch
                   (--force removes one with work nobody has landed)
   attach [id]     reattach to an agent already running (detach: ctrl-\)
-  init [dir]      register a project so agents can be given it (default: cwd)
+  init [dir] [--as name]
+                  register a project so agents can be given it (default: cwd)
+                  --as names it, for when two directories share a basename
   projects        list the projects the guest can reach
   remove-project slug
                   stop serving a project (its repo and history are untouched)

@@ -58,8 +58,16 @@ can be inferred; any other has to be named.
   out from under an agent leaves a checkout it can no longer clone or fetch.
   What decides whether such an agent is safe to remove is not re-answered
   there: `vmcav agent remove` already asks it, unlanded work and all.
-- `rename-project`, and the re-registration of a project directory that moved
-  on disk.
+- ~~the re-registration of a project directory that moved on disk~~ **done**:
+  `vmcav init <newdir>` relinks it, and `projects` marks a registration whose
+  target has gone. A project can also be named: `init <dir> --as <name>`,
+  which is most of what `rename-project` is for and is required rather than
+  convenient, because a slug is a directory's basename and two checkouts can
+  share one. That collision used to be silent -- `ln -sfn` gave the name to
+  whoever registered last, and the guest resolves a project by that name, so
+  an agent given "docs" carried on against a repository nobody had told it
+  about. It is refused now, naming both projects. What is still missing is
+  renaming a registration in place rather than by re-registering.
 - ~~a project added while the VM is up is served only after `vmcav stop &&
   vmcav start`~~ **done**: `init` restarts the git daemon and the guest can
   reach the project immediately. The reason it did not -- a restart drops

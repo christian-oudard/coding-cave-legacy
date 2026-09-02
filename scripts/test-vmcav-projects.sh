@@ -177,6 +177,42 @@ check "and it is no longer served" "alpha" \
 check "but its repo is untouched" "true" \
   "$(git -C "$betarepo" rev-parse --is-bare-repository 2>/dev/null)"
 
+# --- two directories with the same basename ---
+# A slug is a basename, so ~/work/docs and ~/other/docs are both `docs`. The
+# link was written with `ln -sfn`, so the second registration took the name
+# from the first without a word -- and the name is what the guest resolves
+# git://127.0.0.1/docs.git to, so an agent given "docs" would carry on
+# against a repository nobody had told it about.
+mkdir -p "$work/one/docs" "$work/two/docs"
+for d in one/docs two/docs; do
+  git init -q "$work/$d"
+  git -C "$work/$d" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base
+done
+register_project "$work/one/docs" >/dev/null 2>&1
+first=$(readlink "$REPOS/docs.git")
+
+out=$(register_project "$work/two/docs" 2>&1 || true)
+has "a name already taken is refused" "already registered, and to a different project" "$out"
+has "and both projects are named" "$work/one/docs" "$out"
+has "and the way out is offered" "--as" "$out"
+check "and the first project keeps the name" "$first" "$(readlink "$REPOS/docs.git")"
+
+# Nothing is created for a project that was refused: the check happens before
+# the shared repo and the hooks, so a project you were told to rename is not
+# left with half a registration inside it.
+check "and nothing was created in the refused project" "no" \
+  "$([ -d "$work/two/docs/.coding-cave" ] && echo yes || echo no)"
+
+# --as gives it one of its own, and then both are served.
+register_project "$work/two/docs" other-docs >/dev/null 2>&1
+check "--as registers it under another name" "yes" \
+  "$([ -L "$REPOS/other-docs.git" ] && echo yes || echo no)"
+
+# Registering the same project again is not a collision with itself: `start`
+# does it on every run.
+out=$(register_project "$work/one/docs" 2>&1 || true)
+has "re-registering the same project is fine" "docs" "$out"
+
 # --- registering a project while the vm is up ---
 # The daemon's whitelist is an argument list fixed when it started, so a new
 # registration is invisible to it. The advice used to be to stop and start the
