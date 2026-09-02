@@ -132,8 +132,15 @@ below is ergonomics, and each item has a plain-git equivalent a human can run.
   ref the agent has yet to fetch
 - `checkout`: retarget an agent to a different base and rebase its unmerged
   work onto it
-- `reject`: roll a base branch back and delete the approval record, with the
-  divergence check that blocks it
+- ~~`reject`~~ **done** as `vmcav reject [base]`. The approval record is two
+  refs in the shared repo beside the agent tips -- where the base was, and
+  where the landing left it -- plus the branch name, which cannot be a ref
+  because it is not a sha. The refs are what keep the landed commits reachable
+  after a full landing deletes the agent branch. The divergence check is the
+  point: it refuses unless the base is exactly where the landing left it, in
+  the shared repo and the checkout both, because rolling back over what came
+  after is a bigger mistake than the one being undone. It restores rather than
+  discards -- the agent branch comes back and the work is pending again
 - ~~`approve --commit <sha>`: partial approval, dev branch preserved with the
   remainder~~ **done**. The commit has to be one of the pending ones: anything
   already on the base would move nothing, and anything off the branch would

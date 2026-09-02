@@ -19,7 +19,9 @@ package approve
 import (
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -239,6 +241,62 @@ func Checkout(dir string, c Candidate) error {
 // Fast-forward only, so the base's history stays what the agent actually
 // built on. A merge here would land work that was never tested against what
 // the base has since grown, and hide that it wasn't.
+// Undo records live in the shared repo beside the agent tips, which is the
+// same idea one step later: agent-tip remembers what an agent pushed so a
+// force-push can be told from a clobber, and these remember what a landing
+// moved so it can be taken back.
+//
+// Two refs because undoing needs two facts. Where the base was before says
+// what to go back to; where the landing left it says whether anything has
+// happened since, and rolling back over somebody's later commits would be a
+// worse mistake than the one being undone.
+func undoFrom(base string) string { return "refs/cav/undo-from/" + base }
+func undoTo(base string) string   { return "refs/cav/undo-to/" + base }
+
+// UndoRecord is a landing that can still be taken back.
+type UndoRecord struct {
+	Base   string // the base branch that moved
+	Branch string // the agent branch it came from
+	From   string // where the base was before
+	To     string // where the landing left it
+	Ahead  int    // commits the landing added
+}
+
+// Undoable is the landing that Reject would take back, if there is one.
+func Undoable(dir, base string) (UndoRecord, error) {
+	if base == "" {
+		base = current(dir)
+	}
+	if base == "" {
+		return UndoRecord{}, fmt.Errorf("no branch to undo (detached HEAD; name a base)")
+	}
+	shared, err := Shared(dir)
+	if err != nil {
+		return UndoRecord{}, err
+	}
+	from, err := git(shared, "rev-parse", "--verify", "--quiet", undoFrom(base))
+	if err != nil || from == "" {
+		return UndoRecord{}, fmt.Errorf("nothing to undo on %s", base)
+	}
+	to, _ := git(shared, "rev-parse", "--verify", "--quiet", undoTo(base))
+	// The branch name is not a sha, so it cannot be a ref. The refs are there
+	// to keep the commits reachable -- a full landing deletes the agent branch,
+	// and without them the only thing holding its objects would be gone.
+	branch := ""
+	if b, err := os.ReadFile(undoBranchFile(shared, base)); err == nil {
+		branch = strings.TrimSpace(string(b))
+	}
+	n, _ := countAhead(shared, from, to)
+	return UndoRecord{Base: base, Branch: branch, From: from, To: to, Ahead: n}, nil
+}
+
+// undoBranchFile is where the landed branch's name is kept, since a ref can
+// only hold a sha. Beside the refs in the shared repo, so a record is one
+// thing in one place.
+func undoBranchFile(shared, base string) string {
+	return filepath.Join(shared, "cave-undo", strings.ReplaceAll(base, "/", "-"))
+}
+
 // WouldLand is how many commits Land would move, and whether it would refuse.
 // Asked before the confirmation, so a bad commit is reported instead of being
 // prompted about, and so the question names the number actually at stake
@@ -296,6 +354,10 @@ func Land(dir string, c Candidate, upTo string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	// Where the base is before any of this, which is what an undo goes back
+	// to. Read from the shared repo, since that is the copy Reject restores
+	// and the one an agent clones.
+	was, _ := git(shared, "rev-parse", "--verify", "--quiet", "refs/heads/"+c.Base)
 	n, err := countAhead(dir, c.BaseRef(), target)
 	if err != nil {
 		return 0, err
@@ -350,10 +412,84 @@ func Land(dir string, c Candidate, upTo string) (int, error) {
 	// After a partial landing the branch is the work that was not approved,
 	// so deleting it would throw away exactly what was held back. It stays,
 	// and status keeps offering the rest.
+	// What this landing moved, so it can be taken back. Written before the
+	// branch is deleted, because after that these refs are the only thing
+	// keeping its commits reachable.
+	//
+	// Best-effort like the tidying below: the work has landed either way, and
+	// an approve that failed because it could not write an undo record would
+	// be refusing to do the thing that worked.
+	if was != "" {
+		quiet(shared, "update-ref", undoFrom(c.Base), was)
+		quiet(shared, "update-ref", undoTo(c.Base), target)
+		if err := os.MkdirAll(filepath.Dir(undoBranchFile(shared, c.Base)), 0o755); err == nil {
+			os.WriteFile(undoBranchFile(shared, c.Base), []byte(c.Branch+"\n"), 0o644)
+		}
+	}
+
 	if target == tip {
 		quiet(shared, "branch", "-D", c.Branch)
 		quiet(dir, "branch", "-D", c.Branch)
 	}
 	quiet(dir, "fetch", "--prune", Remote)
 	return n, nil
+}
+
+// Reject takes back the last landing on a base: the base goes back to where it
+// was, and the agent branch comes back holding the work.
+//
+// The divergence check is the whole of the care here. A landing is only safe
+// to undo while nothing has been built on it -- roll the base back over
+// somebody's later commits and the mistake being fixed is smaller than the one
+// being made. So this refuses unless the base is exactly where the landing
+// left it, in the shared repo and in the checkout both.
+//
+// It restores rather than deletes: the agent branch comes back pointing at the
+// landed commits, so the work returns to being pending and can be reviewed
+// again or landed again. Undoing an approval should put things back, not throw
+// the work away.
+func Reject(dir string, r UndoRecord) error {
+	shared, err := Shared(dir)
+	if err != nil {
+		return err
+	}
+	now, err := git(shared, "rev-parse", "--verify", "--quiet", "refs/heads/"+r.Base)
+	if err != nil || now == "" {
+		return fmt.Errorf("%s is not in the shared repo any more", r.Base)
+	}
+	if now != r.To {
+		return fmt.Errorf("%s has moved since it was landed, so undoing it would "+
+			"discard what came after; rewind it yourself if that is what you want", r.Base)
+	}
+	// The checkout too. Approving moves both, and leaving them disagreeing is
+	// how a later approve reports a fast-forward it cannot do.
+	if local, _ := git(dir, "rev-parse", "--verify", "--quiet", "refs/heads/"+r.Base); local != "" && local != r.To {
+		return fmt.Errorf("your %s is not where the landing left it; "+
+			"undoing would overwrite what you have", r.Base)
+	}
+
+	// The branch first, so the commits have a name of their own before the
+	// base stops holding them.
+	if r.Branch != "" {
+		if _, err := git(shared, "update-ref", "refs/heads/"+r.Branch, r.To); err != nil {
+			return err
+		}
+	}
+	if _, err := git(shared, "update-ref", "refs/heads/"+r.Base, r.From); err != nil {
+		return err
+	}
+	// Standing on the base means moving the working tree with it; standing
+	// anywhere else means moving the ref alone, the same distinction Land makes.
+	if current(dir) == r.Base {
+		if _, err := git(dir, "reset", "--hard", r.From); err != nil {
+			return err
+		}
+	} else {
+		quiet(dir, "branch", "-f", r.Base, r.From)
+	}
+	quiet(shared, "update-ref", "-d", undoFrom(r.Base))
+	quiet(shared, "update-ref", "-d", undoTo(r.Base))
+	os.Remove(undoBranchFile(shared, r.Base))
+	quiet(dir, "fetch", "--prune", Remote)
+	return nil
 }

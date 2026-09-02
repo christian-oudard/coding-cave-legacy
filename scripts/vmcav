@@ -1337,6 +1337,8 @@ usage: vmcav <command>
   review [agent]  check out what the agent has pushed and not had landed
   approve [agent] land it on the base branch, here and in the shared repo
                   --commit SHA lands only that far, leaving the rest pending
+  reject [base]   take back the last landing on a base branch, putting the
+                  work back on the agent branch it came from
   version         the commit this vmcav was built from
   image create    build the guest and create its disk
   image reformat  destroy that disk and build a new one
@@ -1873,7 +1875,7 @@ case "${1:-help}" in
   agent) shift; do_agent "$@" ;;
   attach) shift; is_running && do_attach "$@" || { log "the vm is not running (vmcav start)"; exit 1; } ;;
   deploy) do_deploy ;;
-  review|approve) cave_vm "$@" ;;
+  review|approve|reject) cave_vm "$@" ;;
   push) shift; do_push "$@" ;;
   init) shift; do_init "$@" ;;
   projects) shift; do_projects "$@" ;;

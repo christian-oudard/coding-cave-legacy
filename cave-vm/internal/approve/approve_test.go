@@ -551,3 +551,117 @@ func TestWouldLandCountsOnlyWhatIsBeingLanded(t *testing.T) {
 		t.Fatalf("partial counts %d (%v), want 1", part, err)
 	}
 }
+
+// Approving is the one destructive step a human takes, and it had no undo.
+func TestRejectPutsTheBaseAndTheBranchBack(t *testing.T) {
+	w := newWorld(t)
+	if err := Fetch(w.repo); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Resolve(w.repo, "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := run(t, w.shared, "rev-parse", "main")
+	landed := run(t, w.repo, "rev-parse", c.Ref())
+	if _, err := Land(w.repo, c, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	rec, err := Undoable(w.repo, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.From != before || rec.To != landed || rec.Branch != c.Branch {
+		t.Fatalf("record is %+v, want from=%s to=%s branch=%s", rec, before, landed, c.Branch)
+	}
+	if rec.Ahead != 2 {
+		t.Fatalf("record says %d commits, want 2", rec.Ahead)
+	}
+
+	if err := Reject(w.repo, rec); err != nil {
+		t.Fatal(err)
+	}
+	if got := run(t, w.shared, "rev-parse", "main"); got != before {
+		t.Fatalf("shared main is %s, want %s", got, before)
+	}
+	if got := run(t, w.repo, "rev-parse", "main"); got != before {
+		t.Fatalf("checkout main is %s, want %s", got, before)
+	}
+	// Restored, not discarded: undoing an approval puts the work back to
+	// pending rather than throwing it away.
+	if got, err := tryRun(w.shared, "rev-parse", "refs/heads/"+c.Branch); err != nil || got != landed {
+		t.Fatalf("the agent branch is %q (%v), want %s", got, err, landed)
+	}
+	if err := Fetch(w.repo); err != nil {
+		t.Fatal(err)
+	}
+	again, err := Pending(w.repo)
+	if err != nil || len(again) != 1 || again[0].Ahead != 2 {
+		t.Fatalf("after undoing, pending is %+v (%v)", again, err)
+	}
+}
+
+// The check that matters. Rolling a base back over what came after it would be
+// a bigger mistake than the one being undone.
+func TestRejectRefusesWhenTheBaseHasMovedOn(t *testing.T) {
+	w := newWorld(t)
+	if err := Fetch(w.repo); err != nil {
+		t.Fatal(err)
+	}
+	c, _ := Resolve(w.repo, "1")
+	if _, err := Land(w.repo, c, ""); err != nil {
+		t.Fatal(err)
+	}
+	rec, err := Undoable(w.repo, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Somebody commits on the base after the landing.
+	write(t, w.repo, "after.txt", "later work\n")
+	commit(t, w.repo, "built on the landing")
+	run(t, w.shared, "fetch", w.repo, "refs/heads/main:refs/heads/main")
+
+	if err := Reject(w.repo, rec); err == nil {
+		t.Fatal("undid a landing that had been built on")
+	}
+	if got := run(t, w.shared, "rev-parse", "main"); got == rec.From {
+		t.Fatal("the base was rolled back anyway")
+	}
+}
+
+// Nothing landed, nothing to take back.
+func TestUndoableSaysWhenThereIsNothing(t *testing.T) {
+	w := newWorld(t)
+	if _, err := Undoable(w.repo, "main"); err == nil {
+		t.Fatal("offered an undo for a base nothing has landed on")
+	}
+}
+
+// A partial landing leaves the branch in place, so undoing it restores the
+// base without needing to invent a branch that never went away.
+func TestRejectAfterAPartialLanding(t *testing.T) {
+	w := newWorld(t)
+	if err := Fetch(w.repo); err != nil {
+		t.Fatal(err)
+	}
+	c, _ := Resolve(w.repo, "1")
+	before := run(t, w.shared, "rev-parse", "main")
+	first := run(t, w.repo, "rev-parse", c.Ref()+"~1")
+	if _, err := Land(w.repo, c, first); err != nil {
+		t.Fatal(err)
+	}
+	rec, err := Undoable(w.repo, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Ahead != 1 {
+		t.Fatalf("record says %d commits, want 1", rec.Ahead)
+	}
+	if err := Reject(w.repo, rec); err != nil {
+		t.Fatal(err)
+	}
+	if got := run(t, w.shared, "rev-parse", "main"); got != before {
+		t.Fatalf("main is %s, want %s", got, before)
+	}
+}

@@ -25,7 +25,7 @@ func main() {
 	switch cmd := os.Args[1]; cmd {
 	case "version":
 		fmt.Println(version)
-	case "pending", "review", "approve":
+	case "pending", "review", "approve", "reject":
 		gitCommand(cmd, os.Args[2:])
 	case "start":
 		vmStart(os.Args[2:])
@@ -68,6 +68,8 @@ func gitCommand(cmd string, args []string) {
 		pending(*dir)
 	case "review":
 		review(*dir, agent)
+	case "reject":
+		unland(*dir, agent, *yes)
 	case "approve":
 		land(*dir, agent, *yes, *upTo)
 	}
@@ -81,7 +83,7 @@ func plural(n int) string {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: cave-vm [pending|review|approve|version]")
+	fmt.Fprintln(os.Stderr, "usage: cave-vm [pending|review|approve|reject|version]")
 	fmt.Fprintln(os.Stderr, "       cave-vm [start|stop|serve|running|socket|cache-key|vsock-connect] --state DIR ...")
 	fmt.Fprintln(os.Stderr, "       cave-vm sessions -ssh-config F [checkpoint|restore <id>...|list]")
 	os.Exit(2)
@@ -216,4 +218,39 @@ func confirm(question string) bool {
 		return true
 	}
 	return false
+}
+
+// unland takes back the last landing on a base, which is the undo `approve`
+// did not have. The agent argument names a base branch rather than an agent:
+// what moved was the base, and more than one agent may have landed on it.
+func unland(dir, base string, yes bool) {
+	if err := approve.Fetch(dir); err != nil {
+		die(err)
+	}
+	rec, err := approve.Undoable(dir, base)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	out, err := approve.Log(dir, approve.Candidate{Base: rec.Base, Branch: rec.Branch})
+	if err == nil && out != "" {
+		fmt.Println(out)
+	}
+	q := fmt.Sprintf("Take %d commit%s back off %s?", rec.Ahead, plural(rec.Ahead), rec.Base)
+	if rec.Branch != "" {
+		q = fmt.Sprintf("Take %d commit%s back off %s, onto %s?",
+			rec.Ahead, plural(rec.Ahead), rec.Base, rec.Branch)
+	}
+	if !yes && !confirm(q) {
+		fmt.Fprintln(os.Stderr, "not undone")
+		os.Exit(1)
+	}
+	if err := approve.Reject(dir, rec); err != nil {
+		die(err)
+	}
+	fmt.Fprintf(os.Stderr, "%s is back at %s", rec.Base, rec.From[:7])
+	if rec.Branch != "" {
+		fmt.Fprintf(os.Stderr, ", and the work is pending again on %s", rec.Branch)
+	}
+	fmt.Fprintln(os.Stderr)
 }
