@@ -545,3 +545,66 @@ func TestParseListTakesTheProjectWhenGiven(t *testing.T) {
 		t.Fatalf("got %+v", got)
 	}
 }
+
+// The shared view exists so an agent can read another agent's session. It was
+// written 0600 and owned by whoever ran the daemon, which is root, so every
+// agent that was not root got permission denied -- and got it silently, since
+// nothing reads this directory until somebody goes looking for a session that
+// is not their own.
+func TestSharedRecordsAreReadableByEveryAgent(t *testing.T) {
+	l := guest(t, "/projects/p", nil)
+	l.SharedDir = filepath.Join(tempDir(t), "shared")
+
+	if err := l.Write(sidA, strings.NewReader("shared\n"), Shared, ""); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(filepath.Join(l.SharedDir, sidA+".jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm()&0o044 != 0o044 {
+		t.Fatalf("shared record is %v; no other agent can read it", fi.Mode().Perm())
+	}
+}
+
+// A record copied in before the mode was fixed has to become readable when it
+// is next written, which O_TRUNC alone does not do: open applies a mode only
+// to a file it creates.
+func TestRewritingASharedRecordFixesItsMode(t *testing.T) {
+	l := guest(t, "/projects/p", nil)
+	l.SharedDir = filepath.Join(tempDir(t), "shared")
+	if err := os.MkdirAll(l.SharedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(l.SharedDir, sidA+".jsonl")
+	if err := os.WriteFile(stale, []byte("old\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := l.Write(sidA, strings.NewReader("new\n"), Shared, ""); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm()&0o044 != 0o044 {
+		t.Fatalf("rewritten record is still %v", fi.Mode().Perm())
+	}
+}
+
+// An agent's own transcripts stay its own. The shared view is the place for
+// reading each other's; a home is not.
+func TestRestoredRecordsStayPrivateToTheirAgent(t *testing.T) {
+	l := guest(t, "/projects/p", nil)
+	if err := l.Write(sidB, strings.NewReader("mine\n"), Resumable, ""); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(filepath.Join(l.projects(), EncodeProject("/projects/p"), sidB+".jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Fatalf("a record in an agent's home is %v, want 0600", fi.Mode().Perm())
+	}
+}

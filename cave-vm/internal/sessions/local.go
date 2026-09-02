@@ -106,6 +106,7 @@ func (l Local) Read(id string) (io.ReadCloser, error) {
 // does not have and clobbering a live transcript with an older copy of itself
 // would lose whatever the agent has done since. Shared replaces freely: it is
 // a copy of the host's record and the host's record is the truth.
+//
 // The agent is ignored: a Local is one agent's home, so writing to this one
 // writes to that agent by construction. Choosing between homes belongs to
 // whoever holds several of them, which in the guest is the daemon.
@@ -120,7 +121,17 @@ func (l Local) Write(id string, r io.Reader, dest Dest, _ string) error {
 		if err := os.MkdirAll(l.SharedDir, 0o755); err != nil {
 			return err
 		}
-		return writeFile(filepath.Join(l.SharedDir, id+".jsonl"), r, true)
+		// Readable by every agent, which is the entire point of this
+		// directory and was the one thing it did not do. The records were
+		// written 0600 and owned by root, like a home's are, so the view whose
+		// purpose is "an agent can read another's session" answered permission
+		// denied to every agent that was not root -- and denied it quietly,
+		// since nothing reads this until somebody goes looking.
+		//
+		// Inside the guest that is the whole population: agents are colleagues
+		// and the boundary that means anything is the VM's, so there is nobody
+		// here to keep it from.
+		return writeFile(filepath.Join(l.SharedDir, id+".jsonl"), r, true, 0o644)
 	}
 	if l.Cwd == "" {
 		return fmt.Errorf("sessions: no cwd, so there is no project to restore into")
@@ -129,19 +140,28 @@ func (l Local) Write(id string, r io.Reader, dest Dest, _ string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	return writeFile(filepath.Join(dir, id+".jsonl"), r, false)
+	return writeFile(filepath.Join(dir, id+".jsonl"), r, false, 0o600)
 }
 
-func writeFile(dest string, r io.Reader, replace bool) error {
+// perm is the mode a new file gets: a record in an agent's own home is that
+// agent's business, one in the shared view is everybody's.
+func writeFile(dest string, r io.Reader, replace bool, perm os.FileMode) error {
 	flags := os.O_WRONLY | os.O_CREATE | os.O_EXCL
 	if replace {
 		flags = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
 	}
-	f, err := os.OpenFile(dest, flags, 0o600)
+	f, err := os.OpenFile(dest, flags, perm)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
+	// Open only applies the mode to a file it creates, so a record already
+	// there keeps whatever it was written with. That is the case that matters
+	// here: the shared view is full of copies made before it was readable, and
+	// rewriting them without this would leave every one of them unreadable.
+	if err := f.Chmod(perm); err != nil {
+		return err
+	}
 	_, err = io.Copy(f, r)
 	return err
 }
