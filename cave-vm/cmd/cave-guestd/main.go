@@ -183,6 +183,7 @@ func start(args []string) {
 	base := fs.String("base", "", "base branch to work from (required)")
 	root := fs.Bool("root", false, "this agent is the guest's root agent (runs as root)")
 	fresh := fs.Bool("fresh", false, "start a new conversation instead of continuing the agent's last")
+	worktrees := fs.String("worktrees", defaultWorktrees, "where agents' worktrees live")
 	fs.Parse(args)
 	if *project == "" || *base == "" {
 		die(fmt.Errorf("start needs -project and -base"))
@@ -198,6 +199,24 @@ func start(args []string) {
 	if err := os.MkdirAll(*dir, 0o700); err != nil {
 		die(err)
 	}
+	// What this agent was the last time anybody said, which outlives the
+	// runtime record. /run is tmpfs, so a VM stop takes the session's env file
+	// while everything it describes -- the worktree, the home, the branch on
+	// the host -- survives; the agent ends up the only part of itself that
+	// does not. Keeping a copy beside the worktree is not the guest deciding
+	// what agents exist, which stays the host's call: it is the guest not
+	// forgetting what it was told about one it already has.
+	//
+	// Root-ness is the field that matters, because it is the one a caller can
+	// omit. Recreating agent 0 without -root resolved its identity to a user
+	// the guest does not declare, and the guest came back running nothing and
+	// reporting itself as not answering.
+	if !*root && agentWasRoot(*worktrees, *id) {
+		fmt.Fprintf(os.Stderr,
+			"cave-guestd: agent %s was created as the root agent; keeping that\n", *id)
+		*root = true
+	}
+
 	env := fmt.Sprintf("CAVE_AGENT_ID=%s\nCAVE_PROJECT=%s\nCAVE_BASE=%s\n", *id, *project, *base)
 	// Which kind of agent this is, written down once, here, at the only
 	// moment anybody says so. Every unit serving this agent reads it back:
@@ -217,9 +236,37 @@ func start(args []string) {
 	if err := os.WriteFile(filepath.Join(*dir, *id+".env"), []byte(env), 0o600); err != nil {
 		die(err)
 	}
+	// The durable copy, beside the worktree it describes, so the two are lost
+	// together or not at all. `remove` deletes that directory, which is what
+	// forgetting an agent should mean.
+	if err := os.MkdirAll(filepath.Join(*worktrees, *id), 0o755); err == nil {
+		os.WriteFile(agentRecord(*worktrees, *id), []byte(env), 0o600)
+	}
 	if err := startUnit(*dir, *id); err != nil {
 		die(err)
 	}
+}
+
+// agentRecord is where an agent's identity survives a stop, beside the
+// worktree rather than in /run, which is tmpfs.
+func agentRecord(worktrees, id string) string {
+	return filepath.Join(worktrees, id, "agent.env")
+}
+
+// agentWasRoot reports whether this agent was created as the root agent,
+// according to the record it left behind. A missing record means no opinion:
+// a new agent is whatever it is being asked to be.
+func agentWasRoot(worktrees, id string) bool {
+	b, err := os.ReadFile(agentRecord(worktrees, id))
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if strings.TrimSpace(line) == "CAVE_AGENT_ROOT=1" {
+			return true
+		}
+	}
+	return false
 }
 
 // remove deletes what an agent leaves behind in the guest: its worktrees and

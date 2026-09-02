@@ -480,6 +480,18 @@ Two failures come out of that, both observed:
   needing to. Observed as a guest that came back, ran nothing, and reported
   itself over ssh as not answering.
 
+**Half done, and the half that does not touch the open question.** The record
+is now kept beside the worktree it describes (`agent.env`), so recreating an
+agent cannot get its root-ness wrong: `start` reads it back and keeps what the
+agent was, saying so. That was the second failure above, observed as a guest
+that came back, ran nothing and reported itself as not answering.
+
+That is not the guest deciding what agents exist -- it is the guest not
+forgetting what it was told about one it already has, and the record is
+deleted with the worktree by `agent remove`. The first failure stands: nothing
+restarts the agents after a stop, and that is the part which is properly the
+host's call.
+
 What is undecided is which side owns the record. Persisting it in the guest
 (`/var/lib/coding-cave/agents/<id>/agent.env`) is the small change and keeps
 the guest able to restore itself, but it means the guest deciding what agents
