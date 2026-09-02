@@ -423,6 +423,32 @@ treat a usage error as an error: `debugfs` exiting 0 on a malformed request
 means every caller here has to check output plausibility rather than the exit
 status, and an empty listing for a directory known to exist should be loud.
 
+## 10. An unset agent id turned the approval gate off, not down
+
+Not reachable as configured, and recorded because of what it costs if it ever
+becomes reachable.
+
+`pre-receive` reads `CODING_CAVE_AGENT_ID` and treats an empty one as the
+human, who is exempt: the approve flow runs on the host and has to be able to
+move a base branch. The daemon sets it from `${AGENT_ID:-$ROOT_AGENT_ID}`, so
+it is non-empty today.
+
+But "the guest's id" and "no id at all" were the same empty string, and the
+exemption is granted to whichever it is. So an id that went missing -- a
+refactor of that line, a `ROOT_AGENT_ID` that ever evaluated empty, a daemon
+started by hand -- would not weaken the gate. It would remove it, silently,
+in the direction of letting the guest push straight to a base branch. That is
+the one thing the whole approval flow exists to prevent, and nothing would
+report it: the pushes would simply start working.
+
+Fixed by making the two distinguishable rather than by trusting the variable.
+The daemon exports `CODING_CAVE_FROM_GUEST=1` beside the id, and a push
+carrying that marker with no id is refused before any ref is read. The human's
+push carries neither and is unaffected.
+
+Demonstrated against a copy of the hook with the check removed: a guest push
+with no id moved `main`.
+
 ## Not findings
 
 Recorded so they are not re-raised.

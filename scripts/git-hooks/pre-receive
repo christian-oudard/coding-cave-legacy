@@ -26,6 +26,26 @@ agent=${CODING_CAVE_AGENT_ID:-}
 status=0
 reject() { echo "pre-receive: REJECTED: $*" >&2; status=1; }
 
+# A push that reached this repo through the daemon carries this, whatever it
+# claims about which agent made it.
+#
+# Without it, "no id" has two meanings that cannot be told apart: the human,
+# whose approve flow runs here and must be able to move a base branch, and a
+# guest push whose id went missing. They are the same empty string, and the
+# exemption is granted to whoever it is -- so an id that is ever unset does
+# not weaken the gate, it removes it, silently, in the direction of letting
+# the guest move base branches. That is the single thing the approval flow
+# exists to prevent, so it is worth not resting on a variable being non-empty
+# somewhere else in another program.
+#
+# Refused before any ref is read: nothing about the push matters once it is
+# unattributable.
+if [ -n "${CODING_CAVE_FROM_GUEST:-}" ] && [ -z "$agent" ]; then
+  echo "pre-receive: REJECTED: this push came from the guest with no agent id;" >&2
+  echo "  refusing it rather than treating it as the user's" >&2
+  exit 1
+fi
+
 is_ancestor() { git merge-base --is-ancestor "$1" "$2" 2>/dev/null; }
 agent_tip() { git rev-parse --verify --quiet "refs/cav/agent-tip/$1"; }
 

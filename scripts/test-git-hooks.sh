@@ -86,5 +86,37 @@ if [ "$(git rev-parse refs/cav/agent-tip/agent-0/main)" = "$B" ]; then
   printf 'ok   post-receive ignores user pushes\n'
 else printf 'FAIL post-receive moved tip for a user push\n'; fail=1; fi
 
+# --- a push from the guest with no id ---
+# "No id" means the user, who may move a base branch: that is how approve
+# lands work. So an id that goes missing does not weaken the gate, it removes
+# it, in the direction of letting the guest move base branches. The daemon
+# marks its own pushes, and an unattributable one is refused.
+from_guest() { # from_guest <id> <old> <new> <ref> -> exit code
+  local id="$1"; shift
+  printf '%s %s %s\n' "$1" "$2" "$3" \
+    | CODING_CAVE_AGENT_ID="$id" CODING_CAVE_FROM_GUEST=1 bash "$HOOK" >/dev/null 2>&1
+  echo $?
+}
+got=$(from_guest "" "$A" "$C" refs/heads/main)
+if [ "$got" = 1 ]; then printf 'ok   a guest push with no id cannot move a base branch\n'
+else printf 'FAIL a guest push with no id moved main (exit %s)\n' "$got"; fail=1; fi
+
+# Not even its own namespace: once it is unattributable there is nothing to
+# check it against.
+got=$(from_guest "" "$B" "$C" refs/heads/agent-0/main)
+if [ "$got" = 1 ]; then printf 'ok   nor push to an agent namespace\n'
+else printf 'FAIL an unattributable guest push was accepted (exit %s)\n' "$got"; fail=1; fi
+
+# The marker alone changes nothing for a push that does say who it is.
+got=$(from_guest 0 "$A" "$C" refs/heads/agent-0/main)
+if [ "$got" = 0 ]; then printf 'ok   a marked push with an id is unaffected\n'
+else printf 'FAIL a normal agent push was refused (exit %s)\n' "$got"; fail=1; fi
+
+# And the human, whose push carries neither, still moves base branches: that
+# is the approve flow, and refusing it would be refusing the whole point.
+got=$(run "" "$A" "$C" refs/heads/main)
+if [ "$got" = 0 ]; then printf 'ok   the user can still move a base branch\n'
+else printf 'FAIL the user was refused (exit %s)\n' "$got"; fail=1; fi
+
 [ "$fail" = 0 ] && echo "PASS" || echo "FAIL"
 exit "$fail"

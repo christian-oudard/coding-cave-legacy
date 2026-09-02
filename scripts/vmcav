@@ -659,7 +659,12 @@ start_git_daemon() {
   # by address at all -- wants the daemon off TCP entirely, behind a unix
   # socket, so that it is unreachable by any address rather than by the ones
   # crinj happens to deny.
+  # And a marker that this push came through the daemon at all, so the hook
+  # can tell a guest push whose id went missing from the human's own, which
+  # arrives with no id and is exempt. Those are the same empty string
+  # otherwise, and the exemption is the whole approval gate.
   CODING_CAVE_AGENT_ID="${AGENT_ID:-$ROOT_AGENT_ID}" \
+  CODING_CAVE_FROM_GUEST=1 \
   git daemon --reuseaddr --listen=127.0.0.1 \
     --export-all --enable=upload-pack --enable=receive-pack \
     --base-path="$dir" --port="$GIT_PORT" --detach --pid-file="$GITPID" \
