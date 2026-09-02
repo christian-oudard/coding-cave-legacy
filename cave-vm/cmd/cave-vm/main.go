@@ -64,6 +64,8 @@ func main() {
 		stalenessCommand(os.Args[2:])
 	case "env-plan":
 		envPlanCommand(os.Args[2:])
+	case "status":
+		statusCommand(os.Args[2:])
 	case "sessions":
 		sessionsCommand(os.Args[2:])
 	default:

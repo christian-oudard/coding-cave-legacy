@@ -46,6 +46,14 @@ check() { # check() <name> <expected-substring-or-empty> <actual>
   echo "FAIL $name: expected '$want', got: ${got:-<silence>}"; fail=1
 }
 
+# Like check, but says so when it passes. Up here beside check rather than
+# inside the section that first needed it: defined lower down, it disappeared
+# with that section and took every later caller with it.
+says() { # says <label> <want-substring> <text>
+  case "$3" in *"$2"*) echo "ok   $1"; return 0 ;; esac
+  echo "FAIL $1 (wanted '$2')"; fail=1
+}
+
 warn() { warn_if_guest_is_behind 2>&1; }
 
 # --- no record at all: silent, because a permanent warning about a one-off
@@ -141,35 +149,12 @@ arch_gives "aarch64, which is what Linux says"      aarch64 aarch64-linux
 arch_gives "and nothing else is guessed at"         riscv64 refused
 
 # --- the agent roster ---
-# Rendered by `cave-vm agents` now, and its cases -- an unreachable guest, an
-# agent with nothing recorded, running versus held -- are a table in
-# cmd/cave-vm/agents_test.go. They were assertions here against thirty lines
-# of awk over text this program had just printed; the awk is gone, and prose
-# this suite would have to stub a binary to produce proves nothing.
-#
-# What stays is that status reports the VM itself, which is this side's job.
-ROSTER=""
-is_running() { return 0; }
-vm_pid() { echo 4242; }
-cave_vm() { :; }
-carry_base_to_shared() { :; }
-correct_guest_clock() { :; }
-warn_if_guest_is_behind() { :; }
-warn_if_hooks_are_foreign() { :; }
-guest_rpc() {
-  case "$1" in
-    agents) printf '%s\n' "$ROSTER" ;;
-    health) echo "system /nix/store/x" ;;
-  esac
-  return 0
-}
-
-says() { # says <label> <want-substring> <text>
-  case "$3" in *"$2"*) echo "ok   $1"; return 0 ;; esac
-  echo "FAIL $1 (wanted '$2')"; fail=1
-}
-
-says "status reports the vm itself" "vm: running (pid 4242" "$(do_status 2>&1 || true)"
+# Rendered by `cave-vm status` now, along with the rest of the report, so
+# there is nothing here to stub: vm_pid and guest_rpc are not consulted by a
+# Go program. The roster's own cases -- unreachable, empty, an agent with
+# nothing recorded, running beside held -- are a table in
+# cmd/cave-vm/agents_test.go. What this suite still covers of status is the
+# two branches above, which now run the real binary end to end.
 
 # --- what a start says to do next ---
 # Rendered by `cave-vm agents --after-start` now. Its cases -- a guest holding
@@ -239,24 +224,14 @@ fi
 
 
 # --- status must not fail silently ---
-# This runs under `set -e`, and every question status asks touches something
-# that can be missing: a socket, a pidfile, a repo, a guest that stopped
-# answering. One unguarded non-zero ended the script before the first line was
-# printed, so the report on a broken cave was an empty screen and an exit
-# code. Reported from a real host, where it was reproducible and silent.
-status_report() { echo "vm: running (pid 1)"; return 7; }
-# `|| rc=$?`, not `; rc=$?`: sourcing vmcav brought its `set -e` in here, so a
-# plain assignment from a command that returns 7 ends the suite instead of
-# being the thing under test. Which is the same mistake, one level up, as the
-# one being tested for.
-rc=0
-out=$(do_status 2>&1) || rc=$?
-says "what it got to is still printed" "vm: running (pid 1)" "$out"
-says "and it says it stopped early"    "stopped early (exit 7)" "$out"
-says "and how to find where"           "bash -x" "$out"
-[ "$rc" = 7 ] && echo "ok   and the exit code is the real one" \
-  || { echo "FAIL exit was $rc, not 7"; fail=1; }
-unset -f status_report
+# Gone by construction rather than by assertion.
+#
+# The shell wrapper existed because this script runs under `set -euo pipefail`
+# and every question status asks touches something that can be missing, so one
+# unguarded non-zero ended it before the first line printed -- an empty screen
+# and an exit code, reported twice from a real host. `do_status` is one call to
+# a Go binary now. A step that fails there is a step that failed, and the rest
+# of the report still prints.
 
 # --- functions that must not kill their caller ---
 #

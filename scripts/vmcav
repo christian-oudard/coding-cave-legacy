@@ -794,88 +794,16 @@ do_vsock_connect() {
 # a failure part way through leaves whatever was already printed and adds a
 # line saying it stopped early. A partial answer beats none; an empty screen
 # is the one thing that cannot be acted on.
+# `vmcav status`, which is `cave-vm status`.
+#
+# It was a shell function sequencing six of this program's own subcommands,
+# and that shape cost the thing status exists for: every question it asks
+# touches something that can be missing, and under `set -euo pipefail` one
+# unguarded non-zero ended the script before its first line. The report on a
+# broken cave was an empty screen and an exit code, reported twice from a real
+# host. Over there a step that fails is a step that failed.
 do_status() {
-  status_report || {
-    local rc=$?
-    log "status stopped early (exit $rc); what is above is what it got to"
-    log "  to see where:  bash -x \$(command -v vmcav) status"
-    return "$rc"
-  }
-}
-
-status_report() {
-  # First, and whether or not the VM is up: a broken guard is a host-side fact
-  # and the thing most likely to be silently wrong, since it fails by refusing
-  # pushes in a way that reads like the guard working.
-  warn_if_hooks_are_foreign
-  # Nothing announces a push: the agent commits, the daemon accepts it, and
-  # the ref moves in silence. Status is where you find out one arrived, and it
-  # says so with the VM stopped too, because the work arrived either way.
-  if ! is_running; then
-    # Whether there is an image at all, because "stopped" answered two
-    # different questions with one word: a VM you can start, and a VM that was
-    # never created. Only `start` knew the difference, and only by refusing.
-    if [ -f "$DISK" ]; then
-      echo "vm: stopped"
-      # Staleness is most worth saying here, not less: `start` boots what the
-      # disk says, so a stopped guest is exactly the one about to run old code.
-      # It used to be reported only in the running branch below, which is after
-      # the moment you could have acted on it.
-      warn_if_guest_is_behind
-    else
-      echo "vm: no image yet (vmcav image create)"
-    fi
-    cave_vm pending || true
-    return 0
-  fi
-  # An empty pid means the VM is running under a supervisor this side cannot
-  # see: another cave, or the host. Say so rather than printing a pid nobody
-  # can use, and do not go on to ask the guest questions -- the ssh path here
-  # belongs to whoever started it.
-  local p; p=$(vm_pid)
-  if [ -z "$p" ]; then
-    echo "vm: running, started elsewhere on this machine (one cave VM per machine)"
-    echo "  stop it where it was started; this side cannot reach its sockets"
-    cave_vm pending || true
-    return 0
-  fi
-  # The human's own commits, before anything asks what is pending: an agent
-  # rebases onto the shared repo, and a base that has not caught up makes its
-  # next rebase a conflict against work it cannot see.
-  carry_base_to_shared
-  # The clock, before anything reads it: every question below is about a
-  # running guest, and a guest whose clock is wrong answers them all while
-  # failing everything an agent tries.
-  correct_guest_clock
-  local since; since=$(ps -o lstart= -p "$p" 2>/dev/null | sed 's/^ *//' || true)
-  echo "vm: running (pid $p, since ${since:-?})"
-  # Which generation it is on is status, not version: the host boots one
-  # toplevel and the agent's nixos-rebuild moves the guest off it in place.
-  # Equal is the normal case and says nothing twice, so only the divergence
-  # gets two lines.
-  # Which generation the guest is on, rendered by cave-vm. Both halves used
-  # to be sed: the booted one out of run-vm.sh, a script that program writes,
-  # and the current one out of `health`, over a struct field formatted into a
-  # line so it could be parsed back.
-  cave-vm system --state "$STATE_DIR" || true
-
-  # The roster, rendered by cave-vm rather than re-parsed here.
-  #
-  # This was thirty lines of awk over the machine-readable form cave-vm had
-  # just printed, and both bugs it grew came from that round trip: ' running '
-  # needs a space on each side, so an agent with no project fell out of the
-  # count, and `|| true` made "the guest did not answer" and "the guest has
-  # nothing" the same empty string. Neither is expressible on the other side
-  # of this line, where an agent is a struct and reachability is its own
-  # argument.
-  #
-  # Exit 3 is "could not ask", which is not a failure of the command: status
-  # says so and carries on.
-  cave-vm agents --state "$STATE_DIR" || [ "$?" = 3 ] || true
-
-  echo "console: $CONSOLE"
-  warn_if_guest_is_behind
-  cave_vm pending || true
+  cave-vm status --state "$STATE_DIR" --disk "$DISK" -C "$REPO"
 }
 
 # --- Review and land what the agent pushed ---
