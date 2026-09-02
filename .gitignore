@@ -2,3 +2,11 @@
 /result-*
 /.direnv/
 /target
+
+# An agent's own state, which lives in the checkout because that is where the
+# tool keeps it: settings, the persist loop's bookkeeping, and scratch
+# worktrees that are whole git repositories of their own. None of it is
+# project content, and the worktrees commit as gitlinks nobody else can
+# resolve. Ignored rather than remembered, because `git add -A` is one keypress
+# away from carrying all of it into a commit.
+/.claude/
