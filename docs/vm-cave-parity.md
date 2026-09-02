@@ -309,7 +309,15 @@ that remains is uncommitted work, not the logs.
   against a symlink naming a host path through a shared namespace, and a guest
   symlink can name only guest paths (checked: one pointing at `/etc/shadow`
   yields the guest's).
-- `cav completion bash|zsh|fish`, and the dynamic callbacks it depends on
+- ~~`cav completion bash|zsh`, and the dynamic callbacks it depends on~~
+  **done** as `vmcav completion bash|zsh`. The callbacks are one hidden
+  subcommand, `vmcav __complete`, so both scripts ask the tool what exists
+  rather than carrying their own copy of it -- a command added to the
+  dispatch is offered by both without either script being edited, and a test
+  reads the help table back to check none has been forgotten. Anything the
+  guest answers is empty and silent when the VM is down: a completion runs on
+  a keystroke, and an error where a list belongs is worse than no list.
+  fish is not written.
 - inter-agent comms: `--comms`, the `send_message` tool, channel events, the
   broker and channel server behind them
 - nested caves: a shared remote per level, `host-cave` up-link and `cave`

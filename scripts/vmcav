@@ -1531,6 +1531,112 @@ do_env() {
   return 0
 }
 
+# The values a completion needs that are not fixed strings: which agents
+# exist and which projects are registered. A hidden subcommand rather than a
+# library, because the completion script is a different language in a
+# different process and the only thing it can call is this one.
+#
+# Never fails and never blocks on a guest. A completion that takes a second to
+# offer nothing is worse than one that offers nothing immediately, and a shell
+# that prints an error where a list should be is worse than both.
+do_complete() {
+  case "${1:-}" in
+    commands)
+      printf '%s\n' start stop status agent attach deploy review approve \
+        reject push init projects remove-project gc env shell version image \
+        completion
+      ;;
+    agents)
+      # Both kinds. A stopped agent is exactly what `attach` is for, and
+      # `agent remove` takes nothing else.
+      is_running 2>/dev/null && guest_rpc agents 2>/dev/null | awk '{print $1}'
+      ;;
+    projects) registered_projects 2>/dev/null ;;
+    bases)
+      # Base branches, which is every branch that is not an agent's.
+      git -C "$REPO" for-each-ref --format='%(refname:short)' refs/heads/ \
+        2>/dev/null | grep -v '^agent-[0-9]*/' || true
+      ;;
+  esac
+  return 0
+}
+
+# Shell completion. Both scripts call `vmcav __complete <what>` for anything
+# that is not a fixed list, so the two stay in step with the tool rather than
+# with each other: a command added below is offered by both without either
+# script being edited.
+do_completion() {
+  case "${1:-}" in
+    bash) cat <<'BASH'
+_vmcav() {
+  local cur prev words cword
+  cur="${COMP_WORDS[COMP_CWORD]}"
+  prev="${COMP_WORDS[COMP_CWORD-1]}"
+  local cmd="${COMP_WORDS[1]}"
+  if [ "$COMP_CWORD" -eq 1 ]; then
+    COMPREPLY=($(compgen -W "$(vmcav __complete commands)" -- "$cur"))
+    return
+  fi
+  case "$cmd" in
+    attach)  COMPREPLY=($(compgen -W "$(vmcav __complete agents)" -- "$cur")) ;;
+    agent)
+      case "$prev" in
+        stop|remove) COMPREPLY=($(compgen -W "$(vmcav __complete agents)" -- "$cur")) ;;
+        agent)       COMPREPLY=($(compgen -W "stop remove --root --fresh $(vmcav __complete projects)" -- "$cur")) ;;
+        *)           COMPREPLY=($(compgen -W "$(vmcav __complete bases)" -- "$cur")) ;;
+      esac ;;
+    remove-project) COMPREPLY=($(compgen -W "$(vmcav __complete projects)" -- "$cur")) ;;
+    env)     COMPREPLY=($(compgen -W "show pull push --force" -- "$cur")) ;;
+    image)   COMPREPLY=($(compgen -W "create reformat" -- "$cur")) ;;
+    push)    COMPREPLY=($(compgen -W "--force $(vmcav __complete bases)" -- "$cur")) ;;
+    review|approve|reject) COMPREPLY=($(compgen -W "$(vmcav __complete agents)" -- "$cur")) ;;
+    init)    COMPREPLY=($(compgen -d -- "$cur")) ;;
+    gc)      COMPREPLY=($(compgen -W "-y" -- "$cur")) ;;
+  esac
+}
+complete -F _vmcav vmcav
+BASH
+      ;;
+    zsh) cat <<'ZSH'
+#compdef vmcav
+_vmcav() {
+  local -a cmds
+  if (( CURRENT == 2 )); then
+    cmds=(${(f)"$(vmcav __complete commands)"})
+    _describe 'command' cmds
+    return
+  fi
+  case "$words[2]" in
+    attach) _values 'agent' ${(f)"$(vmcav __complete agents)"} ;;
+    agent)
+      if (( CURRENT == 3 )); then
+        _values 'project' stop remove --root --fresh ${(f)"$(vmcav __complete projects)"}
+      elif [[ "$words[3]" == (stop|remove) ]]; then
+        _values 'agent' ${(f)"$(vmcav __complete agents)"}
+      else
+        _values 'branch' ${(f)"$(vmcav __complete bases)"}
+      fi ;;
+    remove-project) _values 'project' ${(f)"$(vmcav __complete projects)"} ;;
+    env)   _values 'action' show pull push --force ;;
+    image) _values 'action' create reformat ;;
+    push)  _values 'branch' --force ${(f)"$(vmcav __complete bases)"} ;;
+    review|approve|reject) _values 'agent' ${(f)"$(vmcav __complete agents)"} ;;
+    init)  _path_files -/ ;;
+    gc)    _values 'flag' -y ;;
+  esac
+}
+_vmcav "$@"
+ZSH
+      ;;
+    *)
+      log "usage: vmcav completion {bash|zsh}"
+      log "  bash:  eval \"\$(vmcav completion bash)\"  in ~/.bashrc"
+      log "  zsh:   vmcav completion zsh > ~/.zfunc/_vmcav   (with ~/.zfunc in \$fpath)"
+      return 1
+      ;;
+  esac
+}
+
 do_projects() {
   local slug target missing=0
   while IFS= read -r slug; do
@@ -1620,6 +1726,8 @@ usage: vmcav <command>
   remove-project slug
                   stop serving a project (its repo and history are untouched)
   gc [-y]         remove agents stopped and untouched for over 24h
+  completion bash|zsh
+                  a completion script for that shell, on stdout
   env [show|pull|push]
                   the cave environment's spec (cave.nix): what each side has,
                   or carry it across (--force to overwrite one that differs)
@@ -2238,6 +2346,10 @@ case "${1:-help}" in
   remove-project) shift; do_remove_project "$@" ;;
   gc) shift; case "${1:-}" in -y|--yes) do_gc 1 ;; *) do_gc ;; esac ;;
   env) shift; do_env "$@" ;;
+  completion) shift; do_completion "$@" ;;
+  # Hidden: the completion scripts' way of asking what exists. Not in the help
+  # table, because it is not a thing to run.
+  __complete) shift; do_complete "$@" ;;
   shell) shift; do_shell "$@" ;;
   vsock-connect) shift; do_vsock_connect "$@" ;;
   version|--version|-V) do_version ;;
