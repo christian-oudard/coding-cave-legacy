@@ -48,6 +48,24 @@ ALLOWED = {
 }
 KEYISH = re.compile(r"\A[0-9A-Fa-f]{8,40}\Z|\A[^\s<>|;&$`]+@[^\s<>|;&$`]+\Z")
 
+# The most this will read for one request. A commit object is a few hundred
+# bytes; one with many parents and a long message is still kilobytes, so a
+# mebibyte is three orders of magnitude of headroom.
+#
+# The cap is not about commit sizes. `len` is a number the guest chooses and
+# the payload was read before anything about it was checked, so the guest
+# decided how much the host allocated. Measured against this broker: a
+# declared 256 MiB took it from 14 MB resident to 166 MB and was still
+# climbing. Everything that makes this channel narrow -- one operation, an
+# argv allowlist, a pinned key -- was on the far side of that read.
+MAX_PAYLOAD = 1 << 20
+
+# Nothing in one request should take long. Without this a connection could
+# open, say nothing, and hold a thread for as long as it liked: a cost the
+# guest sets and the host pays. Overridable so a test does not have to wait
+# out the real one.
+TIMEOUT = float(os.environ.get("CAVE_GPG_BROKER_TIMEOUT", "30"))
+
 
 # What a git commit object looks like on its way to a signer: the headers git
 # writes, in the order it writes them, before the blank line that starts the
@@ -113,6 +131,18 @@ def validate(argv):
 
 def handle(conn, gpg, keyid):
     with conn:
+        # Applies to every read below, so a client that stops talking costs a
+        # thread for this long rather than for as long as it likes.
+        conn.settimeout(TIMEOUT)
+        try:
+            return serve(conn, gpg, keyid)
+        except (socket.timeout, TimeoutError) as e:
+            sys.stderr.write(f"[gpg-broker] dropped a stalled connection: {e}\n")
+        except OSError as e:
+            sys.stderr.write(f"[gpg-broker] connection failed: {e}\n")
+
+
+def serve(conn, gpg, keyid):
         f = conn.makefile("rb")
         header = f.readline()
         if not header:
@@ -126,6 +156,15 @@ def handle(conn, gpg, keyid):
         if bad:
             sys.stderr.write(f"[gpg-broker] rejected: {bad}\n")
             return respond(conn, 2, b"", f"gpg-broker: {bad}\n".encode())
+        # Before the read, not after it: this is the check that decides how
+        # much of the host's memory the guest is allowed to name. A length
+        # that is not a plain number in range is refused rather than coerced,
+        # since anything else here is a client that is not the shim.
+        if not isinstance(length, int) or isinstance(length, bool) \
+                or not 0 <= length <= MAX_PAYLOAD:
+            sys.stderr.write(f"[gpg-broker] rejected: length {length!r}\n")
+            return respond(conn, 2, b"",
+                           f"gpg-broker: {length!r} is not a signable length\n".encode())
         # Read exactly the declared length. Relying on EOF would need the
         # client to half-close, and that does not survive the socat/vsock hop:
         # the shutdown propagates as a full close and the reply is lost.

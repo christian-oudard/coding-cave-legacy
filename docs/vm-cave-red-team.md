@@ -477,6 +477,34 @@ genuinely lost its tip can delete the branch and push it again.
 Demonstrated by flipping the condition back on a copy: the test that force-
 pushes over a branch with no tip is the only one that changes answer.
 
+## 12. The guest chose how much of the host the signing broker used
+
+Reachable from any agent, and it needed no valid request.
+
+The broker takes `{"argv": [...], "len": N}` and then reads N bytes. `N` is
+the guest's number and there was no cap, so the guest decided how much the
+host allocated -- and the read happened before any of the checks that make
+this channel narrow. Measured: a declared 256 MiB took the broker from 14 MB
+resident to 166 MB while it was still arriving.
+
+Worse than the memory, a length the guest never satisfies parks the broker in
+that read for good. There was no socket timeout either, so a connection that
+opened and said nothing held a thread for as long as it liked. Twenty silent
+clients took the broker from one thread to twenty-one.
+
+Neither buys the key or a signature. What it buys is the host's memory and
+thread table, from inside a VM whose whole purpose is that it cannot reach
+them.
+
+Capped at a mebibyte, which is three orders of magnitude above a commit
+object, and refused before the read rather than after. A non-numeric length
+is refused rather than coerced. Connections get a timeout, overridable so the
+test does not wait out the real one.
+
+Demonstrated against a copy with both removed: an oversized length with no
+payload never gets an answer at all, because the broker is still waiting for
+bytes that will never come.
+
 ## Not findings
 
 Recorded so they are not re-raised.

@@ -68,6 +68,61 @@ payload_says "a mail message is not"             refuse 'b"From: a@b\nSubject: p
 payload_says "an arbitrary artifact is not"      refuse 'bytes(range(256))'
 payload_says "an empty payload is not"           refuse 'b""'
 payload_says "a commit with no message is not"   refuse 'b"tree "+b"a"*40+b"\nauthor t <t@t> 1 +0000\ncommitter t <t@t> 1 +0000\n"'
+# --- what the broker will do before it has looked at anything ---
+# How much it reads and how long it waits were both numbers the guest chose.
+# Neither needs a signing key to check, because both are refused long before
+# gpg is reached.
+if [ -n "$have_python" ]; then
+  wsock="$work/wire.sock"
+  CAVE_GPG_BROKER_TIMEOUT=1 python3 "$BROKER" "$wsock" >/dev/null 2>&1 &
+  wpid=$!
+  for _ in $(seq 50); do [ -S "$wsock" ] && break; sleep 0.1; done
+
+  # A declared length past the cap is answered, not read. Measured before the
+  # cap existed: a declared 256 MiB took the broker from 14 MB resident to
+  # 166 MB while it was still arriving.
+  got=$(python3 - "$wsock" <<'PY' 2>/dev/null
+import json, socket, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.connect(sys.argv[1])
+s.sendall(json.dumps({"argv": ["-b"], "len": (1 << 20) + 1}).encode() + b"\n")
+print(s.makefile("rb").readline().decode().strip())
+PY
+)
+  case "$got" in
+    *'"exit": 2'*) ok "an oversized payload is refused before it is read" ;;
+    *) bad "an oversized payload was not refused (got ${got:-<nothing>})" ;;
+  esac
+
+  # A length that is not a number at all is refused rather than coerced.
+  got=$(python3 - "$wsock" <<'PY' 2>/dev/null
+import json, socket, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.connect(sys.argv[1])
+s.sendall(json.dumps({"argv": ["-b"], "len": "lots"}).encode() + b"\n")
+print(s.makefile("rb").readline().decode().strip())
+PY
+)
+  case "$got" in
+    *'"exit": 2'*) ok "a length that is not a number is refused" ;;
+    *) bad "a non-numeric length was not refused (got ${got:-<nothing>})" ;;
+  esac
+
+  # A client that connects and says nothing is dropped. Without a timeout it
+  # held a thread for as long as it cared to.
+  got=$(python3 - "$wsock" <<'PY' 2>/dev/null
+import socket, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.connect(sys.argv[1])
+s.settimeout(10)
+try:
+    print("closed" if s.recv(1) == b"" else "spoke")
+except socket.timeout:
+    print("held")
+PY
+)
+  [ "$got" = closed ] && ok "a connection that says nothing is dropped" \
+    || bad "a silent connection was $got, not dropped"
+
+  kill "$wpid" 2>/dev/null
+fi
 
 if ! echo probe | gpg --batch --no-tty --armor --detach-sign >/dev/null 2>&1; then
   echo "SKIP: the rest needs a signing key, which is not in this environment"
@@ -141,6 +196,7 @@ printf '{"argv": ["--verify", "--detach-sign"]}\n' \
   | socat - "UNIX-CONNECT:$sock" 2>/dev/null | grep -q 'disallowed' \
   && ok "broker rejects --verify" \
   || bad "broker signed a request that asked to verify"
+
 
 [ "$fail" = 0 ] && echo PASS || echo FAIL
 exit "$fail"
