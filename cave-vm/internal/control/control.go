@@ -52,6 +52,14 @@ type Agent struct {
 	ID    string `json:"id"`
 	State string `json:"state"`
 	Info  string `json:"info,omitempty"`
+	// What the agent was created for, which is the guest's to answer: it was
+	// written into the session's environment file when the agent was made, and
+	// the host kept no copy. Without these an agent shows up as a number and a
+	// terminal size, which says nothing about what it is doing -- readable
+	// enough with one agent, useless with several.
+	Project string `json:"project,omitempty"`
+	Base    string `json:"base,omitempty"`
+	Root    bool   `json:"root,omitempty"`
 }
 
 // Guest is everything the control plane can do inside the VM. An interface

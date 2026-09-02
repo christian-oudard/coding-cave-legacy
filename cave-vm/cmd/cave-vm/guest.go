@@ -67,8 +67,12 @@ func guestCommand(args []string) {
 			emit(a)
 			return
 		}
+		// <id> <state> <project> <base>, with the terminal size dropped: it is
+		// the pty's shape and belongs to whoever attaches, not to a human
+		// asking what is running. The first two fields are unchanged because
+		// callers read them by position.
 		for _, ag := range a {
-			fmt.Printf("%s %s %s\n", ag.ID, ag.State, ag.Info)
+			fmt.Printf("%s %s %s %s\n", ag.ID, ag.State, dashIfEmpty(ag.Project), dashIfEmpty(ag.Base))
 		}
 	case "stop":
 		id := v.fs.Arg(1)
@@ -124,7 +128,13 @@ func (g controlGuest) List() ([]sessions.Record, error) {
 	}
 	out := make([]sessions.Record, 0, len(recs))
 	for _, r := range recs {
-		out = append(out, sessions.Record{ID: r.ID, Size: r.Size, Project: r.Project})
+		// Agent included, and it is the field this conversion existed to drop:
+		// a sync over the control plane is the usual path, so leaving it out
+		// meant every record arrived unattributed exactly when the VM was
+		// running, while the ssh and disk paths carried it.
+		out = append(out, sessions.Record{
+			ID: r.ID, Size: r.Size, Project: r.Project, Agent: r.Agent,
+		})
 	}
 	return out, nil
 }
@@ -144,4 +154,14 @@ func emit(v any) {
 func fail(err error) {
 	fmt.Fprintln(os.Stderr, "cave-vm:", err)
 	os.Exit(1)
+}
+
+// dashIfEmpty keeps the agent line's columns aligned when the guest could not
+// say what an agent was created for. A blank field would shift every column
+// after it, and these lines are read by position.
+func dashIfEmpty(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
 }

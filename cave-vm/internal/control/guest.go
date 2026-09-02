@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -65,9 +66,34 @@ func (s System) Agents() ([]Agent, error) {
 			a.State = f[1]
 			a.Info = strings.Join(f[2:], " ")
 		}
+		env := s.sessionEnv(a.ID)
+		a.Project, a.Base = env["CAVE_PROJECT"], env["CAVE_BASE"]
+		a.Root = env["CAVE_AGENT_ROOT"] == "1"
 		out = append(out, a)
 	}
 	return out, nil
+}
+
+// sessionEnv reads what an agent was created for, out of the same environment
+// file its units read. Unreadable or absent yields nothing rather than an
+// error: an agent is running whether or not this can be read, and a status
+// that failed because one file was missing would be worse than one that says
+// less about a single agent.
+func (s System) sessionEnv(id string) map[string]string {
+	if err := validID(id); err != nil {
+		return nil
+	}
+	b, err := os.ReadFile(filepath.Join(s.Sessions, id+".env"))
+	if err != nil {
+		return nil
+	}
+	out := map[string]string{}
+	for _, line := range strings.Split(string(b), "\n") {
+		if k, v, ok := strings.Cut(strings.TrimSpace(line), "="); ok {
+			out[k] = v
+		}
+	}
+	return out
 }
 
 // StopAgent stops the unit, which stops the agent: the session process and the

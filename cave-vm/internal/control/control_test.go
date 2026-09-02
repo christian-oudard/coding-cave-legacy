@@ -67,6 +67,40 @@ func TestAgents(t *testing.T) {
 	}
 }
 
+// An agent is reported as what it was created for, which the guest reads back
+// out of the session's own environment file. Without it a human sees a number
+// and the shape of a terminal, which identifies nothing once there is more
+// than one agent.
+func TestSystemAgentsSayWhatAnAgentWasCreatedFor(t *testing.T) {
+	dir := t.TempDir()
+	write := func(id, body string) {
+		if err := os.WriteFile(filepath.Join(dir, id+".env"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("0", "CAVE_AGENT_ID=0\nCAVE_PROJECT=coding-cave\nCAVE_BASE=vm-cave\nCAVE_AGENT_ROOT=1\n")
+	write("3", "CAVE_AGENT_ID=3\nCAVE_PROJECT=widgets\nCAVE_BASE=main\n")
+
+	s := System{Sessions: dir, List: func(string) ([]string, error) {
+		// An agent with no env file at all: it stays a running agent rather
+		// than disappearing from the list or failing it.
+		return []string{"0 running 80 24", "3 running 80 24", "9 running 80 24"}, nil
+	}}
+	got, err := s.Agents()
+	if err != nil || len(got) != 3 {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+	if got[0].Project != "coding-cave" || got[0].Base != "vm-cave" || !got[0].Root {
+		t.Fatalf("root agent: %+v", got[0])
+	}
+	if got[1].Project != "widgets" || got[1].Base != "main" || got[1].Root {
+		t.Fatalf("ordinary agent: %+v", got[1])
+	}
+	if got[2].Project != "" || got[2].State != "running" {
+		t.Fatalf("agent with no record: %+v", got[2])
+	}
+}
+
 // No agents must decode as an empty list, not a null: a caller ranging over
 // the result should see nothing rather than crash, and the wire shape should
 // not change with the number of agents.

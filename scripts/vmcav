@@ -675,7 +675,16 @@ do_status() {
     echo "agents: none running (vmcav agent starts one)"
   else
     echo "agents: $n"
-    printf '%s\n' "$sessions" | sed 's/^/  /'
+    # What each one is working on, rather than its id and the shape of its
+    # terminal. With one agent the number was enough to identify it; with
+    # several it says nothing, and which project and branch an agent was given
+    # is the question a human is actually asking.
+    printf '%s\n' "$sessions" | while read -r id state project base; do
+      [ -n "$id" ] || continue
+      printf '  agent %s: %s @ %s (pushes land on agent-%s/%s)\n' \
+        "$id" "$project" "$base" "$id" "$base"
+      [ "$state" = "running" ] || printf '    state: %s\n' "$state"
+    done
   fi
   if [ "$booted" = "$current" ]; then
     echo "system: $booted"
