@@ -178,5 +178,40 @@ fresh "agent-1/main"
 check "it works from the working directory too" \
   "$("$real" -C "$d" rev-parse HEAD)" "$(remote_tip "$bare" agent-1/main)"
 
+
+# --- git's -C, and a subcommand's ---
+# `-C` before the subcommand names a directory; after it, it belongs to the
+# subcommand and usually means something else entirely. `git commit -C <commit>`
+# reuses that commit's message, and taking its value for a directory made the
+# wrapper ask every question about a path that does not exist: the tip read
+# empty before and after, compared equal, and the commit was never pushed --
+# silently, which is the one failure this wrapper exists to prevent.
+#
+# Run from inside the repository, with no leading -C. With one, the scan finds
+# git's own first and the subcommand's never gets looked at -- so a test that
+# passes -C <dir> here proves nothing about this, and passed against the old
+# scan too.
+fresh "agent-1/main"
+"$real" -C "$d" commit -q --allow-empty -m "a message worth reusing"
+reused=$("$real" -C "$d" rev-parse HEAD)
+( cd "$d" && echo three > f.txt && "$real" add -A && "$cavegit" commit -q -C "$reused" )
+check "a commit reusing a message is still pushed" \
+  "$("$real" -C "$d" rev-parse HEAD)" "$(remote_tip "$bare" agent-1/main)"
+
+# --amend -C HEAD is the same shape and more common.
+fresh "agent-1/main"
+( cd "$d" && echo four > f.txt && "$real" add -A && "$real" commit -q -m "to be amended" )
+( cd "$d" && echo five > f.txt && "$real" add -A && "$cavegit" commit -q --amend -C HEAD )
+check "an amend reusing a message is pushed" \
+  "$("$real" -C "$d" rev-parse HEAD)" "$(remote_tip "$bare" agent-1/main)"
+
+# And git's own -C still decides which repository is meant: without it the
+# wrapper would ask about the directory the test is standing in.
+fresh "agent-1/main"
+echo six > "$d/f.txt"
+"$real" -C "$d" add -A
+( cd "$work" && "$cavegit" -C "$d" commit -q -m "from elsewhere" )
+check "git's own -C still names the repository" \
+  "$("$real" -C "$d" rev-parse HEAD)" "$(remote_tip "$bare" agent-1/main)"
 [ "$fail" = 0 ] && echo "PASS" || echo "FAIL"
 exit "$fail"

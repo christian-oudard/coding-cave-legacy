@@ -44,11 +44,31 @@ fi
 # -C decides which repository the command is about, so every question below
 # has to be asked about the same one. Only the first is honoured, which is
 # also all git itself documents for the repeated form.
+#
+# Only git's own -C, which is the one before the subcommand. A subcommand's
+# -C is a different option that happens to share the letter, and `git commit
+# -C <commit>` -- reuse that commit's message -- is the common one. Scanning
+# the whole argument list took its value for a directory, so every question
+# below asked about a path that does not exist: the tip read empty before and
+# after, compared equal, and the commit was never pushed. Silently, which is
+# the one failure this wrapper exists to prevent. `git commit --amend -C HEAD`
+# is the same shape and is more common still.
 chdir=()
-prev=""
-for arg in "$@"; do
-  if [ "$prev" = "-C" ]; then chdir=(-C "$arg"); break; fi
-  prev="$arg"
+args=("$@")
+i=0
+while [ "$i" -lt "${#args[@]}" ]; do
+  case "${args[$i]}" in
+    -C) chdir=(-C "${args[$((i + 1))]:-}"); break ;;
+    # -c takes a value of its own, so skip both and stay aligned.
+    -c) i=$((i + 2)) ;;
+    # Any other global option. One that takes a separate value
+    # (`--git-dir <path>`) ends the scan at that value, which is read as the
+    # subcommand and leaves chdir unset -- the safe way to be wrong, since
+    # everything below then asks about the working directory.
+    -*) i=$((i + 1)) ;;
+    # The subcommand. Everything after it belongs to it, not to git.
+    *) break ;;
+  esac
 done
 
 ask() { "$real" "${chdir[@]}" "$@" 2>/dev/null; }
