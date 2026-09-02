@@ -664,6 +664,10 @@ do_status() {
     cave_vm pending || true
     return 0
   fi
+  # The clock, before anything reads it: every question below is about a
+  # running guest, and a guest whose clock is wrong answers them all while
+  # failing everything an agent tries.
+  correct_guest_clock
   local since; since=$(ps -o lstart= -p "$p" 2>/dev/null | sed 's/^ *//' || true)
   echo "vm: running (pid $p, since ${since:-?})"
   # Which generation it is on is status, not version: the host boots one
@@ -939,6 +943,9 @@ do_agent() {
   # one you already had.
   warn_if_guest_is_behind
   local id
+  # Before the agent exists, because its first act is a TLS request and a
+  # stale clock fails it in a way that names everything except the clock.
+  correct_guest_clock
   id=$(allocate_agent_id "$want_root") || return 1
   # An agent that cannot publish is not worth starting.
   #
@@ -1561,6 +1568,40 @@ record_deployed_from() {
 #
 # Only warns. Status must not change what it is reporting on, and the repair is
 # one command, named here so it does not have to be looked up.
+# Put the guest's clock right, if it has drifted enough to matter.
+#
+# The guest has no NIC, no NTP and no timesyncd. It takes the clock from the
+# host when it boots and nothing touches it afterwards, so on a host that
+# suspends -- every laptop -- it wakes behind by however long the lid was
+# shut. Under HVF on aarch64 the counter does not track the host at all.
+#
+# What that costs is out of proportion to the cause. A stale clock fails TLS
+# certificate validation, so every request an agent makes fails, and nothing
+# in that failure mentions the time. ssh keeps working, because host keys
+# carry no dates, so the channel you would use to investigate is the one thing
+# that still behaves.
+#
+# Corrected here rather than by a timer in the guest, which would need a clock
+# it has no reason to trust, and rather than by a resume hook, which would
+# need the host to notice its own suspend. Every host-to-guest command is the
+# cheapest trigger there is, and it bounds staleness by "when you last asked"
+# -- the same rule the session sync already follows.
+#
+# Quiet below the threshold, because a call costs a couple of milliseconds and
+# reporting that as drift would make every command noisy.
+# Best-effort, and silent about its own failure. This runs on every command
+# that reaches the guest, so a control plane that is briefly unreachable must
+# not put an error on each one -- and it would be reporting something the rest
+# of the command is about to report properly. Only a correction is worth a
+# line, because a correction means the guest was wrong about the time and an
+# agent may have been failing because of it.
+correct_guest_clock() {
+  command -v cave-vm >/dev/null 2>&1 || return 0
+  cave-vm guest -state "$STATE_DIR" -if-off-by "${CLOCK_SLACK:-2s}" time 2>&1 \
+    | grep '^guest clock was' | while IFS= read -r line; do log "$line"; done
+  return 0
+}
+
 warn_if_hooks_are_foreign() {
   local slug hook
   while IFS= read -r slug; do

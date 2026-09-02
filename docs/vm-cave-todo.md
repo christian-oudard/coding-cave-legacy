@@ -30,10 +30,20 @@ region stays outside the sandbox, with `coding-cave.timeZone` and a host `$TZ`
 as the only levers. The guest owns its own `/etc/localtime`, so the mechanism
 differs and the contract must not.
 
-Open: what triggers the correction. Every host-to-guest call is the cheapest,
-and bounds staleness by "when you last asked", which is the rule the session
-sync already uses. A guest-side timer needs a clock it has no reason to
-trust. A resume hook needs the host to notice its own suspend.
+**Done, by the first of those.** `vmcav status` and `vmcav agent` correct the
+clock through the control plane before they do anything else, so staleness is
+bounded by when you last asked -- the rule the session sync already follows. A
+guest-side timer was rejected because it would need a clock it has no reason to
+trust, and a resume hook because it would need the host to notice its own
+suspend.
+
+Quiet unless it acts: `cave-vm guest -if-off-by` corrects only past a
+threshold, so a couple of milliseconds of round trip is not reported as drift
+and this can run on every command. A correction is worth a line, because it
+means the guest was wrong about the time and an agent may have been failing
+for it.
+
+Still open: the timezone half above, which is a different problem.
 
 ## `clone-repo` failed once and has not reproduced
 

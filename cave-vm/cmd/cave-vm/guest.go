@@ -27,6 +27,9 @@ import (
 func guestCommand(args []string) {
 	v := vmFlagSet("guest")
 	asJSON := v.fs.Bool("json", false, "print the wire form rather than lines")
+	// Correcting only past a threshold is what lets `time` be called on every
+	// host-to-guest command rather than only by hand.
+	ifOffBy := v.fs.Duration("if-off-by", 0, "only correct the clock when it is off by more than this")
 	v.parse(args)
 	sub := v.fs.Arg(0)
 
@@ -90,11 +93,19 @@ func guestCommand(args []string) {
 			fail(err)
 		}
 		now := time.Now()
+		skew := now.Sub(time.Unix(0, before.Now))
+		// Only when it matters, so this can be called on every host-to-guest
+		// command without saying anything most of the time. The guest has no
+		// NTP and no NIC, so the host is its only clock; the point is to
+		// correct it often rather than to report a few milliseconds of round
+		// trip as though it were drift.
+		if *ifOffBy > 0 && skew.Abs() < *ifOffBy {
+			return
+		}
 		if err := c.SetTime(now); err != nil {
 			fail(err)
 		}
-		skew := now.Sub(time.Unix(0, before.Now))
-		fmt.Printf("guest clock was %s off; set to %s\n",
+		fmt.Fprintf(os.Stderr, "guest clock was %s off; set to %s\n",
 			skew.Round(time.Millisecond), now.Format(time.RFC3339))
 	default:
 		fmt.Fprintln(os.Stderr, "usage: cave-vm guest --state DIR health|agents|stop <id>|time|token")
