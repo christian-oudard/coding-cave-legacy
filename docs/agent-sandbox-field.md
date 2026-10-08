@@ -1,9 +1,84 @@
 # The agent-sandbox field
 
-Status: survey, current as of August 2026. Recorded so the "should we build
-this at all" question is answered from evidence rather than re-litigated.
-Cross-platform findings live in `vm-cave-cross-platform.md`; the priority
-argument this survey produced is in `vm-cave-todo.md`.
+Status: survey of August 2026, with the October 2026 changes in their own
+section below. Recorded so the "should we build this at all" question is
+answered from evidence rather than re-litigated. Cross-platform findings live
+in `vm-cave-cross-platform.md`; the priority argument this survey produced is
+in `vm-cave-todo.md`.
+
+## October 2026: credential injection is now standard
+
+Between July and October the large vendors shipped local agent sandboxes, and
+nearly all of them hold credentials outside the sandbox the way crinj does:
+
+- **Claude Code's built-in sandbox** (bwrap or Seatbelt) has a credential mask
+  mode: commands see a per-session sentinel, and the sandbox proxy terminates
+  TLS and substitutes the real value only for listed hosts.
+- **NVIDIA OpenShell** (Apache-2.0) enforces Landlock and seccomp from a
+  supervisor, forces egress through a proxy that adds credentials for approved
+  endpoints, and has a microVM driver over vsock. The supervisor needs root in
+  its container.
+- **Microsoft MXC** (MIT, GA on Windows 11 on 2026-10-07) dispatches to
+  AppContainer, a microVM, bwrap or Seatbelt by policy, and GitHub Copilot's
+  local sandboxing is built on it. Its own docs reportedly say no profile is a
+  security boundary yet.
+- **GitHub Agentic Workflows** comes closest to this design's whole shape: a
+  Cloud Hypervisor microVM, an egress allowlist, a proxy holding the model
+  credentials, and agent writes held as "safe outputs" until a separate job
+  screens and applies them. It runs on CI runners from a privileged launcher,
+  the screen is a model rather than a human, and nothing is shared between
+  runs.
+- **Docker** added hosted Cloud Sandboxes with per-request secret injection.
+  Cleanroom and container-use have not released since the August survey.
+
+What none of them offers:
+
+- All four pieces together: a VM boundary, a credential-injecting proxy, a
+  human-reviewed git gate across many agents, and a shared package store.
+  Only hand-built microvm.nix setups share `/nix/store` between agent VMs.
+- A rootless microVM on Linux, or a guest with no NIC as the default; the
+  others filter a NIC.
+- A laptop-scale sandbox for air-gapped or high-security users; those offers
+  are Kubernetes runtimes (Edera, Kata) or have no documented sandbox.
+- Keeping code or secrets from the model provider. Every pitch is that the
+  *agent* never sees credentials. Anthropic's self-hosted Managed Agents
+  sandboxes still send tool inputs and outputs to Anthropic.
+
+## October 2026: hosted and long-running options
+
+Every hosted agent product and sandbox service runs one sandbox per agent or
+task: Claude Code cloud sessions and Managed Agents, Codex cloud, Cursor,
+Devin, E2B, Fly Sprites, Blaxel, Morph, Vercel, Cloudflare, Modal, Daytona,
+Runloop, Docker Cloud Sandboxes, and AWS AgentCore. Persistence ranges from
+hours (run caps of 1 to 24 h are common) to indefinite pause with memory kept
+(E2B, Blaxel). Proxy-injected credentials are common; default-deny egress is
+not. Shared volumes exist on a few; a shared package store does not.
+
+Closest to persistent, many agents, and customer-controlled:
+
+- **E2B** BYOC or self-hosted: open Firecracker infrastructure in your own
+  account, pause that keeps memory, proxy-injected secrets. One VM per agent,
+  egress open by default, 24 h per run.
+- **Coder** self-hosted with its Agent Firewall: fully yours and default-deny,
+  but process-level isolation.
+- **kubernetes-sigs/agent-sandbox** or **Edera** on your own cluster, with the
+  proxy and gate left to build.
+- **AWS AgentCore Runtime Instances**: up to 14 days on EC2 in your account.
+
+Anthropic's credential injection does not work on self-hosted Managed Agents
+sandboxes, and cloud sessions are unavailable to organisations with zero data
+retention.
+
+No major cloud offers nested KVM inside a confidential VM, so this design's
+host/guest split cannot sit inside one TEE. The options are everything in one
+confidential VM with agents separated by bwrap or gVisor, or two confidential
+VMs, proxy and gate in one and agents in the other, joined by attested TLS
+instead of vsock. Without memory encryption, the closest fit for cave-vm
+unchanged is AWS instances with nested KVM and TPM-attested images gating the
+disk keys, which trusts AWS rather than excluding it.
+
+Nothing hosted offers one persistent VM shared by many agents with a shared
+store, a human gate on git pushes, or a guest with no NIC.
 
 ## Docker Sandboxes
 
